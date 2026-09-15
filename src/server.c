@@ -220,7 +220,7 @@ static void send_isupport(server_t *srv, client_t *cl) {
     snprintf(topiclen, sizeof topiclen, "TOPICLEN=%d", CHAN_TOPICLEN - 1);
 
     const char *tokens[] = {
-        netbuf, "CHANTYPES=#", "CHANMODES=beI,k,l,imnpstz", "PREFIX=(ohv)@%+",
+        netbuf, "CHANTYPES=#", "CHANMODES=beI,k,l,imnprstz", "PREFIX=(ohv)@%+",
         nicklen, chanlen, topiclen, "CASEMAPPING=ascii", "MODES=6",
         "STATUSMSG=@%+", "AWAYLEN=400", "KICKLEN=400",
         "MAXLIST=beI:100", "EXCEPTS=e", "INVEX=I", "MONITOR=100", "SILENCE=15",
@@ -330,7 +330,7 @@ void server_send_welcome(server_t *srv, client_t *cl) {
 
     char swver[CFG_STR + 16];
     server_software_version(srv, swver, sizeof swver);
-    const char *myinfo[] = {srv->cfg.server.name, swver, "diwsoZ", "ntimspklbovhzeI"};
+    const char *myinfo[] = {srv->cfg.server.name, swver, "diwsoZr", "ntimspklbovhzeIr"};
     client_reply(cl, N_MYINFO, myinfo, 4, NULL);
 
     /* 042 RPL_YOURID: a connection-local opaque id, not a network-wide UID
@@ -343,6 +343,10 @@ void server_send_welcome(server_t *srv, client_t *cl) {
     send_isupport(srv, cl);
     server_send_lusers(srv, cl);
     server_send_motd(srv, cl);
+
+    char modestr[16];
+    client_mode_string(cl, modestr, sizeof modestr);
+    client_reply(cl, N_UMODEIS, NULL, 0, modestr);
 }
 
 /* --- K/G-lines --------------------------------------------------------------- */

@@ -34,6 +34,8 @@ struct client;
 #define CMODE_K 0x040 /* keyed */
 #define CMODE_L 0x080 /* limited */
 #define CMODE_Z 0x100 /* secure-only: only TLS clients (or opers) may JOIN */
+#define CMODE_R 0x200 /* registered with services -- set/cleared by a trusted
+                        * service link only, see cmd_apply_channel_mode */
 
 typedef struct member {
     struct client *client;

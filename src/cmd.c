@@ -77,6 +77,8 @@ static const cmd_entry_t DISPATCH[] = {
 
     {"VERSION", cmd_version, 0, 1, 0},
     {"TIME", cmd_time, 0, 1, 0},
+    {"INFO", cmd_info, 0, 1, 0},
+    {"HELP", cmd_help, 0, 1, 0},
     {"MOTD", cmd_motd, 0, 1, 0},
     {"LUSERS", cmd_lusers, 0, 1, 0},
     {"UPTIME", cmd_uptime, 0, 1, 0},
@@ -123,9 +125,10 @@ void cmd_send_welcome_if_ready(server_t *srv, client_t *cl) {
     if (cl->registered || !cl->got_nick || !cl->got_user || cl->cap_negotiating) return;
     if (cl->rdns_pending || cl->ident_pending) return; /* net.c's worker-result tick retries this once they clear */
     cl->registered = 1;
-    server_send_welcome(srv, cl);
-    server_monitor_notify(srv, cl, 1);
 
+    /* Must land before server_send_welcome: its post-MOTD RPL_UMODEIS line
+     * (and RFC 221 in general) is supposed to reflect the modes the client
+     * actually ends up with, not a snapshot taken before these apply. */
     for (const char *p = srv->cfg.security.default_user_modes; *p; p++) {
         switch (*p) {
             case 'i': cl->umodes |= UMODE_I; break;
@@ -135,6 +138,9 @@ void cmd_send_welcome_if_ready(server_t *srv, client_t *cl) {
             default: break;
         }
     }
+
+    server_send_welcome(srv, cl);
+    server_monitor_notify(srv, cl, 1);
 
     for (int i = 0; i < srv->cfg.channels.n_auto_join; i++)
         cmd_force_join(srv, cl, srv->cfg.channels.auto_join[i]);

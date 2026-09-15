@@ -90,6 +90,13 @@ static void announce_join(channel_t *chan, client_t *cl) {
     if (chan->topic[0]) {
         const char *pt[] = {chan->name};
         client_reply(cl, N_TOPIC, pt, 1, chan->topic);
+        char tbuf[32];
+        snprintf(tbuf, sizeof tbuf, "%ld", (long)chan->topic_time);
+        const char *p3[] = {chan->name, chan->topic_setter, tbuf};
+        client_reply(cl, N_TOPICWHOTIME, p3, 3, NULL);
+    } else {
+        const char *pt[] = {chan->name};
+        client_reply(cl, N_NOTOPIC, pt, 1, "No topic is set");
     }
     send_names(cl, chan);
 }
@@ -301,6 +308,9 @@ void cmd_topic(server_t *srv, client_t *cl, irc_message_t *msg) {
             snprintf(tbuf, sizeof tbuf, "%ld", (long)chan->topic_time);
             const char *p3[] = {chan->name, chan->topic_setter, tbuf};
             client_reply(cl, N_TOPICWHOTIME, p3, 3, NULL);
+        } else {
+            const char *p[] = {chan->name};
+            client_reply(cl, N_NOTOPIC, p, 1, "No topic is set");
         }
         return;
     }
@@ -552,15 +562,8 @@ static void cmd_mode_user(client_t *cl, irc_message_t *msg, const char *target) 
         return;
     }
     if (msg->nparams < 2) {
-        char modestr[16] = "+";
-        size_t p = 1;
-        if (cl->umodes & UMODE_I) modestr[p++] = 'i';
-        if (cl->umodes & UMODE_W) modestr[p++] = 'w';
-        if (cl->umodes & UMODE_D) modestr[p++] = 'd';
-        if (cl->umodes & UMODE_S) modestr[p++] = 's';
-        if (cl->umodes & UMODE_O) modestr[p++] = 'o';
-        if (cl->umodes & UMODE_Z) modestr[p++] = 'Z';
-        modestr[p] = '\0';
+        char modestr[16];
+        client_mode_string(cl, modestr, sizeof modestr);
         client_reply(cl, N_UMODEIS, NULL, 0, modestr);
         return;
     }
@@ -613,13 +616,13 @@ void cmd_apply_channel_mode(server_t *srv, client_t *cl, channel_t *chan,
         char c = *pch;
         if (c == '+' || c == '-') { sign = c; continue; }
 
-        if (c == 'r') {
+        if (c == 'r' && !cl->is_service) {
             const char *p[] = {chan->name};
             client_reply(cl, N_NOTCHANNELOP, p, 1, "Mode +r is set by services only");
             continue;
         }
         int is_halfop_mode = (c == 'v' || c == 'b' || c == 'e' || c == 'I');
-        if (!is_full_op && !is_halfop_mode) {
+        if (!is_full_op && !is_halfop_mode && c != 'r') {
             err_not_channel_op(cl, chan->name);
             continue;
         }
@@ -633,6 +636,7 @@ void cmd_apply_channel_mode(server_t *srv, client_t *cl, channel_t *chan,
             case 's': flagbit = CMODE_S; break;
             case 'm': flagbit = CMODE_M; break;
             case 'z': flagbit = CMODE_Z; break;
+            case 'r': flagbit = CMODE_R; break;
             default: break;
         }
         if (flagbit) {

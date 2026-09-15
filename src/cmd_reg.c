@@ -315,6 +315,7 @@ void cmd_authenticate(server_t *srv, client_t *cl, irc_message_t *msg) {
 
     if (strcmp(mech, "PLAIN") == 0 && accounts_verify(&srv->accounts, authcid, passwd)) {
         snprintf(cl->account, sizeof cl->account, "%s", authcid);
+        cl->umodes |= UMODE_R;
         char prefix[320];
         client_prefix(cl, prefix, sizeof prefix);
         char loggedin_msg[220];
@@ -369,6 +370,7 @@ void cmd_register(server_t *srv, client_t *cl, irc_message_t *msg) {
     }
     accounts_register(&srv->accounts, account, password);
     snprintf(cl->account, sizeof cl->account, "%s", account);
+    cl->umodes |= UMODE_R;
     char m[200];
     snprintf(m, sizeof m, "Account %s registered -- you are now logged in as it", account);
     notice_self(srv, cl, m);

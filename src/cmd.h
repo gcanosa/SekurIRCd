@@ -115,5 +115,7 @@ void cmd_stats(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_trace(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_servlist(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_squery(server_t *srv, client_t *cl, irc_message_t *msg);
+void cmd_info(server_t *srv, client_t *cl, irc_message_t *msg);
+void cmd_help(server_t *srv, client_t *cl, irc_message_t *msg);
 
 #endif /* SEKURIRCD_CMD_H */
