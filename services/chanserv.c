@@ -922,13 +922,11 @@ static int read_line_blocking(int fd, char *out, size_t outsz, int timeout_ms) {
 static int do_handshake(void) {
     char line[512];
     snprintf(line, sizeof line, "PASS %s", g_cfg.link_password);
-    write(g_fd, line, strlen(line));
-    write(g_fd, "\r\n", 2);
+    if (write(g_fd, line, strlen(line)) < 0 || write(g_fd, "\r\n", 2) < 0) return -1;
 
     const char *p[] = {g_cfg.link_name, "1"};
     irc_build(line, sizeof line, NULL, 0, NULL, "SERVER", p, 2, "ChanServ services (C port)");
-    write(g_fd, line, strlen(line));
-    write(g_fd, "\r\n", 2);
+    if (write(g_fd, line, strlen(line)) < 0 || write(g_fd, "\r\n", 2) < 0) return -1;
 
     char resp[512];
     if (read_line_blocking(g_fd, resp, sizeof resp, 5000) != 0) return -1;
@@ -938,8 +936,7 @@ static int do_handshake(void) {
 
     const char *np[] = {g_cfg.nick, g_cfg.user, g_cfg.host};
     irc_build(line, sizeof line, NULL, 0, NULL, "NICK", np, 3, g_cfg.realname);
-    write(g_fd, line, strlen(line));
-    write(g_fd, "\r\n", 2);
+    if (write(g_fd, line, strlen(line)) < 0 || write(g_fd, "\r\n", 2) < 0) return -1;
     return 0;
 }
 

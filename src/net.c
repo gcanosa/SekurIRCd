@@ -161,7 +161,7 @@ static client_t *accept_common(server_t *srv, int listen_fd) {
 
     if (srv->cfg.security.max_connections > 0 && srv->n_clients >= srv->cfg.security.max_connections) {
         const char *msg = "ERROR :Too many connections\r\n";
-        write(fd, msg, strlen(msg));
+        if (write(fd, msg, strlen(msg)) < 0) { /* best effort; peer may already be gone */ }
         close(fd);
         return NULL;
     }
@@ -173,7 +173,7 @@ static client_t *accept_common(server_t *srv, int listen_fd) {
     if (kline_reason) {
         char err[350];
         snprintf(err, sizeof err, "ERROR :Closing Link: %s (%s)\r\n", ipbuf, kline_reason);
-        write(fd, err, strlen(err));
+        if (write(fd, err, strlen(err)) < 0) { /* best effort; peer may already be gone */ }
         close(fd);
         log_info("net", "refused %s: %s", ipbuf, kline_reason);
         return NULL;
@@ -190,7 +190,7 @@ static client_t *accept_common(server_t *srv, int listen_fd) {
             if (strcmp(c->ip, cl->ip) == 0) count++;
         if (count >= srv->cfg.security.max_connections_per_ip) {
             const char *msg = "ERROR :Too many connections from your host\r\n";
-            write(fd, msg, strlen(msg));
+            if (write(fd, msg, strlen(msg)) < 0) { /* best effort; peer may already be gone */ }
             close(fd);
             client_free(cl);
             return NULL;
