@@ -12,3 +12,6 @@
 /services/*.json.bak*
 /services/*.pid
 *.d
+
+# Personal Claude Code skill, not project code.
+/.claude/skills/restart-services/
