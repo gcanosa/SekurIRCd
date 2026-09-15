@@ -151,6 +151,7 @@ void channel_modes_string(channel_t *chan, char *out, size_t outsz) {
     if (chan->modes & CMODE_S) flags[fp++] = 's';
     if (chan->modes & CMODE_M) flags[fp++] = 'm';
     if (chan->modes & CMODE_Z) flags[fp++] = 'z';
+    if (chan->modes & CMODE_R) flags[fp++] = 'r';
     if ((chan->modes & CMODE_K) && chan->key[0]) {
         flags[fp++] = 'k';
         snprintf(args, sizeof args, " %s", chan->key);

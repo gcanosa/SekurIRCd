@@ -320,6 +320,7 @@ static void read_client(server_t *srv, client_t *cl) {
             continue;
         }
         if (!client_flood_ok(cl, srv->cfg.security.flood_max_msgs, srv->cfg.security.flood_window)) {
+            client_reply(cl, N_UNKNOWNERROR, NULL, 0, "flood; disconnecting");
             cl->quitting = 1;
             snprintf(cl->quit_reason, sizeof cl->quit_reason, "Excess Flood");
             continue;

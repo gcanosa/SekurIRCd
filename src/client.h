@@ -32,6 +32,7 @@ struct link_conn;
 #define UMODE_S 0x08  /* receive server notices */
 #define UMODE_O 0x10  /* oper -- only /OPER may set this */
 #define UMODE_Z 0x20  /* secure connection -- server-set only, TLS lands later */
+#define UMODE_R 0x40  /* identified to an account (SASL or /REGISTER) -- server-set only */
 
 typedef struct chan_node {
     struct channel *chan;
@@ -111,6 +112,10 @@ void client_free(client_t *cl);
 
 /* Compute the display prefix "nick!~user@host" (or "nick@host" pre-USER). */
 void client_prefix(const client_t *cl, char *out, size_t outsz);
+/* "+iwZ" etc -- the self-togglable/server-set umode letters currently on
+ * cl, same set cmd_mode_user's bare query and the post-MOTD RPL_UMODEIS
+ * (server_send_welcome) both report. */
+void client_mode_string(const client_t *cl, char *out, size_t outsz);
 
 /* Queue a raw line (no CRLF) for sending; appends CRLF, grows sbuf, and marks
  * `cl` quitting with "SendQ exceeded" if it would exceed SENDQ_MAX. */

@@ -122,6 +122,132 @@ void cmd_servlist(server_t *srv, client_t *cl, irc_message_t *msg) {
     client_reply(cl, N_SERVLISTEND, pe, 2, "End of service listing");
 }
 
+void cmd_info(server_t *srv, client_t *cl, irc_message_t *msg) {
+    (void)msg;
+    char line1[CFG_STR + 64];
+    snprintf(line1, sizeof line1, "%s is powered by SekurIRCd %s.",
+             srv->cfg.server.network, srv->cfg.server.version);
+    client_reply(cl, N_INFO, NULL, 0, line1);
+    client_reply(cl, N_INFO, NULL, 0, "A lightweight, secure IRC daemon.");
+    client_reply(cl, N_ENDOFINFO, NULL, 0, "End of /INFO list.");
+}
+
+/* Per-command `/HELP <command>` detail: one syntax line plus a short
+ * description, ported from commands.py's _COMMAND_HELP. */
+typedef struct { const char *cmd; const char *lines[3]; } help_entry_t;
+
+static const help_entry_t HELP_TABLE[] = {
+    {"NICK", {"NICK <nickname>", "Change your nickname."}},
+    {"USER", {"USER <user> <mode> <unused> :<realname>",
+              "Sent once during registration, right after NICK -- not meant to be typed by hand."}},
+    {"JOIN", {"JOIN <channel>[,<channel2>...] [key[,key2...]]",
+              "Join one or more channels, creating any that don't exist yet."}},
+    {"PART", {"PART <channel>[,<channel2>...] [:reason]", "Leave one or more channels."}},
+    {"PRIVMSG", {"PRIVMSG <target> :<text>",
+                 "Message a nick or channel. Prefix a channel target with @/%/+ (STATUSMSG) to reach only that rank or higher."}},
+    {"NOTICE", {"NOTICE <target> :<text>", "Like PRIVMSG, but must never trigger an automated reply."}},
+    {"TOPIC", {"TOPIC <channel> [:<topic>]",
+               "With no topic, shows the current one. An explicit empty topic (\"TOPIC #c :\") clears it."}},
+    {"NAMES", {"NAMES <channel>", "List a channel's members."}},
+    {"WHO", {"WHO <channel|nick> [%<fields>[,<token>]]",
+             "List matching users. The %fields form (WHOX) selects custom columns: t c u i h s n f d l a r."}},
+    {"WHOIS", {"WHOIS <nick>", "Show detailed information about a user."}},
+    {"WHOWAS", {"WHOWAS <nick> [count]",
+                "Show recent nick/user/host records for someone who has since quit or changed nick."}},
+    {"AWAY", {"AWAY [:<message>]", "Mark yourself away, or (no argument) clear it."}},
+    {"SETNAME", {"SETNAME :<realname>", "Change your realname without reconnecting (IRCv3 setname)."}},
+    {"MODE", {"MODE <channel|nick> [modestring [args...]]", "Query or change channel/user modes."}},
+    {"OPER", {"OPER <name> <password>", "Become an IRC operator using a configured [[operators]] login."}},
+    {"INVITE", {"INVITE <nick> <channel>", "Invite a user to a channel, bypassing +i once."}},
+    {"KNOCK", {"KNOCK <channel>", "Ask channel ops for an invite to a +i/+k channel."}},
+    {"LIST", {"LIST [<param1,param2,...>]",
+              "List channels; each param is an exact name or an ELIST search condition (>n, <n, or a glob)."}},
+    {"LINKS", {"LINKS", "Show the servers linked to this network."}},
+    {"MAP", {"MAP", "Show an ASCII-tree view of the linked network."}},
+    {"KICK", {"KICK <channel> <nick> [:reason]", "Remove a member from a channel. Requires chanop, halfop, or server-oper."}},
+    {"KILL", {"KILL <nick> [:reason]", "Disconnect a user from the network. Server-oper only."}},
+    {"KLINE", {"KLINE [<mask> [<duration>] [:reason]]", "List, or add, an IP ban. Server-oper only."}},
+    {"GLINE", {"GLINE [<mask> [<duration>] [:reason]]", "Same as KLINE. Server-oper only."}},
+    {"UNKLINE", {"UNKLINE <mask>", "Remove a K-line. Server-oper only."}},
+    {"UNGLINE", {"UNGLINE <mask>", "Remove a G-line. Server-oper only."}},
+    {"GLOB", {"GLOB <pattern>", "Non-standard: glob-match nicknames server-wide."}},
+    {"WALLOPS", {"WALLOPS :<text>", "Message every user with mode +w set. Server-oper only."}},
+    {"SILENCE", {"SILENCE [(+|-)mask ...]", "Manage your ignore list for private messages; no argument lists it."}},
+    {"USERHOST", {"USERHOST <nick> [nick...]", "Show host/away/oper info for up to 5 nicks."}},
+    {"ISON", {"ISON <nick> [nick...]", "Check which of the given nicks are currently online."}},
+    {"MONITOR", {"MONITOR + nick[,nick...] | - nick[,...] | C | L | S",
+                 "IRCv3 efficient online/offline watch list -- the modern alternative to polling ISON."}},
+    {"REHASH", {"REHASH", "Reload the config file live. Server-oper only."}},
+    {"DIE", {"DIE [password]", "Shut the server down. Server-oper only."}},
+    {"RESTART", {"RESTART [password]", "Shut the server down and restart it in place. Server-oper only."}},
+    {"STATS", {"STATS <letter>", "m = command usage counts, u = uptime, o = operator names (oper-only)."}},
+    {"LUSERS", {"LUSERS", "Re-send the user/server counts sent at registration."}},
+    {"UPTIME", {"UPTIME", "Non-standard: show server uptime."}},
+    {"ADMIN", {"ADMIN", "Show administrative contact info from [admin]."}},
+    {"VHOST", {"VHOST [<host>|off]", "Non-standard: activate a configured virtual host, or clear it (\"off\")."}},
+    {"CHGHOST", {"CHGHOST <nick> <new-host>",
+                 "Non-standard, server-oper only: force-set another local user's displayed host."}},
+    {"SETHOST", {"SETHOST <host>|off", "Non-standard, server-oper only: set your own displayed host to any value, or clear it (\"off\")."}},
+    {"SAJOIN", {"SAJOIN <nick> <channel>[,<channel2>...]",
+                "Non-standard, server-oper only: force a local user into one or more channels, bypassing +i/+k/+l/+b/+z."}},
+    {"SAPART", {"SAPART <nick> <channel>[,<channel2>...] [:reason]",
+                "Non-standard, server-oper only: force a local user out of one or more channels."}},
+    {"SAMODE", {"SAMODE <channel> <modestring> [args...]",
+                "Non-standard, server-oper only: force a channel-mode change, bypassing membership and op/halfop requirements."}},
+    {"CONNECT", {"CONNECT <peer name>", "Server-oper only: establish a configured outbound server link on demand."}},
+    {"SQUIT", {"SQUIT <peer name> [:reason]", "Server-oper only: drop a server link."}},
+    {"TRACE", {"TRACE", "Show connected clients (and, for a server-oper, linked servers)."}},
+    {"SERVLIST", {"SERVLIST [<mask> [<type>]]", "List services pseudo-users (e.g. ChanServ) currently online."}},
+    {"SQUERY", {"SQUERY <servicename> <text>", "Like PRIVMSG, but the target must be a services pseudo-user."}},
+    {"REGISTER", {"REGISTER <account> <password>",
+                  "Non-standard: create a self-service account and log in as it. Only available when the "
+                  "server has [accounts] enabled -- ask a server operator if this fails."}},
+    {"AUTHENTICATE", {"AUTHENTICATE PLAIN",
+                       "SASL login to an existing account -- normally sent by your client automatically "
+                       "during connection setup, not typed by hand."}},
+    {"CAP", {"CAP LS|REQ|END|LIST", "IRCv3 capability negotiation -- normally handled by your client, not typed by hand."}},
+    {"PING", {"PING <token>", "Request a PONG from the server."}},
+    {"QUIT", {"QUIT [:reason]", "Disconnect from the server."}},
+    {"VERSION", {"VERSION", "Show the server's software version."}},
+    {"TIME", {"TIME", "Show the server's current time."}},
+    {"INFO", {"INFO", "Show general information about the server software."}},
+    {"MOTD", {"MOTD", "Show the message of the day."}},
+    {"HELP", {"HELP [command]", "Show this general summary, or detailed usage for one command."}},
+};
+
+static const char *GENERAL_HELP[] = {
+    "SekurIRCd commands: NICK USER JOIN PART QUIT PRIVMSG NOTICE TOPIC NAMES",
+    "WHO WHOIS WHOWAS AWAY SETNAME MODE OPER INVITE KNOCK LIST LINKS MAP KICK",
+    "KILL MONITOR SILENCE USERHOST ISON WALLOPS ADMIN LUSERS STATS VERSION",
+    "TIME INFO MOTD REHASH VHOST CHGHOST SETHOST SAJOIN SAPART SAMODE CONNECT",
+    "SQUIT TRACE SERVLIST SQUERY REGISTER AUTHENTICATE.",
+    "Type /HELP <command> for that command's usage and parameters.",
+};
+
+void cmd_help(server_t *srv, client_t *cl, irc_message_t *msg) {
+    (void)srv;
+    const char *topic = msg->nparams > 0 ? msg->params[0] : "*";
+    const char *p[] = {topic};
+
+    if (strcmp(topic, "*") != 0) {
+        for (size_t i = 0; i < sizeof HELP_TABLE / sizeof HELP_TABLE[0]; i++) {
+            if (strcasecmp(HELP_TABLE[i].cmd, topic) != 0) continue;
+            client_reply(cl, N_HELPSTART, p, 1, "Help");
+            for (int j = 0; j < 3 && HELP_TABLE[i].lines[j]; j++)
+                client_reply(cl, N_HELPTXT, p, 1, HELP_TABLE[i].lines[j]);
+            client_reply(cl, N_ENDOFHELP, p, 1, "End of /HELP");
+            return;
+        }
+        client_reply(cl, N_HELPNOTFOUND, p, 1, "No help available on this topic");
+        return;
+    }
+
+    client_reply(cl, N_HELPSTART, p, 1, "Help");
+    for (size_t i = 0; i < sizeof GENERAL_HELP / sizeof GENERAL_HELP[0]; i++)
+        client_reply(cl, N_HELPTXT, p, 1, GENERAL_HELP[i]);
+    client_reply(cl, N_ENDOFHELP, p, 1, "End of /HELP");
+}
+
 void cmd_squery(server_t *srv, client_t *cl, irc_message_t *msg) {
     client_t *target = server_find_user(srv, msg->params[0]);
     if (!target || !target->is_service) {

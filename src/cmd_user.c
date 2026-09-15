@@ -205,38 +205,122 @@ static void who_rank_flags(int rank, int multi, char *out) {
     *out = '\0';
 }
 
+/* WHOX (ISUPPORT WHOX) field value for one letter -- matches commands.py's
+ * _whox_value. `chan` is NULL for a bare-nick WHO with no channel context. */
+static const char *whox_value(char letter, client_t *u, channel_t *chan, client_t *cl,
+                               const char *token, char *scratch, size_t scratchsz) {
+    switch (letter) {
+    case 't': return token;
+    case 'c': return chan ? chan->name : "*";
+    case 'u': return u->user;
+    case 'i': return ((cl->umodes & UMODE_O) || u == cl) ? u->ip : "255.255.255.255";
+    case 'h': return u->host;
+    case 's': return cl->srv->cfg.server.name;
+    case 'n': return u->nick;
+    case 'f': {
+        int multi = cl->caps & CAP_MULTI_PREFIX;
+        member_t *m = chan ? channel_find_member(chan, u) : NULL;
+        char rankch[4];
+        who_rank_flags(m ? m->rank : 0, multi, rankch);
+        snprintf(scratch, scratchsz, "%s%s%s", u->is_away ? "G" : "H", (u->umodes & UMODE_O) ? "*" : "", rankch);
+        return scratch;
+    }
+    case 'd': return "0";
+    case 'l': {
+        long idle = (long)difftime(time(NULL), u->last_activity);
+        snprintf(scratch, scratchsz, "%ld", idle);
+        return scratch;
+    }
+    case 'a': return u->account[0] ? u->account : "0";
+    default: return "";
+    }
+}
+
+static void send_whox_reply(client_t *cl, const char *fields, const char *token,
+                             client_t *u, channel_t *chan) {
+    const char *p[16];
+    char scratch[16][32];
+    int nscratch = 0, np = 0;
+    const char *trailing = NULL;
+    p[np++] = cl->nick;
+    for (const char *f = fields; *f && np < 16 && nscratch < 16; f++) {
+        if (*f == 'r') { trailing = u->realname; continue; }
+        p[np++] = whox_value(*f, u, chan, cl, token, scratch[nscratch], sizeof scratch[nscratch]);
+        nscratch++;
+    }
+    client_reply(cl, N_WHOSPCRPL, p + 1, np - 1, trailing);
+}
+
+static void send_who_classic(client_t *cl, client_t *u, channel_t *chan, int multi) {
+    char rankch[4];
+    member_t *m = chan ? channel_find_member(chan, u) : NULL;
+    who_rank_flags(m ? m->rank : 0, multi, rankch);
+    char flags[10];
+    snprintf(flags, sizeof flags, "%s%s%s", u->is_away ? "G" : "H", (u->umodes & UMODE_O) ? "*" : "", rankch);
+    const char *p[] = {chan ? chan->name : "*", u->user, u->host, cl->srv->cfg.server.name, u->nick, flags};
+    char trailing[600];
+    snprintf(trailing, sizeof trailing, "0 %s", u->realname);
+    client_reply(cl, N_WHOREPLY, p, 6, trailing);
+}
+
 void cmd_who(server_t *srv, client_t *cl, irc_message_t *msg) {
-    const char *target = msg->nparams > 0 ? msg->params[0] : NULL;
+    if (msg->nparams < 1 || !msg->params[0][0]) {
+        const char *p[] = {"WHO"};
+        client_reply(cl, N_NEEDMOREPARAMS, p, 1, "Not enough parameters");
+        return;
+    }
+    const char *target = msg->params[0];
     int multi = cl->caps & CAP_MULTI_PREFIX;
-    if (target && target[0] == '#') {
-        channel_t *chan = server_find_channel(srv, target);
-        if (chan) {
-            member_t *m, *tmp;
-            HASH_ITER(hh, chan->members, m, tmp) {
-                client_t *u = m->client;
-                char rankch[4];
-                who_rank_flags(m->rank, multi, rankch);
-                char flags[10];
-                snprintf(flags, sizeof flags, "%s%s%s", u->is_away ? "G" : "H", (u->umodes & UMODE_O) ? "*" : "", rankch);
-                const char *p[] = {chan->name, u->user, u->host, srv->cfg.server.name, u->nick, flags};
-                char trailing[600];
-                snprintf(trailing, sizeof trailing, "0 %s", u->realname);
-                client_reply(cl, N_WHOREPLY, p, 6, trailing);
-            }
-        }
-    } else if (target) {
-        client_t *u = server_find_user(srv, target);
-        if (u) {
-            char flags[8];
-            snprintf(flags, sizeof flags, "%s%s", u->is_away ? "G" : "H", (u->umodes & UMODE_O) ? "*" : "");
-            const char *chan_name = u->channels ? u->channels->chan->name : "*";
-            const char *p[] = {chan_name, u->user, u->host, srv->cfg.server.name, u->nick, flags};
-            char trailing[600];
-            snprintf(trailing, sizeof trailing, "0 %s", u->realname);
-            client_reply(cl, N_WHOREPLY, p, 6, trailing);
+
+    const char *whox_fields = NULL;
+    char whox_token[64] = "";
+    char fieldbuf[32];
+    if (msg->nparams > 1 && msg->params[1][0] == '%') {
+        char *comma = strchr(msg->params[1] + 1, ',');
+        if (comma) {
+            size_t flen = (size_t)(comma - (msg->params[1] + 1));
+            if (flen >= sizeof fieldbuf) flen = sizeof fieldbuf - 1;
+            memcpy(fieldbuf, msg->params[1] + 1, flen);
+            fieldbuf[flen] = '\0';
+            whox_fields = fieldbuf;
+            snprintf(whox_token, sizeof whox_token, "%s", comma + 1);
+        } else {
+            whox_fields = msg->params[1] + 1;
         }
     }
-    const char *pe[] = {target ? target : "*"};
+
+    if (target[0] == '#' || target[0] == '&') {
+        channel_t *chan = server_find_channel(srv, target);
+        if (!chan) {
+            const char *p[] = {target};
+            client_reply(cl, N_NOSUCHCHANNEL, p, 1, "No such channel");
+            return;
+        }
+        if ((chan->modes & (CMODE_S | CMODE_P)) && !channel_find_member(chan, cl)) {
+            const char *pe[] = {target};
+            client_reply(cl, N_ENDOFWHO, pe, 1, "End of /WHO list.");
+            return;
+        }
+        member_t *m, *tmp;
+        HASH_ITER(hh, chan->members, m, tmp) {
+            if (whox_fields) send_whox_reply(cl, whox_fields, whox_token, m->client, chan);
+            else send_who_classic(cl, m->client, chan, multi);
+        }
+    } else {
+        client_t *u = server_find_user(srv, target);
+        if (!u) {
+            const char *p[] = {target};
+            client_reply(cl, N_NOSUCHNICK, p, 1, "No such nick/channel");
+            return;
+        }
+        for (chan_node_t *n = u->channels; n; n = n->next) {
+            channel_t *chan = n->chan;
+            if ((chan->modes & (CMODE_S | CMODE_P)) && !channel_find_member(chan, cl)) continue;
+            if (whox_fields) send_whox_reply(cl, whox_fields, whox_token, u, chan);
+            else send_who_classic(cl, u, chan, multi);
+        }
+    }
+    const char *pe[] = {target};
     client_reply(cl, N_ENDOFWHO, pe, 1, "End of /WHO list.");
 }
 

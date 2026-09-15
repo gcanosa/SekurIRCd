@@ -33,6 +33,20 @@ void client_free(client_t *cl) {
     free(cl);
 }
 
+void client_mode_string(const client_t *cl, char *out, size_t outsz) {
+    char modestr[16] = "+";
+    size_t p = 1;
+    if (cl->umodes & UMODE_I) modestr[p++] = 'i';
+    if (cl->umodes & UMODE_W) modestr[p++] = 'w';
+    if (cl->umodes & UMODE_D) modestr[p++] = 'd';
+    if (cl->umodes & UMODE_S) modestr[p++] = 's';
+    if (cl->umodes & UMODE_O) modestr[p++] = 'o';
+    if (cl->umodes & UMODE_Z) modestr[p++] = 'Z';
+    if (cl->umodes & UMODE_R) modestr[p++] = 'r';
+    modestr[p] = '\0';
+    snprintf(out, outsz, "%s", modestr);
+}
+
 void client_prefix(const client_t *cl, char *out, size_t outsz) {
     const char *nick = cl->nick[0] ? cl->nick : "*";
     const char *host = cl->host[0] ? cl->host : "*";

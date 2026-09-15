@@ -203,8 +203,22 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
                     ? crypto_verify_password(lc->pending_pass, matched->password_hash)
                     : (strcmp(lc->pending_pass, matched->password) == 0);
             }
+            /* Reject outright if this name is already linked -- matches the
+             * Python original's "bad credentials or already linked" check.
+             * Without this, a reconnect that races a not-yet-reaped stale
+             * connection (dead peer, no FIN seen yet) authenticates a
+             * second live link_conn_t for the same name, which then shows
+             * up twice in /MAP until the stale one's ping_timeout expires. */
+            if (ok) {
+                for (link_conn_t *other = srv->links; other; other = other->next) {
+                    if (other != lc && other->authenticated && strcasecmp(other->peer_name, name) == 0) {
+                        ok = 0;
+                        break;
+                    }
+                }
+            }
             if (!ok) {
-                log_warn("link", "rejected link handshake from '%s' (bad name/password)", name);
+                log_warn("link", "rejected link handshake from '%s' (bad name/password, or already linked)", name);
                 link_close(srv, lc);
                 return -1;
             }
@@ -320,6 +334,25 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
         int nargs = 0;
         for (int i = 2; i < msg.nparams && nargs < 16; i++) args[nargs++] = msg.params[i];
         cmd_apply_channel_mode(srv, svc, chan, msg.params[1], args, nargs, 1);
+        return 0;
+    }
+    if (strcasecmp(msg.command, "TOPIC") == 0) {
+        /* Trusted: used for TOPICLOCK restore. Was entirely unhandled --
+         * chanserv had no way to actually set a channel's topic over the
+         * link, only observe it (see process_line's TOPIC case). */
+        if (msg.nparams < 1) return 0;
+        channel_t *chan = server_find_channel(srv, msg.params[0]);
+        if (!chan) return 0;
+        const char *newtopic = msg.nparams > 1 ? msg.params[msg.nparams - 1] : "";
+        snprintf(chan->topic, sizeof chan->topic, "%s", newtopic);
+        client_prefix(svc, chan->topic_setter, sizeof chan->topic_setter);
+        chan->topic_time = time(NULL);
+        char prefix[320];
+        client_prefix(svc, prefix, sizeof prefix);
+        char line[600];
+        const char *p[] = {chan->name};
+        irc_build(line, sizeof line, NULL, 0, prefix, "TOPIC", p, 1, chan->topic);
+        server_broadcast_channel(chan, line, NULL);
         return 0;
     }
     if (strcasecmp(msg.command, "KICK") == 0) {

@@ -347,6 +347,14 @@ static void wire_mode(const char *chan, const char *modestring, const char *arg)
     irc_build(line, sizeof line, NULL, 0, prefix, "MODE", p, arg ? 3 : 2, NULL);
     queue_line(line);
 }
+static void wire_topic(const char *chan, const char *topic) {
+    char prefix[320];
+    irc_prefix_for(prefix, sizeof prefix, g_cfg.nick, g_cfg.user, g_cfg.host);
+    char line[600];
+    const char *p[] = {chan};
+    irc_build(line, sizeof line, NULL, 0, prefix, "TOPIC", p, 1, topic);
+    queue_line(line);
+}
 static void wire_kick(const char *chan, const char *target, const char *reason) {
     char prefix[320];
     irc_prefix_for(prefix, sizeof prefix, g_cfg.nick, g_cfg.user, g_cfg.host);
@@ -423,6 +431,12 @@ static void finish_register(void) {
     cJSON_AddItemToObject(g_store, cf, rec);
     store_save();
 
+    /* Trusted MODE (see link.c's `lc->service` branch, same as IDENTIFY's
+     * +o) -- marks the channel +r (registered with services) on the ircd
+     * side. Applies even if ChanServ isn't sitting in the channel, but only
+     * if the channel currently exists there (i.e. someone has JOINed it). */
+    wire_mode(chan, "+r", NULL);
+
     char msg[300];
     snprintf(msg, sizeof msg, "%s is now registered. Use IDENTIFY to reclaim access after a reconnect.", chan);
     reply(from_nick, msg);
@@ -448,6 +462,7 @@ static void cmd_drop(const char *from_nick, char *args) {
     if (!chan || !password) { reply(from_nick, "Syntax: DROP <#channel> <password>"); return; }
     cJSON *rec = check_password(from_nick, chan, password);
     if (!rec) return;
+    wire_mode(chan, "-r", NULL);
     if (rec_bool(rec, "guard")) wire_part(chan);
     char cf[128];
     irc_casefold(cf, sizeof cf, chan);
@@ -764,7 +779,32 @@ static void cmd_help(const char *from_nick, char *args) {
     reply(from_nick, "  INFO <#channel>                             -- show registration info");
 }
 
+#define CTCP_DELIM '\x01'
+
+/* CTCP VERSION only -- matches Python's _handle_ctcp (unrecognized CTCPs are
+ * silently dropped, never a noisy error reply, since some clients/bots probe
+ * this speculatively). */
+static void handle_ctcp(const char *from_nick, const char *text) {
+    size_t len = strlen(text);
+    if (len < 2 || text[0] != CTCP_DELIM) return;
+    char inner[256];
+    size_t n = len - 1;
+    if (text[len - 1] == CTCP_DELIM) n--;
+    if (n >= sizeof inner) n = sizeof inner - 1;
+    memcpy(inner, text + 1, n);
+    inner[n] = '\0';
+    char *save = NULL;
+    char *verb = strtok_r(inner, " ", &save);
+    if (verb && strcasecmp(verb, "VERSION") == 0) {
+        char line[300];
+        snprintf(line, sizeof line, "%cVERSION ChanServ v%s -- SekurIRCd channel services (services/chanserv.c), "
+                 "https://github.com/gcanosa/SekurIRCd%c", CTCP_DELIM, CHANSERV_VERSION, CTCP_DELIM);
+        reply(from_nick, line);
+    }
+}
+
 static void dispatch_privmsg(const char *from_nick, const char *from_prefix, const char *text) {
+    if (text[0] == CTCP_DELIM) { handle_ctcp(from_nick, text); return; }
     char buf[512];
     snprintf(buf, sizeof buf, "%s", text);
     char *save = NULL;
@@ -881,7 +921,22 @@ static int do_handshake(void) {
 static void guard_join_all(void) {
     cJSON *entry;
     cJSON_ArrayForEach(entry, g_store) {
-        if (rec_bool(entry, "guard")) wire_join(rec_str(entry, "name"));
+        if (rec_bool(entry, "guard")) {
+            const char *chan = rec_str(entry, "name");
+            wire_join(chan);
+            /* Channel state (including +r) lives only in the ircd's memory,
+             * not in this store -- reassert it on every (re)join so an ircd
+             * restart/rehash that wiped it (or predates this daemon having
+             * +r at all) gets it back without needing a manual /SAMODE. */
+            wire_mode(chan, "+r", NULL);
+            /* TOPICLOCK: same reasoning as +r above -- the ircd's live topic
+             * is memory-only too, so a restart/recreate loses it. Ported
+             * from Python's guard_join baseline restore. */
+            if (rec_bool(entry, "topiclock")) {
+                const char *stored_topic = rec_str(entry, "topic");
+                if (stored_topic[0]) wire_topic(chan, stored_topic);
+            }
+        }
     }
 }
 
@@ -890,6 +945,21 @@ static void process_line(char *line) {
     if (irc_parse_line(line, &msg) != 0) return;
     if (strcasecmp(msg.command, "PING") == 0) { queue_line("PONG"); return; }
     if (strcasecmp(msg.command, "PONG") == 0) return;
+
+    /* TOPICLOCK: whenever the live topic changes (by anyone), remember it
+     * as the baseline to restore on a later guard_join -- ported from
+     * Python's _on_topic. Was never handled here at all, so the JSON
+     * store's "topic" field went stale the moment anyone ran /TOPIC. */
+    if (strcasecmp(msg.command, "TOPIC") == 0) {
+        if (msg.nparams < 1) return;
+        const char *topic = msg.nparams > 1 ? msg.params[msg.nparams - 1] : "";
+        cJSON *rec = store_get(msg.params[0]);
+        if (rec && rec_bool(rec, "topiclock")) {
+            rec_set_str(rec, "topic", topic);
+            store_save();
+        }
+        return;
+    }
 
     if (strcasecmp(msg.command, "PRIVMSG") == 0) {
         if (msg.nparams < 2 || !msg.prefix) return;
@@ -990,6 +1060,12 @@ static long read_pidfile(const char *path) {
     return ok ? pid : -1;
 }
 
+static int pidfile_is_live(const char *path) {
+    long pid = read_pidfile(path);
+    if (pid <= 0) return 0;
+    return kill((pid_t)pid, 0) == 0;
+}
+
 static int stop_daemon(const char *pidfile) {
     long pid = read_pidfile(pidfile);
     if (pid <= 0) { fprintf(stderr, "chanserv: no running daemon (can't read a pid from %s)\n", pidfile); return 1; }
@@ -1028,6 +1104,19 @@ int main(int argc, char **argv) {
     char errbuf[256];
     if (load_app_config(config_path, &g_cfg, errbuf, sizeof errbuf) != 0) {
         fprintf(stderr, "chanserv: %s\n", errbuf);
+        return 2;
+    }
+
+    /* Unlike sekurircd's own main.c (see its pidfile_is_live), this was
+     * missing entirely -- starting chanserv twice against the same pidfile
+     * silently ran two live daemons, the second one clobbering the pidfile
+     * while the first kept its link to the hub, showing up as the same
+     * peer name twice in /MAP. */
+    if (pidfile[0] && pidfile_is_live(pidfile)) {
+        long existing = read_pidfile(pidfile);
+        fprintf(stderr, "chanserv: a daemon is already running (pid %ld, pidfile %s) "
+                         "-- refusing to start a second one and clobber its pidfile\n",
+                existing, pidfile);
         return 2;
     }
 

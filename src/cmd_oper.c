@@ -23,6 +23,11 @@ void cmd_oper(server_t *srv, client_t *cl, irc_message_t *msg) {
     const char *name = msg->params[0];
     const char *password = msg->params[1];
 
+    if (cl->umodes & UMODE_O) {
+        notice_self(srv, cl, "You are already an IRC operator");
+        return;
+    }
+
     for (int i = 0; i < srv->cfg.n_operators; i++) {
         cfg_operator_t *op = &srv->cfg.operators[i];
         if (strcasecmp(op->name, name) != 0) continue;
