@@ -1,0 +1,14 @@
+/bin/
+/build/
+/build-debug/
+*.o
+*.pid
+/logs/
+/config/sekurircd.toml
+/config/accounts.json
+/config/tls/*.pem
+/services/services.toml
+/services/*.json
+/services/*.json.bak*
+/services/*.pid
+*.d

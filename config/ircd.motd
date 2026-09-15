@@ -1,0 +1,82 @@
+
+     ____          _                  _   _         _
+    / ___|   ___  | | __ _   _  _ __ | \ | |  ___  | |_
+    \___ \  / _ \ | |/ /| | | || '__||  \| | / _ \ | __|
+     ___) ||  __/ |   < | |_| || |   | |\  ||  __/ | |_
+    |____/  \___| |_|\_\ \__,_||_|   |_| \_| \___|  \__|
+
+          small network  -  secure by default  -  no nonsense
+                  powered by SekurIRCd v0.8.4
+
+=====================================================================
+ [ NETWORK ]
+=====================================================================
+
+  Plaintext ........ port 6667
+  TLS/SSL .......... port 6697   (recommended - gets you user mode +z)
+  Hostnames ........ cloaked; your real IP is not shown to other users
+  Services ......... ChanServ   /msg ChanServ HELP
+  Accounts ......... SASL PLAIN, or /REGISTER <account> <password>
+
+=====================================================================
+ [ CHANNELS ]
+=====================================================================
+
+  #SekurNet ........ main lobby - say hi
+  #help ............ questions about the network or your client
+  #SekurIRCd-dev ... ircd development, live commit/PR feed
+
+  Want your own channel? See [ REGISTERING A CHANNEL ] below.
+
+=====================================================================
+ [ RULES ]
+=====================================================================
+
+  By connecting you agree to the following. No exceptions.
+
+   1. Be civil. No harassment, hate speech, threats or doxxing.
+   2. No flooding, spamming, advertising or mass-highlighting.
+   3. No botnets, drones, clones or connection proxies for abuse.
+      Bots are fine if they behave and a channel op allows them.
+   4. No warez, cracks, malware, stolen data or illegal content.
+   5. No porn or NSFW content outside channels set up for it.
+   6. No nick or channel squatting, and no impersonating staff.
+   7. Channel ops run their channels; network staff run the network.
+      Take disputes to #help, not to the channel you got kicked from.
+   8. Don't ask for oper. If we need you, we'll ask you.
+
+  Breaking the rules gets you a kick, a K-line or a permanent ban -
+  our call, no appeals via PM spam. Incidents may be reported to
+  your provider. If you wouldn't let your kids do it at home, don't
+  do it here.
+
+=====================================================================
+ [ REGISTERING A CHANNEL ]
+=====================================================================
+
+  1. Create it and hold op:   /JOIN #mychannel
+  2. Register it:             /msg ChanServ REGISTER #mychannel <pass>
+  3. Keep it alive (optional) /msg ChanServ JOIN #mychannel <pass>
+     ChanServ stays inside, so the channel survives everyone leaving.
+
+  Lost op after a reconnect? Get it back with:
+
+     /msg ChanServ IDENTIFY #mychannel <pass>
+
+  Share ops without sharing the password:
+     /msg ChanServ ACCESS #mychannel ADD *!*@their.host o <pass>
+
+  Pick a strong channel password and keep it to yourself.
+  Full command list: /msg ChanServ HELP
+
+=====================================================================
+ [ PRIVACY ]
+=====================================================================
+
+  Server logs are kept for abuse handling only and are never sold
+  or shared. Staff never ask for your password - don't give it out.
+
+=====================================================================
+
+  Type /MOTD to read this again.        Be smart. Be chill. Have fun.
+
