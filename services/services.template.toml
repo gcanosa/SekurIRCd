@@ -1,0 +1,43 @@
+# ChanServ (channel registration service) config TEMPLATE for the C port.
+#
+# Separate process from sekurircd itself -- it dials the ircd's [links] hub
+# listener as a leaf, using the small line-based link protocol described in
+# src/link.h (not compatible with the Python project's JSON link protocol).
+# Enabling the feature is entirely: turn on [links] hub mode in the ircd's
+# config, add a [[links.peers]] entry matching this file's [link]
+# name/password (or password_hash on the ircd side), and run chanserv.
+# Not running it is the same as disabled.
+#
+# Copy this file to services.toml (or point --config elsewhere) and edit --
+# like config/, this template is the only version meant to be committed;
+# your live copy shouldn't be.
+
+[link]
+# The ircd's link listener (its own [links] bind/port -- NOT the client port).
+host = "127.0.0.1"
+port = 7000
+# This service's own identity on the link -- must match a [[links.peers]]
+# entry (with no host/port set, an accepting entry) on the ircd side, by
+# name+password. Must be the PLAIN secret here (never a hash): this side has
+# to send it to authenticate. The ircd's own entry may store a
+# password_hash of this same value instead (see
+# config/sekurircd.template.toml's "channel services" example).
+name = "services.sekurircd.local"
+password = "change-me-to-a-long-shared-secret"
+
+[chanserv]
+nick = "ChanServ"
+user = "ChanServ"
+host = "services.sekurircd.local"
+realname = "Channel Registration Service"
+
+[storage]
+# Where channel registrations are persisted (JSON, rewritten on every
+# REGISTER/DROP). Relative to the current working directory chanserv is run
+# from (unlike the ircd's own config, this is not resolved against the
+# config file's directory -- keep it simple, run chanserv from a fixed dir).
+path = "chanserv.json"
+# How many rotating backups (<path>.bak1 = most recent, ... .bak<N>) to keep.
+# On startup, if the live file is missing/corrupt, the newest readable
+# backup is loaded instead of starting with zero registrations.
+backup_count = 5
