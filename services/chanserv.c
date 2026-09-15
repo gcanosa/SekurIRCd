@@ -765,18 +765,45 @@ static void cmd_set(const char *from_nick, char *args) {
 
 static void cmd_help(const char *from_nick, char *args) {
     (void)args;
-    reply(from_nick, "ChanServ (SekurIRCd C port) commands:");
-    reply(from_nick, "  REGISTER <#channel> <password>              -- register a channel you hold ops in");
-    reply(from_nick, "  IDENTIFY <#channel> <password>              -- reclaim ops");
-    reply(from_nick, "  DROP <#channel> <password>                  -- unregister a channel");
-    reply(from_nick, "  JOIN/PART <#channel> <password>             -- GUARD: keep ChanServ sitting in the channel");
-    reply(from_nick, "  SETPASS <#channel> <old> <new>              -- change the password");
-    reply(from_nick, "  TOPICLOCK <#channel> ON|OFF <password>      -- lock the topic to its current value");
-    reply(from_nick, "  ACCESS <#channel> ADD|DEL|LIST ...          -- auto-op/halfop/voice by mask");
-    reply(from_nick, "  AKICK <#channel> ADD|DEL|LIST ...           -- auto-kick by mask");
-    reply(from_nick, "  SUCCESSOR <#channel> SET|CLAIM ...          -- designate/claim a fallback founder");
-    reply(from_nick, "  SET <#channel> MLOCK|DESC|URL|ENTRYMSG ...  -- channel metadata");
-    reply(from_nick, "  INFO <#channel>                             -- show registration info");
+    reply(from_nick, "ChanServ commands:");
+    reply(from_nick, "  REGISTER #channel <password>  -- register a channel you currently op");
+    reply(from_nick, "  IDENTIFY #channel <password>  -- reclaim founder status this session");
+    reply(from_nick, "  DROP #channel <password>      -- unregister a channel");
+    reply(from_nick, "  JOIN #channel <password>      -- ChanServ joins and stays, protecting the");
+    reply(from_nick, "                                    channel from ever emptying/being destroyed");
+    reply(from_nick, "  PART #channel <password>      -- ChanServ leaves (undoes JOIN above)");
+    reply(from_nick, "  SETPASS #channel <old> <new>  -- change a channel's password");
+    reply(from_nick, "  TOPICLOCK #channel ON|OFF <password>");
+    reply(from_nick, "                                -- remember the topic and restore it when");
+    reply(from_nick, "                                   ChanServ (re)joins (server restart, channel");
+    reply(from_nick, "                                   emptied out, etc.)");
+    reply(from_nick, "  INFO #channel                 -- show registration/GUARD/TOPICLOCK status");
+    reply(from_nick, "  ACCESS #channel ADD <mask> <v|h|o> <password>");
+    reply(from_nick, "                                -- auto-grant +v/+h/+o on every JOIN matching");
+    reply(from_nick, "                                   <mask>, without sharing the password. Accepts");
+    reply(from_nick, "                                   a bare host (*.example.com), user@host, or a");
+    reply(from_nick, "                                   full nick!user@host mask -- host is always");
+    reply(from_nick, "                                   required, so a nick alone never grants it");
+    reply(from_nick, "  ACCESS #channel DEL <mask> <password>");
+    reply(from_nick, "                                -- remove a mask from the access list");
+    reply(from_nick, "  ACCESS #channel LIST          -- show the access list");
+    reply(from_nick, "  SUCCESSOR #channel SET <mask> <password>");
+    reply(from_nick, "                                -- designate who may CLAIM founder status if");
+    reply(from_nick, "                                   nobody is currently IDENTIFY'd for this channel");
+    reply(from_nick, "  SUCCESSOR #channel CLAIM <new-password>");
+    reply(from_nick, "                                -- become founder (only works from the designated");
+    reply(from_nick, "                                   mask, and only while nobody is IDENTIFY'd)");
+    reply(from_nick, "  AKICK #channel ADD <mask> <password>");
+    reply(from_nick, "                                -- auto-kick anyone matching <mask> on JOIN");
+    reply(from_nick, "  AKICK #channel DEL <mask> <password>");
+    reply(from_nick, "                                -- remove a mask from the auto-kick list");
+    reply(from_nick, "  AKICK #channel LIST           -- show the auto-kick list");
+    reply(from_nick, "  SET #channel MLOCK <modes> <password>");
+    reply(from_nick, "                                -- lock flag modes on; ChanServ re-applies any");
+    reply(from_nick, "                                   of them that gets removed (empty <modes> clears)");
+    reply(from_nick, "  SET #channel DESC|URL|ENTRYMSG <text> <password>");
+    reply(from_nick, "                                -- free-text metadata (DESC/URL shown by INFO,");
+    reply(from_nick, "                                   ENTRYMSG sent to whoever JOINs); empty clears");
 }
 
 #define CTCP_DELIM '\x01'
@@ -963,6 +990,7 @@ static void process_line(char *line) {
 
     if (strcasecmp(msg.command, "PRIVMSG") == 0) {
         if (msg.nparams < 2 || !msg.prefix) return;
+        if (strcasecmp(msg.params[0], g_cfg.nick) != 0) return; /* not addressed to us (e.g. channel chatter while GUARD-joined) */
         char from_nick[64];
         const char *bang = strchr(msg.prefix, '!');
         size_t nl = bang ? (size_t)(bang - msg.prefix) : strlen(msg.prefix);
