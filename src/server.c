@@ -1,4 +1,5 @@
 #include "server.h"
+#include "cmd.h"
 #include "proto.h"
 #include "vendor/cJSON.h"
 
@@ -312,7 +313,7 @@ void server_send_motd(server_t *srv, client_t *cl) {
 }
 
 void server_send_welcome(server_t *srv, client_t *cl) {
-    char msg[512];
+    char msg[768]; /* worst case: CFG_STR network/name/version + NICKLEN + USERLEN + HOSTLEN */
     snprintf(msg, sizeof msg, "Welcome to the %s IRC Network %s!%s@%s",
              srv->cfg.server.network, cl->nick, cl->user, cl->host);
     client_reply(cl, N_WELCOME, NULL, 0, msg);
@@ -332,6 +333,13 @@ void server_send_welcome(server_t *srv, client_t *cl) {
     server_software_version(srv, swver, sizeof swver);
     const char *myinfo[] = {srv->cfg.server.name, swver, "diwsoZr", "ntimspklbovhzeIr"};
     client_reply(cl, N_MYINFO, myinfo, 4, NULL);
+
+    if (cl->ssl) {
+        char tlsmsg[128];
+        snprintf(tlsmsg, sizeof tlsmsg, "*** You are connected to %s with %s/%s",
+                 srv->cfg.server.name, SSL_get_version(cl->ssl), SSL_get_cipher_name(cl->ssl));
+        notice_self(srv, cl, tlsmsg);
+    }
 
     /* 042 RPL_YOURID: a connection-local opaque id, not a network-wide UID
      * -- see client_t.conn_id's doc comment. */

@@ -30,14 +30,21 @@ else
   endif
 endif
 
-WARN     := -Wall -Wextra -Wno-unused-parameter
+# -Wno-format-truncation: most hits are operator-trusted config strings
+# (server name, DNSBL URL, uplink name, ...) declared CFG_STR (256) snprintf'd
+# into smaller display buffers; snprintf always null-terminates safely, so
+# the worst case is a cosmetically truncated message, never a memory bug.
+WARN     := -Wall -Wextra -Wno-unused-parameter -Wno-format-truncation
 # -MMD -MP: emit a .d dependency file per .o listing the headers it included,
 # so editing a .h (e.g. adding a struct field) correctly triggers a rebuild
 # of every .c that includes it -- without this, `make` only looks at .c
 # mtimes and happily links stale .o files compiled against an old struct
 # layout, which corrupts memory in ways that are miserable to debug.
 CFLAGS   ?= -std=c11 -O2 -g $(WARN) -MMD -MP
-CPPFLAGS := -I$(SRC_DIR) -I$(VEND_DIR) $(OPENSSL_CFLAGS)
+# _POSIX_C_SOURCE: glibc hides strtok_r/localtime_r/struct sigaction under
+# -std=c11 (strict ISO) unless a POSIX feature-test macro is defined; macOS's
+# libc exposes them regardless, so this was silently missing before.
+CPPFLAGS := -I$(SRC_DIR) -I$(VEND_DIR) -D_POSIX_C_SOURCE=200809L $(OPENSSL_CFLAGS)
 LDFLAGS  ?=
 LDLIBS   := $(OPENSSL_LIBS) -lpthread
 

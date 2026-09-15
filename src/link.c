@@ -80,12 +80,18 @@ int link_connect_leaf(server_t *srv) {
 
     char line[512];
     snprintf(line, sizeof line, "PASS %s", up->password);
-    write(fd, line, strlen(line));
-    write(fd, "\r\n", 2);
+    if (write(fd, line, strlen(line)) < 0 || write(fd, "\r\n", 2) < 0) {
+        log_warn("link", "write failed sending handshake to uplink %s:%d", up->host, up->port);
+        close(fd);
+        return -1;
+    }
     const char *p[] = {srv->cfg.server.name, "1"};
     irc_build(line, sizeof line, NULL, 0, NULL, "SERVER", p, 2, "sekurircd-c link");
-    write(fd, line, strlen(line));
-    write(fd, "\r\n", 2);
+    if (write(fd, line, strlen(line)) < 0 || write(fd, "\r\n", 2) < 0) {
+        log_warn("link", "write failed sending handshake to uplink %s:%d", up->host, up->port);
+        close(fd);
+        return -1;
+    }
 
     char resp[512];
     if (read_line_blocking_fd(fd, resp, sizeof resp, 5000) != 0) {
