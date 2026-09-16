@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# start/stop/status wrapper around bin/sekurircd and bin/chanserv's own
+# --daemon/--stop/--pidfile flags (see src/main.c / services/chanserv.c --
+# both already refuse a double-start and clean up a stale pidfile on
+# --stop, so this script just calls through rather than re-implementing
+# that logic). Linux + macOS: no GNU-only flags, no bash4+ features.
+set -uo pipefail
+cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+IRCD_BIN=bin/sekurircd
+IRCD_CONFIG=config/sekurircd.toml
+IRCD_PIDFILE=sekurircd.pid
+
+CHANSERV_BIN=bin/chanserv
+CHANSERV_CONFIG=services/services.toml
+CHANSERV_PIDFILE=services/chanserv.pid
+
+chanserv_configured() { [ -f "$CHANSERV_CONFIG" ]; }
+
+pid_running() {
+    local pidfile="$1" pid
+    [ -f "$pidfile" ] || return 1
+    pid=$(cat "$pidfile" 2>/dev/null) || return 1
+    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+
+require_bin() {
+    [ -x "$1" ] || { echo "$1 not found -- run 'make' first" >&2; exit 1; }
+}
+
+cmd_start() {
+    require_bin "$IRCD_BIN"
+    "$IRCD_BIN" --config "$IRCD_CONFIG" --daemon --pidfile "$IRCD_PIDFILE"
+    if chanserv_configured; then
+        require_bin "$CHANSERV_BIN"
+        "$CHANSERV_BIN" --config "$CHANSERV_CONFIG" --daemon --pidfile "$CHANSERV_PIDFILE"
+    else
+        echo "chanserv: not configured ($CHANSERV_CONFIG missing) -- skipping"
+    fi
+}
+
+cmd_stop() {
+    if chanserv_configured; then
+        [ -x "$CHANSERV_BIN" ] && "$CHANSERV_BIN" --stop --pidfile "$CHANSERV_PIDFILE"
+    else
+        echo "chanserv: not configured ($CHANSERV_CONFIG missing) -- skipping"
+    fi
+    [ -x "$IRCD_BIN" ] && "$IRCD_BIN" --stop --pidfile "$IRCD_PIDFILE"
+    true # stopping an already-stopped daemon exits non-zero upstream; that's not a script failure
+}
+
+cmd_status() {
+    if pid_running "$IRCD_PIDFILE"; then
+        echo "sekurircd: running (pid $(cat "$IRCD_PIDFILE"))"
+    else
+        echo "sekurircd: stopped"
+    fi
+    if chanserv_configured; then
+        if pid_running "$CHANSERV_PIDFILE"; then
+            echo "chanserv:  running (pid $(cat "$CHANSERV_PIDFILE"))"
+        else
+            echo "chanserv:  stopped"
+        fi
+    else
+        echo "chanserv:  not configured ($CHANSERV_CONFIG missing)"
+    fi
+}
+
+case "${1:-}" in
+    start)  cmd_start ;;
+    stop)   cmd_stop ;;
+    status) cmd_status ;;
+    *) echo "usage: $0 {start|stop|status}" >&2; exit 1 ;;
+esac
