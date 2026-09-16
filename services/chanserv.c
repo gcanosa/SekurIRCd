@@ -241,8 +241,14 @@ static void rec_set_str(cJSON *rec, const char *key, const char *val) {
 /* Expand an ACCESS/AKICK mask into a full nick!user@host glob, same three
  * shorthands as upstream's _normalize_access_mask: a bare host, user@host,
  * or an already-full mask. The host component is never optional -- see
- * that function's docstring for why (spoofable-by-nick-grab otherwise). */
+ * that function's docstring for why (spoofable-by-nick-grab otherwise).
+ *
+ * A leading '=' instead means "services account", passed through verbatim
+ * (case folded) -- stable across reconnects/host changes, unlike a hostmask,
+ * which under host_masking only ever sees a random per-connection cloak
+ * (see link.c's SVCJOIN comment). */
 static void normalize_mask(const char *mask, char *out, size_t outsz) {
+    if (mask[0] == '=') { snprintf(out, outsz, "=%s", mask + 1); return; }
     if (strchr(mask, '!')) { snprintf(out, outsz, "%s", mask); return; }
     if (strchr(mask, '@')) { snprintf(out, outsz, "*!%s", mask); return; }
     snprintf(out, outsz, "*!*@%s", mask);
@@ -255,8 +261,16 @@ static int access_level_rank(const char *level) {
     return -1;
 }
 
-/* Strongest access level whose mask matches nick!user@host, or "" if none. */
-static const char *access_level_for(cJSON *rec, const char *nick, const char *user, const char *host) {
+/* True if an ACCESS/AKICK entry (hostmask, or "=account") matches this join. */
+static int entry_matches(const char *entry, const char *nick, const char *user,
+                          const char *host, const char *account) {
+    if (entry[0] == '=') return account[0] && account[0] != '*' && strcasecmp(entry + 1, account) == 0;
+    return irc_mask_match(nick, user, host, entry);
+}
+
+/* Strongest access level whose mask/account matches, or "" if none. */
+static const char *access_level_for(cJSON *rec, const char *nick, const char *user,
+                                     const char *host, const char *account) {
     cJSON *access = cJSON_GetObjectItemCaseSensitive(rec, "access");
     if (!access) return "";
     static char best[2];
@@ -264,19 +278,20 @@ static const char *access_level_for(cJSON *rec, const char *nick, const char *us
     cJSON *entry;
     cJSON_ArrayForEach(entry, access) {
         if (!cJSON_IsString(entry)) continue;
-        if (!irc_mask_match(nick, user, host, entry->string)) continue;
+        if (!entry_matches(entry->string, nick, user, host, account)) continue;
         int r = access_level_rank(entry->valuestring);
         if (r > best_rank) { best_rank = r; snprintf(best, sizeof best, "%s", entry->valuestring); }
     }
     return best_rank >= 0 ? best : "";
 }
 
-static int akick_matches(cJSON *rec, const char *nick, const char *user, const char *host) {
+static int akick_matches(cJSON *rec, const char *nick, const char *user,
+                          const char *host, const char *account) {
     cJSON *akick = cJSON_GetObjectItemCaseSensitive(rec, "akick");
     if (!akick) return 0;
     cJSON *m;
     cJSON_ArrayForEach(m, akick) {
-        if (cJSON_IsString(m) && irc_mask_match(nick, user, host, m->valuestring)) return 1;
+        if (cJSON_IsString(m) && entry_matches(m->valuestring, nick, user, host, account)) return 1;
     }
     return 0;
 }
@@ -890,7 +905,12 @@ static void cmd_help(const char *from_nick, char *args) {
     reply(from_nick, "                                   <mask>, without sharing the password. Accepts");
     reply(from_nick, "                                   a bare host (*.example.com), user@host, or a");
     reply(from_nick, "                                   full nick!user@host mask -- host is always");
-    reply(from_nick, "                                   required, so a nick alone never grants it");
+    reply(from_nick, "                                   required, so a nick alone never grants it.");
+    reply(from_nick, "                                   =accountname matches by services account");
+    reply(from_nick, "                                   instead (must be SASL/REGISTER identified) --");
+    reply(from_nick, "                                   use this if host_masking is on, since the");
+    reply(from_nick, "                                   cloak shown in JOIN/WHOIS is random per");
+    reply(from_nick, "                                   connection and can never match a hostmask");
     reply(from_nick, "  ACCESS #channel DEL <mask> <password>");
     reply(from_nick, "                                -- remove a mask from the access list");
     reply(from_nick, "  ACCESS #channel LIST          -- show the access list");
@@ -901,7 +921,8 @@ static void cmd_help(const char *from_nick, char *args) {
     reply(from_nick, "                                -- become founder (only works from the designated");
     reply(from_nick, "                                   mask, and only while nobody is IDENTIFY'd)");
     reply(from_nick, "  AKICK #channel ADD <mask> <password>");
-    reply(from_nick, "                                -- auto-kick anyone matching <mask> on JOIN");
+    reply(from_nick, "                                -- auto-kick anyone matching <mask> on JOIN;");
+    reply(from_nick, "                                   same mask forms as ACCESS, incl. =accountname");
     reply(from_nick, "  AKICK #channel DEL <mask> <password>");
     reply(from_nick, "                                -- remove a mask from the auto-kick list");
     reply(from_nick, "  AKICK #channel LIST           -- show the auto-kick list");
@@ -970,17 +991,18 @@ static void handle_svcjoin(irc_message_t *msg) {
     if (msg->nparams < 4) return;
     const char *chan = msg->params[0], *nick = msg->params[1];
     const char *user = msg->params[2], *host = msg->params[3];
+    const char *account = msg->nparams >= 5 ? msg->params[4] : "*";
     cJSON *rec = store_get(chan);
     if (!rec) return;
 
-    if (akick_matches(rec, nick, user, host)) {
+    if (akick_matches(rec, nick, user, host, account)) {
         wire_kick(chan, nick, "Banned from this channel (AKICK)");
         return;
     }
     const char *entrymsg = rec_str(rec, "entrymsg");
     if (entrymsg[0]) reply(nick, entrymsg);
 
-    const char *level = access_level_for(rec, nick, user, host);
+    const char *level = access_level_for(rec, nick, user, host, account);
     if (level[0]) {
         char modestring[4];
         snprintf(modestring, sizeof modestring, "+%s", level);
