@@ -38,6 +38,62 @@ static volatile sig_atomic_t g_hup = 0;
 static void on_term(int sig) { (void)sig; g_term = 1; }
 static void on_hup(int sig) { (void)sig; g_hup = 1; }
 
+/* Reads RSS (KB) and %CPU for `pid` by shelling out to `ps` -- portable
+ * across macOS/Linux, unlike parsing /proc (which macOS doesn't have).
+ * Returns 0 on success, -1 if `pid` doesn't exist or ps didn't report it. */
+int proc_stats(pid_t pid, double *cpu_pct, long *rss_kb) {
+    char cmd[64];
+    snprintf(cmd, sizeof cmd, "ps -o rss=,%%cpu= -p %d 2>/dev/null", (int)pid);
+    FILE *p = popen(cmd, "r");
+    if (!p) return -1;
+    long rss = 0;
+    double cpu = 0;
+    int got = fscanf(p, "%ld %lf", &rss, &cpu);
+    pclose(p);
+    if (got != 2) return -1;
+    *rss_kb = rss;
+    *cpu_pct = cpu;
+    return 0;
+}
+
+/* Periodic "users/channels/connections + ircd & chanserv CPU/mem" snote,
+ * gated by [debug_channel] stats_interval -- logged at INFO so it rides the
+ * same log_hook relay into the debug channel as everything else (see
+ * server_install_debug_log_hook). */
+static void emit_stats_snote(server_t *srv) {
+    int n_chans = 0, n_reg_chans = 0;
+    channel_t *ch, *chtmp;
+    HASH_ITER(hh, srv->channels, ch, chtmp) {
+        n_chans++;
+        if (ch->modes & CMODE_R) n_reg_chans++;
+    }
+
+    double ircd_cpu = 0;
+    long ircd_rss = 0;
+    proc_stats(getpid(), &ircd_cpu, &ircd_rss);
+
+    char chanserv_part[128] = "";
+    if (srv->cfg.debug_channel.chanserv_pidfile[0]) {
+        FILE *pf = fopen(srv->cfg.debug_channel.chanserv_pidfile, "r");
+        int cs_pid = 0;
+        if (pf) {
+            if (fscanf(pf, "%d", &cs_pid) != 1) cs_pid = 0;
+            fclose(pf);
+        }
+        double cs_cpu = 0;
+        long cs_rss = 0;
+        if (cs_pid > 0 && kill((pid_t)cs_pid, 0) == 0 && proc_stats((pid_t)cs_pid, &cs_cpu, &cs_rss) == 0) {
+            snprintf(chanserv_part, sizeof chanserv_part, ", chanserv cpu=%.1f%% mem=%ldMB", cs_cpu, cs_rss / 1024);
+        } else {
+            snprintf(chanserv_part, sizeof chanserv_part, ", chanserv: not running");
+        }
+    }
+
+    log_info("stats", "users=%d (peak %d), channels=%d (%d registered), connections=%ld total, ircd cpu=%.1f%% mem=%ldMB%s",
+              HASH_COUNT(srv->users), srv->max_users_seen, n_chans, n_reg_chans, srv->total_connections,
+              ircd_cpu, ircd_rss / 1024, chanserv_part);
+}
+
 static void install_signal_handlers(void) {
     struct sigaction sa;
     memset(&sa, 0, sizeof sa);
@@ -496,6 +552,14 @@ static void tick(server_t *srv) {
     link_tick(srv);
     link_leaf_tick(srv);
     server_kline_prune_expired(srv);
+
+    if (srv->cfg.debug_channel.stats_interval > 0) {
+        static time_t last_stats = 0;
+        if (last_stats == 0 || difftime(now, last_stats) >= srv->cfg.debug_channel.stats_interval) {
+            emit_stats_snote(srv);
+            last_stats = now;
+        }
+    }
 }
 
 int net_run(server_t *srv) {

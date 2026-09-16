@@ -152,6 +152,8 @@ typedef struct {
     int enabled;
     char name[CFG_STR];
     char min_level[16];
+    int stats_interval;              /* seconds between periodic stats snotes; 0 = off */
+    char chanserv_pidfile[CFG_PATH]; /* "" = don't report chanserv CPU/mem */
 } cfg_debug_channel_t;
 
 typedef struct {

@@ -4,11 +4,13 @@
  * trace, which is enough to find the break. */
 #include "config.h"
 #include "crypto.h"
+#include "net.h"
 #include "proto.h"
 
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 static void test_parse_basic(void) {
     char line[] = "FOO bar baz :trailing param here";
@@ -265,6 +267,16 @@ static void test_config_load_missing_file(void) {
     assert(err[0] != '\0');
 }
 
+static void test_proc_stats(void) {
+    double cpu = -1;
+    long rss = -1;
+    assert(proc_stats(getpid(), &cpu, &rss) == 0);
+    assert(rss > 0);
+    assert(cpu >= 0);
+    /* a pid this large is never a live process */
+    assert(proc_stats((pid_t)999999, &cpu, &rss) == -1);
+}
+
 int main(void) {
     test_parse_basic();
     test_parse_prefix_and_lowercase_command();
@@ -289,6 +301,7 @@ int main(void) {
     test_config_defaults();
     test_config_cloak_format();
     test_config_load_missing_file();
-    printf("OK (%d assertions across %d tests)\n", 0, 22);
+    test_proc_stats();
+    printf("OK (%d assertions across %d tests)\n", 0, 23);
     return 0;
 }

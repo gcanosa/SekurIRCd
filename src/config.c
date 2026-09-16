@@ -272,6 +272,8 @@ void config_defaults(config_t *out) {
 
     snprintf(out->debug_channel.name, CFG_STR, "#server-debug");
     snprintf(out->debug_channel.min_level, sizeof out->debug_channel.min_level, "WARNING");
+    out->debug_channel.stats_interval = 0;
+    snprintf(out->debug_channel.chanserv_pidfile, CFG_PATH, "%s", "");
 }
 
 /* --- build from parsed TOML ---------------------------------------------------- */
@@ -680,6 +682,8 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
             snprintf(errbuf, errbufsz, "debug_channel.name: '%s' is not a valid channel name", out->debug_channel.name);
             return -1;
         }
+        if (cfg_get_int(dbg, "stats_interval", 0, &out->debug_channel.stats_interval, errbuf, errbufsz, "debug_channel.stats_interval")) return -1;
+        if (cfg_get_str(dbg, "chanserv_pidfile", "", out->debug_channel.chanserv_pidfile, CFG_PATH, errbuf, errbufsz, "debug_channel.chanserv_pidfile")) return -1;
     }
 
     return 0;
