@@ -83,6 +83,7 @@ typedef struct client {
     unsigned int caps; /* CAP_* bitmask -- see cmd_reg.c's CAP_ATTRS table */
 
     uint64_t conn_id;      /* stable identity for a worker.c job result, immune to fd reuse */
+    char your_id[18];      /* random hex shown as 042 RPL_YOURID -- conn_id is sequential, would leak connection count/order */
     int rdns_pending;       /* reverse-DNS lookup in flight -- gates welcome */
     int ident_pending;      /* RFC 1413 ident query in flight -- gates welcome */
     int dnsbl_pending;      /* DNSBL zone lookup in flight -- gates ALL dispatch, not just welcome */

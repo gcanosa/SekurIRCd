@@ -291,6 +291,7 @@ static client_t *accept_common(server_t *srv, int listen_fd) {
     }
 
     cl->conn_id = ++srv->next_conn_id;
+    crypto_random_hex(cl->your_id, sizeof cl->your_id, 8);
 
     if (srv->cfg.dnsbl.enabled && srv->cfg.dnsbl.n_zones > 0) {
         job_t j; memset(&j, 0, sizeof j);

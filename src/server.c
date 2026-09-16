@@ -438,10 +438,8 @@ void server_send_welcome(server_t *srv, client_t *cl) {
     }
 
     /* 042 RPL_YOURID: a connection-local opaque id, not a network-wide UID
-     * -- see client_t.conn_id's doc comment. */
-    char idbuf[32];
-    snprintf(idbuf, sizeof idbuf, "%llu", (unsigned long long)cl->conn_id);
-    const char *idp[] = {idbuf};
+     * -- see client_t.your_id's doc comment. */
+    const char *idp[] = {cl->your_id};
     client_reply(cl, N_YOURID, idp, 1, "your unique ID");
 
     send_isupport(srv, cl);
