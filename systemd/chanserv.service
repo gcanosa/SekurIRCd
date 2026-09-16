@@ -1,0 +1,22 @@
+# `make install` rewrites User=/Group= (to the installing user by default)
+# and the /usr/local/bin paths (to $(PREFIX)) -- see the Makefile's install
+# target. Edit those two lines by hand if installing this file directly.
+[Unit]
+Description=SekurIRCd ChanServ
+After=network.target sekurircd.service
+
+[Service]
+Type=forking
+User=sekurircd
+Group=sekurircd
+WorkingDirectory=/var/lib/sekurircd/chanserv
+PIDFile=/var/lib/sekurircd/chanserv/chanserv.pid
+ExecStart=/usr/local/bin/chanserv --config /etc/sekurircd/services.toml --daemon --pidfile /var/lib/sekurircd/chanserv/chanserv.pid
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/sekurircd/chanserv
+
+[Install]
+WantedBy=multi-user.target

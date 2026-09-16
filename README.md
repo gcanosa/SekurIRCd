@@ -207,6 +207,42 @@ To run it as a background daemon instead of a foreground process:
 Once daemonized, stdout/stderr are redirected to `/dev/null` -- enable
 `[logging] enabled = true` in the config if you want output to go anywhere.
 
+## Running as a systemd service
+
+`systemd/{sekurircd,chanserv}.service` + `make install` set both daemons up
+as systemd units instead of managing pidfiles/backgrounding by hand
+(Linux + systemd only). `make install` needs `sudo` (it writes
+`/usr/local/bin`, `/etc/sekurircd`, `/etc/systemd/system`), but the daemons
+themselves run as the invoking user, not root and not a dedicated system
+account -- `Type=forking` + `PIDFile=` just wraps the existing
+`--daemon`/`--pidfile` flags above, and `ExecReload=` wraps `--rehash`.
+
+```bash
+make            # build first
+sudo make install
+#   -> binaries in /usr/local/bin
+#   -> config/sekurircd.template.toml, services.template.toml, ircd.motd in /etc/sekurircd
+#      (never overwrites a live sekurircd.toml/services.toml already there)
+#   -> state (pidfile, logs/, chanserv's JSON store) in /var/lib/sekurircd/{ircd,chanserv}
+#   -> units in /etc/systemd/system, owned by $SUDO_USER (override with SVCUSER=...)
+
+cp /etc/sekurircd/sekurircd.template.toml /etc/sekurircd/sekurircd.toml   # then edit it
+sudo systemctl enable --now sekurircd
+# once services/services.toml is set up too (see "Channel services" below):
+sudo systemctl enable --now chanserv
+
+sudo systemctl reload sekurircd     # live config reload, same as --rehash
+sudo systemctl restart sekurircd
+sudo journalctl -u sekurircd -f     # only useful once [logging] enabled = true writes somewhere,
+                                     # or with stdout captured -- see note above
+```
+
+`make uninstall` removes the binaries and unit files; it leaves
+`/etc/sekurircd` and `/var/lib/sekurircd` in place so config/state/logs
+survive a reinstall. Override `PREFIX`, `SYSCONFDIR`, `STATEDIR`, `UNITDIR`,
+or `SVCUSER`/`SVCGROUP` on the `make` command line to change any of the
+above.
+
 ## Trying it
 
 In one terminal start the server, then in another:
