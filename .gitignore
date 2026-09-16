@@ -15,3 +15,5 @@
 
 # Personal Claude Code skill, not project code.
 /.claude/skills/restart-services/
+tags
+plans/
