@@ -1,6 +1,6 @@
 # SekurIRCd in C — port plan
 
-## Status (v1.0.1) — fully implemented
+## Status (v1.0.2) — fully implemented
 
 Both binaries build clean (zero warnings, `-Wall -Wextra`) and are verified
 working end-to-end with real TCP/TLS clients: `sekurircd` (registration

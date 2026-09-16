@@ -5,7 +5,7 @@ A C port of [SekurIRCd](../python/sekurircd) — a lightweight IRC daemon
 service. See `plans/python-sekurircd-could-you-make-ticklish-rabin.md` for
 the full port plan and design notes.
 
-## Status: v1.0.1 — fully implemented, both the daemon and the service start and work
+## Status: v1.0.2 — fully implemented, both the daemon and the service start and work
 
 - **`sekurircd`**: full registration burst, NICK/USER/CAP/PING/QUIT/
   AUTHENTICATE; the full IRCv3 cap bundle (message-tags, server-time,
