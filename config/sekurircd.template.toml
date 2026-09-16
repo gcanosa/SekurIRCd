@@ -58,6 +58,13 @@ host_masking = false
 host_masking_format = "{token}.users.{network}"
 # Number of random bytes hex-encoded into {token} (2 hex chars each).
 host_masking_token_bytes = 4
+# Give every successful /OPER a distinct, recognizable vhost (e.g.
+# netadmin.SekurNet) instead of leaving their prior host/cloak in place.
+oper_host_masking = false
+# str.format template for the oper vhost: {network} is [server] network
+# below, lowercased and made hostname-safe. No {token} (same host for every
+# oper -- it's meant to be recognizable, not private).
+oper_host_format = "netadmin.{network}"
 # JSON file K/G-lines (from /KLINE, /GLINE, or DNSBL auto-action) are saved
 # to, so they survive /REHASH and a process restart. Relative to this config
 # file's directory. Empty (the default) means in-memory only -- lost on

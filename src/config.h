@@ -51,6 +51,8 @@ typedef struct {
     int host_masking;
     char host_masking_format[CFG_STR];
     int host_masking_token_bytes;
+    int oper_host_masking;
+    char oper_host_format[CFG_STR];
     char klines_file[CFG_PATH];
     char default_user_modes[16];
     char oper_auto_join[CFG_STR];
