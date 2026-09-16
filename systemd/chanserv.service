@@ -1,14 +1,14 @@
-# `make install` rewrites User=/Group= (to the installing user by default)
-# and the /usr/local/bin paths (to $(PREFIX)) -- see the Makefile's install
-# target. Edit those two lines by hand if installing this file directly.
+# A systemd *user* unit (installs under ~/.config/systemd/user, run via
+# `systemctl --user ...`) -- no root/sudo anywhere. `make install` rewrites
+# the /usr/local/bin, /etc/sekurircd and /var/lib/sekurircd paths below to
+# $(PREFIX)/$(SYSCONFDIR)/$(STATEDIR) -- see the Makefile's install target.
+# Edit those by hand if installing this file directly.
 [Unit]
 Description=SekurIRCd ChanServ
 After=network.target sekurircd.service
 
 [Service]
 Type=forking
-User=sekurircd
-Group=sekurircd
 WorkingDirectory=/var/lib/sekurircd/chanserv
 PIDFile=/var/lib/sekurircd/chanserv/chanserv.pid
 ExecStart=/usr/local/bin/chanserv --config /etc/sekurircd/services.toml --daemon --pidfile /var/lib/sekurircd/chanserv/chanserv.pid
@@ -19,4 +19,4 @@ ProtectSystem=strict
 ReadWritePaths=/var/lib/sekurircd/chanserv
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target
