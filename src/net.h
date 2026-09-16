@@ -2,7 +2,13 @@
 #ifndef SEKURIRCD_NET_H
 #define SEKURIRCD_NET_H
 
+#include <sys/types.h>
+
 struct server;
+
+/* CPU%/RSS(KB) for `pid` via `ps` -- see net.c for why not /proc.
+ * Returns 0 on success, -1 if `pid` doesn't exist. */
+int proc_stats(pid_t pid, double *cpu_pct, long *rss_kb);
 
 /* Bind+listen a nonblocking TCP socket. IPv4 only in v1.0.1 (matches the
  * "0.0.0.0"/"127.0.0.1" defaults in the config template) -- returns the fd,

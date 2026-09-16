@@ -163,8 +163,16 @@ store_file = "accounts.json"
 [debug_channel]
 enabled = false
 name = "#server-debug"
-# Minimum level relayed: DEBUG, INFO, WARNING, ERROR, CRITICAL.
+# Minimum level relayed: DEBUG, INFO, WARNING, ERROR, CRITICAL. WARNING only
+# shows failures; use INFO to also see connects/disconnects, oper actions
+# (OPER/KILL/K-LINE/SQUIT/CONNECT/REHASH), and link up/down.
 min_level = "WARNING"
+# Seconds between periodic "users/channels/connections + CPU/mem" snotes,
+# logged at INFO (so they need min_level = INFO above to show up). 0 = off.
+stats_interval = 0
+# Path to chanserv's pidfile, to report its CPU/mem alongside the ircd's own
+# in the periodic stats snote. "" = don't report chanserv stats.
+chanserv_pidfile = ""
 
 [messages]
 # MOTD file, resolved relative to this config file's directory.
