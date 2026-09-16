@@ -52,6 +52,7 @@ typedef struct server {
     uint64_t next_conn_id;  /* monotonic; see client_t.conn_id / worker.h */
     int max_users_seen;     /* peak of HASH_COUNT(users), for LOCALUSERS/GLOBALUSERS/STATSCONN */
     long total_connections; /* every accept(), regardless of whether it registered */
+    long dnsbl_hits;        /* every connection a configured DNSBL zone listed, kline'd or just rejected */
 
     char motd_lines[MOTD_MAX_LINES][MOTD_LINE_LEN];
     int n_motd_lines;
