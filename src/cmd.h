@@ -46,6 +46,13 @@ void cmd_pong(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_quit(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_authenticate(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_register(server_t *srv, client_t *cl, irc_message_t *msg);
+/* net.c: apply a finished JOB_SASL (is_register=0) / JOB_HASH (is_register=1,
+ * `hash` = the new scrypt string) for cl->pending_account. */
+void cmd_finish_auth(server_t *srv, client_t *cl, int is_register, int success, const char *hash);
+/* net.c: apply a finished JOB_SASL for AUTH_OPER/AUTH_DIE/AUTH_RESTART
+ * (cmd_oper.c) -- `purpose` is an auth_purpose_t (worker.h), passed as int
+ * so this header doesn't need to pull in worker.h. */
+void cmd_finish_privileged_auth(server_t *srv, client_t *cl, int purpose, int success);
 
 /* Channel handlers (cmd_chan.c) */
 void cmd_join(server_t *srv, client_t *cl, irc_message_t *msg);

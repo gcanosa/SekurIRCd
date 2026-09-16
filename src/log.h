@@ -29,8 +29,9 @@ typedef struct {
  * (forces DEBUG regardless of config, like Python's `verbose` param). */
 void log_init(const log_config_t *cfg, int verbose);
 
-/* Hook fed every WARNING+ line (message only, no timestamp/level prefix --
- * the debug channel relay in server.c adds its own framing), same role as
+/* Hook fed every line, whatever the console/file level (message only, no
+ * timestamp/level prefix -- the debug channel relay in server.c filters by
+ * its own min_level and adds its own framing), same role as
  * Server._DebugChannelLogHandler. NULL clears it. */
 void log_set_hook(void (*hook)(log_level_t level, const char *tag, const char *msg));
 
@@ -47,5 +48,6 @@ void log_write(log_level_t level, const char *tag, const char *fmt, ...)
  * for an unrecognized name (config.c validates the string itself, this is
  * just the enum conversion). */
 log_level_t log_level_from_name(const char *name);
+const char *log_level_name(log_level_t level);
 
 #endif /* SEKURIRCD_LOG_H */

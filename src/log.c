@@ -33,6 +33,8 @@ log_level_t log_level_from_name(const char *name) {
     return LOG_INFO;
 }
 
+const char *log_level_name(log_level_t level) { return LEVEL_NAME[level]; }
+
 static int use_color(void) {
     return getenv("NO_COLOR") == NULL && isatty(fileno(stderr));
 }
@@ -117,7 +119,7 @@ void log_write(log_level_t level, const char *tag, const char *fmt, ...) {
     vformat(msg, sizeof msg, fmt, ap);
     va_end(ap);
 
-    if (level >= LOG_WARNING && g_hook) g_hook(level, tag, msg);
+    if (g_hook) g_hook(level, tag, msg);
 
     if (level < g_min_level) return;
 

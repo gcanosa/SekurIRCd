@@ -1,7 +1,12 @@
 #include "worker.h"
+#include "crypto.h"
+#include "proto.h"
+
+#include <openssl/crypto.h>
 
 #include <arpa/inet.h>
 #include <ctype.h>
+#include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <pthread.h>
@@ -29,6 +34,14 @@ static pthread_t g_threads[N_WORKERS];
 static pthread_mutex_t g_rmutex = PTHREAD_MUTEX_INITIALIZER;
 static job_result_t g_results[RESULT_RING];
 static int g_result_head = 0, g_result_tail = 0;
+static int g_wake[2] = {-1, -1};
+
+int worker_wake_fd(void) { return g_wake[0]; }
+
+void worker_drain_wake(void) {
+    char buf[64];
+    while (read(g_wake[0], buf, sizeof buf) > 0) {}
+}
 
 static void push_result(const job_result_t *r) {
     pthread_mutex_lock(&g_rmutex);
@@ -38,6 +51,7 @@ static void push_result(const job_result_t *r) {
         g_result_tail = next;
     }
     pthread_mutex_unlock(&g_rmutex);
+    if (write(g_wake[1], "", 1) < 0) { /* EAGAIN: pipe already full of wakeups -- fine */ }
 }
 
 int worker_poll_results(job_result_t *out, int max) {
@@ -60,6 +74,19 @@ static int do_rdns(const char *ip, char *out, size_t outsz) {
     /* NI_NAMEREQD: fail (rather than fall back to the numeric IP) when
      * there's no PTR record -- "not found" must look like "not found". */
     if (getnameinfo((struct sockaddr *)&sa, sizeof sa, host, sizeof host, NULL, 0, NI_NAMEREQD) != 0) return 0;
+    /* The PTR record is controlled by whoever owns the IP block: reject
+     * junk characters and require forward confirmation (the name must
+     * resolve back to this IP), or anyone could claim e.g. staff.example. */
+    if (!irc_valid_host(host)) return 0;
+    struct addrinfo hints, *res, *ai;
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_INET;
+    if (getaddrinfo(host, NULL, &hints, &res) != 0) return 0;
+    int confirmed = 0;
+    for (ai = res; ai && !confirmed; ai = ai->ai_next)
+        confirmed = ((struct sockaddr_in *)ai->ai_addr)->sin_addr.s_addr == sa.sin_addr.s_addr;
+    freeaddrinfo(res);
+    if (!confirmed) return 0;
     snprintf(out, outsz, "%s", host);
     return 1;
 }
@@ -91,6 +118,9 @@ static int do_ident(const char *ip, int remote_port, int local_port, double time
     close(fd);
     if (n <= 0) return 0;
 
+    /* "<ports> : USERID : <os> : <name>" -- anything else (ERROR, garbage)
+     * is not an answer. */
+    if (!strstr(resp, "USERID")) return 0;
     char *p = strrchr(resp, ':');
     if (!p) return 0;
     p++;
@@ -98,7 +128,9 @@ static int do_ident(const char *ip, int remote_port, int local_port, double time
     char *end = p;
     while (*end && *end != '\r' && *end != '\n') end++;
     *end = '\0';
-    if (!*p) return 0;
+    /* The remote end picks this string; it lands in nick!user@host, so it
+     * must pass the same validation a USER command would. */
+    if (!irc_valid_user(p, 32)) return 0;
     snprintf(out, outsz, "%s", p);
     return 1;
 }
@@ -110,8 +142,16 @@ static int do_dnsbl(const job_t *j, char *out, size_t outsz) {
     for (int i = 0; i < j->n_zones; i++) {
         char query[300];
         snprintf(query, sizeof query, "%u.%u.%u.%u.%s", d, c, b, a, j->zones[i]);
-        struct hostent *he = gethostbyname(query);
-        if (he) { snprintf(out, outsz, "%s", j->zones[i]); return 1; }
+        /* getaddrinfo, not gethostbyname: this runs on N_WORKERS threads at
+         * once and gethostbyname returns a shared static buffer. */
+        struct addrinfo hints, *res;
+        memset(&hints, 0, sizeof hints);
+        hints.ai_family = AF_INET;
+        if (getaddrinfo(query, NULL, &hints, &res) == 0) {
+            freeaddrinfo(res);
+            snprintf(out, outsz, "%s", j->zones[i]);
+            return 1;
+        }
     }
     return 0;
 }
@@ -134,6 +174,7 @@ static void *worker_main(void *arg) {
         memset(&r, 0, sizeof r);
         r.type = node->job.type;
         r.conn_id = node->job.conn_id;
+        r.purpose = node->job.purpose;
         switch (node->job.type) {
             case JOB_RDNS:
                 r.success = do_rdns(node->job.ip, r.text, sizeof r.text);
@@ -145,7 +186,14 @@ static void *worker_main(void *arg) {
             case JOB_DNSBL:
                 r.success = do_dnsbl(&node->job, r.text, sizeof r.text);
                 break;
+            case JOB_SASL:
+                r.success = crypto_verify_password(node->job.secret, node->job.hash);
+                break;
+            case JOB_HASH:
+                r.success = crypto_hash_password(node->job.secret, r.text, sizeof r.text) == 0;
+                break;
         }
+        OPENSSL_cleanse(node->job.secret, sizeof node->job.secret);
         push_result(&r);
         free(node);
     }
@@ -153,6 +201,12 @@ static void *worker_main(void *arg) {
 }
 
 void worker_pool_start(void) {
+    if (pipe(g_wake) == 0) {
+        for (int i = 0; i < 2; i++) {
+            fcntl(g_wake[i], F_SETFL, fcntl(g_wake[i], F_GETFL, 0) | O_NONBLOCK);
+            fcntl(g_wake[i], F_SETFD, FD_CLOEXEC);
+        }
+    }
     g_running = 1;
     for (int i = 0; i < N_WORKERS; i++) pthread_create(&g_threads[i], NULL, worker_main, NULL);
 }
@@ -166,8 +220,11 @@ void worker_pool_stop(void) {
     while (g_qhead) {
         qnode_t *n = g_qhead;
         g_qhead = n->next;
+        OPENSSL_cleanse(n->job.secret, sizeof n->job.secret);
         free(n);
     }
+    g_qtail = NULL;
+    for (int i = 0; i < 2; i++) if (g_wake[i] >= 0) { close(g_wake[i]); g_wake[i] = -1; }
 }
 
 void worker_submit(const job_t *job) {

@@ -104,6 +104,13 @@ static SSL_CTX *tls_setup(server_t *srv) {
         SSL_CTX_free(ctx);
         return NULL;
     }
+    /* PARTIAL_WRITE + ACCEPT_MOVING_WRITE_BUFFER: write_client retries a
+     * WANT_WRITE with a sendq that may have grown/been realloc'd since --
+     * without these OpenSSL fails that retry ("bad write retry") and the
+     * client is dropped with "Write error" under any backpressure.
+     * RELEASE_BUFFERS: idle TLS connections don't pin ~34KB of I/O buffers. */
+    SSL_CTX_set_mode(ctx, SSL_MODE_ENABLE_PARTIAL_WRITE | SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER |
+                          SSL_MODE_RELEASE_BUFFERS);
     return ctx;
 }
 
@@ -159,16 +166,20 @@ static client_t *accept_common(server_t *srv, int listen_fd) {
     if (fd < 0) return NULL;
     srv->total_connections++;
 
+    char ipbuf[64];
+    inet_ntop(AF_INET, &peer.sin_addr, ipbuf, sizeof ipbuf);
+
     if (srv->cfg.security.max_connections > 0 && srv->n_clients >= srv->cfg.security.max_connections) {
         const char *msg = "ERROR :Too many connections\r\n";
         if (write(fd, msg, strlen(msg)) < 0) { /* best effort; peer may already be gone */ }
         close(fd);
+        char snote[200];
+        snprintf(snote, sizeof snote, "Rejected connection from %s: Server is full", ipbuf);
+        server_notify_opers(srv, snote);
         return NULL;
     }
     net_set_nonblocking(fd);
 
-    char ipbuf[64];
-    inet_ntop(AF_INET, &peer.sin_addr, ipbuf, sizeof ipbuf);
     const char *kline_reason = server_kline_match(srv, ipbuf);
     if (kline_reason) {
         char err[350];
@@ -176,10 +187,14 @@ static client_t *accept_common(server_t *srv, int listen_fd) {
         if (write(fd, err, strlen(err)) < 0) { /* best effort; peer may already be gone */ }
         close(fd);
         log_info("net", "refused %s: %s", ipbuf, kline_reason);
+        char snote[400];
+        snprintf(snote, sizeof snote, "Rejected connection from %s: %s", ipbuf, kline_reason);
+        server_notify_opers(srv, snote);
         return NULL;
     }
 
     client_t *cl = client_new(fd, srv);
+    if (!cl) { close(fd); return NULL; }
     snprintf(cl->ip, sizeof cl->ip, "%s", ipbuf);
     cl->port = ntohs(peer.sin_port);
     snprintf(cl->realhost, sizeof cl->realhost, "%s", ipbuf);
@@ -193,6 +208,9 @@ static client_t *accept_common(server_t *srv, int listen_fd) {
             if (write(fd, msg, strlen(msg)) < 0) { /* best effort; peer may already be gone */ }
             close(fd);
             client_free(cl);
+            char snote[200];
+            snprintf(snote, sizeof snote, "Rejected connection from %s: Too many connections from your host", ipbuf);
+            server_notify_opers(srv, snote);
             return NULL;
         }
     }
@@ -248,25 +266,40 @@ static client_t *accept_common(server_t *srv, int listen_fd) {
     return cl;
 }
 
-static void accept_client(server_t *srv) {
-    client_t *cl = accept_common(srv, srv->listen_fd);
-    if (!cl) return;
-    log_info("net", "connection from %s:%d (fd=%d)", cl->ip, cl->port, cl->fd);
+/* Drains the listener's backlog (bounded per tick so a connect flood can't
+ * starve existing clients) instead of taking one connection per poll(). */
+#define ACCEPT_BURST 64
+
+static void accept_clients(server_t *srv, int listen_fd, int tls) {
+    for (int i = 0; i < ACCEPT_BURST; i++) {
+        long before = srv->total_connections;
+        client_t *cl = accept_common(srv, listen_fd);
+        if (!cl) {
+            if (srv->total_connections == before) return; /* EAGAIN: backlog empty */
+            continue; /* refused (limit/K-line) -- keep draining */
+        }
+        if (!tls) {
+            log_info("net", "connection from %s:%d (fd=%d)", cl->ip, cl->port, cl->fd);
+            continue;
+        }
+        cl->ssl = SSL_new(srv->tls_ctx);
+        if (!cl->ssl || SSL_set_fd(cl->ssl, cl->fd) != 1) {
+            cl->quitting = 1;
+            snprintf(cl->quit_reason, sizeof cl->quit_reason, "TLS setup failed");
+            continue;
+        }
+        cl->tls_handshaking = 1;
+        log_info("net", "TLS connection from %s:%d (fd=%d)", cl->ip, cl->port, cl->fd);
+        tls_try_handshake(cl); /* often completes (or fails) in the same event as accept() */
+    }
 }
 
-static void accept_tls_client(server_t *srv) {
-    client_t *cl = accept_common(srv, srv->tls_listen_fd);
-    if (!cl) return;
-    cl->ssl = SSL_new(srv->tls_ctx);
-    SSL_set_fd(cl->ssl, cl->fd);
-    cl->tls_handshaking = 1;
-    log_info("net", "TLS connection from %s:%d (fd=%d)", cl->ip, cl->port, cl->fd);
-    tls_try_handshake(cl); /* often completes (or fails) in the same event as accept() */
-}
+static void write_client(client_t *cl);
 
 static void close_client(server_t *srv, client_t *cl) {
     log_info("net", "disconnecting %s (%s): %s", cl->nick[0] ? cl->nick : "*", cl->ip, cl->quit_reason);
     int fd = cl->fd;
+    if (fd >= 0 && !cl->tls_handshaking) write_client(cl); /* best effort: ERROR/flood notice etc. */
     server_remove_client(srv, cl, cl->quit_reason[0] ? cl->quit_reason : "Client Quit");
     if (fd >= 0) close(fd);
 }
@@ -274,15 +307,15 @@ static void close_client(server_t *srv, client_t *cl) {
 /* Reads from `cl`, splits complete lines, and dispatches each through the
  * max_line_length/max_params/flood-guard choke point -- the C equivalent of
  * server._read_loop's per-line validation before commands.handle. */
-static void read_client(server_t *srv, client_t *cl) {
+static int read_client_once(server_t *srv, client_t *cl) {
     char tmp[4096];
     ssize_t n = io_read(cl, tmp, sizeof tmp);
-    if (n == 0) { cl->quitting = 1; snprintf(cl->quit_reason, sizeof cl->quit_reason, "Remote host closed the connection"); return; }
+    if (n == 0) { cl->quitting = 1; snprintf(cl->quit_reason, sizeof cl->quit_reason, "Remote host closed the connection"); return 0; }
     if (n < 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) return;
+        if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) return 0;
         cl->quitting = 1;
         snprintf(cl->quit_reason, sizeof cl->quit_reason, "Read error");
-        return;
+        return 0;
     }
     cl->last_activity = time(NULL);
     cl->ping_sent = 0;
@@ -294,10 +327,10 @@ static void read_client(server_t *srv, client_t *cl) {
         if (newcap > RECVQ_MAX) {
             cl->quitting = 1;
             snprintf(cl->quit_reason, sizeof cl->quit_reason, "Input line too long");
-            return;
+            return 0;
         }
         char *nb = realloc(cl->rbuf, newcap);
-        if (!nb) { cl->quitting = 1; return; }
+        if (!nb) { cl->quitting = 1; return 0; }
         cl->rbuf = nb;
         cl->rbuf_cap = newcap;
     }
@@ -334,6 +367,16 @@ static void read_client(server_t *srv, client_t *cl) {
         memmove(cl->rbuf, cl->rbuf + start, cl->rbuf_len - start);
         cl->rbuf_len -= start;
     }
+    return 1;
+}
+
+/* A TLS record can hold more plaintext than one read takes; the rest sits
+ * decrypted inside OpenSSL where poll() can't see it, so keep reading while
+ * SSL_pending says so -- otherwise those lines stall until the peer happens
+ * to send more bytes. */
+static void read_client(server_t *srv, client_t *cl) {
+    while (read_client_once(srv, cl) && cl->ssl && !cl->quitting && !cl->dnsbl_pending &&
+           SSL_pending(cl->ssl) > 0) {}
 }
 
 static void write_client(client_t *cl) {
@@ -360,59 +403,87 @@ static client_t *find_by_conn_id(server_t *srv, uint64_t conn_id) {
  * withholding POLLIN longer than the lookup itself took. */
 static void drain_worker_results(server_t *srv) {
     job_result_t results[32];
-    int n = worker_poll_results(results, 32);
-    for (int i = 0; i < n; i++) {
-        job_result_t *r = &results[i];
-        client_t *cl = find_by_conn_id(srv, r->conn_id);
-        if (!cl) continue;
+    int n;
+    worker_drain_wake();
+    while ((n = worker_poll_results(results, 32)) > 0) {
+        for (int i = 0; i < n; i++) {
+            job_result_t *r = &results[i];
+            client_t *cl = find_by_conn_id(srv, r->conn_id);
+            if (!cl) continue;
 
-        if (r->type == JOB_RDNS) {
-            cl->rdns_pending = 0;
-            if (r->success) snprintf(cl->host, sizeof cl->host, "%s", r->text);
-            cmd_send_welcome_if_ready(srv, cl);
-        } else if (r->type == JOB_IDENT) {
-            cl->ident_pending = 0;
-            if (r->success) {
-                cl->ident_confirmed = 1;
-                snprintf(cl->user, sizeof cl->user, "%s", r->text);
-            }
-            cmd_send_welcome_if_ready(srv, cl);
-        } else if (r->type == JOB_DNSBL) {
-            cl->dnsbl_pending = 0;
-            if (r->success) {
-                char reason[350];
-                if (srv->cfg.dnsbl.lookup_url[0]) {
-                    char urlbuf[350];
-                    const char *p = strstr(srv->cfg.dnsbl.lookup_url, "{ip}");
-                    if (p) snprintf(urlbuf, sizeof urlbuf, "%.*s%s%s", (int)(p - srv->cfg.dnsbl.lookup_url),
-                                      srv->cfg.dnsbl.lookup_url, cl->ip, p + 4);
-                    else snprintf(urlbuf, sizeof urlbuf, "%s", srv->cfg.dnsbl.lookup_url);
-                    snprintf(reason, sizeof reason, "Proxy/Drone detected (%s). Check %s for details.", r->text, urlbuf);
-                } else {
-                    snprintf(reason, sizeof reason, "Proxy/Drone detected (%s)", r->text);
+            if (r->type == JOB_RDNS) {
+                cl->rdns_pending = 0;
+                if (r->success) snprintf(cl->host, sizeof cl->host, "%s", r->text);
+                cmd_send_welcome_if_ready(srv, cl);
+            } else if (r->type == JOB_IDENT) {
+                cl->ident_pending = 0;
+                if (r->success) {
+                    cl->ident_confirmed = 1;
+                    snprintf(cl->user, sizeof cl->user, "%s", r->text);
                 }
-                if (strcmp(srv->cfg.dnsbl.action, "kline") == 0) {
-                    long dur = srv->cfg.dnsbl.kline_duration[0] ? irc_parse_duration(srv->cfg.dnsbl.kline_duration) : 0;
-                    if (dur < 0) dur = 0;
-                    server_kline_add(srv, cl->ip, reason, "dnsbl", "K", dur);
+                cmd_send_welcome_if_ready(srv, cl);
+            } else if (r->type == JOB_DNSBL) {
+                cl->dnsbl_pending = 0;
+                if (r->success) {
+                    char reason[350];
+                    if (srv->cfg.dnsbl.lookup_url[0]) {
+                        char urlbuf[350];
+                        const char *p = strstr(srv->cfg.dnsbl.lookup_url, "{ip}");
+                        if (p) snprintf(urlbuf, sizeof urlbuf, "%.*s%s%s", (int)(p - srv->cfg.dnsbl.lookup_url),
+                                          srv->cfg.dnsbl.lookup_url, cl->ip, p + 4);
+                        else snprintf(urlbuf, sizeof urlbuf, "%s", srv->cfg.dnsbl.lookup_url);
+                        snprintf(reason, sizeof reason, "Proxy/Drone detected (%s). Check %s for details.", r->text, urlbuf);
+                    } else {
+                        snprintf(reason, sizeof reason, "Proxy/Drone detected (%s)", r->text);
+                    }
+                    int as_kline = strcmp(srv->cfg.dnsbl.action, "kline") == 0;
+                    if (as_kline) {
+                        long dur = srv->cfg.dnsbl.kline_duration[0] ? irc_parse_duration(srv->cfg.dnsbl.kline_duration) : 0;
+                        if (dur < 0) dur = 0;
+                        server_kline_add(srv, cl->ip, reason, "dnsbl", "K", dur); /* itself calls server_notify_opers */
+                    } else {
+                        char snote[400];
+                        snprintf(snote, sizeof snote, "Rejected connection from %s: %s", cl->ip, reason);
+                        server_notify_opers(srv, snote);
+                    }
+                    snprintf(cl->quit_reason, sizeof cl->quit_reason, "%s", reason);
+                    cl->quitting = 1;
+                    log_info("dnsbl", "%s listed in %s -- %s", cl->ip, r->text, as_kline ? "K-lined" : "rejected");
                 }
-                snprintf(cl->quit_reason, sizeof cl->quit_reason, "%s", reason);
-                cl->quitting = 1;
-                log_info("dnsbl", "%s listed in %s -- %s", cl->ip, r->text,
-                          strcmp(srv->cfg.dnsbl.action, "kline") == 0 ? "K-lined" : "rejected");
+                /* not listed: POLLIN resumes next poll() build, nothing else to do */
+            } else if (r->type == JOB_SASL || r->type == JOB_HASH) {
+                if (r->purpose == AUTH_SASL || r->purpose == AUTH_REGISTER)
+                    cmd_finish_auth(srv, cl, r->purpose == AUTH_REGISTER, r->success, r->text);
+                else
+                    cmd_finish_privileged_auth(srv, cl, r->purpose, r->success);
             }
-            /* not listed: POLLIN resumes next poll() build, nothing else to do */
         }
     }
 }
+
+/* Unregistered connections get this long to finish NICK/USER(/CAP/SASL)
+ * -- otherwise an idle socket holds an fd for the full ping_timeout.
+ * ponytail: fixed, make it a [security] key if 60s ever proves wrong. */
+#define REGISTRATION_TIMEOUT 60
 
 /* PING/timeout for client connections + the link keepalive tick. */
 static void tick(server_t *srv) {
     time_t now = time(NULL);
     for (client_t *cl = srv->all_clients; cl; cl = cl->all_next) {
         if (cl->fd < 0 || cl->quitting) continue; /* service pseudo-clients have no timeout of their own */
+        double age = difftime(now, cl->signon_time);
+        /* Worker results can be lost (full result ring) or stuck on a hung
+         * resolver: never let a pending lookup gate a client forever. */
+        if ((cl->rdns_pending || cl->ident_pending || cl->dnsbl_pending) && age > 30) {
+            log_warn("net", "lookup for %s never finished -- continuing without it", cl->ip);
+            cl->rdns_pending = cl->ident_pending = cl->dnsbl_pending = 0;
+            cmd_send_welcome_if_ready(srv, cl);
+        }
         double idle = difftime(now, cl->last_activity);
-        if (idle > srv->cfg.security.ping_timeout) {
+        if (!cl->registered && age > REGISTRATION_TIMEOUT) {
+            cl->quitting = 1;
+            snprintf(cl->quit_reason, sizeof cl->quit_reason, "Registration timeout");
+        } else if (idle > srv->cfg.security.ping_timeout) {
             cl->quitting = 1;
             snprintf(cl->quit_reason, sizeof cl->quit_reason, "Ping timeout: %d seconds", (int)idle);
         } else if (!cl->ping_sent && idle > srv->cfg.security.ping_interval) {
@@ -462,7 +533,16 @@ int net_run(server_t *srv) {
         }
     }
 
+    server_install_debug_log_hook(srv);
     time_t last_tick = time(NULL);
+
+    /* pollfd set reused across iterations (grown, never shrunk).
+     * ponytail: poll() is O(connections) per wakeup; kqueue/epoll is the
+     * upgrade if this ever serves thousands of concurrent clients. */
+    struct pollfd *fds = NULL;
+    client_t **fd_client = NULL;
+    link_conn_t **fd_link = NULL;
+    size_t fds_cap = 0;
 
     while (!srv->shutdown_requested) {
         if (g_term) { srv->shutdown_requested = 1; break; }
@@ -473,55 +553,87 @@ int net_run(server_t *srv) {
             else log_error("net", "rehash failed: %s", err);
         }
 
-        int nfds = 3 + srv->n_clients;
+        size_t nfds = 4 + (size_t)srv->n_clients;
         for (link_conn_t *lc = srv->links; lc; lc = lc->next) nfds++;
-        struct pollfd *fds = calloc((size_t)nfds, sizeof *fds);
-        client_t **fd_client = calloc((size_t)nfds, sizeof *fd_client);
-        link_conn_t **fd_link = calloc((size_t)nfds, sizeof *fd_link);
+        if (nfds > fds_cap) {
+            size_t cap = nfds * 2;
+            struct pollfd *nf = realloc(fds, cap * sizeof *fds);
+            if (nf) fds = nf;
+            client_t **nc = realloc(fd_client, cap * sizeof *fd_client);
+            if (nc) fd_client = nc;
+            link_conn_t **nl = realloc(fd_link, cap * sizeof *fd_link);
+            if (nl) fd_link = nl;
+            if (!nf || !nc || !nl) { log_critical("net", "out of memory growing poll set"); break; }
+            fds_cap = cap;
+        }
+        memset(fd_client, 0, nfds * sizeof *fd_client);
+        memset(fd_link, 0, nfds * sizeof *fd_link);
         int n = 0;
 
-        fds[n].fd = srv->listen_fd; fds[n].events = POLLIN; n++;
+        fds[n].fd = srv->listen_fd; fds[n].events = POLLIN; fds[n].revents = 0; n++;
+        int wake_idx = -1;
+        if (worker_wake_fd() >= 0) {
+            wake_idx = n;
+            fds[n].fd = worker_wake_fd(); fds[n].events = POLLIN; fds[n].revents = 0; n++;
+        }
         int link_listen_idx = -1;
         if (srv->link_listen_fd >= 0) {
             link_listen_idx = n;
-            fds[n].fd = srv->link_listen_fd; fds[n].events = POLLIN; n++;
+            fds[n].fd = srv->link_listen_fd; fds[n].events = POLLIN; fds[n].revents = 0; n++;
         }
         int tls_listen_idx = -1;
         if (srv->tls_listen_fd >= 0) {
             tls_listen_idx = n;
-            fds[n].fd = srv->tls_listen_fd; fds[n].events = POLLIN; n++;
+            fds[n].fd = srv->tls_listen_fd; fds[n].events = POLLIN; fds[n].revents = 0; n++;
         }
         for (client_t *cl = srv->all_clients; cl; cl = cl->all_next) {
-            if (cl->fd < 0) continue;
+            if (cl->fd < 0 || cl->quitting) continue;
+            /* Flush now rather than waiting a whole extra poll() round for
+             * POLLOUT: most replies fit the socket buffer immediately. */
+            if (cl->sbuf_len > 0 && !cl->tls_handshaking) write_client(cl);
+            if (cl->quitting) continue;
             fds[n].fd = cl->fd;
             /* A pending DNSBL verdict withholds POLLIN entirely: the client
              * exists (a listed IP might still be disconnected below), but
              * nothing it sends is dispatched until the lookup resolves. */
             fds[n].events = (cl->dnsbl_pending ? 0 : POLLIN) | ((cl->sbuf_len > 0 || cl->tls_handshaking) ? POLLOUT : 0);
+            fds[n].revents = 0;
             fd_client[n] = cl;
             n++;
         }
         for (link_conn_t *lc = srv->links; lc; lc = lc->next) {
+            if (lc->closing) continue;
+            if (lc->sbuf_len > 0 && !lc->tls_handshaking) link_handle_writable(srv, lc);
+            if (lc->closing) continue;
             fds[n].fd = lc->fd;
-            fds[n].events = POLLIN | (lc->sbuf_len > 0 ? POLLOUT : 0);
+            fds[n].events = POLLIN | ((lc->sbuf_len > 0 || lc->tls_handshaking) ? POLLOUT : 0);
+            fds[n].revents = 0;
             fd_link[n] = lc;
             n++;
         }
 
-        int rc = poll(fds, (nfds_t)n, 1000);
+        /* Anything already marked for teardown (e.g. a write error in the
+         * flush above) shouldn't wait out a full poll timeout. */
+        int timeout = 1000;
+        for (client_t *cl = srv->all_clients; cl; cl = cl->all_next)
+            if (cl->quitting) { timeout = 0; break; }
+        for (link_conn_t *lc = srv->links; lc && timeout; lc = lc->next)
+            if (lc->closing) timeout = 0;
+
+        int rc = poll(fds, (nfds_t)n, timeout);
         if (rc < 0 && errno != EINTR) {
             log_error("net", "poll() failed: %s", strerror(errno));
-            free(fds); free(fd_client); free(fd_link);
             break;
         }
         if (rc > 0) {
-            if (fds[0].revents & POLLIN) accept_client(srv);
+            if (fds[0].revents & POLLIN) accept_clients(srv, srv->listen_fd, 0);
             if (link_listen_idx >= 0 && (fds[link_listen_idx].revents & POLLIN)) link_accept(srv);
-            if (tls_listen_idx >= 0 && (fds[tls_listen_idx].revents & POLLIN)) accept_tls_client(srv);
+            if (tls_listen_idx >= 0 && (fds[tls_listen_idx].revents & POLLIN)) accept_clients(srv, srv->tls_listen_fd, 1);
 
             for (int i = 0; i < n; i++) {
                 if (fd_client[i]) {
                     client_t *cl = fd_client[i];
+                    if (cl->quitting) continue;
                     if (fds[i].revents & (POLLHUP | POLLERR)) {
                         cl->quitting = 1;
                         if (!cl->quit_reason[0]) snprintf(cl->quit_reason, sizeof cl->quit_reason, "Connection reset");
@@ -535,22 +647,28 @@ int net_run(server_t *srv) {
                     if (!cl->quitting && (fds[i].revents & POLLOUT)) write_client(cl);
                 } else if (fd_link[i]) {
                     link_conn_t *lc = fd_link[i];
+                    if (lc->closing) continue;
                     if (fds[i].revents & (POLLHUP | POLLERR)) { link_close(srv, lc); continue; }
+                    if (lc->tls_handshaking) {
+                        if (fds[i].revents & (POLLIN | POLLOUT)) link_tls_try_handshake(srv, lc);
+                        continue;
+                    }
                     if (fds[i].revents & POLLIN) link_handle_readable(srv, lc);
-                    if (fds[i].revents & POLLOUT) link_handle_writable(lc);
+                    if (fds[i].revents & POLLOUT) link_handle_writable(srv, lc);
                 }
             }
         }
-        free(fds); free(fd_client); free(fd_link);
 
-        drain_worker_results(srv);
+        if (wake_idx < 0 || rc <= 0 || (fds[wake_idx].revents & POLLIN)) drain_worker_results(srv);
 
         time_t now = time(NULL);
         if (now != last_tick) { tick(srv); last_tick = now; }
 
         /* Deferred teardown: only now, after every fd this iteration has
-         * been serviced, do we actually close/free a quitting client -- see
-         * client.h's comment on why no handler ever frees one inline. */
+         * been serviced, do we actually free a closing link or close/free a
+         * quitting client -- see client.h's comment on why no handler ever
+         * frees one inline. */
+        link_reap(srv);
         client_t *cl = srv->all_clients;
         while (cl) {
             client_t *next = cl->all_next;
@@ -558,12 +676,19 @@ int net_run(server_t *srv) {
             cl = next;
         }
     }
+    free(fds); free(fd_client); free(fd_link);
+    log_set_hook(NULL);
 
     log_info("net", "shutting down");
     client_t *cl = srv->all_clients;
     while (cl) {
         client_t *next = cl->all_next;
         if (cl->fd >= 0) {
+            /* Flush whatever's already queued first -- e.g. a DIE/RESTART
+             * snotice queued this same loop iteration, after which the
+             * `while (!shutdown_requested)` loop exits without ever
+             * reaching the normal per-iteration flush. */
+            if (!cl->tls_handshaking) write_client(cl);
             const char *msg = "ERROR :Server shutting down\r\n";
             io_write(cl, msg, strlen(msg));
             close(cl->fd);
@@ -602,6 +727,7 @@ int net_run(server_t *srv) {
     if (srv->link_listen_fd >= 0) close(srv->link_listen_fd);
     if (srv->tls_listen_fd >= 0) close(srv->tls_listen_fd);
     if (srv->tls_ctx) SSL_CTX_free(srv->tls_ctx);
+    link_tls_cleanup();
     accounts_free(&srv->accounts);
     worker_pool_stop();
     return 0;

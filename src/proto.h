@@ -245,6 +245,7 @@ void irc_add_time_tag(char *line, size_t linesz);
 #define N_NOCHANNELKEY     "475"
 #define N_NOAVAIL          "476"
 #define N_NOPRIVILEGES     "481"
+#define N_CANTKILLSERVER   "483"
 #define N_NOTCHANNELOP     "482"
 #define N_SECUREONLYCHAN   "489"
 

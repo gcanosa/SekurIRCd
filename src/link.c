@@ -7,6 +7,9 @@
 #include "proto.h"
 #include "server.h"
 
+#include <openssl/err.h>
+
+#include <errno.h>
 #include <netdb.h>
 #include <poll.h>
 #include <stdio.h>
@@ -16,6 +19,63 @@
 #include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
+
+/* --- TLS (optional, [links] tls=true) --------------------------------------
+ * Hub side reuses srv->tls_ctx (the same cert the client-facing TLS listener
+ * uses -- config.c requires [tls] enabled whenever [links] tls+mode=hub).
+ * Leaf side dials out as a TLS client, honoring tls_insecure_skip_verify;
+ * its SSL_CTX is created once, lazily, and freed at shutdown. */
+
+static ssize_t link_io_read(link_conn_t *lc, void *buf, size_t len) {
+    if (!lc->ssl) return read(lc->fd, buf, len);
+    int n = SSL_read(lc->ssl, buf, (int)len);
+    if (n > 0) return n;
+    int err = SSL_get_error(lc->ssl, n);
+    if (err == SSL_ERROR_ZERO_RETURN) return 0;
+    if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) { errno = EAGAIN; return -1; }
+    errno = EIO;
+    return -1;
+}
+
+static ssize_t link_io_write(link_conn_t *lc, const void *buf, size_t len) {
+    if (!lc->ssl) return write(lc->fd, buf, len);
+    int n = SSL_write(lc->ssl, buf, (int)len);
+    if (n > 0) return n;
+    int err = SSL_get_error(lc->ssl, n);
+    if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) { errno = EAGAIN; return -1; }
+    errno = EIO;
+    return -1;
+}
+
+static SSL_CTX *g_leaf_tls_ctx;
+
+static SSL_CTX *leaf_tls_ctx(void) {
+    if (!g_leaf_tls_ctx) {
+        g_leaf_tls_ctx = SSL_CTX_new(TLS_client_method());
+        if (g_leaf_tls_ctx) SSL_CTX_set_default_verify_paths(g_leaf_tls_ctx);
+    }
+    return g_leaf_tls_ctx;
+}
+
+void link_tls_cleanup(void) {
+    if (g_leaf_tls_ctx) { SSL_CTX_free(g_leaf_tls_ctx); g_leaf_tls_ctx = NULL; }
+}
+
+void link_tls_try_handshake(server_t *srv, link_conn_t *lc) {
+    int rc = SSL_accept(lc->ssl);
+    if (rc == 1) {
+        lc->tls_handshaking = 0;
+        log_info("link", "TLS handshake complete for inbound link (fd=%d): %s/%s",
+                  lc->fd, SSL_get_version(lc->ssl), SSL_get_cipher_name(lc->ssl));
+        return;
+    }
+    int err = SSL_get_error(lc->ssl, rc);
+    if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) return; /* retry on next poll event */
+    char errbuf[256];
+    ERR_error_string_n(ERR_get_error(), errbuf, sizeof errbuf);
+    log_warn("link", "inbound TLS handshake failed (fd=%d): err=%d (%s)", lc->fd, err, errbuf);
+    link_close(srv, lc);
+}
 
 int link_start_hub(server_t *srv) {
     if (!srv->cfg.links.enabled || strcmp(srv->cfg.links.mode, "hub") != 0) return -1;
@@ -29,22 +89,47 @@ int link_start_hub(server_t *srv) {
     return fd;
 }
 
-/* Blocking-with-timeout read of one line, used only during the leaf-dial
- * handshake below (before the fd joins the normal nonblocking poll set). */
-static int read_line_blocking_fd(int fd, char *out, size_t outsz, int timeout_ms) {
+/* Blocking-with-timeout line I/O, used only during the leaf-dial handshake
+ * below (before the fd joins the normal nonblocking poll set) -- goes
+ * through lc->ssl when set, same "-1 + errno=EAGAIN means try later"
+ * contract as link_io_read/write's nonblocking callers. */
+static int read_line_blocking(link_conn_t *lc, char *out, size_t outsz, int timeout_ms) {
     size_t len = 0;
     time_t deadline = time(NULL) + (timeout_ms / 1000) + 1;
     while (time(NULL) < deadline && len + 1 < outsz) {
-        struct pollfd pfd = {.fd = fd, .events = POLLIN};
-        int rc = poll(&pfd, 1, timeout_ms);
-        if (rc <= 0) return -1;
         char c;
-        ssize_t n = read(fd, &c, 1);
-        if (n <= 0) return -1;
-        if (c == '\n') { out[len] = '\0'; return 0; }
-        if (c != '\r') out[len++] = c;
+        ssize_t n = link_io_read(lc, &c, 1);
+        if (n > 0) {
+            if (c == '\n') { out[len] = '\0'; return 0; }
+            if (c != '\r') out[len++] = c;
+            continue;
+        }
+        if (n < 0 && errno == EAGAIN) {
+            struct pollfd pfd = {.fd = lc->fd, .events = POLLIN};
+            if (poll(&pfd, 1, timeout_ms) <= 0) return -1;
+            continue;
+        }
+        return -1; /* EOF or a hard error */
     }
     return -1;
+}
+
+static int write_line_blocking(link_conn_t *lc, const char *line) {
+    char buf[600];
+    int len = snprintf(buf, sizeof buf, "%s\r\n", line);
+    if (len < 0 || (size_t)len >= sizeof buf) return -1;
+    size_t sent = 0;
+    while (sent < (size_t)len) {
+        ssize_t n = link_io_write(lc, buf + sent, (size_t)len - sent);
+        if (n > 0) { sent += (size_t)n; continue; }
+        if (n < 0 && errno == EAGAIN) {
+            struct pollfd pfd = {.fd = lc->fd, .events = POLLOUT};
+            if (poll(&pfd, 1, 5000) <= 0) return -1;
+            continue;
+        }
+        return -1;
+    }
+    return 0;
 }
 
 /* ponytail: a plain blocking connect() (bounded by the OS's own SYN
@@ -78,45 +163,71 @@ int link_connect_leaf(server_t *srv) {
         return -1;
     }
 
+    link_conn_t *lc = calloc(1, sizeof *lc);
+    lc->fd = fd;
+
+    if (srv->cfg.links.tls) {
+        SSL_CTX *ctx = leaf_tls_ctx();
+        if (!ctx) {
+            log_error("link", "TLS setup failed dialing uplink %s:%d", up->host, up->port);
+            close(fd); free(lc); return -1;
+        }
+        lc->ssl = SSL_new(ctx);
+        SSL_set_fd(lc->ssl, fd);
+        if (!srv->cfg.links.tls_insecure_skip_verify) {
+            SSL_set_verify(lc->ssl, SSL_VERIFY_PEER, NULL);
+            SSL_set1_host(lc->ssl, up->host); /* checked against the cert's SAN/CN, not just chain trust */
+        }
+        if (SSL_connect(lc->ssl) != 1) {
+            char errbuf[256];
+            ERR_error_string_n(ERR_get_error(), errbuf, sizeof errbuf);
+            log_warn("link", "TLS handshake to uplink %s:%d failed: %s", up->host, up->port, errbuf);
+            SSL_free(lc->ssl); close(fd); free(lc);
+            return -1;
+        }
+        log_info("link", "TLS established to uplink %s:%d (%s/%s)", up->host, up->port,
+                  SSL_get_version(lc->ssl), SSL_get_cipher_name(lc->ssl));
+    }
+
     char line[512];
     snprintf(line, sizeof line, "PASS %s", up->password);
-    if (write(fd, line, strlen(line)) < 0 || write(fd, "\r\n", 2) < 0) {
+    if (write_line_blocking(lc, line) != 0) {
         log_warn("link", "write failed sending handshake to uplink %s:%d", up->host, up->port);
-        close(fd);
-        return -1;
+        goto fail;
     }
     const char *p[] = {srv->cfg.server.name, "1"};
     irc_build(line, sizeof line, NULL, 0, NULL, "SERVER", p, 2, "sekurircd-c link");
-    if (write(fd, line, strlen(line)) < 0 || write(fd, "\r\n", 2) < 0) {
+    if (write_line_blocking(lc, line) != 0) {
         log_warn("link", "write failed sending handshake to uplink %s:%d", up->host, up->port);
-        close(fd);
-        return -1;
+        goto fail;
     }
 
     char resp[512];
-    if (read_line_blocking_fd(fd, resp, sizeof resp, 5000) != 0) {
+    if (read_line_blocking(lc, resp, sizeof resp, 5000) != 0) {
         log_warn("link", "uplink '%s' did not respond to the handshake", up->name);
-        close(fd);
-        return -1;
+        goto fail;
     }
     irc_message_t msg;
     if (irc_parse_line(resp, &msg) != 0 || strcasecmp(msg.command, "SERVER") != 0 ||
         msg.nparams < 1 || strcmp(msg.params[0], up->name) != 0) {
         log_warn("link", "uplink handshake failed (bad reply or name mismatch)");
-        close(fd);
-        return -1;
+        goto fail;
     }
 
     net_set_nonblocking(fd);
-    link_conn_t *lc = calloc(1, sizeof *lc);
-    lc->fd = fd;
     lc->authenticated = 1;
     snprintf(lc->peer_name, sizeof lc->peer_name, "%s", up->name);
     lc->last_activity = time(NULL);
     lc->next = srv->links;
     srv->links = lc;
-    log_info("link", "connected to uplink '%s'", up->name);
+    log_info("link", "connected to uplink '%s'%s", up->name, lc->ssl ? " (TLS)" : "");
     return 0;
+
+fail:
+    if (lc->ssl) SSL_free(lc->ssl);
+    close(fd);
+    free(lc);
+    return -1;
 }
 
 void link_leaf_tick(server_t *srv) {
@@ -138,16 +249,34 @@ void link_leaf_tick(server_t *srv) {
 void link_accept(server_t *srv) {
     int fd = accept(srv->link_listen_fd, NULL, NULL);
     if (fd < 0) return;
+
+    if (srv->cfg.links.tls && !srv->tls_ctx) {
+        /* [tls] is required whenever [links] tls+mode=hub (config.c) --
+         * reaching here means the cert failed to load at startup (see
+         * net.c's tls_setup). Refuse rather than silently accepting the
+         * link in cleartext. */
+        log_error("link", "rejecting inbound link: [links] tls is enabled but the server's TLS context never initialized");
+        close(fd);
+        return;
+    }
+
     net_set_nonblocking(fd);
     link_conn_t *lc = calloc(1, sizeof *lc);
     lc->fd = fd;
     lc->last_activity = time(NULL);
+    if (srv->cfg.links.tls) {
+        lc->ssl = SSL_new(srv->tls_ctx);
+        SSL_set_fd(lc->ssl, fd);
+        lc->tls_handshaking = 1;
+    }
     lc->next = srv->links;
     srv->links = lc;
-    log_info("link", "inbound link connection accepted (fd=%d)", fd);
+    log_info("link", "inbound link connection accepted (fd=%d)%s", fd, lc->ssl ? " [TLS]" : "");
+    if (lc->tls_handshaking) link_tls_try_handshake(srv, lc); /* often completes in the same event as accept() */
 }
 
 void link_forward_line(link_conn_t *lc, const char *line) {
+    if (lc->closing) return;
     size_t len = strlen(line);
     if (lc->sbuf_len + len + 2 >= sizeof lc->sbuf) {
         log_warn("link", "link '%s' sendq overflow, dropping a line", lc->peer_name);
@@ -159,32 +288,41 @@ void link_forward_line(link_conn_t *lc, const char *line) {
     lc->sbuf[lc->sbuf_len++] = '\n';
 }
 
-void link_handle_writable(link_conn_t *lc) {
-    if (lc->sbuf_len == 0) return;
-    ssize_t n = write(lc->fd, lc->sbuf, lc->sbuf_len);
+void link_handle_writable(server_t *srv, link_conn_t *lc) {
+    if (lc->sbuf_len == 0 || lc->closing) return;
+    ssize_t n = link_io_write(lc, lc->sbuf, lc->sbuf_len);
     if (n > 0) {
         memmove(lc->sbuf, lc->sbuf + n, lc->sbuf_len - (size_t)n);
         lc->sbuf_len -= (size_t)n;
+    } else if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+        link_close(srv, lc);
     }
 }
 
 void link_close(server_t *srv, link_conn_t *lc) {
-    link_conn_t **pp = &srv->links;
-    while (*pp) {
-        if (*pp == lc) { *pp = lc->next; break; }
-        pp = &(*pp)->next;
-    }
-    if (lc->service) {
-        log_info("link", "link '%s' lost -- removing service nick '%s'", lc->peer_name, lc->service->nick);
-        server_remove_client(srv, lc->service, "Service disconnected");
-    }
-    if (lc->fd >= 0) close(lc->fd);
-    log_info("link", "link '%s' closed", lc->peer_name[0] ? lc->peer_name : "(unauthenticated)");
-    free(lc);
+    (void)srv;
+    lc->closing = 1;
 }
 
-/* Returns -1 if `lc` was closed (and freed) while handling this line, so the
- * caller (link_handle_readable) must stop touching it immediately. */
+void link_reap(server_t *srv) {
+    link_conn_t **pp = &srv->links;
+    while (*pp) {
+        link_conn_t *lc = *pp;
+        if (!lc->closing) { pp = &lc->next; continue; }
+        *pp = lc->next;
+        if (lc->service) {
+            log_info("link", "link '%s' lost -- removing service nick '%s'", lc->peer_name, lc->service->nick);
+            server_remove_client(srv, lc->service, "Service disconnected");
+        }
+        if (lc->ssl) SSL_free(lc->ssl); /* abrupt close, no SSL_shutdown close_notify -- fine for a teardown path */
+        if (lc->fd >= 0) close(lc->fd);
+        log_info("link", "link '%s' closed", lc->peer_name[0] ? lc->peer_name : "(unauthenticated)");
+        free(lc);
+    }
+}
+
+/* Returns -1 if `lc` was closed while handling this line, so the caller
+ * (link_handle_readable) stops processing further lines from it. */
 static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
     irc_message_t msg;
     if (irc_parse_line(line, &msg) != 0) return 0;
@@ -217,7 +355,7 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
              * up twice in /MAP until the stale one's ping_timeout expires. */
             if (ok) {
                 for (link_conn_t *other = srv->links; other; other = other->next) {
-                    if (other != lc && other->authenticated && strcasecmp(other->peer_name, name) == 0) {
+                    if (other != lc && other->authenticated && !other->closing && strcasecmp(other->peer_name, name) == 0) {
                         ok = 0;
                         break;
                     }
@@ -242,6 +380,13 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
 
     if (strcasecmp(msg.command, "NICK") == 0) {
         if (msg.nparams < 4) return 0;
+        if (lc->service) {
+            /* One service identity per link: a second NICK would orphan the
+             * first pseudo-client (never removed on link loss, dangling
+             * link_conn pointer) -- ignore it. */
+            log_warn("link", "link '%s' sent a second NICK -- ignored", lc->peer_name);
+            return 0;
+        }
         const char *nick = msg.params[0], *user = msg.params[1], *host = msg.params[2];
         const char *realname = msg.params[msg.nparams - 1];
         if (server_find_user(srv, nick)) {
@@ -406,22 +551,31 @@ void link_notify_channel_join(channel_t *chan, client_t *joiner) {
         client_t *svc = m->client;
         if (svc == joiner || !svc->is_service || !svc->link_conn) continue;
         char line[500];
-        const char *p[] = {chan->name, joiner->nick, joiner->user, joiner->host,
+        /* realhost, not the cloak: the services link is trusted, and a
+         * random per-connection cloak could never match an ACCESS/AKICK mask. */
+        const char *p[] = {chan->name, joiner->nick, joiner->user, joiner->realhost,
                             joiner->account[0] ? joiner->account : "*"};
         irc_build(line, sizeof line, NULL, 0, NULL, "SVCJOIN", p, 5, NULL);
         link_forward_line(svc->link_conn, line);
     }
 }
 
-void link_handle_readable(server_t *srv, link_conn_t *lc) {
+/* Returns 1 to keep going (caller should check SSL_pending again), 0 once
+ * this pass genuinely has nothing left to read. */
+static int link_handle_readable_once(server_t *srv, link_conn_t *lc) {
     char tmp[4096];
-    ssize_t n = read(lc->fd, tmp, sizeof tmp);
-    if (n <= 0) { link_close(srv, lc); return; }
+    ssize_t n = link_io_read(lc, tmp, sizeof tmp);
+    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) return 0;
+    if (n <= 0) { link_close(srv, lc); return 0; }
     lc->last_activity = time(NULL);
-    if (lc->rbuf_len + (size_t)n >= sizeof lc->rbuf) {
+    /* Enforces the *configured* links.max_line_length (validated at load
+     * time to be <= LINK_BUF, see config.c), not just the raw buffer
+     * capacity -- a smaller configured value now actually cuts lines
+     * shorter instead of being silently ignored. */
+    if (lc->rbuf_len + (size_t)n >= (size_t)srv->cfg.links.max_line_length) {
         log_warn("link", "link '%s' line too long, dropping connection", lc->peer_name);
         link_close(srv, lc);
-        return;
+        return 0;
     }
     memcpy(lc->rbuf + lc->rbuf_len, tmp, (size_t)n);
     lc->rbuf_len += (size_t)n;
@@ -432,27 +586,39 @@ void link_handle_readable(server_t *srv, link_conn_t *lc) {
         size_t end = i;
         if (end > start && lc->rbuf[end - 1] == '\r') end--;
         lc->rbuf[end] = '\0';
-        if (link_process_line(srv, lc, lc->rbuf + start) < 0) return; /* lc freed */
+        if (link_process_line(srv, lc, lc->rbuf + start) < 0) return 0; /* closing -- drop the rest */
         start = i + 1;
     }
     memmove(lc->rbuf, lc->rbuf + start, lc->rbuf_len - start);
     lc->rbuf_len -= start;
+    return 1;
+}
+
+/* A TLS record can hold more plaintext than one read drains; the rest sits
+ * decrypted inside OpenSSL where poll() can't see it (same reasoning as
+ * net.c's read_client) -- keep reading while SSL_pending says so. */
+void link_handle_readable(server_t *srv, link_conn_t *lc) {
+    if (lc->closing) return;
+    while (link_handle_readable_once(srv, lc) && lc->ssl && !lc->closing && SSL_pending(lc->ssl) > 0) {}
 }
 
 void link_tick(server_t *srv) {
     time_t now = time(NULL);
-    link_conn_t *lc = srv->links;
-    while (lc) {
-        link_conn_t *next = lc->next;
-        if (lc->authenticated) {
-            double idle = difftime(now, lc->last_activity);
-            if (idle > srv->cfg.links.ping_timeout) {
-                log_warn("link", "link '%s' timed out", lc->peer_name);
+    for (link_conn_t *lc = srv->links; lc; lc = lc->next) {
+        if (lc->closing) continue;
+        double idle = difftime(now, lc->last_activity);
+        if (!lc->authenticated) {
+            /* A handshake is two lines; an idle unauthenticated socket is
+             * just holding an fd open. */
+            if (idle > srv->cfg.links.ping_interval) {
+                log_warn("link", "unauthenticated link connection (fd=%d) timed out", lc->fd);
                 link_close(srv, lc);
-            } else if (idle > srv->cfg.links.ping_interval) {
-                link_forward_line(lc, "PING");
             }
+        } else if (idle > srv->cfg.links.ping_timeout) {
+            log_warn("link", "link '%s' timed out", lc->peer_name);
+            link_close(srv, lc);
+        } else if (idle > srv->cfg.links.ping_interval) {
+            link_forward_line(lc, "PING");
         }
-        lc = next;
     }
 }

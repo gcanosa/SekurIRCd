@@ -375,15 +375,114 @@ static void wire_whoischan(const char *chan, const char *nick) {
 /* Checks the channel is registered and `password` matches; on failure,
  * replies the reason and returns NULL. Shared by every password-gated
  * command below (same role as chanserv.py's ChanServ.check_password). */
+/* Failed-password cooldown per nick: each scrypt verify is ~30ms of this
+ * single-threaded daemon, so unthrottled guessing is both a brute-force and
+ * a CPU-pinning DoS.
+ * ponytail: keyed by nick (a nick change evades it); key by account/IP if
+ * that's ever seen in practice. */
+#define FAIL_SLOTS 64
+#define FAIL_COOLDOWN 3
+static struct { char nick[64]; time_t until; } g_fails[FAIL_SLOTS];
+
+static int fail_slot(const char *nick, int create) {
+    char cf[64];
+    irc_casefold(cf, sizeof cf, nick);
+    time_t now = time(NULL);
+    int free_slot = -1;
+    for (int i = 0; i < FAIL_SLOTS; i++) {
+        if (g_fails[i].until > now && strcmp(g_fails[i].nick, cf) == 0) return i;
+        if (g_fails[i].until <= now && free_slot < 0) free_slot = i;
+    }
+    if (!create) return -1;
+    if (free_slot < 0) free_slot = (int)(now % FAIL_SLOTS); /* table full: evict something */
+    snprintf(g_fails[free_slot].nick, sizeof g_fails[0].nick, "%s", cf);
+    return free_slot;
+}
+
 static cJSON *check_password(const char *from_nick, const char *chan, const char *password) {
     cJSON *rec = store_get(chan);
     if (!rec) { reply(from_nick, "That channel isn't registered."); return NULL; }
+    if (fail_slot(from_nick, 0) >= 0) {
+        reply(from_nick, "Too many failed password attempts -- wait a few seconds and try again.");
+        return NULL;
+    }
     const char *hash = rec_str(rec, "pw_hash");
     if (!hash[0] || !crypto_verify_password(password, hash)) {
+        g_fails[fail_slot(from_nick, 1)].until = time(NULL) + FAIL_COOLDOWN;
         reply(from_nick, "Password incorrect.");
+        log_warn("chanserv", "failed password for %s from %s", chan, from_nick);
         return NULL;
     }
     return rec;
+}
+
+/* MLOCK: (re)assert the locked flag modes on the ircd. */
+static void apply_mlock(cJSON *rec, const char *chan) {
+    const char *mlock = rec_str(rec, "mlock");
+    if (!mlock[0]) return;
+    char modes[16];
+    snprintf(modes, sizeof modes, "+%s", mlock);
+    wire_mode(chan, modes, NULL);
+}
+
+/* Sessions that IDENTIFY'd (or REGISTERed, or SUCCESSOR CLAIMed) successfully
+ * this run -- ported from Python's ChanServ.identified: (casefolded chan,
+ * casefolded nick) pairs, cleared on QUIT, migrated on NICK. Not persisted
+ * to the JSON store -- matches real ChanServ semantics ("repeat IDENTIFY
+ * every reconnect"). Only reachable for channels ChanServ is GUARD-joined
+ * to (that's the only case QUIT/NICK for a member reaches this daemon at
+ * all -- see link.c's `lc->service` doc comment); for a registered-but-
+ * never-GUARDed channel this set simply always reads empty, so SUCCESSOR
+ * CLAIM there behaves as if nobody is identified (never falsely blocks it).
+ * ponytail: capped at MAX_IDENTIFIED, oldest untouched entries are simply
+ * forgotten past that -- bump it if a real deployment ever needs more. */
+#define MAX_IDENTIFIED 256
+static struct { char chan[128]; char nick[64]; } g_identified[MAX_IDENTIFIED];
+static int g_n_identified;
+
+static int is_identified(const char *chan, const char *nick) {
+    char cf_c[128], cf_n[64];
+    irc_casefold(cf_c, sizeof cf_c, chan);
+    irc_casefold(cf_n, sizeof cf_n, nick);
+    for (int i = 0; i < g_n_identified; i++)
+        if (strcmp(g_identified[i].chan, cf_c) == 0 && strcmp(g_identified[i].nick, cf_n) == 0) return 1;
+    return 0;
+}
+
+static void mark_identified(const char *chan, const char *nick) {
+    if (is_identified(chan, nick)) return;
+    if (g_n_identified >= MAX_IDENTIFIED) return;
+    irc_casefold(g_identified[g_n_identified].chan, sizeof g_identified[0].chan, chan);
+    irc_casefold(g_identified[g_n_identified].nick, sizeof g_identified[0].nick, nick);
+    g_n_identified++;
+}
+
+static int any_identified(const char *chan) {
+    char cf_c[128];
+    irc_casefold(cf_c, sizeof cf_c, chan);
+    for (int i = 0; i < g_n_identified; i++)
+        if (strcmp(g_identified[i].chan, cf_c) == 0) return 1;
+    return 0;
+}
+
+/* QUIT: drop every (chan, nick) entry for the nick that just disconnected. */
+static void clear_identified_nick(const char *nick) {
+    char cf_n[64];
+    irc_casefold(cf_n, sizeof cf_n, nick);
+    int w = 0;
+    for (int i = 0; i < g_n_identified; i++)
+        if (strcmp(g_identified[i].nick, cf_n) != 0) g_identified[w++] = g_identified[i];
+    g_n_identified = w;
+}
+
+/* NICK: identified status follows the session across a nick change, same as
+ * Python's _on_nick_change. */
+static void rename_identified_nick(const char *old_nick, const char *new_nick) {
+    char cf_old[64];
+    irc_casefold(cf_old, sizeof cf_old, old_nick);
+    for (int i = 0; i < g_n_identified; i++)
+        if (strcmp(g_identified[i].nick, cf_old) == 0)
+            irc_casefold(g_identified[i].nick, sizeof g_identified[0].nick, new_nick);
 }
 
 /* A REGISTER awaiting the hub's WHOISCHANREPLY (is the requester actually
@@ -430,6 +529,7 @@ static void finish_register(void) {
     irc_casefold(cf, sizeof cf, chan);
     cJSON_AddItemToObject(g_store, cf, rec);
     store_save();
+    mark_identified(chan, from_nick);
 
     /* Trusted MODE (see link.c's `lc->service` branch, same as IDENTIFY's
      * +o) -- marks the channel +r (registered with services) on the ircd
@@ -449,6 +549,7 @@ static void cmd_identify(const char *from_nick, char *args) {
     char *password = strtok_r(NULL, " ", &save);
     if (!chan || !password) { reply(from_nick, "Syntax: IDENTIFY <#channel> <password>"); return; }
     if (!check_password(from_nick, chan, password)) return;
+    mark_identified(chan, from_nick);
     /* Trusted MODE (see link.c's `lc->service` branch) -- applies even if
      * ChanServ itself isn't sitting in the channel (no GUARD needed). */
     wire_mode(chan, "+o", from_nick);
@@ -691,6 +792,10 @@ static void cmd_successor(const char *from_nick, const char *prefix, char *args)
         if (!new_password || !new_password[0]) { reply(from_nick, "Syntax: SUCCESSOR <#channel> CLAIM <new-password>"); return; }
         const char *successor = rec_str(rec, "successor");
         if (!successor[0]) { reply(from_nick, "That channel has no designated successor."); return; }
+        if (any_identified(chan)) {
+            reply(from_nick, "That channel still has an identified founder -- CLAIM refused.");
+            return;
+        }
         char user[64] = "", host[256] = "";
         const char *bang = prefix ? strchr(prefix, '!') : NULL;
         const char *at = prefix ? strchr(prefix, '@') : NULL;
@@ -709,6 +814,7 @@ static void cmd_successor(const char *from_nick, const char *prefix, char *args)
         rec_set_str(rec, "pw_hash", hash);
         rec_set_str(rec, "successor", "");
         store_save();
+        mark_identified(chan, from_nick);
         wire_mode(chan, "+o", from_nick);
         char msg[300]; snprintf(msg, sizeof msg, "You are now founder of %s -- SETPASS/ACCESS as needed", chan);
         reply(from_nick, msg);
@@ -757,6 +863,7 @@ static void cmd_set(const char *from_nick, char *args) {
     if (!check_password(from_nick, chan, password)) return;
     rec_set_str(rec, optlower, value);
     store_save();
+    if (strcmp(optlower, "mlock") == 0) apply_mlock(rec, rec_str(rec, "name"));
     char msg[350];
     if (value[0]) snprintf(msg, sizeof msg, "%s for %s is now: '%s'", option, chan, value);
     else snprintf(msg, sizeof msg, "%s for %s cleared", option, chan);
@@ -953,6 +1060,7 @@ static void guard_join_all(void) {
              * restart/rehash that wiped it (or predates this daemon having
              * +r at all) gets it back without needing a manual /SAMODE. */
             wire_mode(chan, "+r", NULL);
+            apply_mlock(entry, chan);
             /* TOPICLOCK: same reasoning as +r above -- the ircd's live topic
              * is memory-only too, so a restart/recreate loses it. Ported
              * from Python's guard_join baseline restore. */
@@ -964,11 +1072,40 @@ static void guard_join_all(void) {
     }
 }
 
+/* "nick!user@host" -> "nick" (or the whole thing if there's no '!'). */
+static void nick_from_prefix(const char *prefix, char *out, size_t outsz) {
+    const char *bang = strchr(prefix, '!');
+    size_t nl = bang ? (size_t)(bang - prefix) : strlen(prefix);
+    if (nl >= outsz) nl = outsz - 1;
+    memcpy(out, prefix, nl);
+    out[nl] = '\0';
+}
+
 static void process_line(char *line) {
     irc_message_t msg;
     if (irc_parse_line(line, &msg) != 0) return;
     if (strcasecmp(msg.command, "PING") == 0) { queue_line("PONG"); return; }
     if (strcasecmp(msg.command, "PONG") == 0) return;
+
+    /* QUIT/NICK for a shared-channel member reach us like any other channel
+     * event (see link.c's client_send/server_send_common_channels fan-out --
+     * no purpose-built relay needed here, unlike SVCJOIN). Only ever
+     * observed for a GUARDed channel's members (see MAX_IDENTIFIED's doc
+     * comment above); QUIT clears identified status, NICK carries it over. */
+    if (strcasecmp(msg.command, "QUIT") == 0) {
+        if (!msg.prefix) return;
+        char from_nick[64];
+        nick_from_prefix(msg.prefix, from_nick, sizeof from_nick);
+        clear_identified_nick(from_nick);
+        return;
+    }
+    if (strcasecmp(msg.command, "NICK") == 0) {
+        if (!msg.prefix || msg.nparams < 1) return;
+        char old_nick[64];
+        nick_from_prefix(msg.prefix, old_nick, sizeof old_nick);
+        rename_identified_nick(old_nick, msg.params[0]);
+        return;
+    }
 
     /* TOPICLOCK: whenever the live topic changes (by anyone), remember it
      * as the baseline to restore on a later guard_join -- ported from
@@ -985,15 +1122,32 @@ static void process_line(char *line) {
         return;
     }
 
+    /* MLOCK enforcement: the hub relays channel MODE changes for channels
+     * ChanServ sits in (GUARD) -- put back any locked letter someone removed. */
+    if (strcasecmp(msg.command, "MODE") == 0) {
+        if (msg.nparams < 2 || msg.params[0][0] != '#') return;
+        cJSON *rec = store_get(msg.params[0]);
+        const char *mlock = rec ? rec_str(rec, "mlock") : "";
+        if (!mlock[0]) return;
+        char restore[16] = "+";
+        size_t rp = 1;
+        char sign = '+';
+        for (const char *c = msg.params[1]; *c; c++) {
+            if (*c == '+' || *c == '-') { sign = *c; continue; }
+            if (sign == '-' && strchr(mlock, *c) && !strchr(restore, *c) && rp + 1 < sizeof restore) {
+                restore[rp++] = *c;
+                restore[rp] = '\0';
+            }
+        }
+        if (rp > 1) wire_mode(msg.params[0], restore, NULL);
+        return;
+    }
+
     if (strcasecmp(msg.command, "PRIVMSG") == 0) {
         if (msg.nparams < 2 || !msg.prefix) return;
         if (strcasecmp(msg.params[0], g_cfg.nick) != 0) return; /* not addressed to us (e.g. channel chatter while GUARD-joined) */
         char from_nick[64];
-        const char *bang = strchr(msg.prefix, '!');
-        size_t nl = bang ? (size_t)(bang - msg.prefix) : strlen(msg.prefix);
-        if (nl >= sizeof from_nick) nl = sizeof from_nick - 1;
-        memcpy(from_nick, msg.prefix, nl);
-        from_nick[nl] = '\0';
+        nick_from_prefix(msg.prefix, from_nick, sizeof from_nick);
         dispatch_privmsg(from_nick, msg.prefix, msg.params[msg.nparams - 1]);
         return;
     }

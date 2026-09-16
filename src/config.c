@@ -615,6 +615,18 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
             if (out->links.ping_interval <= 0) { snprintf(errbuf, errbufsz, "links.ping_interval must be > 0"); return -1; }
             if (out->links.ping_timeout <= out->links.ping_interval) { snprintf(errbuf, errbufsz, "links.ping_timeout must be greater than links.ping_interval"); return -1; }
             if (out->links.max_line_length < 1) { snprintf(errbuf, errbufsz, "links.max_line_length must be >= 1"); return -1; }
+            /* link.c's rbuf/sbuf are fixed LINK_BUF-byte arrays (link.h), not
+             * malloc'd to fit this value -- a larger configured limit would
+             * silently never take effect (every line still cut off at 8192),
+             * so reject it loudly instead. */
+            if (out->links.max_line_length > 8192) {
+                snprintf(errbuf, errbufsz, "links.max_line_length must be <= 8192 (link.h's LINK_BUF)");
+                return -1;
+            }
+            if (out->links.tls && strcmp(out->links.mode, "hub") == 0 && !out->tls.enabled) {
+                snprintf(errbuf, errbufsz, "links.tls requires [tls] enabled (a hub-mode link reuses the client-facing TLS certificate)");
+                return -1;
+            }
             if (strcmp(out->links.mode, "hub") == 0) {
                 int have_hub_peer = 0;
                 for (int i = 0; i < out->links.n_peers; i++) {

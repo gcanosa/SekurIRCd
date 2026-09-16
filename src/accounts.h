@@ -24,10 +24,12 @@ void accounts_free(account_store_t *st);
 
 /* True if `name` (case-insensitive) is already registered. */
 int accounts_exists(account_store_t *st, const char *name);
-/* Register `name` with `password` (hashed via crypto_hash_password), persist
- * if a path is configured. Caller must have already checked !accounts_exists. */
-void accounts_register(account_store_t *st, const char *name, const char *password);
-/* True if `password` matches the stored hash for `name`. */
-int accounts_verify(account_store_t *st, const char *name, const char *password);
+/* Register `name` with an already-computed crypto_hash_password string,
+ * persist if a path is configured. Caller must have already checked
+ * !accounts_exists. */
+void accounts_register_hashed(account_store_t *st, const char *name, const char *hash);
+/* Stored scrypt hash for `name`, or NULL if no such account. Valid until the
+ * next mutation of the store. */
+const char *accounts_hash(account_store_t *st, const char *name);
 
 #endif /* SEKURIRCD_ACCOUNTS_H */
