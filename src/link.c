@@ -9,8 +9,10 @@
 
 #include <openssl/err.h>
 
+#include <arpa/inet.h>
 #include <errno.h>
 #include <netdb.h>
+#include <netinet/in.h>
 #include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -246,9 +248,38 @@ void link_leaf_tick(server_t *srv) {
     }
 }
 
+/* ponytail: fixed, not a config knob -- only pre-configured peers (n_peers,
+ * checked at handshake time) are ever supposed to reach this listener, so a
+ * couple of concurrent connections per IP (reconnect races) is plenty; more
+ * than that from one address is noise or a flood, not a legitimate peer. */
+#define LINK_MAX_UNAUTH_PER_IP 3
+
 void link_accept(server_t *srv) {
-    int fd = accept(srv->link_listen_fd, NULL, NULL);
+    struct sockaddr_in peer;
+    socklen_t plen = sizeof peer;
+    int fd = accept(srv->link_listen_fd, (struct sockaddr *)&peer, &plen);
     if (fd < 0) return;
+
+    char ipbuf[64];
+    inet_ntop(AF_INET, &peer.sin_addr, ipbuf, sizeof ipbuf);
+
+    /* Same blocklist as the client listener -- a K-lined host shouldn't get
+     * a free pass at the link port just because it's a different socket. */
+    const char *kline_reason = server_kline_match(srv, ipbuf);
+    if (kline_reason) {
+        close(fd);
+        log_warn("link", "rejected inbound link from %s: %s", ipbuf, kline_reason);
+        return;
+    }
+
+    int count = 0;
+    for (link_conn_t *l = srv->links; l; l = l->next)
+        if (!l->closing && strcmp(l->ip, ipbuf) == 0) count++;
+    if (count >= LINK_MAX_UNAUTH_PER_IP) {
+        close(fd);
+        log_warn("link", "rejected inbound link from %s: too many concurrent connections from this host", ipbuf);
+        return;
+    }
 
     if (srv->cfg.links.tls && !srv->tls_ctx) {
         /* [tls] is required whenever [links] tls+mode=hub (config.c) --
@@ -263,6 +294,7 @@ void link_accept(server_t *srv) {
     net_set_nonblocking(fd);
     link_conn_t *lc = calloc(1, sizeof *lc);
     lc->fd = fd;
+    snprintf(lc->ip, sizeof lc->ip, "%s", ipbuf);
     lc->last_activity = time(NULL);
     if (srv->cfg.links.tls) {
         lc->ssl = SSL_new(srv->tls_ctx);
@@ -271,7 +303,7 @@ void link_accept(server_t *srv) {
     }
     lc->next = srv->links;
     srv->links = lc;
-    log_info("link", "inbound link connection accepted (fd=%d)%s", fd, lc->ssl ? " [TLS]" : "");
+    log_info("link", "inbound link connection accepted from %s (fd=%d)%s", ipbuf, fd, lc->ssl ? " [TLS]" : "");
     if (lc->tls_handshaking) link_tls_try_handshake(srv, lc); /* often completes in the same event as accept() */
 }
 
@@ -316,7 +348,8 @@ void link_reap(server_t *srv) {
         }
         if (lc->ssl) SSL_free(lc->ssl); /* abrupt close, no SSL_shutdown close_notify -- fine for a teardown path */
         if (lc->fd >= 0) close(lc->fd);
-        log_info("link", "link '%s' closed", lc->peer_name[0] ? lc->peer_name : "(unauthenticated)");
+        if (lc->peer_name[0]) log_info("link", "link '%s' closed", lc->peer_name);
+        else log_info("link", "unauthenticated link from %s closed", lc->ip[0] ? lc->ip : "?");
         free(lc);
     }
 }

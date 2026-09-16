@@ -35,6 +35,7 @@ struct channel;
 
 typedef struct link_conn {
     int fd;
+    char ip[64];             /* peer address, captured at accept() -- used for K-line/per-IP checks and logging */
     char peer_name[128];
     char pending_pass[256]; /* PASS seen, waiting for the following SERVER line */
     int authenticated;
