@@ -130,7 +130,10 @@ install: all
 	install -d $(PREFIX)/bin
 	install -m755 $(BIN_DIR)/sekurircd $(BIN_DIR)/chanserv $(PREFIX)/bin/
 	install -d $(SYSCONFDIR) $(STATEDIR)/ircd/logs $(STATEDIR)/chanserv $(UNITDIR)
-	install -m644 config/sekurircd.template.toml services/services.template.toml $(SYSCONFDIR)/
+	sed -e 's|^chanserv_pidfile = ""|chanserv_pidfile = "$(STATEDIR)/chanserv/chanserv.pid"|' \
+	    config/sekurircd.template.toml > $(SYSCONFDIR)/sekurircd.template.toml
+	chmod 644 $(SYSCONFDIR)/sekurircd.template.toml
+	install -m644 services/services.template.toml $(SYSCONFDIR)/
 	test -f $(SYSCONFDIR)/ircd.motd || install -m644 config/ircd.motd $(SYSCONFDIR)/
 	sed -e 's|/usr/local/bin|$(PREFIX)/bin|g' -e 's|/etc/sekurircd|$(SYSCONFDIR)|g' -e 's|/var/lib/sekurircd|$(STATEDIR)|g' \
 	    systemd/sekurircd.service > $(UNITDIR)/sekurircd.service

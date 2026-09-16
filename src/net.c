@@ -78,20 +78,35 @@ static void emit_stats_snote(server_t *srv) {
     long ircd_rss = 0;
     proc_stats(getpid(), &ircd_cpu, &ircd_rss);
 
-    char chanserv_part[128] = "";
+    char chanserv_part[160] = "";
     if (srv->cfg.debug_channel.chanserv_pidfile[0]) {
         FILE *pf = fopen(srv->cfg.debug_channel.chanserv_pidfile, "r");
         int cs_pid = 0;
         if (pf) {
             if (fscanf(pf, "%d", &cs_pid) != 1) cs_pid = 0;
             fclose(pf);
-        }
-        double cs_cpu = 0;
-        long cs_rss = 0;
-        if (cs_pid > 0 && kill((pid_t)cs_pid, 0) == 0 && proc_stats((pid_t)cs_pid, &cs_cpu, &cs_rss) == 0) {
-            snprintf(chanserv_part, sizeof chanserv_part, ", chanserv cpu=%.1f%% mem=%ldMB", cs_cpu, cs_rss / 1024);
         } else {
-            snprintf(chanserv_part, sizeof chanserv_part, ", chanserv: not running");
+            /* Most common cause: chanserv_pidfile is a relative path and this
+             * process's cwd (its own WorkingDirectory, e.g. under systemd)
+             * isn't chanserv's -- the two daemons can have different
+             * WorkingDirectory= and the pidfile then never resolves. Use an
+             * absolute path matching chanserv's actual --pidfile/PIDFile=. */
+            snprintf(chanserv_part, sizeof chanserv_part,
+                      ", chanserv: not running (pidfile %s not found -- check for a relative path)",
+                      srv->cfg.debug_channel.chanserv_pidfile);
+        }
+        if (cs_pid > 0) {
+            double cs_cpu = 0;
+            long cs_rss = 0;
+            if (kill((pid_t)cs_pid, 0) == 0 && proc_stats((pid_t)cs_pid, &cs_cpu, &cs_rss) == 0) {
+                snprintf(chanserv_part, sizeof chanserv_part, ", chanserv cpu=%.1f%% mem=%ldMB", cs_cpu, cs_rss / 1024);
+            } else if (errno == ESRCH) {
+                snprintf(chanserv_part, sizeof chanserv_part, ", chanserv: not running (stale pidfile, pid %d)", cs_pid);
+            } else {
+                snprintf(chanserv_part, sizeof chanserv_part, ", chanserv: pid %d unreachable (%s)", cs_pid, strerror(errno));
+            }
+        } else if (!chanserv_part[0]) {
+            snprintf(chanserv_part, sizeof chanserv_part, ", chanserv: not running (empty/invalid pidfile)");
         }
     }
 
@@ -250,7 +265,7 @@ static client_t *accept_common(server_t *srv, int listen_fd) {
         snprintf(err, sizeof err, "ERROR :Closing Link: %s (%s)\r\n", ipbuf, kline_reason);
         if (write(fd, err, strlen(err)) < 0) { /* best effort; peer may already be gone */ }
         close(fd);
-        log_info("net", "refused %s: %s", ipbuf, kline_reason);
+        log_warn("net", "refused %s: %s", ipbuf, kline_reason);
         char snote[400];
         snprintf(snote, sizeof snote, "Rejected connection from %s: %s", ipbuf, kline_reason);
         server_notify_opers(srv, snote);
@@ -344,7 +359,7 @@ static void accept_clients(server_t *srv, int listen_fd, int tls) {
             continue; /* refused (limit/K-line) -- keep draining */
         }
         if (!tls) {
-            log_info("net", "connection from %s:%d (fd=%d)", cl->ip, cl->port, cl->fd);
+            log_debug("net", "connection from %s:%d (fd=%d)", cl->ip, cl->port, cl->fd);
             continue;
         }
         cl->ssl = SSL_new(srv->tls_ctx);
@@ -354,7 +369,7 @@ static void accept_clients(server_t *srv, int listen_fd, int tls) {
             continue;
         }
         cl->tls_handshaking = 1;
-        log_info("net", "TLS connection from %s:%d (fd=%d)", cl->ip, cl->port, cl->fd);
+        log_debug("net", "TLS connection from %s:%d (fd=%d)", cl->ip, cl->port, cl->fd);
         tls_try_handshake(cl); /* often completes (or fails) in the same event as accept() */
     }
 }
@@ -362,7 +377,11 @@ static void accept_clients(server_t *srv, int listen_fd, int tls) {
 static void write_client(client_t *cl);
 
 static void close_client(server_t *srv, client_t *cl) {
-    log_info("net", "disconnecting %s (%s): %s", cl->nick[0] ? cl->nick : "*", cl->ip, cl->quit_reason);
+    /* Unregistered clients are almost always scanners/health-checks that
+     * connect and reset before sending NICK/USER -- routine noise, not worth
+     * a #server-debug notice. A client that made it to a nick is real. */
+    log_write(cl->nick[0] ? LOG_INFO : LOG_DEBUG, "net", "disconnecting %s (%s): %s",
+              cl->nick[0] ? cl->nick : "*", cl->ip, cl->quit_reason);
     int fd = cl->fd;
     if (fd >= 0 && !cl->tls_handshaking) write_client(cl); /* best effort: ERROR/flood notice etc. */
     server_remove_client(srv, cl, cl->quit_reason[0] ? cl->quit_reason : "Client Quit");
@@ -514,7 +533,7 @@ static void drain_worker_results(server_t *srv) {
                     }
                     snprintf(cl->quit_reason, sizeof cl->quit_reason, "%s", reason);
                     cl->quitting = 1;
-                    log_info("dnsbl", "%s listed in %s -- %s", cl->ip, r->text, as_kline ? "K-lined" : "rejected");
+                    log_warn("dnsbl", "%s listed in %s -- %s", cl->ip, r->text, as_kline ? "K-lined" : "rejected");
                 }
                 /* not listed: POLLIN resumes next poll() build, nothing else to do */
             } else if (r->type == JOB_SASL || r->type == JOB_HASH) {
