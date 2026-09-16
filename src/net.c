@@ -68,6 +68,12 @@ static void emit_stats_snote(server_t *srv) {
         if (ch->modes & CMODE_R) n_reg_chans++;
     }
 
+    int n_klines = 0, n_glines = 0, n_dnsbl_active = 0;
+    for (kline_entry_t *k = srv->klines; k; k = k->next) {
+        if (k->line_type[0] == 'K') n_klines++; else n_glines++;
+        if (strcmp(k->set_by, "dnsbl") == 0) n_dnsbl_active++;
+    }
+
     double ircd_cpu = 0;
     long ircd_rss = 0;
     proc_stats(getpid(), &ircd_cpu, &ircd_rss);
@@ -89,8 +95,10 @@ static void emit_stats_snote(server_t *srv) {
         }
     }
 
-    log_info("stats", "users=%d (peak %d), channels=%d (%d registered), connections=%ld total, ircd cpu=%.1f%% mem=%ldMB%s",
+    log_info("stats", "users=%d (peak %d), channels=%d (%d registered), connections=%ld total, "
+              "lines active=%d K/%d G (%d from DNSBL), dnsbl hits=%ld total, ircd cpu=%.1f%% mem=%ldMB%s",
               HASH_COUNT(srv->users), srv->max_users_seen, n_chans, n_reg_chans, srv->total_connections,
+              n_klines, n_glines, n_dnsbl_active, srv->dnsbl_hits,
               ircd_cpu, ircd_rss / 1024, chanserv_part);
 }
 
@@ -481,6 +489,7 @@ static void drain_worker_results(server_t *srv) {
             } else if (r->type == JOB_DNSBL) {
                 cl->dnsbl_pending = 0;
                 if (r->success) {
+                    srv->dnsbl_hits++;
                     char reason[350];
                     if (srv->cfg.dnsbl.lookup_url[0]) {
                         char urlbuf[350];

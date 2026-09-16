@@ -167,8 +167,11 @@ name = "#server-debug"
 # shows failures; use INFO to also see connects/disconnects, oper actions
 # (OPER/KILL/K-LINE/SQUIT/CONNECT/REHASH), and link up/down.
 min_level = "WARNING"
-# Seconds between periodic "users/channels/connections + CPU/mem" snotes,
-# logged at INFO (so they need min_level = INFO above to show up). 0 = off.
+# Seconds between periodic "users/channels/connections/K-G-lines + CPU/mem"
+# snotes, logged at INFO (so they need min_level = INFO above to show up).
+# Includes how many active K/G-lines came from [dnsbl] hits (and the
+# cumulative DNSBL hit count) as a rough read on how much the DNSBL/proxy
+# protection is actually catching. 0 = off.
 stats_interval = 0
 # Path to chanserv's pidfile, to report its CPU/mem alongside the ircd's own
 # in the periodic stats snote. "" = don't report chanserv stats.
