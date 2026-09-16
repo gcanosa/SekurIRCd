@@ -1,24 +1,28 @@
-# `make install` rewrites User=/Group= (to the installing user by default)
-# and the /usr/local/bin paths (to $(PREFIX)) -- see the Makefile's install
-# target. Edit those two lines by hand if installing this file directly.
+# A systemd *user* unit (installs under ~/.config/systemd/user, run via
+# `systemctl --user ...`) -- no root/sudo anywhere, it always runs as
+# whoever `systemctl --user` belongs to. `make install` rewrites the
+# /usr/local/bin, /etc/sekurircd and /var/lib/sekurircd paths below to
+# $(PREFIX)/$(SYSCONFDIR)/$(STATEDIR) -- see the Makefile's install target.
+# Edit those by hand if installing this file directly.
 [Unit]
 Description=SekurIRCd IRC server
 After=network.target
 
 [Service]
 Type=forking
-User=sekurircd
-Group=sekurircd
 WorkingDirectory=/var/lib/sekurircd/ircd
 PIDFile=/var/lib/sekurircd/ircd/sekurircd.pid
 ExecStart=/usr/local/bin/sekurircd --config /etc/sekurircd/sekurircd.toml --daemon --pidfile /var/lib/sekurircd/ircd/sekurircd.pid
 ExecReload=/usr/local/bin/sekurircd --rehash --pidfile /var/lib/sekurircd/ircd/sekurircd.pid
 Restart=on-failure
 RestartSec=2
-# hardening -- state/logs live under WorkingDirectory, config is read-only to the daemon
+# hardening -- state/logs live under WorkingDirectory, config dir is the
+# only other writable path ([accounts] writes accounts.json there); works
+# unprivileged too, systemd sandboxes user units in their own mount
+# namespace the same way (systemd >= 245).
 NoNewPrivileges=true
 ProtectSystem=strict
 ReadWritePaths=/var/lib/sekurircd/ircd /etc/sekurircd
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target
