@@ -28,10 +28,10 @@ struct link_conn;
 /* self-togglable via MODE, same letters as security.default_user_modes */
 #define UMODE_I 0x01
 #define UMODE_W 0x02
-#define UMODE_D 0x04  /* suppress CTCP (advertised, not yet enforced in v1.0.1) */
+#define UMODE_D 0x04  /* d: suppress CTCP (except ACTION) in private messages */
 #define UMODE_S 0x08  /* receive server notices */
 #define UMODE_O 0x10  /* oper -- only /OPER may set this */
-#define UMODE_Z 0x20  /* secure connection -- server-set only, TLS lands later */
+#define UMODE_Z 0x20  /* Z: secure (TLS) connection -- server-set only */
 #define UMODE_R 0x40  /* identified to an account (SASL or /REGISTER) -- server-set only */
 #define UMODE_P        0x80   /* p: hide channel list in /WHOIS */
 #define UMODE_HIDEIDLE 0x100  /* I: hide idle time in /WHOIS */
@@ -87,6 +87,10 @@ typedef struct client {
     int ident_pending;      /* RFC 1413 ident query in flight -- gates welcome */
     int dnsbl_pending;      /* DNSBL zone lookup in flight -- gates ALL dispatch, not just welcome */
     int ident_confirmed;    /* an identd answered -- cl->user is authoritative, no "~" prefix */
+    int auth_pending;       /* SASL verify / REGISTER hash running on a worker (scrypt is ~30ms) */
+    char pending_account[64];
+
+    uint64_t fanout_mark;   /* server_send_common_channels dedupe stamp */
 
     int is_away;
     char away[400];

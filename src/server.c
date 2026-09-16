@@ -1,5 +1,6 @@
 #include "server.h"
 #include "cmd.h"
+#include "log.h"
 #include "proto.h"
 #include "vendor/cJSON.h"
 
@@ -103,7 +104,8 @@ channel_t *server_get_or_create_channel(server_t *srv, const char *name) {
             case 'V': chan->modes |= CMODE_NOINVITE; break;
             case 'Q': chan->modes |= CMODE_NOKICK; break;
             case 'N': chan->modes |= CMODE_NONICK; break;
-            default: break; /* 'z' (secure-only) lands with TLS in a later phase */
+            case 'z': chan->modes |= CMODE_Z; break;
+            default: break;
         }
     }
     return chan;
@@ -173,6 +175,108 @@ void server_broadcast_channel(channel_t *chan, const char *line, client_t *excep
     }
 }
 
+void server_send_common_channels(server_t *srv, client_t *cl, const char *line, unsigned int cap) {
+    uint64_t gen = ++srv->fanout_gen;
+    cl->fanout_mark = gen; /* never send to cl itself */
+    for (chan_node_t *n = cl->channels; n; n = n->next) {
+        member_t *m, *tmp;
+        HASH_ITER(hh, n->chan->members, m, tmp) {
+            client_t *c = m->client;
+            if (c->fanout_mark == gen) continue;
+            c->fanout_mark = gen;
+            if (cap && !(c->caps & cap)) continue;
+            client_send(c, line);
+        }
+    }
+}
+
+static server_t *g_log_srv;
+
+static void debug_log_hook(log_level_t level, const char *tag, const char *msg) {
+    static int busy; /* a send path that itself logs must not recurse back in */
+    server_t *srv = g_log_srv;
+    if (busy || !srv || !srv->cfg.debug_channel.enabled) return;
+    if (level < log_level_from_name(srv->cfg.debug_channel.min_level)) return;
+    channel_t *chan = server_find_channel(srv, srv->cfg.debug_channel.name);
+    if (!chan) return;
+    busy = 1;
+    char text[480], line[600];
+    snprintf(text, sizeof text, "[%s] %s: %s", log_level_name(level), tag, msg);
+    const char *p[] = {chan->name};
+    irc_build(line, sizeof line, NULL, 0, srv->cfg.server.name, "NOTICE", p, 1, text);
+    server_broadcast_channel(chan, line, NULL);
+    busy = 0;
+}
+
+void server_install_debug_log_hook(server_t *srv) {
+    g_log_srv = srv;
+    log_set_hook(debug_log_hook);
+}
+
+#define SNOTE_MAX 20
+#define SNOTE_WINDOW 5.0
+
+static double monotonic_now(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
+void server_notify_opers(server_t *srv, const char *message) {
+    double now = monotonic_now();
+
+    /* Push `now`, evicting the oldest entry first if the ring (sized to
+     * SNOTE_MAX+1) is already full -- see server.h's doc comment on why a
+     * fixed ring gives the same suppression decision as Python's deque. */
+    int ringsz = (int)(sizeof srv->snote_times / sizeof srv->snote_times[0]);
+    if (srv->snote_count < ringsz) {
+        int tail = (srv->snote_head + srv->snote_count) % ringsz;
+        srv->snote_times[tail] = now;
+        srv->snote_count++;
+    } else {
+        srv->snote_times[srv->snote_head] = now;
+        srv->snote_head = (srv->snote_head + 1) % ringsz;
+    }
+    while (srv->snote_count > 0 && srv->snote_times[srv->snote_head] < now - SNOTE_WINDOW) {
+        srv->snote_head = (srv->snote_head + 1) % ringsz;
+        srv->snote_count--;
+    }
+    if (srv->snote_count > SNOTE_MAX) {
+        srv->snote_suppressed++;
+        if (srv->snote_suppressed == 1)
+            log_warn("oper", "oper-notice flood guard tripped; suppressing further notices for up to %.0fs", SNOTE_WINDOW);
+        return;
+    }
+
+    char text[500];
+    if (srv->snote_suppressed) {
+        snprintf(text, sizeof text, "*** Notice -- %s (+%d more notice(s) were suppressed)", message, srv->snote_suppressed);
+        srv->snote_suppressed = 0;
+    } else {
+        snprintf(text, sizeof text, "*** Notice -- %s", message);
+    }
+    client_t *u, *tmp;
+    HASH_ITER(hh, srv->users, u, tmp) {
+        if ((u->umodes & UMODE_O) && (u->umodes & UMODE_S)) notice_self(srv, u, text);
+    }
+}
+
+void server_login(server_t *srv, client_t *cl, const char *account) {
+    snprintf(cl->account, sizeof cl->account, "%s", account);
+    cl->umodes |= UMODE_R;
+    char prefix[320];
+    client_prefix(cl, prefix, sizeof prefix);
+    char msg[220];
+    snprintf(msg, sizeof msg, "You are now logged in as %s", account);
+    const char *p[] = {prefix, account};
+    client_reply(cl, N_LOGGEDIN, p, 2, msg);
+
+    char line[400];
+    const char *pa[] = {account};
+    irc_build(line, sizeof line, NULL, 0, prefix, "ACCOUNT", pa, 1, NULL);
+    server_send_common_channels(srv, cl, line, CAP_ACCOUNT_NOTIFY);
+}
+
 void server_remove_client(server_t *srv, client_t *cl, const char *quit_reason) {
     char prefix[320];
     client_prefix(cl, prefix, sizeof prefix);
@@ -184,28 +288,12 @@ void server_remove_client(server_t *srv, client_t *cl, const char *quit_reason) 
         server_monitor_notify(srv, cl, 0);
     }
 
-    /* Notify each channel-mate at most once even if cl shares several
-     * channels with them -- mark via a transient visited flag isn't worth
-     * it at v1.0.1 scale; a client seeing one QUIT twice from two shared
-     * channels is a real ircd bug class, so dedupe with a small seen-list. */
-    client_t *seen[256];
-    int n_seen = 0;
-
+    server_send_common_channels(srv, cl, line, 0);
     chan_node_t *n = cl->channels;
     while (n) {
         chan_node_t *next = n->next;
-        channel_t *chan = n->chan;
-        member_t *m, *tmp;
-        HASH_ITER(hh, chan->members, m, tmp) {
-            if (m->client == cl) continue;
-            int dup = 0;
-            for (int i = 0; i < n_seen; i++) if (seen[i] == m->client) { dup = 1; break; }
-            if (dup) continue;
-            client_send(m->client, line);
-            if (n_seen < 256) seen[n_seen++] = m->client;
-        }
-        channel_remove_member(chan, cl);
-        server_maybe_drop_channel(srv, chan);
+        channel_remove_member(n->chan, cl);
+        server_maybe_drop_channel(srv, n->chan);
         free(n);
         n = next;
     }
@@ -339,7 +427,7 @@ void server_send_welcome(server_t *srv, client_t *cl) {
 
     char swver[CFG_STR + 16];
     server_software_version(srv, swver, sizeof swver);
-    const char *myinfo[] = {srv->cfg.server.name, swver, "diwsoZr", "ntimspklbovhzeIr"};
+    const char *myinfo[] = {srv->cfg.server.name, swver, "diwsoZrpIHqRD", "beIklnimpstzrovhPCTSVQN"};
     client_reply(cl, N_MYINFO, myinfo, 4, NULL);
 
     if (cl->ssl) {
@@ -429,6 +517,9 @@ void server_kline_prune_expired(server_t *srv) {
     while (*pp) {
         if ((*pp)->expires_at && (*pp)->expires_at <= now) {
             kline_entry_t *dead = *pp;
+            char snote[350];
+            snprintf(snote, sizeof snote, "Expiring %s-Line '%s' (%s)", dead->line_type, dead->mask, dead->reason);
+            server_notify_opers(srv, snote);
             *pp = dead->next;
             free(dead);
             pruned = 1;
@@ -450,6 +541,10 @@ void server_kline_add(server_t *srv, const char *mask, const char *reason,
     k->next = srv->klines;
     srv->klines = k;
     kline_save(srv);
+
+    char snote[400];
+    snprintf(snote, sizeof snote, "%s added %s-Line '%s' (%s)", set_by, line_type, mask, reason);
+    server_notify_opers(srv, snote);
 }
 
 int server_kline_remove(server_t *srv, const char *mask) {
@@ -460,6 +555,9 @@ int server_kline_remove(server_t *srv, const char *mask) {
             *pp = dead->next;
             free(dead);
             kline_save(srv);
+            char snote[350];
+            snprintf(snote, sizeof snote, "removed line on '%s'", mask);
+            server_notify_opers(srv, snote);
             return 1;
         }
         pp = &(*pp)->next;

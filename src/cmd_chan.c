@@ -579,7 +579,8 @@ static void cmd_mode_user(client_t *cl, irc_message_t *msg, const char *target) 
     size_t ap = 1;
     char cursign = '+'; /* applied[] is pre-seeded with '+', so the first
                           * mode must not re-print the sign */
-    for (const char *p = msg->params[1]; *p; p++) {
+    /* each accepted letter appends at most 2 bytes (sign + letter) */
+    for (const char *p = msg->params[1]; *p && ap + 3 <= sizeof applied; p++) {
         char c = *p;
         if (c == '+' || c == '-') { sign = c; continue; }
         unsigned int bit = 0;
@@ -676,6 +677,7 @@ void cmd_apply_channel_mode(server_t *srv, client_t *cl, channel_t *chan,
                 snprintf(outparams[n_outparams++], sizeof outparams[0], "%s", args[argi]);
                 argi++;
             } else {
+                if (argi < nargs) argi++; /* "-k <key>": the key arg is consumed, not shifted onto the next mode */
                 chan->modes &= ~CMODE_K;
                 chan->key[0] = '\0';
                 if (cursign != sign) { outflags[of++] = sign; cursign = sign; }

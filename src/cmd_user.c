@@ -40,6 +40,11 @@ static void strip_formatting(char *dst, size_t dstsz, const char *src) {
     dst[di] = '\0';
 }
 
+/* CTCP other than ACTION (/me) -- what +C (channel) and +d (user) block. */
+static int is_blocked_ctcp(const char *text) {
+    return text[0] == '\x01' && strncmp(text + 1, "ACTION", 6) != 0;
+}
+
 static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char *verb, int is_notice) {
     const char *target = msg->params[0];
     if (msg->nparams < 2) {
@@ -77,35 +82,11 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
         member_t *m = channel_find_member(chan, cl);
         int privileged = (m && (m->rank & (RANK_OP | RANK_HALFOP | RANK_VOICE))) || (cl->umodes & UMODE_O);
 
-        if ((chan->modes & CMODE_NOCTCP) && textbuf[0] == '\x01' && !privileged) {
+        if ((chan->modes & CMODE_NOCTCP) && is_blocked_ctcp(textbuf) && !privileged) {
             if (!is_notice) { const char *pe[] = {target}; client_reply(cl, N_CANNOTSENDTOCHAN, pe, 1, "Cannot send to channel (+C)"); }
             return;
         }
         if (is_notice && (chan->modes & CMODE_NONOTICE) && !privileged) return;
-
-        char stripbuf[420];
-        const char *outtext = textbuf;
-        if (chan->modes & CMODE_STRIPCOLOR) { strip_formatting(stripbuf, sizeof stripbuf, textbuf); outtext = stripbuf; }
-
-        irc_build(line, sizeof line, NULL, 0, prefix, verb, p, 1, outtext);
-        if (cl->account[0]) {
-            irc_tag_t tags[] = {{"account", cl->account}};
-            irc_build(line_acct, sizeof line_acct, tags, 1, prefix, verb, p, 1, outtext);
-        }
-
-        if (status_prefix) {
-            int min_rank = (status_prefix == '@') ? RANK_OP : (status_prefix == '%') ? RANK_HALFOP : RANK_VOICE;
-            member_t *mm, *tmp;
-            HASH_ITER(hh, chan->members, mm, tmp) {
-                if (mm->client == cl) continue;
-                int rank = mm->rank;
-                int has_it = (min_rank == RANK_OP) ? (rank & RANK_OP)
-                           : (min_rank == RANK_HALFOP) ? (rank & (RANK_OP | RANK_HALFOP))
-                           : (rank & (RANK_OP | RANK_HALFOP | RANK_VOICE));
-                if (has_it) deliver(mm->client, line, cl->account[0] ? line_acct : NULL);
-            }
-            return; /* STATUSMSG has no echo-message in upstream either */
-        }
 
         if (!m && (chan->modes & CMODE_N) && !(cl->umodes & UMODE_O)) {
             if (!is_notice) { const char *pe[] = {target}; client_reply(cl, N_CANNOTSENDTOCHAN, pe, 1, "Cannot send to channel"); }
@@ -120,7 +101,30 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
             if (!is_notice) { const char *pe[] = {target}; client_reply(cl, N_CANNOTSENDTOCHAN, pe, 1, "Cannot send to channel (+b)"); }
             return;
         }
+        char stripbuf[420];
+        const char *outtext = textbuf;
+        if (chan->modes & CMODE_STRIPCOLOR) { strip_formatting(stripbuf, sizeof stripbuf, textbuf); outtext = stripbuf; }
+
+        irc_build(line, sizeof line, NULL, 0, prefix, verb, p, 1, outtext);
+        if (cl->account[0]) {
+            irc_tag_t tags[] = {{"account", cl->account}};
+            irc_build(line_acct, sizeof line_acct, tags, 1, prefix, verb, p, 1, outtext);
+        }
+
         member_t *mm, *tmp;
+        if (status_prefix) {
+            int min_rank = (status_prefix == '@') ? RANK_OP : (status_prefix == '%') ? RANK_HALFOP : RANK_VOICE;
+            HASH_ITER(hh, chan->members, mm, tmp) {
+                if (mm->client == cl) continue;
+                int rank = mm->rank;
+                int has_it = (min_rank == RANK_OP) ? (rank & RANK_OP)
+                           : (min_rank == RANK_HALFOP) ? (rank & (RANK_OP | RANK_HALFOP))
+                           : (rank & (RANK_OP | RANK_HALFOP | RANK_VOICE));
+                if (has_it) deliver(mm->client, line, cl->account[0] ? line_acct : NULL);
+            }
+            return; /* STATUSMSG has no echo-message in upstream either */
+        }
+
         HASH_ITER(hh, chan->members, mm, tmp) {
             if (mm->client == cl) continue;
             deliver(mm->client, line, cl->account[0] ? line_acct : NULL);
@@ -133,7 +137,7 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
             return;
         }
         if (is_silencing(dst, cl)) return; /* dropped without telling the sender */
-        if ((dst->umodes & UMODE_D) && textbuf[0] == '\x01') return; /* +d: suppress CTCP */
+        if ((dst->umodes & UMODE_D) && is_blocked_ctcp(textbuf)) return; /* +d: suppress CTCP */
         if ((dst->umodes & UMODE_NOPM) && !(cl->umodes & UMODE_O) && cl != dst) {
             const char *pe[] = {dst->nick};
             client_reply(cl, N_NONONREG, pe, 1, "is not accepting private messages");
@@ -369,37 +373,25 @@ void cmd_who(server_t *srv, client_t *cl, irc_message_t *msg) {
 
 /* IRCv3 away-notify: tell channel-mates that negotiated it, at most once
  * each even if `cl` shares several channels with them. */
-static void broadcast_away(client_t *cl) {
+static void broadcast_away(server_t *srv, client_t *cl) {
     char prefix[320];
     client_prefix(cl, prefix, sizeof prefix);
     char line[500];
     irc_build(line, sizeof line, NULL, 0, prefix, "AWAY", NULL, 0, cl->is_away ? cl->away : NULL);
-    client_t *seen[256]; int n_seen = 0;
-    for (chan_node_t *n = cl->channels; n; n = n->next) {
-        member_t *m, *tmp;
-        HASH_ITER(hh, n->chan->members, m, tmp) {
-            if (m->client == cl || !(m->client->caps & CAP_AWAY_NOTIFY)) continue;
-            int dup = 0;
-            for (int i = 0; i < n_seen; i++) if (seen[i] == m->client) { dup = 1; break; }
-            if (dup) continue;
-            client_send(m->client, line);
-            if (n_seen < 256) seen[n_seen++] = m->client;
-        }
-    }
+    server_send_common_channels(srv, cl, line, CAP_AWAY_NOTIFY);
 }
 
 void cmd_away(server_t *srv, client_t *cl, irc_message_t *msg) {
-    (void)srv;
     if (msg->nparams < 1 || msg->params[0][0] == '\0') {
         cl->is_away = 0;
         cl->away[0] = '\0';
         client_reply(cl, N_UNAWAY, NULL, 0, "You are no longer marked as being away");
     } else {
         cl->is_away = 1;
-        snprintf(cl->away, sizeof cl->away, "%.100s", msg->params[msg->nparams - 1]);
+        snprintf(cl->away, sizeof cl->away, "%.399s", msg->params[msg->nparams - 1]);
         client_reply(cl, N_NOWAWAY, NULL, 0, "You have been marked as being away");
     }
-    broadcast_away(cl);
+    broadcast_away(srv, cl);
 }
 
 void cmd_whowas(server_t *srv, client_t *cl, irc_message_t *msg) {
@@ -425,7 +417,6 @@ void cmd_whowas(server_t *srv, client_t *cl, irc_message_t *msg) {
 }
 
 void cmd_setname(server_t *srv, client_t *cl, irc_message_t *msg) {
-    (void)srv;
     snprintf(cl->realname, sizeof cl->realname, "%.390s", msg->params[0]);
 
     char prefix[320];
@@ -434,18 +425,7 @@ void cmd_setname(server_t *srv, client_t *cl, irc_message_t *msg) {
     irc_build(line, sizeof line, NULL, 0, prefix, "SETNAME", NULL, 0, cl->realname);
 
     if (cl->caps & CAP_SETNAME) client_send(cl, line);
-    client_t *seen[256]; int n_seen = 0;
-    for (chan_node_t *n = cl->channels; n; n = n->next) {
-        member_t *m, *tmp;
-        HASH_ITER(hh, n->chan->members, m, tmp) {
-            if (m->client == cl || !(m->client->caps & CAP_SETNAME)) continue;
-            int dup = 0;
-            for (int i = 0; i < n_seen; i++) if (seen[i] == m->client) { dup = 1; break; }
-            if (dup) continue;
-            client_send(m->client, line);
-            if (n_seen < 256) seen[n_seen++] = m->client;
-        }
-    }
+    server_send_common_channels(srv, cl, line, CAP_SETNAME);
 }
 
 void cmd_userhost(server_t *srv, client_t *cl, irc_message_t *msg) {

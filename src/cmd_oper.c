@@ -8,9 +8,11 @@
  * command handler can never leave another part of the loop holding a
  * dangling client_t* in the same iteration. */
 #include "cmd.h"
-#include "crypto.h"
 #include "link.h"
 #include "log.h"
+#include "worker.h"
+
+#include <openssl/crypto.h>
 
 #include <stdio.h>
 #include <string.h>
@@ -18,6 +20,38 @@
 #include <time.h>
 
 #define MAX_OPER_FAILS 3
+
+/* Applies (or refuses) the OPER grant once the password is known good or
+ * bad -- shared by the plaintext-password path (checked inline, cheap) and
+ * cmd_finish_privileged_auth's AUTH_OPER case (checked on a worker). */
+static void finish_oper(server_t *srv, client_t *cl, const char *op_name, int pw_ok) {
+    if (!pw_ok) {
+        cl->oper_fails++;
+        if (cl->oper_fails >= MAX_OPER_FAILS) {
+            snprintf(cl->quit_reason, sizeof cl->quit_reason, "Too many failed OPER attempts");
+            cl->quitting = 1;
+            log_warn("oper", "%s disconnected: too many failed OPER attempts", cl->nick);
+            return;
+        }
+        client_reply(cl, N_PASSWDMISMATCH, NULL, 0, "Password incorrect");
+        return;
+    }
+
+    cl->oper_fails = 0;
+    cl->umodes |= UMODE_O | UMODE_S | UMODE_W;
+    snprintf(cl->oper_name, sizeof cl->oper_name, "%s", op_name);
+
+    char prefix[320];
+    client_prefix(cl, prefix, sizeof prefix);
+    char line[200];
+    const char *p2[] = {cl->nick, "+osw"};
+    irc_build(line, sizeof line, NULL, 0, prefix, "MODE", p2, 2, NULL);
+    client_send(cl, line);
+    client_reply(cl, N_YOUREOPER, NULL, 0, "You are now an IRC operator");
+
+    if (srv->cfg.security.oper_auto_join[0]) cmd_force_join(srv, cl, srv->cfg.security.oper_auto_join);
+    log_info("oper", "%s OPER'd as %s", cl->nick, op_name);
+}
 
 void cmd_oper(server_t *srv, client_t *cl, irc_message_t *msg) {
     const char *name = msg->params[0];
@@ -27,14 +61,14 @@ void cmd_oper(server_t *srv, client_t *cl, irc_message_t *msg) {
         notice_self(srv, cl, "You are already an IRC operator");
         return;
     }
+    if (cl->auth_pending) {
+        client_reply(cl, N_NOOPERHOST, NULL, 0, "Another login is already in progress -- try again shortly");
+        return;
+    }
 
     for (int i = 0; i < srv->cfg.n_operators; i++) {
         cfg_operator_t *op = &srv->cfg.operators[i];
         if (strcasecmp(op->name, name) != 0) continue;
-
-        int pw_ok = op->password_hash[0]
-            ? crypto_verify_password(password, op->password_hash)
-            : (strcmp(password, op->password) == 0);
 
         int host_ok = 0;
         for (int j = 0; j < op->n_hosts; j++) {
@@ -42,32 +76,24 @@ void cmd_oper(server_t *srv, client_t *cl, irc_message_t *msg) {
         }
         if (!host_ok) break; /* wrong host: same "no O-lines" reply as wrong name, never leaks which */
 
-        if (!pw_ok) {
-            cl->oper_fails++;
-            if (cl->oper_fails >= MAX_OPER_FAILS) {
-                snprintf(cl->quit_reason, sizeof cl->quit_reason, "Too many failed OPER attempts");
-                cl->quitting = 1;
-                log_warn("oper", "%s disconnected: too many failed OPER attempts", cl->nick);
-                return;
-            }
-            client_reply(cl, N_PASSWDMISMATCH, NULL, 0, "Password incorrect");
+        if (op->password_hash[0]) {
+            /* scrypt verify is ~30ms -- run it on a worker so hammering
+             * /OPER (or a legitimate login) never stalls the event loop.
+             * finish_oper (above) applies the result once it's back. */
+            job_t j; memset(&j, 0, sizeof j);
+            j.type = JOB_SASL;
+            j.purpose = AUTH_OPER;
+            j.conn_id = cl->conn_id;
+            snprintf(j.secret, sizeof j.secret, "%s", password);
+            snprintf(j.hash, sizeof j.hash, "%s", op->password_hash);
+            snprintf(cl->pending_account, sizeof cl->pending_account, "%s", op->name);
+            cl->auth_pending = 1;
+            worker_submit(&j);
+            OPENSSL_cleanse(j.secret, sizeof j.secret);
             return;
         }
 
-        cl->oper_fails = 0;
-        cl->umodes |= UMODE_O | UMODE_S | UMODE_W;
-        snprintf(cl->oper_name, sizeof cl->oper_name, "%s", op->name);
-
-        char prefix[320];
-        client_prefix(cl, prefix, sizeof prefix);
-        char line[200];
-        const char *p2[] = {cl->nick, "+osw"};
-        irc_build(line, sizeof line, NULL, 0, prefix, "MODE", p2, 2, NULL);
-        client_send(cl, line);
-        client_reply(cl, N_YOUREOPER, NULL, 0, "You are now an IRC operator");
-
-        if (srv->cfg.security.oper_auto_join[0]) cmd_force_join(srv, cl, srv->cfg.security.oper_auto_join);
-        log_info("oper", "%s OPER'd as %s", cl->nick, name);
+        finish_oper(srv, cl, op->name, strcmp(password, op->password) == 0);
         return;
     }
     client_reply(cl, N_NOOPERHOST, NULL, 0, "No O-lines for your host");
@@ -75,11 +101,11 @@ void cmd_oper(server_t *srv, client_t *cl, irc_message_t *msg) {
 
 /* Optional extra password gate for /DIE and /RESTART, independent of the
  * /OPER password already required to reach them. No password configured ->
- * gate passes (being an oper is enough, matching classic ircds). */
-static int check_extra_password(const char *plain, const char *hashed, const char *given) {
-    if (hashed[0]) return crypto_verify_password(given, hashed);
-    if (plain[0]) return strcmp(plain, given) == 0;
-    return 1;
+ * gate passes (being an oper is enough, matching classic ircds). Only the
+ * plaintext case is checked here -- a configured hash routes through the
+ * worker pool instead (see cmd_die/cmd_restart). */
+static int check_extra_password(const char *plain, const char *given) {
+    return plain[0] ? strcmp(plain, given) == 0 : 1;
 }
 
 void cmd_kill(server_t *srv, client_t *cl, irc_message_t *msg) {
@@ -87,6 +113,13 @@ void cmd_kill(server_t *srv, client_t *cl, irc_message_t *msg) {
     const char *reason = msg->nparams > 1 ? msg->params[msg->nparams - 1] : "No reason given";
     client_t *target = server_find_user(srv, target_nick);
     if (!target) { err_no_such_nick(cl, target_nick); return; }
+    if (target->fd < 0) {
+        /* A service pseudo-client isn't in net.c's teardown sweep -- marking
+         * it quitting would just silently mute it forever. SQUIT its link. */
+        const char *p[] = {target->nick};
+        client_reply(cl, N_CANTKILLSERVER, p, 1, "You may not kill a service -- SQUIT its link instead");
+        return;
+    }
 
     char prefix[320];
     client_prefix(cl, prefix, sizeof prefix);
@@ -125,25 +158,79 @@ void cmd_rehash(server_t *srv, client_t *cl, irc_message_t *msg) {
     }
 }
 
-void cmd_die(server_t *srv, client_t *cl, irc_message_t *msg) {
-    const char *given = msg->nparams > 0 ? msg->params[0] : "";
-    if (!check_extra_password(srv->cfg.security.die_password, srv->cfg.security.die_password_hash, given)) {
+/* Applies the DIE/RESTART action once the extra password (if any) is known
+ * good or bad -- shared by the plaintext-password path (checked inline,
+ * cheap) and cmd_finish_privileged_auth's AUTH_DIE/AUTH_RESTART cases
+ * (checked on a worker). */
+static void finish_die_or_restart(server_t *srv, client_t *cl, int is_restart, int pw_ok) {
+    if (!pw_ok) {
         client_reply(cl, N_PASSWDMISMATCH, NULL, 0, "Password incorrect");
         return;
     }
-    log_warn("oper", "%s issued DIE -- server shutting down", cl->nick);
+    char snote[128];
+    if (is_restart) {
+        log_warn("oper", "%s issued RESTART -- server restarting", cl->nick);
+        snprintf(snote, sizeof snote, "Server restarting (RESTART by %s)", cl->nick);
+        srv->restart_requested = 1;
+    } else {
+        log_warn("oper", "%s issued DIE -- server shutting down", cl->nick);
+        snprintf(snote, sizeof snote, "Server terminating (DIE by %s)", cl->nick);
+    }
+    server_notify_opers(srv, snote);
     srv->shutdown_requested = 1;
+}
+
+/* Submits `given` for a worker scrypt verify against `hash` -- shared by
+ * cmd_die/cmd_restart when a hashed extra password is configured. */
+static void submit_privileged_check(client_t *cl, const char *given, const char *hash, auth_purpose_t purpose) {
+    job_t j; memset(&j, 0, sizeof j);
+    j.type = JOB_SASL;
+    j.purpose = purpose;
+    j.conn_id = cl->conn_id;
+    snprintf(j.secret, sizeof j.secret, "%s", given);
+    snprintf(j.hash, sizeof j.hash, "%s", hash);
+    cl->auth_pending = 1;
+    worker_submit(&j);
+    OPENSSL_cleanse(j.secret, sizeof j.secret);
+}
+
+void cmd_die(server_t *srv, client_t *cl, irc_message_t *msg) {
+    const char *given = msg->nparams > 0 ? msg->params[0] : "";
+    if (srv->cfg.security.die_password_hash[0]) {
+        if (cl->auth_pending) {
+            client_reply(cl, N_PASSWDMISMATCH, NULL, 0, "Another login is already in progress -- try again shortly");
+            return;
+        }
+        submit_privileged_check(cl, given, srv->cfg.security.die_password_hash, AUTH_DIE);
+        return;
+    }
+    finish_die_or_restart(srv, cl, 0, check_extra_password(srv->cfg.security.die_password, given));
 }
 
 void cmd_restart(server_t *srv, client_t *cl, irc_message_t *msg) {
     const char *given = msg->nparams > 0 ? msg->params[0] : "";
-    if (!check_extra_password(srv->cfg.security.restart_password, srv->cfg.security.restart_password_hash, given)) {
-        client_reply(cl, N_PASSWDMISMATCH, NULL, 0, "Password incorrect");
+    if (srv->cfg.security.restart_password_hash[0]) {
+        if (cl->auth_pending) {
+            client_reply(cl, N_PASSWDMISMATCH, NULL, 0, "Another login is already in progress -- try again shortly");
+            return;
+        }
+        submit_privileged_check(cl, given, srv->cfg.security.restart_password_hash, AUTH_RESTART);
         return;
     }
-    log_warn("oper", "%s issued RESTART -- server restarting", cl->nick);
-    srv->restart_requested = 1;
-    srv->shutdown_requested = 1;
+    finish_die_or_restart(srv, cl, 1, check_extra_password(srv->cfg.security.restart_password, given));
+}
+
+/* net.c: apply a finished JOB_SASL for AUTH_OPER/AUTH_DIE/AUTH_RESTART --
+ * see cmd.h's doc comment. AUTH_SASL/AUTH_REGISTER never reach here (net.c
+ * routes those to cmd_finish_auth in cmd_reg.c instead). */
+void cmd_finish_privileged_auth(server_t *srv, client_t *cl, int purpose, int success) {
+    cl->auth_pending = 0;
+    switch ((auth_purpose_t)purpose) {
+        case AUTH_OPER:    finish_oper(srv, cl, cl->pending_account, success); break;
+        case AUTH_DIE:     finish_die_or_restart(srv, cl, 0, success); break;
+        case AUTH_RESTART: finish_die_or_restart(srv, cl, 1, success); break;
+        default: break;
+    }
 }
 
 /* --- host masking: VHOST / CHGHOST / SETHOST -------------------------------- */
@@ -157,23 +244,12 @@ static int may_use_vhost(client_t *cl, cfg_vhost_t *v) {
 
 /* IRCv3 chghost: only delivered to `cl` itself and channel-mates that
  * negotiated the cap. */
-static void broadcast_chghost(client_t *cl, const char *old_prefix) {
+static void broadcast_chghost(server_t *srv, client_t *cl, const char *old_prefix) {
     char line[400];
     const char *p[] = {cl->user, cl->host};
     irc_build(line, sizeof line, NULL, 0, old_prefix, "CHGHOST", p, 2, NULL);
     if (cl->caps & CAP_CHGHOST) client_send(cl, line);
-    client_t *seen[256]; int n_seen = 0;
-    for (chan_node_t *n = cl->channels; n; n = n->next) {
-        member_t *m, *tmp;
-        HASH_ITER(hh, n->chan->members, m, tmp) {
-            if (m->client == cl || !(m->client->caps & CAP_CHGHOST)) continue;
-            int dup = 0;
-            for (int i = 0; i < n_seen; i++) if (seen[i] == m->client) { dup = 1; break; }
-            if (dup) continue;
-            client_send(m->client, line);
-            if (n_seen < 256) seen[n_seen++] = m->client;
-        }
-    }
+    server_send_common_channels(srv, cl, line, CAP_CHGHOST);
 }
 
 void cmd_vhost(server_t *srv, client_t *cl, irc_message_t *msg) {
@@ -192,7 +268,7 @@ void cmd_vhost(server_t *srv, client_t *cl, irc_message_t *msg) {
         char old_prefix[320];
         client_prefix(cl, old_prefix, sizeof old_prefix);
         snprintf(cl->host, sizeof cl->host, "%s", cl->realhost);
-        broadcast_chghost(cl, old_prefix);
+        broadcast_chghost(srv, cl, old_prefix);
         char m[300]; snprintf(m, sizeof m, "vhost cleared; host is now %s", cl->host);
         notice_self(srv, cl, m);
         return;
@@ -205,7 +281,7 @@ void cmd_vhost(server_t *srv, client_t *cl, irc_message_t *msg) {
     char old_prefix[320];
     client_prefix(cl, old_prefix, sizeof old_prefix);
     snprintf(cl->host, sizeof cl->host, "%s", match->host);
-    broadcast_chghost(cl, old_prefix);
+    broadcast_chghost(srv, cl, old_prefix);
     char m[300]; snprintf(m, sizeof m, "vhost set to %s", match->host);
     notice_self(srv, cl, m);
     log_info("oper", "%s activated vhost %s", cl->nick, match->host);
@@ -223,7 +299,7 @@ void cmd_chghost(server_t *srv, client_t *cl, irc_message_t *msg) {
     char old_prefix[320];
     client_prefix(target, old_prefix, sizeof old_prefix);
     snprintf(target->host, sizeof target->host, "%s", new_host);
-    broadcast_chghost(target, old_prefix);
+    broadcast_chghost(srv, target, old_prefix);
     char m[300]; snprintf(m, sizeof m, "%s's host is now %s", target->nick, new_host);
     notice_self(srv, cl, m);
     log_info("oper", "%s used CHGHOST on %s -> %s", cl->nick, target->nick, new_host);
@@ -235,7 +311,7 @@ void cmd_sethost(server_t *srv, client_t *cl, irc_message_t *msg) {
     client_prefix(cl, old_prefix, sizeof old_prefix);
     if (strcasecmp(requested, "off") == 0 || strcasecmp(requested, "none") == 0) {
         snprintf(cl->host, sizeof cl->host, "%s", cl->realhost);
-        broadcast_chghost(cl, old_prefix);
+        broadcast_chghost(srv, cl, old_prefix);
         char m[300]; snprintf(m, sizeof m, "host cleared; host is now %s", cl->host);
         notice_self(srv, cl, m);
         return;
@@ -246,7 +322,7 @@ void cmd_sethost(server_t *srv, client_t *cl, irc_message_t *msg) {
         return;
     }
     snprintf(cl->host, sizeof cl->host, "%s", requested);
-    broadcast_chghost(cl, old_prefix);
+    broadcast_chghost(srv, cl, old_prefix);
     char m[300]; snprintf(m, sizeof m, "host is now %s", requested);
     notice_self(srv, cl, m);
     log_info("oper", "%s set own host via SETHOST -> %s", cl->nick, requested);
@@ -330,7 +406,7 @@ void cmd_ungline(server_t *srv, client_t *cl, irc_message_t *msg) { unline_commo
 
 void cmd_squit(server_t *srv, client_t *cl, irc_message_t *msg) {
     for (link_conn_t *lc = srv->links; lc; lc = lc->next) {
-        if (strcasecmp(lc->peer_name, msg->params[0]) != 0) continue;
+        if (lc->closing || strcasecmp(lc->peer_name, msg->params[0]) != 0) continue;
         const char *reason = msg->nparams > 1 ? msg->params[1] : "Requested";
         char m[300]; snprintf(m, sizeof m, "Closed link to %s (%s)", lc->peer_name, reason);
         notice_self(srv, cl, m);

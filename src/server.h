@@ -67,6 +67,15 @@ typedef struct server {
     struct { char name[32]; int count; } command_counts[64];
     int n_command_counts;
 
+    uint64_t fanout_gen;   /* see server_send_common_channels */
+
+    /* server_notify_opers()'s own flood guard -- see that function's doc
+     * comment. Fixed-size ring, unlike Python's unbounded deque, but the
+     * ring is sized to the same threshold so the suppression decision
+     * matches exactly. */
+    double snote_times[21];
+    int snote_head, snote_count, snote_suppressed;
+
     volatile sig_atomic_t shutdown_requested;
     volatile sig_atomic_t rehash_requested;
     int restart_requested; /* DIE vs RESTART -- main.c execv's on exit if set */
@@ -105,9 +114,29 @@ void server_send_lusers(server_t *srv, client_t *cl);
 /* Broadcast `line` (already built, no CRLF) to every member of `chan` except
  * `except` (may be NULL). */
 void server_broadcast_channel(channel_t *chan, const char *line, client_t *except);
-/* Same, but only to `chan`'s members who share at least one channel with
- * `cl` (i.e. would see cl's QUIT/NICK) -- de-duplicated across all of cl's
- * channels by the caller (server_remove_client / cmd_nick). */
+/* Send `line` once to every client sharing a channel with `cl` (not `cl`
+ * itself), de-duplicated across all of cl's channels via a per-client
+ * generation stamp -- O(total memberships), no seen-list cap. If `cap` is
+ * nonzero, only recipients that negotiated that CAP_* bit get it. Used for
+ * QUIT/NICK/AWAY/SETNAME/CHGHOST/ACCOUNT fan-out. */
+void server_send_common_channels(server_t *srv, client_t *cl, const char *line, unsigned int cap);
+
+/* log.c hook: relays log lines at/above [debug_channel] min_level as server
+ * NOTICEs to [debug_channel] name. Installed by net_run. */
+void server_install_debug_log_hook(server_t *srv);
+
+/* Log `cl` in as `account` (+r, 900) and tell channel-mates with
+ * account-notify. Shared by SASL and /REGISTER. */
+void server_login(server_t *srv, client_t *cl, const char *account);
+
+/* A server notice ("*** Notice -- <message>") to every currently-connected
+ * oper with user mode +s set -- client connects, K/G-line add/remove/expiry,
+ * a connection getting refused (limit/K-line/DNSBL), and DIE/RESTART. Ported
+ * from Python's Server.notify_opers, including its own sliding-window flood
+ * guard (at most 20 delivered in any 5s window; anything past that is
+ * silently dropped with a one-line log warning and folded into the next
+ * delivered notice's "(+N more notice(s) were suppressed)" suffix). */
+void server_notify_opers(server_t *srv, const char *message);
 
 /* Link `cl`'s channels list to include `chan` (does NOT touch chan->members
  * -- pair with channel_add_member). Shared by cmd_chan.c's JOIN paths and

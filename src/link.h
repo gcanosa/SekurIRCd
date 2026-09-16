@@ -22,6 +22,8 @@
 #ifndef SEKURIRCD_LINK_H
 #define SEKURIRCD_LINK_H
 
+#include <openssl/ssl.h>
+
 #include <stddef.h>
 #include <time.h>
 
@@ -36,6 +38,10 @@ typedef struct link_conn {
     char peer_name[128];
     char pending_pass[256]; /* PASS seen, waiting for the following SERVER line */
     int authenticated;
+    int closing;            /* link_close() called -- freed by link_reap() at end of loop tick */
+    SSL *ssl;                /* non-NULL iff [links] tls=true for this connection */
+    int tls_handshaking;    /* hub side only: SSL_accept() hasn't completed yet (leaf side
+                              * blocks through its handshake in link_connect_leaf, see there) */
     char rbuf[LINK_BUF];
     size_t rbuf_len;
     char sbuf[LINK_BUF * 4];
@@ -68,15 +74,28 @@ void link_leaf_tick(struct server *srv);
 
 /* net.c integration: accept a new inbound link connection. */
 void link_accept(struct server *srv);
+/* net.c integration, hub side, lc->tls_handshaking only: drives (or re-drives)
+ * SSL_accept() until it completes or genuinely needs to wait for more I/O
+ * (mirrors net.c's own tls_try_handshake for client connections). */
+void link_tls_try_handshake(struct server *srv, link_conn_t *lc);
 /* net.c integration: fd is readable -- read, parse complete lines, dispatch. */
 void link_handle_readable(struct server *srv, link_conn_t *lc);
 /* net.c integration: fd is writable and lc->sbuf_len > 0 -- flush it. */
-void link_handle_writable(link_conn_t *lc);
-/* net.c integration: tear down a link connection (peer gone or error) --
- * removes its service pseudo-client (if any) from the users registry too. */
+void link_handle_writable(struct server *srv, link_conn_t *lc);
+/* Mark a link for teardown (peer gone, error, SQUIT). Safe to call from
+ * anywhere, any number of times: nothing is freed until link_reap(), so a
+ * caller still holding `lc` (net.c's poll array, a handler) never touches
+ * freed memory. */
 void link_close(struct server *srv, link_conn_t *lc);
+/* net.c, end of each loop iteration: free every closing link, removing its
+ * service pseudo-client (if any) from the users registry and channels. */
+void link_reap(struct server *srv);
 /* net.c integration: periodic tick -- ping timeout. */
 void link_tick(struct server *srv);
+/* net.c, at shutdown: frees the lazily-created client-side SSL_CTX used to
+ * dial a TLS hub in leaf mode (link_connect_leaf). No-op if links.tls was
+ * never used (mode=hub, or leaf without tls). */
+void link_tls_cleanup(void);
 
 /* client_send()'s hook for a service pseudo-client: forward an already-built
  * IRC line verbatim to this link's peer. */

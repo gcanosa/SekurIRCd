@@ -1,5 +1,4 @@
 #include "accounts.h"
-#include "crypto.h"
 #include "proto.h"
 
 #include <stdio.h>
@@ -60,9 +59,7 @@ int accounts_exists(account_store_t *st, const char *name) {
     return find(st, name) != NULL;
 }
 
-void accounts_register(account_store_t *st, const char *name, const char *password) {
-    char hash[256];
-    if (crypto_hash_password(password, hash, sizeof hash) != 0) return;
+void accounts_register_hashed(account_store_t *st, const char *name, const char *hash) {
     cJSON *rec = cJSON_CreateObject();
     cJSON_AddStringToObject(rec, "name", name);
     cJSON_AddStringToObject(rec, "pw_hash", hash);
@@ -73,10 +70,7 @@ void accounts_register(account_store_t *st, const char *name, const char *passwo
     save(st);
 }
 
-int accounts_verify(account_store_t *st, const char *name, const char *password) {
-    cJSON *rec = find(st, name);
-    if (!rec) return 0;
-    cJSON *hash = cJSON_GetObjectItemCaseSensitive(rec, "pw_hash");
-    if (!cJSON_IsString(hash)) return 0;
-    return crypto_verify_password(password, hash->valuestring);
+const char *accounts_hash(account_store_t *st, const char *name) {
+    cJSON *hash = cJSON_GetObjectItemCaseSensitive(find(st, name), "pw_hash");
+    return cJSON_IsString(hash) ? hash->valuestring : NULL;
 }

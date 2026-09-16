@@ -1,8 +1,8 @@
 /* Entrypoint. Ported (reduced scope for v1.0.1 -- see the plan) from
  * sekurircd/src/sekurircd/app.py: argument parsing, --hash-password,
  * config/logging setup, POSIX double-fork --daemon, --pidfile, and
- * --stop/--rehash (signal the pidfile's PID and, for --stop, wait for exit).
- * Not yet ported: --restart / /RESTART's execv re-exec, TLS listener.
+ * --stop/--rehash (signal the pidfile's PID and, for --stop, wait for exit),
+ * and /RESTART's in-place execv re-exec.
  */
 #include "config.h"
 #include "crypto.h"

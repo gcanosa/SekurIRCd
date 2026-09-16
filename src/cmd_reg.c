@@ -4,7 +4,9 @@
 #include "accounts.h"
 #include "cmd.h"
 #include "log.h"
+#include "worker.h"
 
+#include <openssl/crypto.h>
 #include <openssl/evp.h>
 
 #include <stdio.h>
@@ -85,25 +87,15 @@ void cmd_nick(server_t *srv, client_t *cl, irc_message_t *msg) {
     char line[400];
     irc_build(line, sizeof line, NULL, 0, prefix, "NICK", NULL, 0, newnick);
 
-    client_t *seen[256];
-    int n_seen = 0;
     client_send(cl, line);
-    seen[n_seen++] = cl;
-    for (chan_node_t *n = cl->channels; n; n = n->next) {
-        member_t *m, *tmp;
-        HASH_ITER(hh, n->chan->members, m, tmp) {
-            int dup = 0;
-            for (int i = 0; i < n_seen; i++) if (seen[i] == m->client) { dup = 1; break; }
-            if (dup) continue;
-            client_send(m->client, line);
-            if (n_seen < 256) seen[n_seen++] = m->client;
-        }
-    }
+    server_send_common_channels(srv, cl, line, 0);
+    server_monitor_notify(srv, cl, 0); /* MONITOR: old nick went offline, new one online below */
 
     HASH_DEL(srv->users, cl);
     snprintf(cl->nick, sizeof cl->nick, "%s", newnick);
     snprintf(cl->casefold_nick, sizeof cl->casefold_nick, "%s", cf);
     server_add_user(srv, cl);
+    server_monitor_notify(srv, cl, 1);
 }
 
 void cmd_user(server_t *srv, client_t *cl, irc_message_t *msg) {
@@ -325,27 +317,28 @@ void cmd_authenticate(server_t *srv, client_t *cl, irc_message_t *msg) {
     memcpy(passwd, pw_start, pw_len);
     passwd[pw_len] = '\0';
 
-    if (strcmp(mech, "PLAIN") == 0 && accounts_verify(&srv->accounts, authcid, passwd)) {
-        snprintf(cl->account, sizeof cl->account, "%s", authcid);
-        cl->umodes |= UMODE_R;
-        char prefix[320];
-        client_prefix(cl, prefix, sizeof prefix);
-        char loggedin_msg[220];
-        snprintf(loggedin_msg, sizeof loggedin_msg, "You are now logged in as %s", authcid);
-        const char *p2[] = {prefix, authcid};
-        client_reply(cl, N_LOGGEDIN, p2, 2, loggedin_msg);
-        client_reply(cl, N_SASLSUCCESS, NULL, 0, "SASL authentication successful");
-        log_info("sasl", "%s authenticated as %s", cl->nick, authcid);
-    } else {
+    const char *hash = strcmp(mech, "PLAIN") == 0 ? accounts_hash(&srv->accounts, authcid) : NULL;
+    if (!hash || cl->auth_pending) {
+        OPENSSL_cleanse(passwd, sizeof passwd);
         client_reply(cl, N_SASLFAIL, NULL, 0, "SASL authentication failed");
+        return;
     }
+    /* scrypt verify is ~30ms -- run it on a worker so a login (or a SASL
+     * spammer) never stalls the event loop; net.c applies the result. One
+     * in flight per connection bounds the queue. */
+    job_t j; memset(&j, 0, sizeof j);
+    j.type = JOB_SASL;
+    j.purpose = AUTH_SASL;
+    j.conn_id = cl->conn_id;
+    snprintf(j.secret, sizeof j.secret, "%s", passwd);
+    snprintf(j.hash, sizeof j.hash, "%s", hash);
+    OPENSSL_cleanse(passwd, sizeof passwd);
+    snprintf(cl->pending_account, sizeof cl->pending_account, "%s", authcid);
+    cl->auth_pending = 1;
+    worker_submit(&j);
+    OPENSSL_cleanse(j.secret, sizeof j.secret);
 }
 
-/* Self-service account registration (``/REGISTER <account> <password>``) --
- * not RFC/IRCv3, matching this daemon's "accounts live in core, no NickServ
- * required" design (see accounts.h). Ported from commands.cmd_register,
- * simplified to a plain NOTICE for every outcome (no standard-replies/FAIL
- * cap in this port yet). */
 /* IRCv3 standard-replies: a structured FAIL for a command with no natural
  * legacy-numeric equivalent, only for clients that negotiated the cap --
  * everyone else gets the existing plain NOTICE fallback. */
@@ -360,6 +353,9 @@ static void send_fail(server_t *srv, client_t *cl, const char *cmd, const char *
     }
 }
 
+/* Self-service account registration (``/REGISTER <account> <password>``) --
+ * not RFC/IRCv3, matching this daemon's "accounts live in core, no NickServ
+ * required" design (see accounts.h). Ported from commands.cmd_register. */
 void cmd_register(server_t *srv, client_t *cl, irc_message_t *msg) {
     if (!srv->cfg.accounts.enabled) {
         send_fail(srv, cl, "REGISTER", "REG_UNAVAILABLE", "Account registration is not enabled on this server");
@@ -380,9 +376,48 @@ void cmd_register(server_t *srv, client_t *cl, irc_message_t *msg) {
         send_fail(srv, cl, "REGISTER", "ACCOUNT_EXISTS", m);
         return;
     }
-    accounts_register(&srv->accounts, account, password);
-    snprintf(cl->account, sizeof cl->account, "%s", account);
-    cl->umodes |= UMODE_R;
+    if (strlen(password) >= sizeof ((job_t *)0)->secret) {
+        send_fail(srv, cl, "REGISTER", "BAD_PASSWORD", "Password is too long");
+        return;
+    }
+    if (cl->auth_pending) {
+        send_fail(srv, cl, "REGISTER", "TEMPORARILY_UNAVAILABLE", "Another login/registration is still in progress");
+        return;
+    }
+    /* Hash on a worker (scrypt, ~30ms); net.c finishes via cmd_finish_auth. */
+    job_t j; memset(&j, 0, sizeof j);
+    j.type = JOB_HASH;
+    j.purpose = AUTH_REGISTER;
+    j.conn_id = cl->conn_id;
+    snprintf(j.secret, sizeof j.secret, "%s", password);
+    snprintf(cl->pending_account, sizeof cl->pending_account, "%s", account);
+    cl->auth_pending = 1;
+    worker_submit(&j);
+    OPENSSL_cleanse(j.secret, sizeof j.secret);
+}
+
+void cmd_finish_auth(server_t *srv, client_t *cl, int is_register, int success, const char *hash) {
+    cl->auth_pending = 0;
+    const char *account = cl->pending_account;
+    if (!is_register) {
+        if (success) {
+            server_login(srv, cl, account);
+            client_reply(cl, N_SASLSUCCESS, NULL, 0, "SASL authentication successful");
+            log_info("sasl", "%s authenticated as %s", cl->nick, account);
+        } else {
+            client_reply(cl, N_SASLFAIL, NULL, 0, "SASL authentication failed");
+        }
+        return;
+    }
+    if (!success) { send_fail(srv, cl, "REGISTER", "TEMPORARILY_UNAVAILABLE", "Internal error hashing password -- try again"); return; }
+    if (accounts_exists(&srv->accounts, account)) { /* lost a race with another REGISTER */
+        char m[200];
+        snprintf(m, sizeof m, "Account %s already exists", account);
+        send_fail(srv, cl, "REGISTER", "ACCOUNT_EXISTS", m);
+        return;
+    }
+    accounts_register_hashed(&srv->accounts, account, hash);
+    server_login(srv, cl, account);
     char m[200];
     snprintf(m, sizeof m, "Account %s registered -- you are now logged in as it", account);
     notice_self(srv, cl, m);
