@@ -180,9 +180,6 @@ typedef struct {
     cfg_links_t links;
     cfg_accounts_t accounts;
     cfg_debug_channel_t debug_channel;
-    /* github_monitor is dropped in this port (see plan) -- only its
-     * `enabled` flag is read, to warn a deployment that still has it on. */
-    int github_monitor_enabled;
     char path[CFG_PATH]; /* "" = built-in defaults, no file loaded */
 } config_t;
 
