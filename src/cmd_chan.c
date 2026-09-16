@@ -455,6 +455,10 @@ void cmd_invite(server_t *srv, client_t *cl, irc_message_t *msg) {
             err_not_channel_op(cl, chan->name);
             return;
         }
+        if ((chan->modes & CMODE_NOINVITE) && !channel_has_ops(chan, cl) && !(cl->umodes & UMODE_O)) {
+            err_not_channel_op(cl, chan->name);
+            return;
+        }
         char cf[64];
         irc_casefold(cf, sizeof cf, target->nick);
         channel_invite_add(chan, cf);
@@ -525,6 +529,7 @@ void cmd_kick(server_t *srv, client_t *cl, irc_message_t *msg) {
         return;
     }
     if (!(me->rank & (RANK_OP | RANK_HALFOP)) && !(cl->umodes & UMODE_O)) { err_not_channel_op(cl, chan->name); return; }
+    if ((chan->modes & CMODE_NOKICK) && !(cl->umodes & UMODE_O)) { err_not_channel_op(cl, chan->name); return; }
 
     client_t *target = server_find_user(srv, target_nick);
     member_t *tm = target ? channel_find_member(chan, target) : NULL;
@@ -533,6 +538,7 @@ void cmd_kick(server_t *srv, client_t *cl, irc_message_t *msg) {
         client_reply(cl, N_USERNOTINCHANNEL, p, 2, "They aren't on that channel");
         return;
     }
+    if ((target->umodes & UMODE_Q) && !(cl->umodes & UMODE_O)) { err_not_channel_op(cl, chan->name); return; }
     /* a halfop (not full op/oper) may only kick "downward" */
     if ((me->rank & RANK_HALFOP) && !(me->rank & RANK_OP) && !(cl->umodes & UMODE_O) && (tm->rank & (RANK_OP | RANK_HALFOP))) {
         err_not_channel_op(cl, chan->name);
@@ -562,16 +568,17 @@ static void cmd_mode_user(client_t *cl, irc_message_t *msg, const char *target) 
         return;
     }
     if (msg->nparams < 2) {
-        char modestr[16];
+        char modestr[24];
         client_mode_string(cl, modestr, sizeof modestr);
         client_reply(cl, N_UMODEIS, NULL, 0, modestr);
         return;
     }
 
     char sign = '+';
-    char applied[16] = "+";
+    char applied[32] = "+";
     size_t ap = 1;
-    char cursign = 0;
+    char cursign = '+'; /* applied[] is pre-seeded with '+', so the first
+                          * mode must not re-print the sign */
     for (const char *p = msg->params[1]; *p; p++) {
         char c = *p;
         if (c == '+' || c == '-') { sign = c; continue; }
@@ -583,6 +590,12 @@ static void cmd_mode_user(client_t *cl, irc_message_t *msg, const char *target) 
         else if (c == 'w') bit = UMODE_W;
         else if (c == 'd') bit = UMODE_D;
         else if (c == 's') bit = UMODE_S;
+        else if (c == 'p') bit = UMODE_P;
+        else if (c == 'I') bit = UMODE_HIDEIDLE;
+        else if (c == 'q') bit = UMODE_Q;
+        else if (c == 'R') bit = UMODE_REGONLY;
+        else if (c == 'D') bit = UMODE_NOPM;
+        else if (c == 'H') { if (cl->umodes & UMODE_O) bit = UMODE_H; else continue; }
         else continue;
         if (sign == '+') cl->umodes |= bit; else cl->umodes &= ~bit;
         if (cursign != sign) { applied[ap++] = sign; cursign = sign; }
@@ -637,6 +650,13 @@ void cmd_apply_channel_mode(server_t *srv, client_t *cl, channel_t *chan,
             case 'm': flagbit = CMODE_M; break;
             case 'z': flagbit = CMODE_Z; break;
             case 'r': flagbit = CMODE_R; break;
+            case 'P': flagbit = CMODE_PERM; break;
+            case 'C': flagbit = CMODE_NOCTCP; break;
+            case 'T': flagbit = CMODE_NONOTICE; break;
+            case 'S': flagbit = CMODE_STRIPCOLOR; break;
+            case 'V': flagbit = CMODE_NOINVITE; break;
+            case 'Q': flagbit = CMODE_NOKICK; break;
+            case 'N': flagbit = CMODE_NONICK; break;
             default: break;
         }
         if (flagbit) {

@@ -68,6 +68,18 @@ void cmd_nick(server_t *srv, client_t *cl, irc_message_t *msg) {
         return;
     }
 
+    if (!(cl->umodes & UMODE_O)) {
+        for (chan_node_t *n = cl->channels; n; n = n->next) {
+            channel_t *chan = n->chan;
+            if (!(chan->modes & CMODE_NONICK)) continue;
+            member_t *me = channel_find_member(chan, cl);
+            if (me && (me->rank & (RANK_OP | RANK_HALFOP))) continue;
+            const char *p[] = {chan->name};
+            client_reply(cl, N_CANTCHANGENICK, p, 1, "Can not change nickname while on channel (+N)");
+            return;
+        }
+    }
+
     char prefix[320];
     client_prefix(cl, prefix, sizeof prefix);
     char line[400];

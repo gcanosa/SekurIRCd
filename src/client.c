@@ -34,7 +34,7 @@ void client_free(client_t *cl) {
 }
 
 void client_mode_string(const client_t *cl, char *out, size_t outsz) {
-    char modestr[16] = "+";
+    char modestr[24] = "+";
     size_t p = 1;
     if (cl->umodes & UMODE_I) modestr[p++] = 'i';
     if (cl->umodes & UMODE_W) modestr[p++] = 'w';
@@ -43,6 +43,12 @@ void client_mode_string(const client_t *cl, char *out, size_t outsz) {
     if (cl->umodes & UMODE_O) modestr[p++] = 'o';
     if (cl->umodes & UMODE_Z) modestr[p++] = 'Z';
     if (cl->umodes & UMODE_R) modestr[p++] = 'r';
+    if (cl->umodes & UMODE_P) modestr[p++] = 'p';
+    if (cl->umodes & UMODE_HIDEIDLE) modestr[p++] = 'I';
+    if (cl->umodes & UMODE_H) modestr[p++] = 'H';
+    if (cl->umodes & UMODE_Q) modestr[p++] = 'q';
+    if (cl->umodes & UMODE_REGONLY) modestr[p++] = 'R';
+    if (cl->umodes & UMODE_NOPM) modestr[p++] = 'D';
     modestr[p] = '\0';
     snprintf(out, outsz, "%s", modestr);
 }

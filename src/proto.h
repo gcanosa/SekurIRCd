@@ -231,6 +231,8 @@ void irc_add_time_tag(char *line, size_t linesz);
 #define N_USERNOTINCHANNEL "441"
 #define N_NOTONCHANNEL     "442"
 #define N_USERONCHANNEL    "443"
+#define N_CANTCHANGENICK   "447"
+#define N_NONONREG         "486"
 #define N_NOTREGISTERED    "451"
 #define N_NEEDMOREPARAMS   "461"
 #define N_ALREADYREGISTERED "462"

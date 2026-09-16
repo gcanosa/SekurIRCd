@@ -36,6 +36,13 @@ struct client;
 #define CMODE_Z 0x100 /* secure-only: only TLS clients (or opers) may JOIN */
 #define CMODE_R 0x200 /* registered with services -- set/cleared by a trusted
                         * service link only, see cmd_apply_channel_mode */
+#define CMODE_PERM       0x400  /* P: channel survives going empty */
+#define CMODE_NOCTCP     0x800  /* C: block CTCP to the channel */
+#define CMODE_NONOTICE   0x1000 /* T: block NOTICE to the channel */
+#define CMODE_STRIPCOLOR 0x2000 /* S: strip mIRC colour/formatting from messages */
+#define CMODE_NOINVITE   0x4000 /* V: /INVITE disabled */
+#define CMODE_NOKICK     0x8000 /* Q: /KICK disabled except for IRCOps */
+#define CMODE_NONICK     0x10000 /* N: members may not change nickname */
 
 typedef struct member {
     struct client *client;

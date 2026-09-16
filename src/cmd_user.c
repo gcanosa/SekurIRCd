@@ -23,6 +23,23 @@ static void deliver(client_t *rcpt, const char *line, const char *acct_tagged) {
     client_send(rcpt, (acct_tagged && (rcpt->caps & CAP_ACCOUNT_TAG)) ? acct_tagged : line);
 }
 
+/* +S: drop mIRC colour (\x03[fg[,bg]]) and the other single-byte formatting
+ * controls (bold/underline/reverse/italic/strikethrough/monospace/reset). */
+static void strip_formatting(char *dst, size_t dstsz, const char *src) {
+    size_t di = 0;
+    for (const char *p = src; *p && di + 1 < dstsz; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c == 0x02 || c == 0x0F || c == 0x11 || c == 0x16 || c == 0x1D || c == 0x1E || c == 0x1F) continue;
+        if (c == 0x03) {
+            for (int n = 0; n < 2 && isdigit((unsigned char)p[1]); n++) p++;
+            if (p[1] == ',') { p++; for (int n = 0; n < 2 && isdigit((unsigned char)p[1]); n++) p++; }
+            continue;
+        }
+        dst[di++] = (char)c;
+    }
+    dst[di] = '\0';
+}
+
 static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char *verb, int is_notice) {
     const char *target = msg->params[0];
     if (msg->nparams < 2) {
@@ -58,10 +75,22 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
             return;
         }
         member_t *m = channel_find_member(chan, cl);
-        irc_build(line, sizeof line, NULL, 0, prefix, verb, p, 1, textbuf);
+        int privileged = (m && (m->rank & (RANK_OP | RANK_HALFOP | RANK_VOICE))) || (cl->umodes & UMODE_O);
+
+        if ((chan->modes & CMODE_NOCTCP) && textbuf[0] == '\x01' && !privileged) {
+            if (!is_notice) { const char *pe[] = {target}; client_reply(cl, N_CANNOTSENDTOCHAN, pe, 1, "Cannot send to channel (+C)"); }
+            return;
+        }
+        if (is_notice && (chan->modes & CMODE_NONOTICE) && !privileged) return;
+
+        char stripbuf[420];
+        const char *outtext = textbuf;
+        if (chan->modes & CMODE_STRIPCOLOR) { strip_formatting(stripbuf, sizeof stripbuf, textbuf); outtext = stripbuf; }
+
+        irc_build(line, sizeof line, NULL, 0, prefix, verb, p, 1, outtext);
         if (cl->account[0]) {
             irc_tag_t tags[] = {{"account", cl->account}};
-            irc_build(line_acct, sizeof line_acct, tags, 1, prefix, verb, p, 1, textbuf);
+            irc_build(line_acct, sizeof line_acct, tags, 1, prefix, verb, p, 1, outtext);
         }
 
         if (status_prefix) {
@@ -78,7 +107,6 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
             return; /* STATUSMSG has no echo-message in upstream either */
         }
 
-        int privileged = (m && (m->rank & (RANK_OP | RANK_HALFOP | RANK_VOICE))) || (cl->umodes & UMODE_O);
         if (!m && (chan->modes & CMODE_N) && !(cl->umodes & UMODE_O)) {
             if (!is_notice) { const char *pe[] = {target}; client_reply(cl, N_CANNOTSENDTOCHAN, pe, 1, "Cannot send to channel"); }
             return;
@@ -106,6 +134,16 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
         }
         if (is_silencing(dst, cl)) return; /* dropped without telling the sender */
         if ((dst->umodes & UMODE_D) && textbuf[0] == '\x01') return; /* +d: suppress CTCP */
+        if ((dst->umodes & UMODE_NOPM) && !(cl->umodes & UMODE_O) && cl != dst) {
+            const char *pe[] = {dst->nick};
+            client_reply(cl, N_NONONREG, pe, 1, "is not accepting private messages");
+            return;
+        }
+        if ((dst->umodes & UMODE_REGONLY) && !cl->account[0] && !(cl->umodes & UMODE_O) && cl != dst) {
+            const char *pe[] = {dst->nick};
+            client_reply(cl, N_NONONREG, pe, 1, "is only accepting messages from registered users");
+            return;
+        }
         if (!is_notice && dst->is_away) {
             const char *pa[] = {dst->nick};
             client_reply(cl, N_AWAY, pa, 1, dst->away);
@@ -140,7 +178,8 @@ static void whois_one(server_t *srv, client_t *cl, const char *nick) {
     const char *p2[] = {target->nick, srv->cfg.server.name};
     client_reply(cl, N_WHOISSERVER, p2, 2, srv->cfg.server.network);
 
-    if (target->umodes & UMODE_O) {
+    int self_or_oper = (cl == target) || (cl->umodes & UMODE_O);
+    if ((target->umodes & UMODE_O) && (!(target->umodes & UMODE_H) || self_or_oper)) {
         const char *p3[] = {target->nick};
         client_reply(cl, N_WHOISOPERATOR, p3, 1, "is an IRC operator");
     }
@@ -161,26 +200,30 @@ static void whois_one(server_t *srv, client_t *cl, const char *nick) {
 
     char chanbuf[1024] = "";
     size_t cp = 0;
-    for (chan_node_t *n = target->channels; n; n = n->next) {
-        if ((n->chan->modes & (CMODE_S | CMODE_P)) && !channel_find_member(n->chan, cl)) continue;
-        member_t *m = channel_find_member(n->chan, target);
-        const char *rankch = (m && (m->rank & RANK_OP)) ? "@" : (m && (m->rank & RANK_HALFOP)) ? "%" : (m && (m->rank & RANK_VOICE)) ? "+" : "";
-        char entry[80];
-        snprintf(entry, sizeof entry, "%s%s%s", cp ? " " : "", rankch, n->chan->name);
-        size_t el = strlen(entry);
-        if (cp + el < sizeof chanbuf) { memcpy(chanbuf + cp, entry, el); cp += el; chanbuf[cp] = '\0'; }
+    if (!(target->umodes & UMODE_P) || self_or_oper) {
+        for (chan_node_t *n = target->channels; n; n = n->next) {
+            if ((n->chan->modes & (CMODE_S | CMODE_P)) && !channel_find_member(n->chan, cl)) continue;
+            member_t *m = channel_find_member(n->chan, target);
+            const char *rankch = (m && (m->rank & RANK_OP)) ? "@" : (m && (m->rank & RANK_HALFOP)) ? "%" : (m && (m->rank & RANK_VOICE)) ? "+" : "";
+            char entry[80];
+            snprintf(entry, sizeof entry, "%s%s%s", cp ? " " : "", rankch, n->chan->name);
+            size_t el = strlen(entry);
+            if (cp + el < sizeof chanbuf) { memcpy(chanbuf + cp, entry, el); cp += el; chanbuf[cp] = '\0'; }
+        }
     }
     if (cp > 0) {
         const char *p4[] = {target->nick};
         client_reply(cl, N_WHOISCHANNELS, p4, 1, chanbuf);
     }
 
-    long idle = (long)difftime(time(NULL), target->last_activity);
-    char idlebuf[32], signonbuf[32];
-    snprintf(idlebuf, sizeof idlebuf, "%ld", idle);
-    snprintf(signonbuf, sizeof signonbuf, "%ld", (long)target->signon_time);
-    const char *p5[] = {target->nick, idlebuf, signonbuf};
-    client_reply(cl, N_WHOISIDLE, p5, 3, "seconds idle, signon time");
+    if (!(target->umodes & UMODE_HIDEIDLE) || self_or_oper) {
+        long idle = (long)difftime(time(NULL), target->last_activity);
+        char idlebuf[32], signonbuf[32];
+        snprintf(idlebuf, sizeof idlebuf, "%ld", idle);
+        snprintf(signonbuf, sizeof signonbuf, "%ld", (long)target->signon_time);
+        const char *p5[] = {target->nick, idlebuf, signonbuf};
+        client_reply(cl, N_WHOISIDLE, p5, 3, "seconds idle, signon time");
+    }
 
     const char *pe[] = {target->nick};
     client_reply(cl, N_ENDOFWHOIS, pe, 1, "End of /WHOIS list.");
