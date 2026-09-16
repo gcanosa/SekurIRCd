@@ -166,33 +166,6 @@ name = "#server-debug"
 # Minimum level relayed: DEBUG, INFO, WARNING, ERROR, CRITICAL.
 min_level = "WARNING"
 
-# Open channel (anyone may join) announcing new commits/pull requests on a
-# GitHub repo -- polls the REST API (no webhook receiver, no exposed port).
-# Off by default; requires `repo` when enabled. Announcements arrive as
-# NOTICEs from a fake "nickname!github@<server>" sender that is never
-# actually registered or present anywhere else (no /WHOIS, no /NAMES entry
-# outside this channel) -- see docs/irc-protocol-reference.md "Debug channel
-# & GitHub activity feed".
-[github_monitor]
-enabled = false
-# "owner/name" of the repo to poll, e.g. "your-org/sekurircd". Required.
-repo = ""
-channel = "#SekurIRCd-dev"
-# Branch whose commits are watched.
-branch = "main"
-# Seconds between polls. 300s keeps unauthenticated usage (12/hr) well
-# under GitHub's 60/hr unauthenticated rate limit even before counting the
-# free 304-on-no-change discount conditional requests get.
-poll_interval = 300
-track_commits = true
-track_pull_requests = true
-# Sender nick on announcement NOTICEs.
-nickname = "SK-Snitch"
-# Optional GitHub personal access token -- raises the rate limit to
-# 5000/hr and is required to poll a private repo. Leave blank for a public
-# repo polled at the default interval.
-#token = "ghp_xxx"
-
 [messages]
 # MOTD file, resolved relative to this config file's directory.
 motd = "ircd.motd"

@@ -682,14 +682,6 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
         }
     }
 
-    /* [github_monitor] -- dropped in this port; only read `enabled` to warn. */
-    {
-        int e;
-        toml_table_t *gh = cfg_get_section(raw, "github_monitor", errbuf, errbufsz, &e);
-        if (e) return -1;
-        if (cfg_get_bool(gh, "enabled", 0, &out->github_monitor_enabled, errbuf, errbufsz, "github_monitor.enabled")) return -1;
-    }
-
     return 0;
 }
 

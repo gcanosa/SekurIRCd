@@ -201,8 +201,6 @@ int main(int argc, char **argv) {
 
     log_info("main", "sekurircd %s starting (config: %s)", SEKURIRCD_VERSION,
               cfg.path[0] ? cfg.path : "<built-in defaults>");
-    if (cfg.github_monitor_enabled)
-        log_warn("main", "[github_monitor] is enabled in config but not implemented in this C port -- ignoring");
 
     server_t srv;
     server_init(&srv, &cfg);
