@@ -233,6 +233,8 @@ void config_defaults(config_t *out) {
     out->security.host_masking = 0;
     snprintf(out->security.host_masking_format, CFG_STR, "{token}.users.{network}");
     out->security.host_masking_token_bytes = 4;
+    out->security.oper_host_masking = 0;
+    snprintf(out->security.oper_host_format, CFG_STR, "netadmin.{network}");
     for (int i = 0; i < N_DEFAULT_RESERVED_NICKS; i++)
         snprintf(out->security.reserved_nicks[i], CFG_STR, "%s", DEFAULT_RESERVED_NICKS[i]);
     out->security.n_reserved_nicks = N_DEFAULT_RESERVED_NICKS;
@@ -327,6 +329,8 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
     if (cfg_get_bool(sec, "host_masking", 0, &out->security.host_masking, errbuf, errbufsz, "security.host_masking")) return -1;
     if (cfg_get_str(sec, "host_masking_format", "{token}.users.{network}", out->security.host_masking_format, CFG_STR, errbuf, errbufsz, "security.host_masking_format")) return -1;
     if (cfg_get_int(sec, "host_masking_token_bytes", 4, &out->security.host_masking_token_bytes, errbuf, errbufsz, "security.host_masking_token_bytes")) return -1;
+    if (cfg_get_bool(sec, "oper_host_masking", 0, &out->security.oper_host_masking, errbuf, errbufsz, "security.oper_host_masking")) return -1;
+    if (cfg_get_str(sec, "oper_host_format", "netadmin.{network}", out->security.oper_host_format, CFG_STR, errbuf, errbufsz, "security.oper_host_format")) return -1;
     if (cfg_get_str(sec, "klines_file", "", out->security.klines_file, CFG_PATH, errbuf, errbufsz, "security.klines_file")) return -1;
     if (cfg_get_str(sec, "default_user_modes", "", out->security.default_user_modes, sizeof out->security.default_user_modes, errbuf, errbufsz, "security.default_user_modes")) return -1;
     if (cfg_get_str(sec, "oper_auto_join", "", out->security.oper_auto_join, CFG_STR, errbuf, errbufsz, "security.oper_auto_join")) return -1;
@@ -353,6 +357,13 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
     if (out->security.host_masking_token_bytes < 1) {
         snprintf(errbuf, errbufsz, "security.host_masking_token_bytes must be >= 1");
         return -1;
+    }
+    {
+        char probe[CFG_STR];
+        if (config_format_cloak(out->security.oper_host_format, "x", "example", probe, sizeof probe)) {
+            snprintf(errbuf, errbufsz, "security.oper_host_format: invalid template");
+            return -1;
+        }
     }
     for (const char *c = out->security.default_user_modes; *c; c++) {
         if (!strchr(USER_MODE_SELF, *c)) {

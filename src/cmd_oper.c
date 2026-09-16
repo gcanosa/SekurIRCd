@@ -21,6 +21,8 @@
 
 #define MAX_OPER_FAILS 3
 
+static void broadcast_chghost(server_t *srv, client_t *cl, const char *old_prefix);
+
 /* Applies (or refuses) the OPER grant once the password is known good or
  * bad -- shared by the plaintext-password path (checked inline, cheap) and
  * cmd_finish_privileged_auth's AUTH_OPER case (checked on a worker). */
@@ -43,6 +45,19 @@ static void finish_oper(server_t *srv, client_t *cl, const char *op_name, int pw
 
     char prefix[320];
     client_prefix(cl, prefix, sizeof prefix);
+
+    if (srv->cfg.security.oper_host_masking) {
+        char network[CFG_STR];
+        irc_casefold(network, sizeof network, srv->cfg.server.network);
+        for (char *p = network; *p; p++) if (*p == ' ') *p = '-';
+        char masked[CFG_STR];
+        if (config_format_cloak(srv->cfg.security.oper_host_format, "", network, masked, sizeof masked) == 0) {
+            snprintf(cl->host, sizeof cl->host, "%s", masked);
+            broadcast_chghost(srv, cl, prefix);
+            client_prefix(cl, prefix, sizeof prefix);
+        }
+    }
+
     char line[200];
     const char *p2[] = {cl->nick, "+osw"};
     irc_build(line, sizeof line, NULL, 0, prefix, "MODE", p2, 2, NULL);
