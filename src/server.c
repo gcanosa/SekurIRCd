@@ -192,16 +192,58 @@ void server_send_common_channels(server_t *srv, client_t *cl, const char *line, 
 
 static server_t *g_log_srv;
 
+#define SNOTE_MAX 20
+#define SNOTE_WINDOW 5.0
+
+static double monotonic_now(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
+/* Every log_write() call in the process passes through here (regardless of
+ * tag), unlike server_notify_opers's targeted snotes -- so it needs its own
+ * flood guard, same ring-buffer shape as SNOTE_MAX/SNOTE_WINDOW below.
+ * Without this, connection-noise log spam (e.g. link listener probes) floods
+ * #server-debug at min_level=INFO with no suppression at all. */
 static void debug_log_hook(log_level_t level, const char *tag, const char *msg) {
     static int busy; /* a send path that itself logs must not recurse back in */
+    static double times[SNOTE_MAX + 1];
+    static int head, count, suppressed;
     server_t *srv = g_log_srv;
     if (busy || !srv || !srv->cfg.debug_channel.enabled) return;
     if (level < log_level_from_name(srv->cfg.debug_channel.min_level)) return;
     channel_t *chan = server_find_channel(srv, srv->cfg.debug_channel.name);
     if (!chan) return;
+
     busy = 1;
+    double now = monotonic_now();
+    int ringsz = (int)(sizeof times / sizeof times[0]);
+    if (count < ringsz) {
+        times[(head + count) % ringsz] = now;
+        count++;
+    } else {
+        times[head] = now;
+        head = (head + 1) % ringsz;
+    }
+    while (count > 0 && times[head] < now - SNOTE_WINDOW) {
+        head = (head + 1) % ringsz;
+        count--;
+    }
+    if (count > SNOTE_MAX) {
+        suppressed++;
+        busy = 0;
+        return;
+    }
+
     char text[480], line[600];
-    snprintf(text, sizeof text, "[%s] %s: %s", log_level_name(level), tag, msg);
+    if (suppressed) {
+        snprintf(text, sizeof text, "[%s] %s: %s (+%d more log line(s) suppressed)",
+                  log_level_name(level), tag, msg, suppressed);
+        suppressed = 0;
+    } else {
+        snprintf(text, sizeof text, "[%s] %s: %s", log_level_name(level), tag, msg);
+    }
     const char *p[] = {chan->name};
     irc_build(line, sizeof line, NULL, 0, srv->cfg.server.name, "NOTICE", p, 1, text);
     server_broadcast_channel(chan, line, NULL);
@@ -211,15 +253,6 @@ static void debug_log_hook(log_level_t level, const char *tag, const char *msg) 
 void server_install_debug_log_hook(server_t *srv) {
     g_log_srv = srv;
     log_set_hook(debug_log_hook);
-}
-
-#define SNOTE_MAX 20
-#define SNOTE_WINDOW 5.0
-
-static double monotonic_now(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
 }
 
 void server_notify_opers(server_t *srv, const char *message) {
