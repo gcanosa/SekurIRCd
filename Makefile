@@ -99,5 +99,65 @@ $(BIN_DIR)/chanserv: $(CHANSERV_SRCS)
 clean:
 	rm -rf $(OBJ_DIR) build-debug $(BIN_DIR)
 
+# --- install / uninstall (Linux + systemd only) ---------------------------
+#
+# Layout:
+#   $(PREFIX)/bin/{sekurircd,chanserv}   -- binaries
+#   /etc/sekurircd/                      -- config (owned by the service user:
+#                                            [accounts] writes accounts.json here)
+#   /var/lib/sekurircd/ircd/             -- ircd WorkingDirectory (pidfile, logs/)
+#   /var/lib/sekurircd/chanserv/         -- chanserv WorkingDirectory (pidfile,
+#                                            chanserv.json + rotating backups)
+#   /etc/systemd/system/{sekurircd,chanserv}.service
+#
+# Only ships config/*.template.toml + ircd.motd -- never writes a live
+# sekurircd.toml/services.toml itself (those need operator-chosen operators/
+# secrets), matching the existing "cp *.template.toml" quick-start flow.
+# DESTDIR is honored for staged/packaging installs (e.g. `make install
+# DESTDIR=/pkg/root`), which skips chown/systemctl -- those only make sense
+# against the real running system.
+#
+# Runs as the invoking user rather than a dedicated system account -- no
+# useradd, no extra account to manage. `make install` is normally run via
+# sudo, so SVCUSER prefers $SUDO_USER over `id -un` (which under sudo is
+# root); override either on the command line if that guess is wrong.
+PREFIX     ?= /usr/local
+SYSCONFDIR ?= /etc/sekurircd
+STATEDIR   ?= /var/lib/sekurircd
+UNITDIR    ?= /etc/systemd/system
+SVCUSER    ?= $(shell echo $${SUDO_USER:-$$(id -un)})
+SVCGROUP   ?= $(shell id -gn $(SVCUSER) 2>/dev/null || echo $(SVCUSER))
+
+.PHONY: install uninstall
+install: all
+	@[ "$$(uname -s)" = Linux ] || { echo "make install: Linux + systemd only" >&2; exit 1; }
+	install -d $(DESTDIR)$(PREFIX)/bin
+	install -m755 $(BIN_DIR)/sekurircd $(BIN_DIR)/chanserv $(DESTDIR)$(PREFIX)/bin/
+	install -d $(DESTDIR)$(SYSCONFDIR) $(DESTDIR)$(STATEDIR)/ircd/logs $(DESTDIR)$(STATEDIR)/chanserv
+	install -m644 config/sekurircd.template.toml services/services.template.toml $(DESTDIR)$(SYSCONFDIR)/
+	test -f $(DESTDIR)$(SYSCONFDIR)/ircd.motd || install -m644 config/ircd.motd $(DESTDIR)$(SYSCONFDIR)/
+	install -d $(DESTDIR)$(UNITDIR)
+	sed -e 's|/usr/local/bin|$(PREFIX)/bin|g' -e 's|^User=.*|User=$(SVCUSER)|' -e 's|^Group=.*|Group=$(SVCGROUP)|' \
+	    systemd/sekurircd.service > $(DESTDIR)$(UNITDIR)/sekurircd.service
+	sed -e 's|/usr/local/bin|$(PREFIX)/bin|g' -e 's|^User=.*|User=$(SVCUSER)|' -e 's|^Group=.*|Group=$(SVCGROUP)|' \
+	    systemd/chanserv.service > $(DESTDIR)$(UNITDIR)/chanserv.service
+	chmod 644 $(DESTDIR)$(UNITDIR)/sekurircd.service $(DESTDIR)$(UNITDIR)/chanserv.service
+ifeq ($(DESTDIR),)
+	chown -R $(SVCUSER):$(SVCGROUP) $(SYSCONFDIR) $(STATEDIR)
+	systemctl daemon-reload
+	@echo "installed (runs as $(SVCUSER):$(SVCGROUP)). next: edit $(SYSCONFDIR)/sekurircd.toml (copied from the .template.toml)," \
+	      "then: systemctl enable --now sekurircd chanserv"
+endif
+
+uninstall:
+	@[ "$$(uname -s)" = Linux ] || { echo "make uninstall: Linux + systemd only" >&2; exit 1; }
+	rm -f $(DESTDIR)$(PREFIX)/bin/sekurircd $(DESTDIR)$(PREFIX)/bin/chanserv
+	rm -f $(DESTDIR)$(UNITDIR)/sekurircd.service $(DESTDIR)$(UNITDIR)/chanserv.service
+ifeq ($(DESTDIR),)
+	systemctl daemon-reload
+endif
+	@echo "uninstalled binaries + unit files. left in place (remove by hand if you want):" \
+	      "$(SYSCONFDIR), $(STATEDIR)"
+
 -include $(ALL_OBJS:.o=.d)
 -include $(patsubst %.c,build-debug/%.d,$(ALL_SRCS))
