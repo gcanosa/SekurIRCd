@@ -33,6 +33,12 @@ struct link_conn;
 #define UMODE_O 0x10  /* oper -- only /OPER may set this */
 #define UMODE_Z 0x20  /* secure connection -- server-set only, TLS lands later */
 #define UMODE_R 0x40  /* identified to an account (SASL or /REGISTER) -- server-set only */
+#define UMODE_P        0x80   /* p: hide channel list in /WHOIS */
+#define UMODE_HIDEIDLE 0x100  /* I: hide idle time in /WHOIS */
+#define UMODE_H        0x200  /* H: hide oper status from non-opers -- oper-only settable */
+#define UMODE_Q        0x400  /* q: unkickable from channels except by IRCOps */
+#define UMODE_REGONLY  0x800  /* R: only accept PMs from identified (registered-account) users */
+#define UMODE_NOPM     0x1000 /* D: accept PMs from nobody except IRCOps */
 
 typedef struct chan_node {
     struct channel *chan;

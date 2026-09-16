@@ -141,7 +141,7 @@ void channel_invite_remove(channel_t *chan, const char *casefold_nick) {
 }
 
 void channel_modes_string(channel_t *chan, char *out, size_t outsz) {
-    char flags[16] = "+";
+    char flags[24] = "+";
     char args[128] = "";
     size_t fp = 1;
     if (chan->modes & CMODE_N) flags[fp++] = 'n';
@@ -152,6 +152,13 @@ void channel_modes_string(channel_t *chan, char *out, size_t outsz) {
     if (chan->modes & CMODE_M) flags[fp++] = 'm';
     if (chan->modes & CMODE_Z) flags[fp++] = 'z';
     if (chan->modes & CMODE_R) flags[fp++] = 'r';
+    if (chan->modes & CMODE_PERM) flags[fp++] = 'P';
+    if (chan->modes & CMODE_NOCTCP) flags[fp++] = 'C';
+    if (chan->modes & CMODE_NONOTICE) flags[fp++] = 'T';
+    if (chan->modes & CMODE_STRIPCOLOR) flags[fp++] = 'S';
+    if (chan->modes & CMODE_NOINVITE) flags[fp++] = 'V';
+    if (chan->modes & CMODE_NOKICK) flags[fp++] = 'Q';
+    if (chan->modes & CMODE_NONICK) flags[fp++] = 'N';
     if ((chan->modes & CMODE_K) && chan->key[0]) {
         flags[fp++] = 'k';
         snprintf(args, sizeof args, " %s", chan->key);

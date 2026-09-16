@@ -96,6 +96,13 @@ channel_t *server_get_or_create_channel(server_t *srv, const char *name) {
             case 't': chan->modes |= CMODE_T; break;
             case 's': chan->modes |= CMODE_S; break;
             case 'm': chan->modes |= CMODE_M; break;
+            case 'P': chan->modes |= CMODE_PERM; break;
+            case 'C': chan->modes |= CMODE_NOCTCP; break;
+            case 'T': chan->modes |= CMODE_NONOTICE; break;
+            case 'S': chan->modes |= CMODE_STRIPCOLOR; break;
+            case 'V': chan->modes |= CMODE_NOINVITE; break;
+            case 'Q': chan->modes |= CMODE_NOKICK; break;
+            case 'N': chan->modes |= CMODE_NONICK; break;
             default: break; /* 'z' (secure-only) lands with TLS in a later phase */
         }
     }
@@ -153,6 +160,7 @@ void server_detach_membership(client_t *cl, channel_t *chan) {
 
 void server_maybe_drop_channel(server_t *srv, channel_t *chan) {
     if (channel_member_count(chan) > 0) return;
+    if (chan->modes & CMODE_PERM) return; /* +P: survives going empty */
     HASH_DEL(srv->channels, chan);
     channel_free(chan);
 }
@@ -221,7 +229,7 @@ static void send_isupport(server_t *srv, client_t *cl) {
     snprintf(topiclen, sizeof topiclen, "TOPICLEN=%d", CHAN_TOPICLEN - 1);
 
     const char *tokens[] = {
-        netbuf, "CHANTYPES=#", "CHANMODES=beI,k,l,imnprstz", "PREFIX=(ohv)@%+",
+        netbuf, "CHANTYPES=#", "CHANMODES=beI,k,l,imnprstzCNPQSTV", "PREFIX=(ohv)@%+",
         nicklen, chanlen, topiclen, "CASEMAPPING=ascii", "MODES=6",
         "STATUSMSG=@%+", "AWAYLEN=400", "KICKLEN=400",
         "MAXLIST=beI:100", "EXCEPTS=e", "INVEX=I", "MONITOR=100", "SILENCE=15",
