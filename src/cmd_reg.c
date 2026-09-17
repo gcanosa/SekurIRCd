@@ -8,6 +8,7 @@
 
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
+#include <openssl/x509.h>
 
 #include <stdio.h>
 #include <string.h>
@@ -159,7 +160,11 @@ static void render_supported_caps(server_t *srv, char *out, size_t outsz) {
     }
     if (srv->cfg.accounts.enabled) {
         if (out[0]) strncat(out, " ", outsz - strlen(out) - 1);
-        strncat(out, "sasl=PLAIN", outsz - strlen(out) - 1);
+        /* EXTERNAL only ever succeeds if the TLS listener actually asks
+         * clients for a certificate -- otherwise cl->ssl never has a peer
+         * cert to match, so don't advertise a mechanism that can't work. */
+        int external_possible = srv->cfg.tls.enabled && srv->cfg.tls.request_client_cert;
+        strncat(out, external_possible ? "sasl=PLAIN,EXTERNAL" : "sasl=PLAIN", outsz - strlen(out) - 1);
     }
 }
 
@@ -262,19 +267,45 @@ static int b64_decode(const char *in, unsigned char *out, size_t outcap, int *ou
     return 0;
 }
 
-/* SASL PLAIN only -- the universal minimum every SASL-capable client already
- * supports (ported from commands.cmd_authenticate). Deliberately doesn't
- * support the multi-line ("400-byte chunks, a final short/empty line") form
- * of the spec -- a PLAIN blob never needs it in practice. */
+/* Hex-encodes the SHA-256 fingerprint of `cl`'s TLS client certificate into
+ * `out` (>= 65 bytes: 32 bytes * 2 hex chars + NUL). Returns -1 if this isn't
+ * a TLS connection or the client didn't present a certificate -- SASL
+ * EXTERNAL needs [tls] request_client_cert = true for the latter to ever be
+ * possible. Backs both SASL EXTERNAL (cmd_authenticate) and /CERT ADD. */
+static int peer_cert_fingerprint(client_t *cl, char *out, size_t outsz) {
+    if (!cl->ssl) return -1;
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+    X509 *cert = SSL_get1_peer_certificate(cl->ssl);
+#else
+    X509 *cert = SSL_get_peer_certificate(cl->ssl);
+#endif
+    if (!cert) return -1;
+    unsigned char digest[EVP_MAX_MD_SIZE];
+    unsigned int dlen = 0;
+    X509_digest(cert, EVP_sha256(), digest, &dlen);
+    X509_free(cert);
+    if (outsz < (size_t)dlen * 2 + 1) return -1;
+    for (unsigned int i = 0; i < dlen; i++) snprintf(out + i * 2, 3, "%02x", digest[i]);
+    return 0;
+}
+
+/* SASL PLAIN and EXTERNAL -- the universal minimum every SASL-capable client
+ * already supports, plus certificate-based login for one that presented a
+ * TLS client cert bound to an account via /CERT ADD. Ported (PLAIN) from
+ * commands.cmd_authenticate. Deliberately doesn't support the multi-line
+ * ("400-byte chunks, a final short/empty line") form of the spec -- neither
+ * mechanism's blob ever needs it in practice. */
 void cmd_authenticate(server_t *srv, client_t *cl, irc_message_t *msg) {
     const char *token = msg->params[0];
 
     if (!cl->sasl_mech[0]) {
-        if (strcasecmp(token, "PLAIN") != 0 || !srv->cfg.accounts.enabled) {
+        int is_plain = strcasecmp(token, "PLAIN") == 0;
+        int is_external = strcasecmp(token, "EXTERNAL") == 0;
+        if ((!is_plain && !is_external) || !srv->cfg.accounts.enabled) {
             client_reply(cl, N_SASLFAIL, NULL, 0, "SASL authentication failed");
             return;
         }
-        snprintf(cl->sasl_mech, sizeof cl->sasl_mech, "PLAIN");
+        snprintf(cl->sasl_mech, sizeof cl->sasl_mech, "%s", is_plain ? "PLAIN" : "EXTERNAL");
         const char *p[] = {"+"};
         char line[64];
         irc_build(line, sizeof line, NULL, 0, NULL, "AUTHENTICATE", p, 1, NULL);
@@ -288,6 +319,23 @@ void cmd_authenticate(server_t *srv, client_t *cl, irc_message_t *msg) {
 
     if (strcmp(token, "*") == 0) {
         client_reply(cl, N_SASLABORTED, NULL, 0, "SASL authentication aborted");
+        return;
+    }
+
+    if (strcmp(mech, "EXTERNAL") == 0) {
+        /* Identity comes entirely from the TLS certificate already on this
+         * connection -- the continuation blob is just an (ignored) optional
+         * authzid, same as PLAIN's. */
+        char fp[65];
+        const char *account;
+        if (peer_cert_fingerprint(cl, fp, sizeof fp) != 0 ||
+            !(account = accounts_find_by_fingerprint(&srv->accounts, fp))) {
+            client_reply(cl, N_SASLFAIL, NULL, 0, "SASL authentication failed");
+            return;
+        }
+        server_login(srv, cl, account);
+        client_reply(cl, N_SASLSUCCESS, NULL, 0, "SASL authentication successful");
+        log_info("sasl", "%s authenticated as %s via EXTERNAL", cl->nick, account);
         return;
     }
 
@@ -396,6 +444,51 @@ void cmd_register(server_t *srv, client_t *cl, irc_message_t *msg) {
     cl->auth_pending = 1;
     worker_submit(&j);
     OPENSSL_cleanse(j.secret, sizeof j.secret);
+}
+
+/* ``/CERT ADD|DEL|INFO`` -- binds (or clears, or reports) the SASL EXTERNAL
+ * certificate fingerprint on the caller's own account, taken from whatever
+ * TLS client certificate this connection is currently presenting (see
+ * peer_cert_fingerprint above; requires [tls] request_client_cert = true).
+ * Not RFC/IRCv3 -- same "no NickServ required" self-service design as
+ * /REGISTER. */
+void cmd_cert(server_t *srv, client_t *cl, irc_message_t *msg) {
+    const char *sub = msg->params[0];
+    if (!srv->cfg.accounts.enabled) {
+        send_fail(srv, cl, "CERT", "CERT_UNAVAILABLE", "Accounts are not enabled on this server");
+        return;
+    }
+    if (!cl->account[0]) {
+        send_fail(srv, cl, "CERT", "ACCOUNT_REQUIRED", "You must be logged in (SASL or /REGISTER) to manage a certificate fingerprint");
+        return;
+    }
+
+    if (strcasecmp(sub, "ADD") == 0) {
+        char fp[65];
+        if (peer_cert_fingerprint(cl, fp, sizeof fp) != 0) {
+            send_fail(srv, cl, "CERT", "CERT_REQUIRED", "Your connection isn't presenting a TLS client certificate");
+            return;
+        }
+        accounts_set_fingerprint(&srv->accounts, cl->account, fp);
+        char m[200];
+        snprintf(m, sizeof m, "Certificate fingerprint %s bound to %s -- SASL EXTERNAL will now log this connection in", fp, cl->account);
+        notice_self(srv, cl, m);
+        log_info("sasl", "%s bound a certificate fingerprint to account %s", cl->nick, cl->account);
+    } else if (strcasecmp(sub, "DEL") == 0) {
+        accounts_set_fingerprint(&srv->accounts, cl->account, NULL);
+        notice_self(srv, cl, "Certificate fingerprint removed -- SASL EXTERNAL is now disabled for this account");
+    } else if (strcasecmp(sub, "INFO") == 0) {
+        const char *fp = accounts_fingerprint(&srv->accounts, cl->account);
+        if (fp) {
+            char m[120];
+            snprintf(m, sizeof m, "Certificate fingerprint on file: %s", fp);
+            notice_self(srv, cl, m);
+        } else {
+            notice_self(srv, cl, "No certificate fingerprint is on file for this account");
+        }
+    } else {
+        send_fail(srv, cl, "CERT", "UNKNOWN_SUBCOMMAND", "Syntax: CERT ADD|DEL|INFO");
+    }
 }
 
 void cmd_finish_auth(server_t *srv, client_t *cl, int is_register, int success, const char *hash) {

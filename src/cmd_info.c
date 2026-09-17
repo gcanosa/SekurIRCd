@@ -227,9 +227,14 @@ static const help_entry_t HELP_TABLE[] = {
     {"REGISTER", {"REGISTER <account> <password>",
                   "Non-standard: create a self-service account and log in as it. Only available when the "
                   "server has [accounts] enabled -- ask a server operator if this fails."}},
-    {"AUTHENTICATE", {"AUTHENTICATE PLAIN",
+    {"AUTHENTICATE", {"AUTHENTICATE PLAIN|EXTERNAL",
                        "SASL login to an existing account -- normally sent by your client automatically "
-                       "during connection setup, not typed by hand."}},
+                       "during connection setup, not typed by hand. EXTERNAL logs in via a TLS client "
+                       "certificate bound with /CERT ADD, instead of a password."}},
+    {"CERT", {"CERT ADD|DEL|INFO",
+              "Non-standard: bind (ADD), clear (DEL), or show (INFO) the TLS client certificate fingerprint "
+              "SASL EXTERNAL logs your account in with. Requires being logged in and connected with a "
+              "certificate ([tls] request_client_cert must be enabled server-side)."}},
     {"CAP", {"CAP LS|REQ|END|LIST", "IRCv3 capability negotiation -- normally handled by your client, not typed by hand."}},
     {"PING", {"PING <token>", "Request a PONG from the server."}},
     {"QUIT", {"QUIT [:reason]", "Disconnect from the server."}},
@@ -245,7 +250,7 @@ static const char *GENERAL_HELP[] = {
     "WHO WHOIS WHOWAS AWAY SETNAME MODE OPER INVITE KNOCK LIST LINKS MAP KICK",
     "KILL MONITOR WATCH SILENCE USERHOST ISON WALLOPS ADMIN LUSERS STATS VERSION",
     "TIME INFO MOTD REHASH VHOST CHGHOST SETHOST SAJOIN SAPART SAMODE CONNECT",
-    "SQUIT TRACE SERVLIST SQUERY REGISTER AUTHENTICATE.",
+    "SQUIT TRACE SERVLIST SQUERY REGISTER AUTHENTICATE CERT.",
     "Type /HELP <command> for that command's usage and parameters.",
 };
 

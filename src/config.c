@@ -560,6 +560,7 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
         if (cfg_get_int(t, "port", 6697, &out->tls.port, errbuf, errbufsz, "tls.port")) return -1;
         if (cfg_get_str(t, "cert_file", "", out->tls.cert_file, CFG_PATH, errbuf, errbufsz, "tls.cert_file")) return -1;
         if (cfg_get_str(t, "key_file", "", out->tls.key_file, CFG_PATH, errbuf, errbufsz, "tls.key_file")) return -1;
+        if (cfg_get_bool(t, "request_client_cert", 0, &out->tls.request_client_cert, errbuf, errbufsz, "tls.request_client_cert")) return -1;
         if (out->tls.port < 1 || out->tls.port > 65535) { snprintf(errbuf, errbufsz, "tls.port must be in 1-65535"); return -1; }
         if (out->tls.enabled && !(out->tls.cert_file[0] && out->tls.key_file[0])) {
             snprintf(errbuf, errbufsz, "tls.enabled is true but tls.cert_file/tls.key_file are not both set");

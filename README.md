@@ -74,11 +74,16 @@ over a gateway).
   `echo-message`, `message-tags`/`server-time`/`account-tag`,
   `account-notify`, `invite-notify`, `standard-replies`, and `sasl` (see
   Accounts below)
-- Self-service accounts (`[accounts]`, off by default) + SASL PLAIN
-  (`AUTHENTICATE`) and `/REGISTER <account> <password>` -- backs `330
-  RPL_WHOISACCOUNT` and `EXTBAN=,a` (`+b`/`+e`/`+I` masks like `a:<account>`,
-  matching by SASL account instead of hostmask). A small standalone store in
-  core, independent of channel services below
+- Self-service accounts (`[accounts]`, off by default) + SASL PLAIN and
+  EXTERNAL (`AUTHENTICATE`) and `/REGISTER <account> <password>` -- backs
+  `330 RPL_WHOISACCOUNT` and `EXTBAN=,a` (`+b`/`+e`/`+I` masks like
+  `a:<account>`, matching by SASL account instead of hostmask). A small
+  standalone store in core, independent of channel services below. SASL
+  EXTERNAL logs an already-registered account in by matching its TLS client
+  certificate's fingerprint instead of a password -- bind one with
+  `/CERT ADD` (while logged in over a connection presenting a client cert),
+  and enable `[tls] request_client_cert` so the server actually asks
+  clients for one (see Configuration below)
 - `TRACE`, `SERVLIST`/`SQUERY` (services pseudo-users, e.g. ChanServ, flag
   themselves for these), and `WHOX` (`WHO <mask> %<fields>,<token>` for
   custom field selection)
@@ -316,10 +321,11 @@ See [`config/sekurircd.template.toml`](config/sekurircd.template.toml). Key sect
 - `[dnsbl]` — `enabled` (default `true`, EFnet RBL), `zones`, `timeout` (default 5s),
   `action` (`"kline"` or `"reject"`), `kline_duration`, `lookup_url`
 - `[tls]` — `enabled` (default `false`), `port` (default `6697`), `cert_file`
-  / `key_file` (PEM, required if enabled); runs alongside `[server]`'s
-  plaintext listener, never in place of it
+  / `key_file` (PEM, required if enabled), `request_client_cert` (default
+  `false`, needed for SASL EXTERNAL -- see below); runs alongside
+  `[server]`'s plaintext listener, never in place of it
 - `[accounts]` — `enabled` (default `false`), `store_file`; backs SASL
-  PLAIN, `/REGISTER`, and the `a:` EXTBAN type
+  PLAIN/EXTERNAL, `/REGISTER`, `/CERT`, and the `a:` EXTBAN type
 - `[debug_channel]` — `enabled` (default `false`), `name` (default
   `"#server-debug"`, oper-only -- JOIN is refused to anyone else),
   `min_level` (default `"WARNING"`)
@@ -374,6 +380,52 @@ Removing an oper is the same in reverse: delete (or comment out) its
 `[[operators]]` table, then `/REHASH` or restart -- anyone currently opered
 under that login keeps their `+o` until they reconnect or re-`/OPER`
 elsewhere; `/REHASH` doesn't retroactively deop connected clients.
+
+## SASL EXTERNAL (certificate login)
+
+SASL PLAIN logs an account in with a password; SASL EXTERNAL logs it in with
+a TLS client certificate instead -- the connection's certificate fingerprint
+(SHA-256 of the DER cert) stands in for the password. The server never
+validates the certificate against a CA -- it doesn't need to be signed by
+anyone, self-signed is fine -- it only checks whether that exact fingerprint
+is the one bound to an account. Requires `[accounts] enabled = true` (same
+store as PLAIN/`/REGISTER`).
+
+**1. Ask the server for client certificates.** Off by default -- a TLS
+listener normally never requests one. Set, then `/REHASH` or restart:
+
+```toml
+[tls]
+enabled = true
+request_client_cert = true   # only *requests* a cert -- clients with none still connect fine
+```
+
+**2. Get a client certificate.** Any self-signed one works; most IRC clients
+(WeeChat, irssi, etc.) have a "client certificate" connection option that
+points at a cert/key pair, generating one if needed:
+
+```bash
+openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+  -keyout client-key.pem -out client-cert.pem -subj "/CN=myaccount"
+```
+
+**3. Bind it to your account.** Connect once with that certificate active
+and log in the normal way (SASL PLAIN or `/REGISTER`), then:
+
+```
+/CERT ADD
+```
+
+The server replies with the fingerprint it just bound. `/CERT INFO` shows
+the current one; `/CERT DEL` removes it (also disabling EXTERNAL for the
+account until you `/CERT ADD` again).
+
+**4. From then on**, connecting with that same certificate and sending
+`AUTHENTICATE EXTERNAL` logs the account in with no password at all -- most
+clients do this automatically once both TLS client-cert and SASL EXTERNAL
+are configured on the client side. `CAP LS` only advertises `sasl=PLAIN` vs.
+`sasl=PLAIN,EXTERNAL` depending on whether `request_client_cert` is on, so a
+client can tell without guessing.
 
 ## Channel services (ChanServ)
 
