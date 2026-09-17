@@ -32,4 +32,16 @@ void accounts_register_hashed(account_store_t *st, const char *name, const char 
  * next mutation of the store. */
 const char *accounts_hash(account_store_t *st, const char *name);
 
+/* Bind (fp non-empty) or clear (fp NULL or "") the SASL EXTERNAL certificate
+ * fingerprint -- hex-encoded SHA-256 of the DER certificate, see cmd_reg.c's
+ * peer_cert_fingerprint() -- on `name`. No-op if `name` isn't registered. */
+void accounts_set_fingerprint(account_store_t *st, const char *name, const char *fp);
+/* Hex fingerprint on file for `name`, or NULL if none/no such account. Valid
+ * until the next mutation of the store. */
+const char *accounts_fingerprint(account_store_t *st, const char *name);
+/* Registered account name (as stored, not casefolded) whose fingerprint
+ * matches `fp` case-insensitively, or NULL if none -- backs SASL EXTERNAL.
+ * Valid until the next mutation of the store. */
+const char *accounts_find_by_fingerprint(account_store_t *st, const char *fp);
+
 #endif /* SEKURIRCD_ACCOUNTS_H */

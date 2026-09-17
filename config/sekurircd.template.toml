@@ -1,75 +1,114 @@
-# ---------------------------------------------------------------------------
-# sekurircd — default configuration template
-# ---------------------------------------------------------------------------
+# =============================================================================
+#  sekurircd -- default configuration template
+# =============================================================================
+#
 # This is a documented starting point, not a live config. To run a server:
 #
 #   1. Copy it (and ircd.motd) next to where you keep live config:
+#
 #          cp config/sekurircd.template.toml /etc/sekurircd/sekurircd.toml
 #          cp config/ircd.motd               /etc/sekurircd/ircd.motd
+#
 #   2. Edit the copy to taste (port, network name, logging, security limits,
 #      operators, admin contact, vhosts, channel-creation policy, DNSBL, ...).
+#
 #   3. Start the daemon pointing at the copy:
+#
 #          sekurircd --config /etc/sekurircd/sekurircd.toml
 #
 # Relative paths resolve as follows:
-#   • [messages] motd, [tls] cert_file/key_file -> relative to THIS config
-#     file's directory
-#   • [logging] directory   -> relative to the current working directory
 #
-# Every key is optional; the value shown is the built-in default.
-# ---------------------------------------------------------------------------
+#   - [messages] motd, [tls] cert_file/key_file  -> relative to THIS config
+#     file's directory
+#   - [logging] directory                        -> relative to the current
+#     working directory
+#
+# Every key is optional; the value shown (commented or not) is the built-in
+# default unless noted otherwise.
+# =============================================================================
 
+
+# -----------------------------------------------------------------------------
+# [server] -- identity and the plaintext listener
+# -----------------------------------------------------------------------------
 [server]
+
 # Hostname reported in protocol prefixes (e.g. ":sekuri 001 ...").
 name = "sekuri"
+
 # Human-friendly network name shown in the welcome message.
 network = "SekuriIRC Network"
+
 # Version string reported via 004 MYINFO / VERSION. Omit to use the running
 # package's version (sekurircd.__version__) -- the recommended default.
 #version = "0.8.4"
+
 # Address to bind. 0.0.0.0 = reachable across the LAN; 127.0.0.1 = local only.
 bind = "0.0.0.0"
+
 # TCP port to listen on.
 port = 6667
 
+
+# -----------------------------------------------------------------------------
+# [security] -- limits, flood guards, cloaking, connection caps
+# -----------------------------------------------------------------------------
 [security]
+
 # Maximum length (bytes) of a single inbound line before it is rejected.
 max_line_length = 512
+
 # Maximum number of parameters a single command may carry.
 max_params = 15
+
 # Maximum allowed length of a nickname.
 max_nick_length = 30
-# Flood guard: more than this many messages within one second drops the client.
+
+# Flood guard: more than this many messages within one second drops the
+# client, measured over a sliding window of this many seconds.
 flood_max_msgs = 20
-# ...within a sliding window of this many seconds.
 flood_window = 1
-# Seconds of silence before the server sends a keepalive PING.
+
+# Seconds of silence before the server sends a keepalive PING, and seconds of
+# total silence (no line at all, including a PONG) before the connection is
+# dropped. ping_timeout must be greater than ping_interval.
 ping_interval = 120
-# Seconds of total silence (no line at all, including a PONG) before the
-# server drops the connection. Must be greater than ping_interval.
 ping_timeout = 300
+
+# --- host cloaking ----------------------------------------------------------
+
 # Hide every client's real IP/hostname behind a random per-connection cloak.
 # The real address is still kept internally (logs, and visible via /WHOIS to
 # an oper or to the user themselves) -- this only hides it from other users
 # on the wire.
 host_masking = false
+
 # str.format template for the cloak: {token} is a random hex string,
-# {network} is [server] network below, lowercased and made hostname-safe.
+# {network} is [server] network above, lowercased and made hostname-safe.
 host_masking_format = "{token}.users.{network}"
+
 # Number of random bytes hex-encoded into {token} (2 hex chars each).
 host_masking_token_bytes = 4
+
 # Give every successful /OPER a distinct, recognizable vhost (e.g.
 # netadmin.SekurNet) instead of leaving their prior host/cloak in place.
 oper_host_masking = false
+
 # str.format template for the oper vhost: {network} is [server] network
-# below, lowercased and made hostname-safe. No {token} (same host for every
+# above, lowercased and made hostname-safe. No {token} (same host for every
 # oper -- it's meant to be recognizable, not private).
 oper_host_format = "netadmin.{network}"
-# JSON file K/G/Z-lines (from /KLINE, /GLINE, /ZLINE, or DNSBL auto-action) are saved
-# to, so they survive /REHASH and a process restart. Relative to this config
-# file's directory. Empty (the default) means in-memory only -- lost on
-# restart.
+
+# --- bans ---------------------------------------------------------------
+
+# JSON file K/G/Z-lines (from /KLINE, /GLINE, /ZLINE, or DNSBL auto-action)
+# are saved to, so they survive /REHASH and a process restart. Relative to
+# this config file's directory. Empty (the default) means in-memory only --
+# lost on restart.
 klines_file = ""
+
+# --- default modes / auto-join ----------------------------------------------
+
 # User mode letters (no signs/args) applied automatically to every client
 # once it finishes registration. Empty means no defaults.
 # Only self-togglable flag modes are allowed: i (invisible), w (wallops),
@@ -79,6 +118,7 @@ klines_file = ""
 # "iw" is the big-network default: Libera.Chat and OFTC (both solanum/
 # hybrid-family ircds) set +i and +w on every connect by default.
 default_user_modes = "iw"
+
 # Channel a client is auto-joined to right after a successful /OPER (created
 # on first use, same as any channel a client JOINs). Empty (the default)
 # means opers get no auto-join. The daemon does NOT enforce oper-only
@@ -86,24 +126,32 @@ default_user_modes = "iw"
 # (e.g. +i, or +k with the key given only to opers) if you don't want
 # regular clients joining it too.
 #oper_auto_join = "#opers"
+
+# --- /DIE and /RESTART extra password ---------------------------------------
+
 # Optional extra password required by /DIE and /RESTART, on top of already
 # being an oper. Empty (the default, for all four fields below) means being
 # an oper is enough -- matching classic ircds. Same `password`/`password_hash`
-# split as [[operators]] above (at most one of each pair; generate a hash the
+# split as [[operators]] below (at most one of each pair; generate a hash the
 # same way, with `sekurircd --hash-password`).
 #die_password_hash = "scrypt$16384$8$1$<salt-hex>$<digest-hex>"
 #restart_password_hash = "scrypt$16384$8$1$<salt-hex>$<digest-hex>"
 # Legacy plain-text equivalents, if you'd rather not hash these:
 #die_password = ""
 #restart_password = ""
+
+# --- connection caps and connect-flood throttle -----------------------------
+
 # Hard cap on total simultaneous connections (registered or not); refused
 # with a plain ERROR before registration, same as a K/G-line. 0 = unlimited.
 max_connections = 0
+
 # Hard cap on simultaneous connections from a single IP; 0 = unlimited.
 # Cheap defense against one host opening a large number of sockets --
 # doesn't require that host to be otherwise misbehaving (K/G-lines and
 # [dnsbl] below only catch already-known-bad addresses).
 max_connections_per_ip = 0
+
 # Connect-rate throttle: an IP that opens more than connect_flood_max
 # connections within connect_flood_window seconds gets an automatic K-line
 # for connect_flood_kline_duration (same duration syntax as [dnsbl]
@@ -115,6 +163,9 @@ max_connections_per_ip = 0
 connect_flood_max = 5
 connect_flood_window = 10.0
 connect_flood_kline_duration = "10m"
+
+# --- reserved nicks, ident, reverse-DNS -------------------------------------
+
 # Nicknames (case-insensitive) no local client may take via NICK/USER --
 # 437 ERR_UNAVAILRESOURCE instead of letting them register/change to it.
 # Only usable by a user introduced through a server link (a services
@@ -124,12 +175,14 @@ connect_flood_kline_duration = "10m"
 # takes the nick and asks others to "/msg NickServ IDENTIFY <password>").
 # Empty list ("[]") disables the check entirely.
 reserved_nicks = ["nickserv", "chanserv", "operserv", "memoserv", "hostserv", "botserv"]
+
 # RFC 1413 ident-protocol query on connect, to confirm (rather than just
 # trust) the ident a client's own USER command reports. Off by default --
 # an extra round-trip most clients' hosts don't run an identd for anyway,
 # so it usually just adds ident_timeout seconds of connect latency.
 ident_enabled = false
 ident_timeout = 3.0
+
 # Reverse-DNS resolution of the connecting IP, to display a hostname
 # instead of a bare address. ON by default (standard ircd behavior) --
 # set to false if you'd rather avoid the extra connect latency, or just
@@ -137,40 +190,65 @@ ident_timeout = 3.0
 rdns_enabled = true
 rdns_timeout = 3.0
 
-# TLS/SSL listener. Runs ALONGSIDE the plaintext [server] listener above
-# (never replaces it) on its own port. Off by default -- opt in.
+
+# -----------------------------------------------------------------------------
+# [tls] -- TLS/SSL listener
+# -----------------------------------------------------------------------------
+# Runs ALONGSIDE the plaintext [server] listener above (never replaces it) on
+# its own port. Off by default -- opt in.
 [tls]
 enabled = false
+
 # Port for the TLS listener. 6697 ("ircs") is what most clients try first.
 port = 6697
+
 # PEM certificate (or chain) file, resolved relative to this config file's
 # directory. Required if enabled = true.
 cert_file = ""
+
 # PEM private key file matching cert_file, same resolution rule. Required if
 # enabled = true.
 #
 # Most deployments won't have a CA-signed certificate -- a self-signed one is
 # fine, encryption doesn't need a trusted CA, only clients that verify the
 # chain do. Generate one with:
+#
 #   openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
 #     -keyout key.pem -out cert.pem -subj "/CN=irc.example.com"
+#
 # Client-side, most IRC clients have an "only allow trusted certificates" (or
 # "verify SSL") option that must be UNCHECKED to connect to a self-signed
 # cert -- the connection is still encrypted either way.
 key_file = ""
 
-# Self-service accounts, backing SASL PLAIN, /REGISTER, EXTBAN's "a:"
-# account type, and the account-notify/account-tag IRCv3 caps. Off by
-# default. Deliberately independent of channel services (services/
-# chanserv.py, which stays password-only per-channel, no accounts) -- a
-# small standalone store in core, so it works with no services process
-# running at all. See docs/irc-protocol-reference.md "Accounts / SASL".
+# Ask (never require) connecting clients for a TLS client certificate. A
+# client with no certificate still connects normally; one that presents a
+# certificate whose fingerprint has been bound to an account (see /CERT ADD
+# in README.md) can then log in via SASL EXTERNAL instead of a password.
+# Off by default -- no effect unless [accounts] below is also enabled.
+request_client_cert = false
+
+
+# -----------------------------------------------------------------------------
+# [accounts] -- self-service accounts (SASL PLAIN/EXTERNAL, /REGISTER, /CERT)
+# -----------------------------------------------------------------------------
+# Backs SASL PLAIN/EXTERNAL, /REGISTER, /CERT, EXTBAN's "a:" account type, and
+# the account-notify/account-tag IRCv3 caps. Off by default. Deliberately
+# independent of channel services (services/chanserv.py, which stays
+# password-only per-channel, no accounts) -- a small standalone store in
+# core, so it works with no services process running at all. See README.md's
+# "SASL EXTERNAL (certificate login)" section for the /CERT walkthrough.
 [accounts]
 enabled = false
+
 # JSON file account registrations are persisted to, resolved relative to
 # this config file's directory.
 store_file = "accounts.json"
 
+
+# -----------------------------------------------------------------------------
+# [debug_channel] -- live in-IRC view of the daemon's own log
+# -----------------------------------------------------------------------------
 # Oper-only channel relaying the daemon's own WARNING+ log lines as server
 # NOTICEs -- a live in-IRC view of errors/warnings without tailing the log
 # file. Off by default. Pair `name` below with security.oper_auto_join
@@ -181,54 +259,81 @@ store_file = "accounts.json"
 [debug_channel]
 enabled = false
 name = "#server-debug"
+
 # Minimum level relayed: DEBUG, INFO, WARNING, ERROR, CRITICAL. WARNING only
 # shows failures; use INFO to also see connects/disconnects, oper actions
 # (OPER/KILL/K-LINE/SQUIT/CONNECT/REHASH), and link up/down.
 min_level = "WARNING"
+
 # Seconds between periodic "users/channels/connections/K-G-lines + CPU/mem"
 # snotes, logged at INFO (so they need min_level = INFO above to show up).
 # Includes how many active K/G-lines came from [dnsbl] hits (and the
 # cumulative DNSBL hit count) as a rough read on how much the DNSBL/proxy
 # protection is actually catching. 0 = off.
 stats_interval = 0
+
 # Path to chanserv's pidfile, to report its CPU/mem alongside the ircd's own
 # in the periodic stats snote. "" = don't report chanserv stats.
 chanserv_pidfile = ""
 
+
+# -----------------------------------------------------------------------------
+# [messages] -- MOTD and message limits
+# -----------------------------------------------------------------------------
 [messages]
+
 # MOTD file, resolved relative to this config file's directory.
 motd = "ircd.motd"
+
 # Maximum number of bytes per PRIVMSG/NOTICE payload before truncation.
 max_message_length = 400
 
+
+# -----------------------------------------------------------------------------
+# [logging] -- file + console logging
+# -----------------------------------------------------------------------------
 [logging]
+
 # Master switch for file logging. When false, only the console handler is used.
 enabled = true
+
 # Directory for log files (created if missing). Relative -> CWD; absolute as-is.
 directory = "logs"
-# When true, DEBUG-level detail (every line in/out, per-command trace) is written
-# to the log file. When false, the `level` below governs what is written.
+
+# When true, DEBUG-level detail (every line in/out, per-command trace) is
+# written to the log file. When false, the `level` below governs what is
+# written.
 debug = false
+
 # Minimum level written to the file when debug = false.
 # One of: DEBUG, INFO, WARNING, ERROR, CRITICAL
 level = "INFO"
-# Base log file name inside `directory`. RotatingHandler appends .1 .2 ... on rotation.
+
+# Base log file name inside `directory`. RotatingHandler appends .1 .2 ... on
+# rotation, rotating once the file exceeds `max_bytes` and keeping
+# `backup_count` rotated files (5 x 5 MiB ~ 25 MiB of history retained).
 file = "sekurircd.log"
-# Rotate the log file once it exceeds this many bytes (5 MiB).
 max_bytes = 5242880
-# Number of rotated files to keep (5 x 5 MiB ~ 25 MiB of history retained).
 backup_count = 5
 
-# IRC operators (/OPER logins). None by default -- no one can /OPER until you
-# add at least one table here. Each requires exactly ONE of `password` or
-# `password_hash`:
+
+# -----------------------------------------------------------------------------
+# [[operators]] -- IRC operator (/OPER) logins
+# -----------------------------------------------------------------------------
+# None by default -- no one can /OPER until you add at least one table here.
+# Each requires exactly ONE of `password` or `password_hash`:
+#
 #   - `password_hash` (recommended): a scrypt hash, so the config file holds
 #     no recoverable plaintext even if it leaks. Generate one with:
+#
 #         sekurircd --hash-password
+#
 #     and paste the printed "scrypt$..." string in as-is.
+#
 #   - `password` (legacy): plain text, compared with a constant-time check,
 #     but readable by anyone who can read this file -- protect its
 #     permissions if you use this instead of password_hash.
+#
 # `hosts` is required: a list of ident@host/IP masks (like [[vhosts]]
 # allowed_hosts) the login may /OPER from, matched against the connection's
 # real ident/IP, never the nick. Use "*@*" to allow that login from anywhere.
@@ -240,6 +345,7 @@ backup_count = 5
 # no restart is strictly required, [[operators]] (like everything else here
 # except [server] bind/port and [tls]) is picked up live by /REHASH. See
 # "Adding or updating an IRC operator" in README.md for the full walkthrough.
+
 #[[operators]]
 #name = "admin"
 #password_hash = "scrypt$16384$8$1$<salt-hex>$<digest-hex>"
@@ -255,57 +361,78 @@ backup_count = 5
 #password = "legacy-plaintext-example-do-not-use-in-production"
 #hosts = ["*@10.*"]
 
-# Contact info reported by /ADMIN. All fields optional (blank -> "Not configured").
+
+# -----------------------------------------------------------------------------
+# [admin] -- /ADMIN contact info
+# -----------------------------------------------------------------------------
+# All fields optional (blank -> "Not configured").
 #[admin]
 #location1 = "Somewhere, Some Country"
 #location2 = "Some Organization"
 #email = "admin@example.com"
 
-# Virtual hosts a client can switch to with /VHOST <host> (and clear with
-# /VHOST off). `allowed_hosts` is a list of ident@host/IP masks (NOT nicks --
-# a nick can be grabbed by anyone once its owner disconnects, so matching by
-# nick would let an impersonator inherit vhost access). A bare mask with no
-# "@" is shorthand for "*@<mask>" (host/IP-only, any ident). A server
-# operator may activate ANY configured vhost regardless of this list. Add as
-# many [[vhosts]] tables as you need; omit `allowed_hosts` (or leave it
-# empty) for an oper-only vhost.
+
+# -----------------------------------------------------------------------------
+# [[vhosts]] -- virtual hosts activated with /VHOST
+# -----------------------------------------------------------------------------
+# `allowed_hosts` is a list of ident@host/IP masks (NOT nicks -- a nick can
+# be grabbed by anyone once its owner disconnects, so matching by nick would
+# let an impersonator inherit vhost access). A bare mask with no "@" is
+# shorthand for "*@<mask>" (host/IP-only, any ident). A server operator may
+# activate ANY configured vhost regardless of this list. Add as many
+# [[vhosts]] tables as you need; omit `allowed_hosts` (or leave it empty)
+# for an oper-only vhost.
 #[[vhosts]]
 #host = "elite.users.example.com"
 #allowed_hosts = ["*@203.0.113.42", "198.51.100.*"]
 
+
+# -----------------------------------------------------------------------------
+# [channels] -- creation policy and default modes
+# -----------------------------------------------------------------------------
 [channels]
+
 # When true, only a server operator may create a channel nobody has joined
 # yet; everyone may still join a channel that already exists (whoever
 # created it), and anyone may create one listed in allowed_channels below.
 # When false (the default), any registered client may create any channel.
 restrict_creation = false
+
 # Channel names exempt from restrict_creation -- any registered client may
 # create one of these even in restricted mode. Ignored when restrict_creation
 # is false.
 allowed_channels = []
+
 # Mode letters (no signs/args) applied automatically to a newly created
 # channel only -- never to one that already exists. Empty means no defaults.
 # Only argument-free flag modes are allowed: n (no external messages), i
 # (invite-only), p (private), t (topic locked to ops), s (secret), m
 # (moderated). The classic ircd default is "nt".
 default_modes = "nt"
+
 # Channels every client is auto-joined to right after registration (after
 # MOTD) -- same as if they'd typed /JOIN themselves, so they can /PART
 # afterward like any other channel. Created on first use. Empty (the
 # default) means no auto-join.
 auto_join = []
 
-# DNSBL (DNS-based blackhole list) checking: reject connections from IPs
-# listed as known open proxies/drones/botnets by a DNSBL provider. Uses the
-# standard reversed-octet DNS-lookup protocol (works with any provider's
-# zone -- no zone is built in, since a third-party service's hostname/policy
-# can change; pick one whose terms you accept). Adds up to `timeout` seconds
-# of connect latency per configured zone when on.
+
+# -----------------------------------------------------------------------------
+# [dnsbl] -- DNS-based blackhole list checking
+# -----------------------------------------------------------------------------
+# Reject connections from IPs listed as known open proxies/drones/botnets by
+# a DNSBL provider. Uses the standard reversed-octet DNS-lookup protocol
+# (works with any provider's zone -- no zone is built in, since a
+# third-party service's hostname/policy can change; pick one whose terms you
+# accept). Adds up to `timeout` seconds of connect latency per configured
+# zone when on.
 [dnsbl]
+
 # On by default with EFnet RBL below -- an IRC-specific, no-strings-attached
 # DNSBL (unlike Spamhaus ZEN, which targets email spam sources and restricts
 # unlicensed high-volume/commercial querying). Set to false to disable.
 enabled = true
+
 # DNSBL zone hostnames to query, in order (first hit wins). Required if
 # enabled = true.
 zones = [
@@ -314,10 +441,12 @@ zones = [
     # and no query-volume restrictions -- the default for exactly this reason.
     "rbl.efnetrbl.org",
 ]
+
 # Other public zones you might add (uncomment and verify each is still
 # live/accepting queries before relying on it -- DNSBL providers come and
 # go, and a dead zone just times out silently rather than protecting
 # anything):
+#
 #   - "zen.spamhaus.org"   Spamhaus ZEN (proxies/spam sources) -- the
 #                          best-known DNSBL overall, but aimed at email
 #                          abuse and free only for low-volume/non-commercial
@@ -333,49 +462,64 @@ zones = [
 #                          zone likely no longer resolves. Listed here only
 #                          so it isn't silently rediscovered and assumed to
 #                          work; confirm before use.
+
 # Seconds to wait for a zone's lookup before treating it as "not listed" and
 # trying the next zone (or letting the connection through if it was the
 # last one).
 timeout = 5.0
+
 # What happens when a connecting IP is listed: "kline" refuses the
 # connection AND records an in-memory K-line for that IP (persisted if
 # security.klines_file is set), so later attempts skip the DNS lookup
 # entirely; "reject" only refuses this one connection attempt.
 action = "kline"
+
 # How long an action = "kline" auto-line lasts: "1d", "12h", "30m", or a bare
 # number of seconds. Dynamic IPs get reassigned, so a permanent ban from one
 # DNSBL hit usually isn't appropriate. Empty string = permanent.
 kline_duration = "1d"
+
 # Optional human-facing verification link included in the auto-K-line's
 # reason ("{ip}" is replaced with the connecting address), e.g. how
 # UnrealIRCd's TKL reasons read: "Proxy/Drone detected. Check <url> for
-# details." Empty by default -- no third-party URL is assumed unless you opt in.
+# details." Empty by default -- no third-party URL is assumed unless you
+# opt in.
 #lookup_url = "https://dronebl.org/lookup?ip={ip}"
 
-# Server-to-server linking (hub/leaf redundancy). OFF by default -- this
-# daemon is single-server unless you opt in. Strict hub-and-spoke: one hub,
-# one or more leaves that link only to the hub (never to each other). See
-# docs/irc-protocol-reference.md "Server-to-server linking" for the wire
-# protocol and what does/doesn't propagate network-wide.
+
+# -----------------------------------------------------------------------------
+# [links] -- server-to-server linking (hub/leaf redundancy)
+# -----------------------------------------------------------------------------
+# OFF by default -- this daemon is single-server unless you opt in. Strict
+# hub-and-spoke: one hub, one or more leaves that link only to the hub
+# (never to each other). See docs/irc-protocol-reference.md "Server-to-server
+# linking" for the wire protocol and what does/doesn't propagate
+# network-wide.
 [links]
 enabled = false
+
 # "hub" (accepts connections from leaves) or "leaf" (dials out to one hub).
 mode = "hub"
+
 # hub only: address/port the link listener binds to (separate from
 # [server]/[tls] -- clients never connect here, only other sekurircd nodes).
 # Note: on recent macOS, 7000 is sometimes already bound by the OS itself
 # (AirPlay/ControlCenter) -- pick another port if the hub fails to bind.
 bind = "0.0.0.0"
 port = 7000
+
 # Wrap the link connection in TLS: on a hub, reuses the [tls] cert/key above
 # on the link listener; on a leaf, requires TLS when dialing its uplink.
 tls = false
+
 # leaf only: accept the hub's TLS certificate without CA validation (for a
 # self-signed hub cert with no shared CA infrastructure). Never set this on
 # a link exposed to the public internet without also trusting the exact peer.
 tls_insecure_skip_verify = false
+
 ping_interval = 60.0
 ping_timeout = 180.0
+
 # leaf only: reconnect backoff (seconds), doubling from reconnect_delay up
 # to reconnect_delay_max after each failed attempt.
 reconnect_delay = 5.0
@@ -389,6 +533,7 @@ reconnect_delay_max = 300.0
 # (scrypt, generate with `sekurircd --hash-password`, same as
 # [[operators]]) is preferred so this config doesn't hold the raw secret;
 # the dialing side still needs the real (plain) password to send it.
+#
 #[[links.peers]]
 #name = "leaf1"
 #password_hash = "scrypt$16384$8$1$<salt-hex>$<digest-hex>"
@@ -405,6 +550,7 @@ reconnect_delay_max = 300.0
 # side gets to store a hash instead. Not running chanserv.py is the same as
 # leaving channel services disabled -- there is no separate on/off switch
 # on the ircd side.
+#
 #[[links.peers]]
 #name = "services.sekurircd.local"
 #password_hash = "scrypt$16384$8$1$<salt-hex>$<digest-hex>"
@@ -417,6 +563,7 @@ reconnect_delay_max = 300.0
 # here (not `password_hash`) -- dialing out means actually sending the
 # secret, which a one-way hash can't reproduce; the hub side above is where
 # `password_hash` applies.
+#
 #[links]
 #enabled = true
 #mode = "leaf"

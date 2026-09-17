@@ -83,6 +83,7 @@ typedef struct {
     int port;
     char cert_file[CFG_PATH];
     char key_file[CFG_PATH];
+    int request_client_cert; /* ask (never require) a TLS client cert -- see SASL EXTERNAL */
 } cfg_tls_t;
 
 typedef struct {

@@ -26,6 +26,7 @@ static const cmd_entry_t DISPATCH[] = {
     {"QUIT", cmd_quit, 0, 0, 0},
     {"AUTHENTICATE", cmd_authenticate, 1, 0, 0},
     {"REGISTER", cmd_register, 2, 1, 0},
+    {"CERT", cmd_cert, 1, 1, 0},
 
     {"JOIN", cmd_join, 1, 1, 0},
     {"PART", cmd_part, 1, 1, 0},

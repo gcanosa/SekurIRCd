@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -73,4 +74,29 @@ void accounts_register_hashed(account_store_t *st, const char *name, const char 
 const char *accounts_hash(account_store_t *st, const char *name) {
     cJSON *hash = cJSON_GetObjectItemCaseSensitive(find(st, name), "pw_hash");
     return cJSON_IsString(hash) ? hash->valuestring : NULL;
+}
+
+void accounts_set_fingerprint(account_store_t *st, const char *name, const char *fp) {
+    cJSON *rec = find(st, name);
+    if (!rec) return;
+    cJSON_DeleteItemFromObjectCaseSensitive(rec, "cert_fp");
+    if (fp && fp[0]) cJSON_AddStringToObject(rec, "cert_fp", fp);
+    save(st);
+}
+
+const char *accounts_fingerprint(account_store_t *st, const char *name) {
+    cJSON *fp = cJSON_GetObjectItemCaseSensitive(find(st, name), "cert_fp");
+    return cJSON_IsString(fp) ? fp->valuestring : NULL;
+}
+
+const char *accounts_find_by_fingerprint(account_store_t *st, const char *fp) {
+    if (!fp || !fp[0]) return NULL;
+    cJSON *rec;
+    cJSON_ArrayForEach(rec, st->data) {
+        cJSON *cf = cJSON_GetObjectItemCaseSensitive(rec, "cert_fp");
+        if (!cJSON_IsString(cf) || strcasecmp(cf->valuestring, fp) != 0) continue;
+        cJSON *name = cJSON_GetObjectItemCaseSensitive(rec, "name");
+        return cJSON_IsString(name) ? name->valuestring : NULL;
+    }
+    return NULL;
 }

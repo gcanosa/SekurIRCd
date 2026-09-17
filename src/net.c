@@ -164,6 +164,15 @@ int net_listen(const char *bind_addr, int port) {
 
 /* --- TLS ([tls], user mode +Z, channel mode +z) --------------------------- */
 
+/* SASL EXTERNAL (cmd_reg.c) identifies a client by matching its certificate's
+ * fingerprint against one bound to an account via /CERT ADD -- not by chain-
+ * of-trust, so any certificate (self-signed, expired, whatever) is accepted
+ * at the TLS layer; only /CERT ADD's account binding decides who it is. */
+static int tls_accept_any_client_cert(int preverify_ok, X509_STORE_CTX *ctx) {
+    (void)preverify_ok; (void)ctx;
+    return 1;
+}
+
 static SSL_CTX *tls_setup(server_t *srv) {
     if (!srv->cfg.tls.enabled) return NULL;
     char cert[CFG_PATH], key[CFG_PATH];
@@ -192,6 +201,11 @@ static SSL_CTX *tls_setup(server_t *srv) {
      * RELEASE_BUFFERS: idle TLS connections don't pin ~34KB of I/O buffers. */
     SSL_CTX_set_mode(ctx, SSL_MODE_ENABLE_PARTIAL_WRITE | SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER |
                           SSL_MODE_RELEASE_BUFFERS);
+    /* SSL_VERIFY_PEER alone (no _FAIL_IF_NO_PEER_CERT) *requests* a client
+     * certificate without requiring one -- a client with no cert still
+     * connects normally, just can't use SASL EXTERNAL. */
+    if (srv->cfg.tls.request_client_cert)
+        SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, tls_accept_any_client_cert);
     return ctx;
 }
 
