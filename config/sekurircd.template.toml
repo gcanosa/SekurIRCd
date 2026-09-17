@@ -104,6 +104,17 @@ max_connections = 0
 # doesn't require that host to be otherwise misbehaving (K/G-lines and
 # [dnsbl] below only catch already-known-bad addresses).
 max_connections_per_ip = 0
+# Connect-rate throttle: an IP that opens more than connect_flood_max
+# connections within connect_flood_window seconds gets an automatic K-line
+# for connect_flood_kline_duration (same duration syntax as [dnsbl]
+# kline_duration below, e.g. "10m", "1h", "1d"; 0 or "" = permanent).
+# Catches scanners/port-probes that connect and disconnect too fast for
+# max_connections_per_ip (a concurrency cap) to ever see -- each individual
+# hit is cheap, but an IP hammering the accept() path indefinitely still
+# isn't something to just shrug off. 0 disables this check.
+connect_flood_max = 5
+connect_flood_window = 10.0
+connect_flood_kline_duration = "10m"
 # Nicknames (case-insensitive) no local client may take via NICK/USER --
 # 437 ERR_UNAVAILRESOURCE instead of letting them register/change to it.
 # Only usable by a user introduced through a server link (a services

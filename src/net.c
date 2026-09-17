@@ -238,6 +238,37 @@ static ssize_t io_write(client_t *cl, const void *buf, size_t len) {
 
 /* --- accept ----------------------------------------------------------------- */
 
+/* Per-IP connect-rate tracking: max_connections_per_ip only bounds
+ * *concurrent* sockets, so a scanner that connects and resets in
+ * milliseconds (TLS probes, port scanners) never trips it. Fixed slot
+ * table, same eviction tradeoff as chanserv.c's fail_slot password-fail
+ * table -- a full table evicts by hash instead of tracking every possible
+ * IP forever. */
+#define CONNECT_FLOOD_SLOTS 256
+typedef struct { char ip[64]; time_t window_start; int count; } connect_track_t;
+static connect_track_t g_connect_tracks[CONNECT_FLOOD_SLOTS];
+
+/* Returns 1 once `ip` exceeds security.connect_flood_max connects within
+ * security.connect_flood_window seconds. */
+int net_connect_flood_hit(const cfg_security_t *sec, const char *ip) {
+    if (sec->connect_flood_max <= 0) return 0;
+    time_t now = time(NULL);
+    int slot = -1;
+    for (int i = 0; i < CONNECT_FLOOD_SLOTS; i++) {
+        if (strcmp(g_connect_tracks[i].ip, ip) == 0) { slot = i; break; }
+    }
+    if (slot < 0) slot = (int)((unsigned long)now % CONNECT_FLOOD_SLOTS);
+    connect_track_t *t = &g_connect_tracks[slot];
+    if (strcmp(t->ip, ip) != 0 || now - t->window_start > sec->connect_flood_window) {
+        snprintf(t->ip, sizeof t->ip, "%s", ip);
+        t->window_start = now;
+        t->count = 1;
+        return 0;
+    }
+    t->count++;
+    return t->count > sec->connect_flood_max;
+}
+
 static client_t *accept_common(server_t *srv, int listen_fd) {
     struct sockaddr_in peer;
     socklen_t plen = sizeof peer;
@@ -269,6 +300,18 @@ static client_t *accept_common(server_t *srv, int listen_fd) {
         char snote[400];
         snprintf(snote, sizeof snote, "Rejected connection from %s: %s", ipbuf, kline_reason);
         server_notify_opers(srv, snote);
+        return NULL;
+    }
+
+    if (net_connect_flood_hit(&srv->cfg.security, ipbuf)) {
+        long dur = srv->cfg.security.connect_flood_kline_duration[0]
+            ? irc_parse_duration(srv->cfg.security.connect_flood_kline_duration) : 0;
+        if (dur < 0) dur = 0;
+        server_kline_add(srv, ipbuf, "Connecting too fast (connect flood protection)",
+                          "connect-flood", "K", dur); /* itself calls server_notify_opers */
+        const char *msg = "ERROR :Closing Link: reconnecting too fast\r\n";
+        if (write(fd, msg, strlen(msg)) < 0) { /* best effort; peer may already be gone */ }
+        close(fd);
         return NULL;
     }
 
