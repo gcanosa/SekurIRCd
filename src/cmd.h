@@ -91,6 +91,7 @@ void cmd_setname(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_userhost(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_ison(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_monitor(server_t *srv, client_t *cl, irc_message_t *msg);
+void cmd_watch(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_silence(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_glob(server_t *srv, client_t *cl, irc_message_t *msg);
 
@@ -106,8 +107,10 @@ void cmd_chghost(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_sethost(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_kline(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_gline(server_t *srv, client_t *cl, irc_message_t *msg);
+void cmd_zline(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_unkline(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_ungline(server_t *srv, client_t *cl, irc_message_t *msg);
+void cmd_unzline(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_squit(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_connect(server_t *srv, client_t *cl, irc_message_t *msg);
 

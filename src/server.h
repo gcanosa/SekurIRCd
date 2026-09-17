@@ -179,4 +179,9 @@ void server_whowas_record(server_t *srv, const char *nick, const char *user,
  * from cmd_nick (online) and server_remove_client (offline). */
 void server_monitor_notify(server_t *srv, client_t *cl, int online);
 
+/* Same as server_monitor_notify but for the legacy /WATCH list (600 RPL_LOGON /
+ * 601 RPL_LOGOFF instead of MONITOR's 730/731) -- called from the same hook
+ * points. */
+void server_watch_notify(server_t *srv, client_t *cl, int online);
+
 #endif /* SEKURIRCD_SERVER_H */

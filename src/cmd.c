@@ -52,6 +52,7 @@ static const cmd_entry_t DISPATCH[] = {
     {"USERHOST", cmd_userhost, 1, 1, 0},
     {"ISON", cmd_ison, 1, 1, 0},
     {"MONITOR", cmd_monitor, 1, 1, 0},
+    {"WATCH", cmd_watch, 1, 1, 0},
     {"SILENCE", cmd_silence, 0, 1, 0},
     {"GLOB", cmd_glob, 1, 1, 0},
 
@@ -66,8 +67,10 @@ static const cmd_entry_t DISPATCH[] = {
     {"SETHOST", cmd_sethost, 1, 1, 1},
     {"KLINE", cmd_kline, 0, 1, 1},
     {"GLINE", cmd_gline, 0, 1, 1},
+    {"ZLINE", cmd_zline, 0, 1, 1},
     {"UNKLINE", cmd_unkline, 1, 1, 1},
     {"UNGLINE", cmd_ungline, 1, 1, 1},
+    {"UNZLINE", cmd_unzline, 1, 1, 1},
     {"SQUIT", cmd_squit, 1, 1, 1},
     {"CONNECT", cmd_connect, 0, 1, 1},
     {"STATS", cmd_stats, 0, 1, 0},
@@ -145,6 +148,7 @@ void cmd_send_welcome_if_ready(server_t *srv, client_t *cl) {
 
     server_send_welcome(srv, cl);
     server_monitor_notify(srv, cl, 1);
+    server_watch_notify(srv, cl, 1);
 
     for (int i = 0; i < srv->cfg.channels.n_auto_join; i++)
         cmd_force_join(srv, cl, srv->cfg.channels.auto_join[i]);

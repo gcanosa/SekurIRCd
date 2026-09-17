@@ -65,7 +65,7 @@ oper_host_masking = false
 # below, lowercased and made hostname-safe. No {token} (same host for every
 # oper -- it's meant to be recognizable, not private).
 oper_host_format = "netadmin.{network}"
-# JSON file K/G-lines (from /KLINE, /GLINE, or DNSBL auto-action) are saved
+# JSON file K/G/Z-lines (from /KLINE, /GLINE, /ZLINE, or DNSBL auto-action) are saved
 # to, so they survive /REHASH and a process restart. Relative to this config
 # file's directory. Empty (the default) means in-memory only -- lost on
 # restart.

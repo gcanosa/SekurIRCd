@@ -319,6 +319,7 @@ void server_remove_client(server_t *srv, client_t *cl, const char *quit_reason) 
     if (cl->registered && !cl->is_service) {
         server_whowas_record(srv, cl->nick, cl->user, cl->host, cl->realname);
         server_monitor_notify(srv, cl, 0);
+        server_watch_notify(srv, cl, 0);
     }
 
     server_send_common_channels(srv, cl, line, 0);
@@ -353,7 +354,7 @@ static void send_isupport(server_t *srv, client_t *cl) {
         netbuf, "CHANTYPES=#", "CHANMODES=beI,k,l,imnprstzCNPQSTV", "PREFIX=(ohv)@%+",
         nicklen, chanlen, topiclen, "CASEMAPPING=ascii", "MODES=6",
         "STATUSMSG=@%+", "AWAYLEN=400", "KICKLEN=400",
-        "MAXLIST=beI:100", "EXCEPTS=e", "INVEX=I", "MONITOR=100", "SILENCE=15",
+        "MAXLIST=beI:100", "EXCEPTS=e", "INVEX=I", "MONITOR=100", "WATCH=128", "SILENCE=15",
         "EXTBAN=,a", "ELIST=MNU",
     };
     int total = (int)(sizeof tokens / sizeof tokens[0]);
@@ -635,6 +636,25 @@ void server_monitor_notify(server_t *srv, client_t *cl, int online) {
             const char *code = online ? N_MONONLINE : N_MONOFFLINE;
             const char *val = online ? prefix : cl->nick;
             client_reply(watcher, code, NULL, 0, val);
+            break;
+        }
+    }
+}
+
+/* --- WATCH (legacy pre-MONITOR watch-list, numerics 600-607) --------------- */
+
+void server_watch_notify(server_t *srv, client_t *cl, int online) {
+    char cf[NICKLEN];
+    irc_casefold(cf, sizeof cf, cl->nick);
+    char timebuf[32];
+    snprintf(timebuf, sizeof timebuf, "%ld", (long)(online ? cl->signon_time : time(NULL)));
+
+    for (client_t *watcher = srv->all_clients; watcher; watcher = watcher->all_next) {
+        if (watcher == cl) continue;
+        for (int i = 0; i < watcher->n_watch; i++) {
+            if (strcmp(watcher->watch[i], cf) != 0) continue;
+            const char *p[] = {cl->nick, cl->user, cl->host, timebuf};
+            client_reply(watcher, online ? N_LOGON : N_LOGOFF, p, 4, online ? "logged online" : "logged offline");
             break;
         }
     }

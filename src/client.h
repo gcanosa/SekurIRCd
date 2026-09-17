@@ -77,6 +77,8 @@ typedef struct client {
 
     char monitor[100][NICKLEN]; /* /MONITOR watch list, casefolded nicks -- MAX_MONITOR */
     int n_monitor;
+    char watch[128][NICKLEN];   /* legacy /WATCH list, casefolded nicks -- MAX_WATCH */
+    int n_watch;
     char silence[15][256];      /* /SILENCE mask list -- _MAX_SILENCE */
     int n_silence;
 
