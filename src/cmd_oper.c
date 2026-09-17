@@ -1,5 +1,5 @@
 /* Oper commands: OPER, KILL, WALLOPS, REHASH, DIE, RESTART, VHOST, CHGHOST,
- * SETHOST, KLINE/GLINE/UNKLINE/UNGLINE, SQUIT.
+ * SETHOST, KLINE/GLINE/ZLINE/UNKLINE/UNGLINE/UNZLINE, SQUIT.
  * Ported from commands.py's cmd_oper/cmd_kill/etc.
  *
  * Every quit/removal path here only marks a client `quitting` and sets
@@ -368,7 +368,7 @@ static void line_common(server_t *srv, client_t *cl, irc_message_t *msg, const c
             } else snprintf(m, sizeof m, "%s-line %s (by %s, permanent): %s", k->line_type, k->mask, k->set_by, k->reason);
             notice_self(srv, cl, m);
         }
-        if (!any) notice_self(srv, cl, "No active K/G-lines");
+        if (!any) notice_self(srv, cl, "No active K/G/Z-lines");
         return;
     }
     char mask[256];
@@ -416,6 +416,7 @@ static void line_common(server_t *srv, client_t *cl, irc_message_t *msg, const c
 
 void cmd_kline(server_t *srv, client_t *cl, irc_message_t *msg) { line_common(srv, cl, msg, "K"); }
 void cmd_gline(server_t *srv, client_t *cl, irc_message_t *msg) { line_common(srv, cl, msg, "G"); }
+void cmd_zline(server_t *srv, client_t *cl, irc_message_t *msg) { line_common(srv, cl, msg, "Z"); }
 
 static void unline_common(server_t *srv, client_t *cl, const char *mask) {
     if (server_kline_remove(srv, mask)) {
@@ -428,6 +429,7 @@ static void unline_common(server_t *srv, client_t *cl, const char *mask) {
 }
 void cmd_unkline(server_t *srv, client_t *cl, irc_message_t *msg) { unline_common(srv, cl, msg->params[0]); }
 void cmd_ungline(server_t *srv, client_t *cl, irc_message_t *msg) { unline_common(srv, cl, msg->params[0]); }
+void cmd_unzline(server_t *srv, client_t *cl, irc_message_t *msg) { unline_common(srv, cl, msg->params[0]); }
 
 /* --- SQUIT (closes any link, hub or leaf side) / CONNECT (leaf-mode manual
  * dial, see link.c's link_connect_leaf). ------------------------------------ */

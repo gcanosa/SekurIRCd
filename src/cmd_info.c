@@ -1,7 +1,9 @@
 /* Informational commands: VERSION, TIME, MOTD, LUSERS, ADMIN, UPTIME, STATS,
  * TRACE, SERVLIST, SQUERY. Ported from commands.py's cmd_version/etc. */
 #include "cmd.h"
+#include "link.h"
 
+#include <ctype.h>
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
@@ -72,6 +74,24 @@ void cmd_stats(server_t *srv, client_t *cl, irc_message_t *msg) {
         for (int i = 0; i < srv->cfg.n_operators; i++) {
             const char *p[] = {"O", "*", srv->cfg.operators[i].name};
             client_reply(cl, N_STATSOLINE, p, 3, "0");
+        }
+    } else if (strcasecmp(letter, "k") == 0 || strcasecmp(letter, "g") == 0 || strcasecmp(letter, "z") == 0) {
+        if (!(cl->umodes & UMODE_O)) { err_no_privileges(cl); return; }
+        char want = (char)toupper((unsigned char)letter[0]);
+        for (kline_entry_t *k = srv->klines; k; k = k->next) {
+            if (k->line_type[0] != want) continue;
+            const char *p[] = {k->line_type, k->mask};
+            client_reply(cl, N_STATSKLINE, p, 2, k->reason);
+        }
+    } else if (strcmp(letter, "l") == 0) {
+        if (!(cl->umodes & UMODE_O)) { err_no_privileges(cl); return; }
+        for (link_conn_t *lc = srv->links; lc; lc = lc->next) {
+            long idle = (long)difftime(time(NULL), lc->last_activity);
+            char idlebuf[16]; snprintf(idlebuf, sizeof idlebuf, "%ld", idle);
+            char sq[16]; snprintf(sq, sizeof sq, "%zu", lc->sbuf_len);
+            const char *name = lc->peer_name[0] ? lc->peer_name : lc->ip;
+            const char *p[] = {name, sq, idlebuf};
+            client_reply(cl, N_STATSLINKINFO, p, 3, NULL);
         }
     }
     const char *pe[] = {letter[0] ? letter : "*"};
@@ -169,8 +189,10 @@ static const help_entry_t HELP_TABLE[] = {
     {"KILL", {"KILL <nick> [:reason]", "Disconnect a user from the network. Server-oper only."}},
     {"KLINE", {"KLINE [<mask> [<duration>] [:reason]]", "List, or add, an IP ban. Server-oper only."}},
     {"GLINE", {"GLINE [<mask> [<duration>] [:reason]]", "Same as KLINE. Server-oper only."}},
+    {"ZLINE", {"ZLINE [<mask> [<duration>] [:reason]]", "Same as KLINE. Server-oper only."}},
     {"UNKLINE", {"UNKLINE <mask>", "Remove a K-line. Server-oper only."}},
     {"UNGLINE", {"UNGLINE <mask>", "Remove a G-line. Server-oper only."}},
+    {"UNZLINE", {"UNZLINE <mask>", "Remove a Z-line. Server-oper only."}},
     {"GLOB", {"GLOB <pattern>", "Non-standard: glob-match nicknames server-wide."}},
     {"WALLOPS", {"WALLOPS :<text>", "Message every user with mode +w set. Server-oper only."}},
     {"SILENCE", {"SILENCE [(+|-)mask ...]", "Manage your ignore list for private messages; no argument lists it."}},
@@ -178,10 +200,12 @@ static const help_entry_t HELP_TABLE[] = {
     {"ISON", {"ISON <nick> [nick...]", "Check which of the given nicks are currently online."}},
     {"MONITOR", {"MONITOR + nick[,nick...] | - nick[,...] | C | L | S",
                  "IRCv3 efficient online/offline watch list -- the modern alternative to polling ISON."}},
+    {"WATCH", {"WATCH +nick | -nick | C | L | S [...]",
+               "Legacy pre-MONITOR watch list (one +/-nick or C/L/S per argument). Prefer MONITOR."}},
     {"REHASH", {"REHASH", "Reload the config file live. Server-oper only."}},
     {"DIE", {"DIE [password]", "Shut the server down. Server-oper only."}},
     {"RESTART", {"RESTART [password]", "Shut the server down and restart it in place. Server-oper only."}},
-    {"STATS", {"STATS <letter>", "m = command usage counts, u = uptime, o = operator names (oper-only)."}},
+    {"STATS", {"STATS <letter>", "m = command usage, u = uptime, o = operators, k/g/z = K/G/Z-lines, l = links (all oper-only except m/u)."}},
     {"LUSERS", {"LUSERS", "Re-send the user/server counts sent at registration."}},
     {"UPTIME", {"UPTIME", "Non-standard: show server uptime."}},
     {"ADMIN", {"ADMIN", "Show administrative contact info from [admin]."}},
@@ -219,7 +243,7 @@ static const help_entry_t HELP_TABLE[] = {
 static const char *GENERAL_HELP[] = {
     "SekurIRCd commands: NICK USER JOIN PART QUIT PRIVMSG NOTICE TOPIC NAMES",
     "WHO WHOIS WHOWAS AWAY SETNAME MODE OPER INVITE KNOCK LIST LINKS MAP KICK",
-    "KILL MONITOR SILENCE USERHOST ISON WALLOPS ADMIN LUSERS STATS VERSION",
+    "KILL MONITOR WATCH SILENCE USERHOST ISON WALLOPS ADMIN LUSERS STATS VERSION",
     "TIME INFO MOTD REHASH VHOST CHGHOST SETHOST SAJOIN SAPART SAMODE CONNECT",
     "SQUIT TRACE SERVLIST SQUERY REGISTER AUTHENTICATE.",
     "Type /HELP <command> for that command's usage and parameters.",

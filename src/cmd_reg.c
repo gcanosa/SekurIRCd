@@ -90,12 +90,14 @@ void cmd_nick(server_t *srv, client_t *cl, irc_message_t *msg) {
     client_send(cl, line);
     server_send_common_channels(srv, cl, line, 0);
     server_monitor_notify(srv, cl, 0); /* MONITOR: old nick went offline, new one online below */
+    server_watch_notify(srv, cl, 0);
 
     HASH_DEL(srv->users, cl);
     snprintf(cl->nick, sizeof cl->nick, "%s", newnick);
     snprintf(cl->casefold_nick, sizeof cl->casefold_nick, "%s", cf);
     server_add_user(srv, cl);
     server_monitor_notify(srv, cl, 1);
+    server_watch_notify(srv, cl, 1);
 }
 
 void cmd_user(server_t *srv, client_t *cl, irc_message_t *msg) {

@@ -68,9 +68,11 @@ static void emit_stats_snote(server_t *srv) {
         if (ch->modes & CMODE_R) n_reg_chans++;
     }
 
-    int n_klines = 0, n_glines = 0, n_dnsbl_active = 0;
+    int n_klines = 0, n_glines = 0, n_zlines = 0, n_dnsbl_active = 0;
     for (kline_entry_t *k = srv->klines; k; k = k->next) {
-        if (k->line_type[0] == 'K') n_klines++; else n_glines++;
+        if (k->line_type[0] == 'K') n_klines++;
+        else if (k->line_type[0] == 'Z') n_zlines++;
+        else n_glines++;
         if (strcmp(k->set_by, "dnsbl") == 0) n_dnsbl_active++;
     }
 
@@ -111,9 +113,9 @@ static void emit_stats_snote(server_t *srv) {
     }
 
     log_info("stats", "users=%d (peak %d), channels=%d (%d registered), connections=%ld total, "
-              "lines active=%d K/%d G (%d from DNSBL), dnsbl hits=%ld total, ircd cpu=%.1f%% mem=%ldMB%s",
+              "lines active=%d K/%d G/%d Z (%d from DNSBL), dnsbl hits=%ld total, ircd cpu=%.1f%% mem=%ldMB%s",
               HASH_COUNT(srv->users), srv->max_users_seen, n_chans, n_reg_chans, srv->total_connections,
-              n_klines, n_glines, n_dnsbl_active, srv->dnsbl_hits,
+              n_klines, n_glines, n_zlines, n_dnsbl_active, srv->dnsbl_hits,
               ircd_cpu, ircd_rss / 1024, chanserv_part);
 }
 
@@ -308,7 +310,7 @@ static client_t *accept_common(server_t *srv, int listen_fd) {
             ? irc_parse_duration(srv->cfg.security.connect_flood_kline_duration) : 0;
         if (dur < 0) dur = 0;
         server_kline_add(srv, ipbuf, "Connecting too fast (connect flood protection)",
-                          "connect-flood", "K", dur); /* itself calls server_notify_opers */
+                          "connect-flood", "Z", dur); /* pure-IP pre-registration ban; itself calls server_notify_opers */
         const char *msg = "ERROR :Closing Link: reconnecting too fast\r\n";
         if (write(fd, msg, strlen(msg)) < 0) { /* best effort; peer may already be gone */ }
         close(fd);
@@ -568,7 +570,7 @@ static void drain_worker_results(server_t *srv) {
                     if (as_kline) {
                         long dur = srv->cfg.dnsbl.kline_duration[0] ? irc_parse_duration(srv->cfg.dnsbl.kline_duration) : 0;
                         if (dur < 0) dur = 0;
-                        server_kline_add(srv, cl->ip, reason, "dnsbl", "K", dur); /* itself calls server_notify_opers */
+                        server_kline_add(srv, cl->ip, reason, "dnsbl", "Z", dur); /* pure-IP pre-registration ban; itself calls server_notify_opers */
                     } else {
                         char snote[400];
                         snprintf(snote, sizeof snote, "Rejected connection from %s: %s", cl->ip, reason);

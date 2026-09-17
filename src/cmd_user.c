@@ -530,6 +530,83 @@ void cmd_monitor(server_t *srv, client_t *cl, irc_message_t *msg) {
     }
 }
 
+#define MAX_WATCH 128
+
+static void watch_discard(client_t *cl, const char *cf) {
+    for (int i = 0; i < cl->n_watch; i++) {
+        if (strcmp(cl->watch[i], cf) == 0) {
+            memmove(cl->watch[i], cl->watch[i + 1], (size_t)(cl->n_watch - i - 1) * sizeof cl->watch[0]);
+            cl->n_watch--;
+            return;
+        }
+    }
+}
+
+/* Legacy pre-MONITOR watch list: unlike MONITOR's single comma-separated
+ * argument, each WATCH parameter is its own +nick/-nick token (or a bare
+ * C/L/S letter), and a single command line may mix several of these. */
+void cmd_watch(server_t *srv, client_t *cl, irc_message_t *msg) {
+    for (int pi = 0; pi < msg->nparams; pi++) {
+        const char *tok = msg->params[pi];
+        if (tok[0] == '+' || tok[0] == '-') {
+            char cf[NICKLEN]; irc_casefold(cf, sizeof cf, tok + 1);
+            if (!cf[0]) continue;
+            if (tok[0] == '-') {
+                watch_discard(cl, cf);
+                const char *p[] = {tok + 1, "*", "*", "0"};
+                client_reply(cl, N_WATCHOFF, p, 4, "stopped watching");
+                continue;
+            }
+            int dup = 0;
+            for (int i = 0; i < cl->n_watch; i++) if (strcmp(cl->watch[i], cf) == 0) { dup = 1; break; }
+            if (!dup) {
+                if (cl->n_watch >= MAX_WATCH) continue;
+                snprintf(cl->watch[cl->n_watch], NICKLEN, "%s", cf);
+                cl->n_watch++;
+            }
+            client_t *u = server_find_user(srv, tok + 1);
+            char timebuf[32];
+            if (u) {
+                snprintf(timebuf, sizeof timebuf, "%ld", (long)u->signon_time);
+                const char *p[] = {u->nick, u->user, u->host, timebuf};
+                client_reply(cl, N_NOWON, p, 4, "is online");
+            } else {
+                snprintf(timebuf, sizeof timebuf, "%ld", 0L);
+                const char *p[] = {tok + 1, "*", "*", timebuf};
+                client_reply(cl, N_NOWOFF, p, 4, "is offline");
+            }
+        } else if (strcasecmp(tok, "C") == 0) {
+            cl->n_watch = 0;
+        } else if (strcasecmp(tok, "L") == 0) {
+            for (int i = 0; i < cl->n_watch; i++) {
+                client_t *u = server_find_user(srv, cl->watch[i]);
+                char timebuf[32];
+                if (u) {
+                    snprintf(timebuf, sizeof timebuf, "%ld", (long)u->signon_time);
+                    const char *p[] = {u->nick, u->user, u->host, timebuf};
+                    client_reply(cl, N_NOWON, p, 4, "is online");
+                } else {
+                    const char *p[] = {cl->watch[i], "*", "*", "0"};
+                    client_reply(cl, N_NOWOFF, p, 4, "is offline");
+                }
+            }
+            client_reply(cl, N_ENDOFWATCHLIST, NULL, 0, "End of WATCH L");
+        } else if (strcasecmp(tok, "S") == 0) {
+            char nbuf[8]; snprintf(nbuf, sizeof nbuf, "%d", cl->n_watch);
+            char msgbuf[64]; snprintf(msgbuf, sizeof msgbuf, "You have %d and are on %d WATCH entries", cl->n_watch, cl->n_watch);
+            client_reply(cl, N_WATCHSTAT, NULL, 0, msgbuf);
+            for (int i = 0; i < cl->n_watch; i++) {
+                client_t *u = server_find_user(srv, cl->watch[i]);
+                if (!u) continue;
+                char timebuf[32]; snprintf(timebuf, sizeof timebuf, "%ld", (long)u->signon_time);
+                const char *p[] = {u->nick, u->user, u->host, timebuf};
+                client_reply(cl, N_NOWON, p, 4, "is online");
+            }
+            client_reply(cl, N_ENDOFWATCHLIST, NULL, 0, "End of WATCH S");
+        }
+    }
+}
+
 #define MAX_SILENCE 15
 
 void cmd_silence(server_t *srv, client_t *cl, irc_message_t *msg) {

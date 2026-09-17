@@ -131,7 +131,9 @@ void irc_add_time_tag(char *line, size_t linesz);
 #define N_LOCALUSERS       "265"
 #define N_GLOBALUSERS      "266"
 
+#define N_STATSLINKINFO    "211"
 #define N_STATSCOMMANDS    "212"
+#define N_STATSKLINE       "216"
 #define N_ENDOFSTATS       "219"
 #define N_STATSCONN        "250"
 #define N_STATSUPTIME      "242"
@@ -210,6 +212,15 @@ void irc_add_time_tag(char *line, size_t linesz);
 #define N_MONLIST          "732"
 #define N_ENDOFMONLIST     "733"
 #define N_MONLISTFULL      "734"
+
+#define N_LOGON            "600"
+#define N_LOGOFF           "601"
+#define N_WATCHOFF         "602"
+#define N_WATCHSTAT        "603"
+#define N_NOWON            "604"
+#define N_NOWOFF           "605"
+#define N_WATCHLIST        "606"
+#define N_ENDOFWATCHLIST   "607"
 
 #define N_UNKNOWNERROR     "400"
 #define N_NOSUCHNICK       "401"
