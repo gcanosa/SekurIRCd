@@ -345,17 +345,27 @@ void cmd_sethost(server_t *srv, client_t *cl, irc_message_t *msg) {
 
 /* --- K/G-lines --------------------------------------------------------------- */
 
+/* "YYYY-MM-DD HH:MM:SS UTC", easier to read at a glance than a raw
+ * epoch/duration when an oper is scanning a K/G-line list or add notice. */
+static void format_expiry(time_t t, char *out, size_t outsz) {
+    struct tm tmv;
+    gmtime_r(&t, &tmv);
+    strftime(out, outsz, "%Y-%m-%d %H:%M:%S UTC", &tmv);
+}
+
 static void line_common(server_t *srv, client_t *cl, irc_message_t *msg, const char *line_type) {
     server_kline_prune_expired(srv);
     if (msg->nparams < 1) {
         int any = 0;
-        time_t now = time(NULL);
         for (kline_entry_t *k = srv->klines; k; k = k->next) {
             any = 1;
             char m[500];
-            if (k->expires_at) snprintf(m, sizeof m, "%s-line %s (by %s, expires in %llds): %s",
-                                          k->line_type, k->mask, k->set_by, (long long)(k->expires_at - now), k->reason);
-            else snprintf(m, sizeof m, "%s-line %s (by %s, permanent): %s", k->line_type, k->mask, k->set_by, k->reason);
+            if (k->expires_at) {
+                char exp[32];
+                format_expiry(k->expires_at, exp, sizeof exp);
+                snprintf(m, sizeof m, "%s-line %s (by %s, expires %s): %s",
+                         k->line_type, k->mask, k->set_by, exp, k->reason);
+            } else snprintf(m, sizeof m, "%s-line %s (by %s, permanent): %s", k->line_type, k->mask, k->set_by, k->reason);
             notice_self(srv, cl, m);
         }
         if (!any) notice_self(srv, cl, "No active K/G-lines");
@@ -380,8 +390,11 @@ static void line_common(server_t *srv, client_t *cl, irc_message_t *msg, const c
     server_kline_add(srv, maskbuf, reason, cl->nick, line_type, duration);
 
     char m[400];
-    if (duration) snprintf(m, sizeof m, "%s-line added: %s (%s) [expires in %lds]", line_type, maskbuf, reason, duration);
-    else snprintf(m, sizeof m, "%s-line added: %s (%s) [permanent]", line_type, maskbuf, reason);
+    if (duration) {
+        char exp[32];
+        format_expiry(time(NULL) + duration, exp, sizeof exp);
+        snprintf(m, sizeof m, "%s-line added: %s (%s) [expires %s]", line_type, maskbuf, reason, exp);
+    } else snprintf(m, sizeof m, "%s-line added: %s (%s) [permanent]", line_type, maskbuf, reason);
     notice_self(srv, cl, m);
     if (irc_glob_match(maskbuf, cl->ip))
         notice_self(srv, cl, "Warning: this mask matches your own address -- you won't be able to reconnect from it while it's active");

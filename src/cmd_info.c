@@ -44,7 +44,8 @@ static void uptime_str(server_t *srv, char *out, size_t outsz) {
     long d = up / 86400; up %= 86400;
     long h = up / 3600; up %= 3600;
     long m = up / 60; long s = up % 60;
-    snprintf(out, outsz, "Server Up %ld days %02ld:%02ld:%02ld", d, h, m, s);
+    if (d > 0) snprintf(out, outsz, "Server Up %ld day%s %02ld:%02ld:%02ld", d, d == 1 ? "" : "s", h, m, s);
+    else snprintf(out, outsz, "Server Up %02ld:%02ld:%02ld", h, m, s);
 }
 
 void cmd_uptime(server_t *srv, client_t *cl, irc_message_t *msg) {
