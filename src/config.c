@@ -242,6 +242,9 @@ void config_defaults(config_t *out) {
     out->security.ident_timeout = 3.0;
     out->security.rdns_enabled = 1;
     out->security.rdns_timeout = 3.0;
+    out->security.connect_flood_max = 5;
+    out->security.connect_flood_window = 10.0;
+    snprintf(out->security.connect_flood_kline_duration, sizeof out->security.connect_flood_kline_duration, "10m");
 
     snprintf(out->messages.motd, CFG_PATH, "ircd.motd");
     out->messages.max_message_length = 400;
@@ -344,6 +347,9 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
     if (cfg_get_double(sec, "ident_timeout", 3.0, &out->security.ident_timeout, errbuf, errbufsz, "security.ident_timeout")) return -1;
     if (cfg_get_bool(sec, "rdns_enabled", 1, &out->security.rdns_enabled, errbuf, errbufsz, "security.rdns_enabled")) return -1;
     if (cfg_get_double(sec, "rdns_timeout", 3.0, &out->security.rdns_timeout, errbuf, errbufsz, "security.rdns_timeout")) return -1;
+    if (cfg_get_int(sec, "connect_flood_max", 5, &out->security.connect_flood_max, errbuf, errbufsz, "security.connect_flood_max")) return -1;
+    if (cfg_get_double(sec, "connect_flood_window", 10.0, &out->security.connect_flood_window, errbuf, errbufsz, "security.connect_flood_window")) return -1;
+    if (cfg_get_str(sec, "connect_flood_kline_duration", "10m", out->security.connect_flood_kline_duration, sizeof out->security.connect_flood_kline_duration, errbuf, errbufsz, "security.connect_flood_kline_duration")) return -1;
 
     {
         char probe[CFG_STR];

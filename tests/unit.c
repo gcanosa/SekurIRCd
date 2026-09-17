@@ -267,6 +267,29 @@ static void test_config_load_missing_file(void) {
     assert(err[0] != '\0');
 }
 
+static void test_connect_flood_throttle(void) {
+    cfg_security_t sec;
+    memset(&sec, 0, sizeof sec);
+    sec.connect_flood_max = 3;
+    sec.connect_flood_window = 10.0;
+
+    /* first 3 connects from the same IP within the window: not flooding yet */
+    assert(net_connect_flood_hit(&sec, "203.0.113.9") == 0);
+    assert(net_connect_flood_hit(&sec, "203.0.113.9") == 0);
+    assert(net_connect_flood_hit(&sec, "203.0.113.9") == 0);
+    /* 4th connect trips it */
+    assert(net_connect_flood_hit(&sec, "203.0.113.9") == 1);
+    /* stays tripped while still spamming within the window */
+    assert(net_connect_flood_hit(&sec, "203.0.113.9") == 1);
+
+    /* a different IP has its own independent counter */
+    assert(net_connect_flood_hit(&sec, "203.0.113.10") == 0);
+
+    /* connect_flood_max <= 0 disables the check entirely */
+    sec.connect_flood_max = 0;
+    for (int i = 0; i < 10; i++) assert(net_connect_flood_hit(&sec, "203.0.113.11") == 0);
+}
+
 static void test_proc_stats(void) {
     double cpu = -1;
     long rss = -1;
@@ -301,7 +324,8 @@ int main(void) {
     test_config_defaults();
     test_config_cloak_format();
     test_config_load_missing_file();
+    test_connect_flood_throttle();
     test_proc_stats();
-    printf("OK (%d assertions across %d tests)\n", 0, 23);
+    printf("OK (%d assertions across %d tests)\n", 0, 24);
     return 0;
 }

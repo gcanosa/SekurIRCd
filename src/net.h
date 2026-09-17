@@ -2,6 +2,8 @@
 #ifndef SEKURIRCD_NET_H
 #define SEKURIRCD_NET_H
 
+#include "config.h"
+
 #include <sys/types.h>
 
 struct server;
@@ -15,6 +17,11 @@ int proc_stats(pid_t pid, double *cpu_pct, long *rss_kb);
  * or -1 on error. */
 int net_listen(const char *bind_addr, int port);
 int net_set_nonblocking(int fd);
+
+/* Per-IP connect-rate throttle used by accept_common -- exposed (non-static)
+ * only so tests/unit.c can exercise it directly. Returns 1 once `ip` exceeds
+ * sec->connect_flood_max connects within sec->connect_flood_window seconds. */
+int net_connect_flood_hit(const cfg_security_t *sec, const char *ip);
 
 /* Runs until srv->shutdown_requested. Returns 0 normally. */
 int net_run(struct server *srv);

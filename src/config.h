@@ -62,6 +62,9 @@ typedef struct {
     char restart_password_hash[CFG_STR];
     int max_connections;
     int max_connections_per_ip;
+    int connect_flood_max;
+    double connect_flood_window;
+    char connect_flood_kline_duration[16];
     char reserved_nicks[CFG_MAX_RESERVED_NICKS][CFG_STR];
     int n_reserved_nicks;
     int ident_enabled;
