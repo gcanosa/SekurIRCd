@@ -24,6 +24,17 @@ pid_running() {
     [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
 }
 
+# Fallback for when the daemon was started outside this script (wrong cwd,
+# hand-run binary, etc.) and its pidfile landed somewhere other than where
+# we look -- pid_running() would then wrongly report "stopped" even though
+# a matching process is alive. Scans by command line instead of trusting
+# the pidfile path. Read-only: never kills anything, just flags the mismatch
+# (see .claude/skills/restart-services -- this project has been burned by
+# pidfile/process mismatches before, so no pkill-by-pattern here either).
+proc_running() {
+    pgrep -f "$1" >/dev/null 2>&1
+}
+
 require_bin() {
     [ -x "$1" ] || { echo "$1 not found -- run 'make' first" >&2; exit 1; }
 }
@@ -52,12 +63,16 @@ cmd_stop() {
 cmd_status() {
     if pid_running "$IRCD_PIDFILE"; then
         echo "sekurircd: running (pid $(cat "$IRCD_PIDFILE"))"
+    elif proc_running "sekurircd .*--daemon"; then
+        echo "sekurircd: running, but pidfile $IRCD_PIDFILE is missing/stale -- found a matching process by scanning instead. stop/restart via this script won't work until it's started through here (or the pidfile is pointed at the right pid)."
     else
         echo "sekurircd: stopped"
     fi
     if chanserv_configured; then
         if pid_running "$CHANSERV_PIDFILE"; then
             echo "chanserv:  running (pid $(cat "$CHANSERV_PIDFILE"))"
+        elif proc_running "chanserv .*--daemon"; then
+            echo "chanserv:  running, but pidfile $CHANSERV_PIDFILE is missing/stale -- found a matching process by scanning instead. stop/restart via this script won't work until it's started through here (or the pidfile is pointed at the right pid)."
         else
             echo "chanserv:  stopped"
         fi
