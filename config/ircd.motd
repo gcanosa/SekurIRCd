@@ -1,82 +1,82 @@
 
-     ____          _                  _   _         _
-    / ___|   ___  | | __ _   _  _ __ | \ | |  ___  | |_
-    \___ \  / _ \ | |/ /| | | || '__||  \| | / _ \ | __|
-     ___) ||  __/ |   < | |_| || |   | |\  ||  __/ | |_
-    |____/  \___| |_|\_\ \__,_||_|   |_| \_| \___|  \__|
+11     ____          _                  _   _         _   
+11    / ___|   ___  | | __ _   _  _ __ | \ | |  ___  | |_ 
+12    \___ \  / _ \ | |/ /| | | || '__||  \| | / _ \ | __|
+12     ___) ||  __/ |   < | |_| || |   | |\  ||  __/ | |_ 
+02    |____/  \___| |_|\_\ \__,_||_|   |_| \_| \___|  \__|
 
-          small network  -  secure by default  -  no nonsense
-                  powered by SekurIRCd v0.8.4
+15          small network  -  secure by default  -  no nonsense
+14                  powered by SekurIRCd v0.8.4
 
-=====================================================================
- [ NETWORK ]
-=====================================================================
+11=====================================================================
+11 NETWORK 
+11=====================================================================
 
-  Plaintext ........ port 6667
-  TLS/SSL .......... port 6697   (recommended - gets you user mode +z)
-  Hostnames ........ cloaked; your real IP is not shown to other users
-  Services ......... ChanServ   /msg ChanServ HELP
-  Accounts ......... SASL PLAIN, or /REGISTER <account> <password>
+  11Plaintext ..... port 6667
+  11TLS/SSL ....... port 6697   (09recommended - gets you user mode +z)
+  11Hostnames ..... cloaked; your real IP is not shown to other users
+  11Services ...... ChanServ   /msg ChanServ HELP
+  11Accounts ...... SASL PLAIN, or /REGISTER <account> <password>
 
-=====================================================================
- [ CHANNELS ]
-=====================================================================
+03=====================================================================
+03 CHANNELS 
+03=====================================================================
 
-  #SekurNet ........ main lobby - say hi
-  #help ............ questions about the network or your client
-  #SekurIRCd-dev ... ircd development, live commit/PR feed
+  03#SekurNet ........ main lobby - say hi
+  03#help ............ questions about the network or your client
+  03#SekurIRCd-dev ... ircd development, live commit/PR feed
 
-  Want your own channel? See [ REGISTERING A CHANNEL ] below.
+  Want your own channel? See 06[ REGISTERING A CHANNEL ] below.
 
-=====================================================================
- [ RULES ]
-=====================================================================
+04=====================================================================
+04 RULES 
+04=====================================================================
 
-  By connecting you agree to the following. No exceptions.
+  By connecting you agree to the following. 04No exceptions.
 
-   1. Be civil. No harassment, hate speech, threats or doxxing.
-   2. No flooding, spamming, advertising or mass-highlighting.
-   3. No botnets, drones, clones or connection proxies for abuse.
+   081. Be civil. No harassment, hate speech, threats or doxxing.
+   082. No flooding, spamming, advertising or mass-highlighting.
+   083. No botnets, drones, clones or connection proxies for abuse.
       Bots are fine if they behave and a channel op allows them.
-   4. No warez, cracks, malware, stolen data or illegal content.
-   5. No porn or NSFW content outside channels set up for it.
-   6. No nick or channel squatting, and no impersonating staff.
-   7. Channel ops run their channels; network staff run the network.
+   084. No warez, cracks, malware, stolen data or illegal content.
+   085. No porn or NSFW content outside channels set up for it.
+   086. No nick or channel squatting, and no impersonating staff.
+   087. Channel ops run their channels; network staff run the network.
       Take disputes to #help, not to the channel you got kicked from.
-   8. Don't ask for oper. If we need you, we'll ask you.
+   088. Don't ask for oper. If we need you, we'll ask you.
 
-  Breaking the rules gets you a kick, a K-line or a permanent ban -
+  Breaking the rules gets you a kick, a 04K-line or a 04permanent ban -
   our call, no appeals via PM spam. Incidents may be reported to
   your provider. If you wouldn't let your kids do it at home, don't
   do it here.
 
-=====================================================================
- [ REGISTERING A CHANNEL ]
-=====================================================================
+06=====================================================================
+06 REGISTERING A CHANNEL 
+06=====================================================================
 
-  1. Create it and hold op:   /JOIN #mychannel
-  2. Register it:             /msg ChanServ REGISTER #mychannel <pass>
-  3. Keep it alive (optional) /msg ChanServ JOIN #mychannel <pass>
+  1. Create it and hold op:   11/JOIN #mychannel
+  2. Register it:             11/msg ChanServ REGISTER #mychannel <pass>
+  3. Keep it alive (optional) 11/msg ChanServ JOIN #mychannel <pass>
      ChanServ stays inside, so the channel survives everyone leaving.
 
   Lost op after a reconnect? Get it back with:
 
-     /msg ChanServ IDENTIFY #mychannel <pass>
+     11/msg ChanServ IDENTIFY #mychannel <pass>
 
   Share ops without sharing the password:
-     /msg ChanServ ACCESS #mychannel ADD *!*@their.host o <pass>
+     11/msg ChanServ ACCESS #mychannel ADD *!*@their.host o <pass>
 
   Pick a strong channel password and keep it to yourself.
-  Full command list: /msg ChanServ HELP
+  Full command list: 11/msg ChanServ HELP
 
-=====================================================================
- [ PRIVACY ]
-=====================================================================
+14=====================================================================
+14 PRIVACY 
+14=====================================================================
 
   Server logs are kept for abuse handling only and are never sold
-  or shared. Staff never ask for your password - don't give it out.
+  or shared. Staff never ask for your password - 04don't give it out.
 
-=====================================================================
+10=====================================================================
 
-  Type /MOTD to read this again.        Be smart. Be chill. Have fun.
+  Type 11/MOTD to read this again.        09Be smart. Be chill. Have fun.
 
