@@ -255,6 +255,9 @@ void cmd_sajoin(server_t *srv, client_t *cl, irc_message_t *msg) {
         snprintf(m, sizeof m, "%s joined: %s", target->nick, joined);
         notice_self(srv, cl, m);
         log_info("chan", "%s SAJOINed %s to %s", cl->nick, target->nick, joined);
+        char snote[800];
+        snprintf(snote, sizeof snote, "%s used SAJOIN to put %s in %s", cl->nick, target->nick, joined);
+        server_notify_opers(srv, snote);
     }
 }
 
@@ -286,6 +289,9 @@ void cmd_sapart(server_t *srv, client_t *cl, irc_message_t *msg) {
         snprintf(m, sizeof m, "%s parted: %s", target->nick, parted);
         notice_self(srv, cl, m);
         log_info("chan", "%s SAPARTed %s from %s", cl->nick, target->nick, parted);
+        char snote[800];
+        snprintf(snote, sizeof snote, "%s used SAPART to remove %s from %s", cl->nick, target->nick, parted);
+        server_notify_opers(srv, snote);
     }
 }
 
@@ -810,4 +816,8 @@ void cmd_samode(server_t *srv, client_t *cl, irc_message_t *msg) {
     int nargs = 0;
     for (int i = 2; i < msg->nparams && nargs < 16; i++) args[nargs++] = msg->params[i];
     cmd_apply_channel_mode(srv, cl, chan, msg->params[1], args, nargs, 1);
+    log_info("chan", "%s SAMODEd %s: %s", cl->nick, chan->name, msg->params[1]);
+    char snote[400];
+    snprintf(snote, sizeof snote, "%s used SAMODE on %s: %s", cl->nick, chan->name, msg->params[1]);
+    server_notify_opers(srv, snote);
 }
