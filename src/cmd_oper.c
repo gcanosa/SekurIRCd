@@ -29,6 +29,9 @@ static void broadcast_chghost(server_t *srv, client_t *cl, const char *old_prefi
 static void finish_oper(server_t *srv, client_t *cl, const char *op_name, int pw_ok) {
     if (!pw_ok) {
         cl->oper_fails++;
+        char snote[300];
+        snprintf(snote, sizeof snote, "Failed OPER attempt by %s (%s@%s)", cl->nick, cl->user, cl->host);
+        server_notify_opers(srv, snote);
         if (cl->oper_fails >= MAX_OPER_FAILS) {
             snprintf(cl->quit_reason, sizeof cl->quit_reason, "Too many failed OPER attempts");
             cl->quitting = 1;
@@ -116,6 +119,9 @@ void cmd_oper(server_t *srv, client_t *cl, irc_message_t *msg) {
         return;
     }
     client_reply(cl, N_NOOPERHOST, NULL, 0, "No O-lines for your host");
+    char snote[300];
+    snprintf(snote, sizeof snote, "Failed OPER attempt by %s (%s@%s)", cl->nick, cl->user, cl->host);
+    server_notify_opers(srv, snote);
 }
 
 /* Optional extra password gate for /DIE and /RESTART, independent of the
@@ -150,6 +156,10 @@ void cmd_kill(server_t *srv, client_t *cl, irc_message_t *msg) {
     snprintf(target->quit_reason, sizeof target->quit_reason, "Killed (%s (%s))", cl->nick, reason);
     target->quitting = 1;
     log_info("oper", "%s KILLed %s: %s", cl->nick, target->nick, reason);
+
+    char snote[400];
+    snprintf(snote, sizeof snote, "Received KILL message for %s. From %s: %s", target->nick, cl->nick, reason);
+    server_notify_opers(srv, snote);
 }
 
 void cmd_wallops(server_t *srv, client_t *cl, irc_message_t *msg) {
@@ -290,6 +300,8 @@ void cmd_vhost(server_t *srv, client_t *cl, irc_message_t *msg) {
         broadcast_chghost(srv, cl, old_prefix);
         char m[300]; snprintf(m, sizeof m, "vhost cleared; host is now %s", cl->host);
         notice_self(srv, cl, m);
+        char snote[300]; snprintf(snote, sizeof snote, "%s cleared their vhost", cl->nick);
+        server_notify_opers(srv, snote);
         return;
     }
     cfg_vhost_t *match = NULL;
@@ -304,6 +316,8 @@ void cmd_vhost(server_t *srv, client_t *cl, irc_message_t *msg) {
     char m[300]; snprintf(m, sizeof m, "vhost set to %s", match->host);
     notice_self(srv, cl, m);
     log_info("oper", "%s activated vhost %s", cl->nick, match->host);
+    char snote[300]; snprintf(snote, sizeof snote, "%s activated vhost %s", cl->nick, match->host);
+    server_notify_opers(srv, snote);
 }
 
 void cmd_chghost(server_t *srv, client_t *cl, irc_message_t *msg) {
@@ -322,6 +336,8 @@ void cmd_chghost(server_t *srv, client_t *cl, irc_message_t *msg) {
     char m[300]; snprintf(m, sizeof m, "%s's host is now %s", target->nick, new_host);
     notice_self(srv, cl, m);
     log_info("oper", "%s used CHGHOST on %s -> %s", cl->nick, target->nick, new_host);
+    char snote[400]; snprintf(snote, sizeof snote, "%s used CHGHOST on %s -> %s", cl->nick, target->nick, new_host);
+    server_notify_opers(srv, snote);
 }
 
 void cmd_sethost(server_t *srv, client_t *cl, irc_message_t *msg) {
@@ -333,6 +349,8 @@ void cmd_sethost(server_t *srv, client_t *cl, irc_message_t *msg) {
         broadcast_chghost(srv, cl, old_prefix);
         char m[300]; snprintf(m, sizeof m, "host cleared; host is now %s", cl->host);
         notice_self(srv, cl, m);
+        char snote[300]; snprintf(snote, sizeof snote, "%s cleared their SETHOST", cl->nick);
+        server_notify_opers(srv, snote);
         return;
     }
     if (!irc_valid_host(requested)) {
@@ -345,6 +363,8 @@ void cmd_sethost(server_t *srv, client_t *cl, irc_message_t *msg) {
     char m[300]; snprintf(m, sizeof m, "host is now %s", requested);
     notice_self(srv, cl, m);
     log_info("oper", "%s set own host via SETHOST -> %s", cl->nick, requested);
+    char snote[400]; snprintf(snote, sizeof snote, "%s set own host via SETHOST -> %s", cl->nick, requested);
+    server_notify_opers(srv, snote);
 }
 
 /* --- K/G-lines --------------------------------------------------------------- */

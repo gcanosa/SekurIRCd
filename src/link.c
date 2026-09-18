@@ -223,6 +223,9 @@ int link_connect_leaf(server_t *srv) {
     lc->next = srv->links;
     srv->links = lc;
     log_info("link", "connected to uplink '%s'%s", up->name, lc->ssl ? " (TLS)" : "");
+    char snote[200];
+    snprintf(snote, sizeof snote, "Link with %s established", up->name);
+    server_notify_opers(srv, snote);
     return 0;
 
 fail:
@@ -348,8 +351,14 @@ void link_reap(server_t *srv) {
         }
         if (lc->ssl) SSL_free(lc->ssl); /* abrupt close, no SSL_shutdown close_notify -- fine for a teardown path */
         if (lc->fd >= 0) close(lc->fd);
-        if (lc->peer_name[0]) log_info("link", "link '%s' closed", lc->peer_name);
-        else log_info("link", "unauthenticated link from %s closed", lc->ip[0] ? lc->ip : "?");
+        if (lc->peer_name[0]) {
+            log_info("link", "link '%s' closed", lc->peer_name);
+            char snote[200];
+            snprintf(snote, sizeof snote, "Link with %s lost", lc->peer_name);
+            server_notify_opers(srv, snote);
+        } else {
+            log_info("link", "unauthenticated link from %s closed", lc->ip[0] ? lc->ip : "?");
+        }
         free(lc);
     }
 }
@@ -406,6 +415,9 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
             irc_build(resp, sizeof resp, NULL, 0, NULL, "SERVER", rp, 2, "sekurircd-c link");
             link_forward_line(lc, resp);
             log_info("link", "link '%s' authenticated", name);
+            char snote[200];
+            snprintf(snote, sizeof snote, "Link with %s established", name);
+            server_notify_opers(srv, snote);
             return 0;
         }
         return 0; /* ignore anything else pre-auth */
