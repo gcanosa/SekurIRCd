@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Commands and modes · SekurIRCd docs</title>
+<meta name="description" content="User, channel and operator commands, channel modes and user modes supported by SekurIRCd.">
+<link rel="icon" href="../img/favicon.ico" sizes="any">
+<script>(function(){var t;try{t=localStorage.getItem("theme")}catch(e){}if(t!=="light"&&t!=="dark")t=matchMedia("(prefers-color-scheme: light)").matches?"light":"dark";document.documentElement.dataset.theme=t})()</script>
+<link rel="stylesheet" href="../css/site.css">
+</head>
+<body data-root="../" data-page="commands">
+<header id="site-header"></header>
+<div class="wrap docs-layout">
+<aside id="docs-nav" class="docs-nav"></aside>
+<main class="docs">
+<h1>commands &amp; modes</h1>
+<p>Type <code>/HELP</code> for a summary and <code>/HELP &lt;command&gt;</code> for syntax on any command below.</p>
+
+<h2>user commands</h2>
+<div class="tablewrap"><table>
+<tr><th>Command</th><th>Purpose</th></tr>
+<tr><td><code>NICK</code> <code>USER</code> <code>PASS</code> <code>CAP</code> <code>QUIT</code></td><td>Registration and disconnect. <code>CAP</code> negotiates IRCv3 features.</td></tr>
+<tr><td><code>JOIN</code> <code>PART</code> <code>NAMES</code> <code>TOPIC</code> <code>LIST</code></td><td>Channels. <code>LIST</code> supports ELIST conditions (<code>&gt;n</code>, <code>&lt;n</code>, glob).</td></tr>
+<tr><td><code>KICK</code> <code>INVITE</code> <code>KNOCK</code></td><td>Moderation and access. <code>KNOCK</code> asks ops for an invite to a <code>+i</code>/<code>+k</code> channel.</td></tr>
+<tr><td><code>PRIVMSG</code> <code>NOTICE</code></td><td>Messages. Prefix a channel with <code>@</code>, <code>%</code> or <code>+</code> (STATUSMSG) to reach only that rank or higher.</td></tr>
+<tr><td><code>WHO</code> <code>WHOIS</code> <code>WHOWAS</code> <code>USERHOST</code> <code>ISON</code></td><td>Lookups. <code>WHO</code> supports WHOX: <code>WHO &lt;mask&gt; %fields,token</code>.</td></tr>
+<tr><td><code>MONITOR</code> <code>WATCH</code></td><td>Online/offline watch lists. Prefer <code>MONITOR</code> (up to 100 entries).</td></tr>
+<tr><td><code>AWAY</code> <code>SETNAME</code> <code>SILENCE</code></td><td>Away status, change realname live, per-client private-message ignore masks.</td></tr>
+<tr><td><code>MODE</code></td><td>Query or change channel and user modes.</td></tr>
+<tr><td><code>VHOST</code></td><td>Activate a configured virtual host, or <code>VHOST off</code>.</td></tr>
+<tr><td><code>REGISTER</code> <code>AUTHENTICATE</code> <code>CERT</code></td><td>Accounts: create an account, SASL login, bind a TLS client certificate. Needs <code>[accounts] enabled</code>.</td></tr>
+<tr><td><code>MOTD</code> <code>ADMIN</code> <code>INFO</code> <code>VERSION</code> <code>TIME</code> <code>UPTIME</code> <code>LUSERS</code> <code>LINKS</code> <code>MAP</code> <code>STATS</code> <code>HELP</code></td><td>Server information. <code>STATS m</code> and <code>u</code> are open to everyone.</td></tr>
+<tr><td><code>SERVLIST</code> <code>SQUERY</code></td><td>List and message services pseudo-users such as ChanServ.</td></tr>
+<tr><td><code>GLOB</code></td><td>Non-standard: glob-match nicknames server-wide (invisible users hidden unless you share a channel or you are an oper).</td></tr>
+<tr><td><code>PING</code> <code>PONG</code></td><td>Keepalive.</td></tr>
+</table></div>
+
+<h2>operator commands</h2>
+<p>All require <code>/OPER</code> with a configured <code>[[operators]]</code> login.</p>
+<div class="tablewrap"><table>
+<tr><th>Command</th><th>Purpose</th></tr>
+<tr><td><code>OPER</code></td><td><code>OPER &lt;name&gt; &lt;password&gt;</code>. Grants <code>+o</code>, and also <code>+s</code> and <code>+w</code>.</td></tr>
+<tr><td><code>KILL</code></td><td>Disconnect a user from the network.</td></tr>
+<tr><td><code>KLINE</code> <code>GLINE</code> <code>ZLINE</code></td><td><code>&lt;mask&gt; [duration] [:reason]</code>. With no arguments, list active lines.</td></tr>
+<tr><td><code>UNKLINE</code> <code>UNGLINE</code> <code>UNZLINE</code></td><td>Remove a line.</td></tr>
+<tr><td><code>WALLOPS</code></td><td>Message every user with <code>+w</code>.</td></tr>
+<tr><td><code>REHASH</code></td><td>Reload the config live.</td></tr>
+<tr><td><code>DIE</code> <code>RESTART</code></td><td>Shut down, or re-exec in place. Can require an extra password.</td></tr>
+<tr><td><code>CHGHOST</code> <code>SETHOST</code></td><td>Force-set another local user's displayed host, or your own (<code>SETHOST off</code> clears it).</td></tr>
+<tr><td><code>SAJOIN</code> <code>SAPART</code> <code>SAMODE</code></td><td>Force a user into or out of channels, or change channel modes, bypassing <code>+i +k +l +b +z</code> and op requirements. <code>+r</code> stays services-only.</td></tr>
+<tr><td><code>CONNECT</code> <code>SQUIT</code></td><td>Bring up or drop a configured server link.</td></tr>
+<tr><td><code>TRACE</code> <code>STATS</code></td><td>Connected clients and linked servers; <code>STATS k/g/z/l/o</code> list bans, links, operators.</td></tr>
+</table></div>
+
+<h2>channel modes</h2>
+<div class="tablewrap"><table>
+<tr><th>Mode</th><th>Meaning</th></tr>
+<tr><td><code>+n</code> <code>+t</code></td><td>No outside messages; only ops set the topic. Default for new channels (<code>default_modes = "nt"</code>).</td></tr>
+<tr><td><code>+i</code></td><td>Invite only.</td></tr>
+<tr><td><code>+m</code></td><td>Moderated.</td></tr>
+<tr><td><code>+p</code> <code>+s</code></td><td>Private / secret. Hides name, topic and membership from non-members.</td></tr>
+<tr><td><code>+k</code> <code>+l</code></td><td>Key, and user limit.</td></tr>
+<tr><td><code>+z</code></td><td>Only clients connected over TLS may join.</td></tr>
+<tr><td><code>+r</code></td><td>Registered with services. Set and cleared only by ChanServ.</td></tr>
+<tr><td><code>+P</code></td><td>Permanent: the channel survives going empty.</td></tr>
+<tr><td><code>+C</code> <code>+T</code> <code>+S</code></td><td>Block CTCP, block channel NOTICE, strip color codes.</td></tr>
+<tr><td><code>+N</code> <code>+Q</code> <code>+V</code></td><td>Block nick changes, block kicks, block invites.</td></tr>
+<tr><td><code>+o</code> <code>+h</code> <code>+v</code></td><td>Prefix modes: <code>@</code> op, <code>%</code> halfop, <code>+</code> voice.</td></tr>
+<tr><td><code>+b</code> <code>+e</code> <code>+I</code></td><td>Ban, ban exception, invite exception. Up to 100 entries each. Extban <code>a:&lt;account&gt;</code> matches by SASL account.</td></tr>
+</table></div>
+
+<h2>user modes</h2>
+<div class="tablewrap"><table>
+<tr><th>Mode</th><th>Meaning</th></tr>
+<tr><td><code>+i</code></td><td>Invisible. Hidden from <code>GLOB</code> unless you share a channel or the searcher is an oper.</td></tr>
+<tr><td><code>+w</code></td><td>Receive <code>WALLOPS</code>.</td></tr>
+<tr><td><code>+d</code></td><td>Drop CTCP sent to you.</td></tr>
+<tr><td><code>+s</code></td><td>Server notices (opers): bans, connects, kills, failed <code>OPER</code>, links.</td></tr>
+<tr><td><code>+o</code></td><td>Operator. Granted by <code>/OPER</code>.</td></tr>
+<tr><td><code>+Z</code></td><td>Connected over TLS. Set by the server.</td></tr>
+<tr><td><code>+r</code></td><td>Identified to an account. Set by the server.</td></tr>
+</table></div>
+<p class="note"><code>[security] default_user_modes</code> (e.g. <code>"iw"</code>) applies self-togglable modes automatically after registration.
+  <code>+o</code>, <code>+Z</code> and <code>+r</code> can never be granted this way.</p>
+</main>
+</div>
+<footer id="site-footer"></footer>
+<script src="../js/site.js"></script>
+</body>
+</html>

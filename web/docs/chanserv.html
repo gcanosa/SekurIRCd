@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ChanServ · SekurIRCd docs</title>
+<meta name="description" content="Set up and use ChanServ, SekurIRCd's optional channel services process.">
+<link rel="icon" href="../img/favicon.ico" sizes="any">
+<script>(function(){var t;try{t=localStorage.getItem("theme")}catch(e){}if(t!=="light"&&t!=="dark")t=matchMedia("(prefers-color-scheme: light)").matches?"light":"dark";document.documentElement.dataset.theme=t})()</script>
+<link rel="stylesheet" href="../css/site.css">
+</head>
+<body data-root="../" data-page="chanserv">
+<header id="site-header"></header>
+<div class="wrap docs-layout">
+<aside id="docs-nav" class="docs-nav"></aside>
+<main class="docs">
+<h1>ChanServ</h1>
+<p><code>bin/chanserv</code> is a completely separate, optional process. It links to the ircd as an ordinary server peer and introduces one bot,
+  <code>ChanServ</code>, that lets a channel be registered behind a password so its ops survive an empty channel instead of going to
+  whoever joins first. Registrations are JSON on disk with rotating backups (<code>[storage] backup_count</code>, default 5); if the live file is
+  corrupt, the newest readable backup loads automatically.</p>
+
+<h2>enable it</h2>
+<h3>1. ircd side: turn on linking and add a peer</h3>
+<pre>[links]
+enabled = true
+mode = "hub"
+
+[[links.peers]]
+name = "services.sekurircd.local"
+password_hash = "scrypt$16384$8$1$&lt;salt-hex&gt;$&lt;digest-hex&gt;"   # from sekurircd --hash-password</pre>
+<h3>2. services side: point it at the link port</h3>
+<pre>cp services/services.template.toml services/services.toml
+# edit [link] host/port to the ircd's [links] bind/port,
+# name/password to the [[links.peers]] entry above (the plain secret goes here)</pre>
+
+<h2>run it</h2>
+<pre>./bin/chanserv --config services/services.toml                     # foreground
+./bin/chanserv --config services/services.toml --daemon --pidfile services/chanserv.pid
+./bin/chanserv --stop --pidfile services/chanserv.pid</pre>
+<p>A second <code>--daemon</code> against a live pidfile is refused. If the ircd is down or the link drops, ChanServ keeps retrying.
+  Under systemd: <code>systemctl --user enable --now chanserv</code>.</p>
+
+<h2>commands</h2>
+<pre>/msg ChanServ REGISTER #chan &lt;password&gt;            # you must be opped on #chan
+/msg ChanServ IDENTIFY #chan &lt;password&gt;            # every new connection, to reclaim founder status
+/msg ChanServ DROP #chan &lt;password&gt;
+/msg ChanServ SETPASS #chan &lt;old&gt; &lt;new&gt;
+/msg ChanServ JOIN #chan &lt;password&gt;                # GUARD: ChanServ stays in the channel
+/msg ChanServ PART #chan &lt;password&gt;
+/msg ChanServ TOPICLOCK #chan ON|OFF &lt;password&gt;
+/msg ChanServ INFO #chan
+/msg ChanServ ACCESS #chan ADD|DEL|LIST [&lt;mask&gt; &lt;v|h|o&gt;] &lt;password&gt;
+/msg ChanServ AKICK #chan ADD|DEL|LIST [&lt;mask&gt;] &lt;password&gt;
+/msg ChanServ SUCCESSOR #chan SET &lt;mask&gt; &lt;password&gt;
+/msg ChanServ SUCCESSOR #chan CLAIM &lt;new-password&gt;
+/msg ChanServ SET #chan MLOCK|DESC|URL|ENTRYMSG ...
+/msg ChanServ HELP</pre>
+<p>The password belongs to the channel record; anyone who knows it can IDENTIFY as founder. <code>IDENTIFY</code> lasts for the connection
+  only and must be repeated after reconnecting. <code>/HELP</code> in ChanServ prints exact syntax for each command.</p>
+
+<h2>guard and topiclock</h2>
+<p><code>JOIN</code> makes ChanServ a permanent member, so the channel can never go empty or be squatted. The setting persists across
+  restarts and ChanServ rejoins immediately if kicked. Each time it (re)joins it deops anyone not identified this session, closing the
+  gap where a full ircd restart lets a stranger win the race to an empty channel. <code>TOPICLOCK</code> records the topic and restores
+  it when GUARD rejoins, since topics live only in ircd memory.</p>
+
+<h2>access and akick masks</h2>
+<ul>
+  <li>A bare host (<code>trusted.example</code>), <code>ident@host</code>, or a full <code>nick!ident@host</code>. Shorthand is
+    wildcard-expanded. The host is always required, so a nick alone can never grant access.</li>
+  <li><code>=accountname</code> matches by services account (SASL or <code>/REGISTER</code>) and only after the joiner has identified.
+    This is the right choice under host cloaking and survives IP changes.</li>
+</ul>
+<pre>/msg ChanServ ACCESS #chan ADD *@trusted.example h &lt;password&gt;   # auto +h on JOIN from that host
+/msg ChanServ ACCESS #chan ADD =alice o &lt;password&gt;               # auto +o once alice is identified
+/msg ChanServ AKICK  #chan ADD *@bad.example &lt;password&gt;</pre>
+
+<h2>brute-force protection</h2>
+<p>Every command that checks an existing password locks that <em>nick</em> out of password checks, network-wide, for a short window after repeated
+  failures. That also stops one nick grinding through passwords across many channels. The lockout clears on <code>QUIT</code> and follows a nick change.</p>
+</main>
+</div>
+<footer id="site-footer"></footer>
+<script src="../js/site.js"></script>
+</body>
+</html>

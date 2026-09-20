@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IRCv3 and SASL · SekurIRCd docs</title>
+<meta name="description" content="IRCv3 capabilities, SASL PLAIN and EXTERNAL, accounts and certificate login in SekurIRCd.">
+<link rel="icon" href="../img/favicon.ico" sizes="any">
+<script>(function(){var t;try{t=localStorage.getItem("theme")}catch(e){}if(t!=="light"&&t!=="dark")t=matchMedia("(prefers-color-scheme: light)").matches?"light":"dark";document.documentElement.dataset.theme=t})()</script>
+<link rel="stylesheet" href="../css/site.css">
+</head>
+<body data-root="../" data-page="ircv3">
+<header id="site-header"></header>
+<div class="wrap docs-layout">
+<aside id="docs-nav" class="docs-nav"></aside>
+<main class="docs">
+<h1>IRCv3 &amp; SASL</h1>
+
+<h2>capabilities</h2>
+<p>Negotiated with <code>CAP LS</code> / <code>CAP REQ</code>. Your client normally does this for you.</p>
+<div class="tablewrap"><table>
+<tr><th>Capability</th><th>Effect</th></tr>
+<tr><td><code>sasl</code></td><td>Login during connection. Advertised as <code>sasl=PLAIN</code>, or <code>sasl=PLAIN,EXTERNAL</code> when <code>request_client_cert</code> is on.</td></tr>
+<tr><td><code>account-notify</code> <code>account-tag</code></td><td>Account login/logout notices and the sender's account on messages.</td></tr>
+<tr><td><code>away-notify</code></td><td>Live <code>AWAY</code> updates for channel-mates.</td></tr>
+<tr><td><code>multi-prefix</code> <code>userhost-in-names</code></td><td>All rank prefixes, and full <code>nick!user@host</code>, in <code>NAMES</code> and <code>WHO</code>.</td></tr>
+<tr><td><code>extended-join</code> <code>chghost</code> <code>setname</code></td><td>Account and realname on JOIN; live host and realname changes.</td></tr>
+<tr><td><code>echo-message</code></td><td>Your own messages are echoed back to you.</td></tr>
+<tr><td><code>message-tags</code> <code>server-time</code></td><td>Message tags and server timestamps.</td></tr>
+<tr><td><code>invite-notify</code> <code>standard-replies</code></td><td>Invite visibility for ops; machine-readable <code>FAIL</code>/<code>WARN</code>/<code>NOTE</code> replies.</td></tr>
+</table></div>
+<p>Also advertised in <code>005</code>: <code>MONITOR=100</code>, <code>ELIST=MNU</code>, <code>EXTBAN=,a</code>, <code>STATUSMSG=@%+</code>, <code>EXCEPTS</code>, <code>INVEX</code>.</p>
+
+<h2>accounts</h2>
+<pre>[accounts]
+enabled    = true
+store_file = "accounts.json"</pre>
+<p>Then <code>/REGISTER &lt;account&gt; &lt;password&gt;</code> creates an account and logs you in. Accounts back <code>330 RPL_WHOISACCOUNT</code>
+  and the extban <code>a:&lt;account&gt;</code> for <code>+b</code>, <code>+e</code> and <code>+I</code>, matching by account instead of hostmask.
+  The store is independent of ChanServ.</p>
+
+<h2>SASL PLAIN</h2>
+<p>Configure your client for SASL PLAIN with your account name and password. It sends <code>AUTHENTICATE PLAIN</code> during connection setup.</p>
+
+<h2>SASL EXTERNAL (certificate login)</h2>
+<p>EXTERNAL logs in with a TLS client certificate instead of a password. The server does not validate the certificate against a CA;
+  it only checks whether that exact SHA-256 fingerprint is bound to an account, so self-signed is fine.</p>
+<h3>1. ask for client certificates</h3>
+<pre>[tls]
+enabled = true
+request_client_cert = true   # only requests a cert; clients without one still connect</pre>
+<h3>2. make a certificate</h3>
+<pre>openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+  -keyout client-key.pem -out client-cert.pem -subj "/CN=myaccount"</pre>
+<p>Most clients (WeeChat, irssi, ...) have a "client certificate" option pointing at the pair.</p>
+<h3>3. bind it to your account</h3>
+<p>Connect with the certificate, log in normally (PLAIN or <code>/REGISTER</code>), then:</p>
+<pre>/CERT ADD      # binds the fingerprint of the certificate you connected with
+/CERT INFO     # show it
+/CERT DEL      # remove it (disables EXTERNAL until you ADD again)</pre>
+<h3>4. connect passwordless</h3>
+<p>Connecting with that certificate and sending <code>AUTHENTICATE EXTERNAL</code> logs the account in. Most clients do this
+  automatically once both client-cert and SASL EXTERNAL are configured.</p>
+</main>
+</div>
+<footer id="site-footer"></footer>
+<script src="../js/site.js"></script>
+</body>
+</html>

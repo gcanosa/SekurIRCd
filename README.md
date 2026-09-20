@@ -9,6 +9,8 @@ IRCv3 capability negotiation), so it works with **weechat, irssi, xchat,
 BitchX**, **The Lounge**, and web clients such as **Kiwi** (which connect
 over a gateway).
 
+Website & docs: <https://gcanosa.github.io/SekurIRCd/> (source in [`web/`](web/)). Licensed under the [MIT License](LICENSE).
+
 ## Features (v1.0.2)
 
 - Client connect + full registration (NICK/USER, CAP negotiation, welcome + MOTD)
