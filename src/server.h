@@ -21,6 +21,11 @@
 #define WHOWAS_MAX     200
 
 typedef struct {
+    char lines[MOTD_MAX_LINES][MOTD_LINE_LEN];
+    int n;
+} textfile_t;
+
+typedef struct {
     char nick[NICKLEN], user[USERLEN], host[HOSTLEN], realname[REALNAMELEN];
 } whowas_entry_t;
 
@@ -55,8 +60,7 @@ typedef struct server {
     time_t accept_paused_until; /* fd exhaustion: stop polling the listeners until then (see net.c) */
     long dnsbl_hits;        /* every connection a configured DNSBL zone listed, kline'd or just rejected */
 
-    char motd_lines[MOTD_MAX_LINES][MOTD_LINE_LEN];
-    int n_motd_lines;
+    textfile_t motd, oper_motd, rules;
 
     whowas_entry_t whowas[WHOWAS_MAX]; /* ring buffer */
     int whowas_head;                   /* next slot to write */
@@ -127,6 +131,9 @@ void server_remove_client(server_t *srv, client_t *cl, const char *quit_reason);
 /* Send 001-005 + LUSERS + MOTD, matching server._send_welcome's order. */
 void server_send_welcome(server_t *srv, client_t *cl);
 void server_send_motd(server_t *srv, client_t *cl);
+/* /OPERMOTD (also sent on successful /OPER) and /RULES. */
+void server_send_oper_motd(server_t *srv, client_t *cl);
+void server_send_rules(server_t *srv, client_t *cl);
 void server_send_lusers(server_t *srv, client_t *cl);
 
 /* Broadcast `line` (already built, no CRLF) to every member of `chan` except

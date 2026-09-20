@@ -193,6 +193,10 @@ void irc_add_time_tag(char *line, size_t linesz);
 #define N_ENDOFSILELIST    "272"
 
 #define N_INFO             "371"
+#define N_RULES            "232"
+#define N_RULESSTART       "308"
+#define N_ENDOFRULES       "309"
+#define N_NORULES          "434"
 #define N_MOTD             "372"
 #define N_ENDOFINFO        "374"
 #define N_MOTDSTART        "375"

@@ -124,6 +124,8 @@ void cmd_connect(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_version(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_time(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_motd(server_t *srv, client_t *cl, irc_message_t *msg);
+void cmd_rules(server_t *srv, client_t *cl, irc_message_t *msg);
+void cmd_opermotd(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_lusers(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_uptime(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_admin(server_t *srv, client_t *cl, irc_message_t *msg);

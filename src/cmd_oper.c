@@ -68,6 +68,7 @@ static void finish_oper(server_t *srv, client_t *cl, const char *op_name, int pw
     client_send(cl, line);
     client_reply(cl, N_YOUREOPER, NULL, 0, "You are now an IRC operator");
 
+    server_send_oper_motd(srv, cl);
     if (srv->cfg.security.oper_auto_join[0]) cmd_force_join(srv, cl, srv->cfg.security.oper_auto_join);
     log_info("oper", "%s OPER'd as %s", cl->nick, op_name);
 

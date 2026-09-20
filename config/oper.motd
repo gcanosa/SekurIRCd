@@ -1,0 +1,59 @@
+
+04    ___  ____  _____ ____     ____ ___  ____  _____
+04   / _ \|  _ \| ____|  _ \   / ___/ _ \|  _ \| ____|
+07  | | | | |_) |  _| | |_) | | |  | | | | |_) |  _|
+07  | |_| |  __/| |___|  _ <  | |__| |_| |  _ <| |___
+08   \___/|_|   |_____|_| \_\  \____\___/|_| \_\_____|
+
+15         Welcome to the team. You are now an 04IRC Operator15.
+
+04======================================================================
+04 OPERATOR RULES
+04======================================================================
+
+  041. You hold this power in trust. Use it only to keep the network
+     safe and pleasant - never for personal gain or grudges.
+  042. Be fair. Warn first when it is reasonable; every K/G/Z-line
+     needs a real reason, and you must be able to explain it.
+  043. Do not abuse users, channels or services you don't need to touch.
+     No SAJOIN/SAMODE/KILL games, no snooping for fun.
+  044. Privacy is sacred. Never share IPs, real hosts, logs or
+     private messages outside of a genuine abuse investigation.
+  045. Never give out oper credentials. Not to friends, not to staff.
+     Lost or leaked a password? Tell the admins immediately.
+  046. Stay accountable. Everything you do shows up in the server
+     notices and logs. Leave a clear reason on every ban or kill.
+  047. Settle disputes in the staff channel, not in public. Keep
+     staff disagreements out of user channels.
+  048. Off duty? /MODE yourself -o. Being idle as oper is fine,
+     being absent while flagged as available is not.
+
+09======================================================================
+09 STAFF TOOLS
+09======================================================================
+
+  11/KLINE /GLINE /ZLINE  ban a host, a global mask, or an IP
+  11/UNKLINE /UNGLINE /UNZLINE  lift them again
+  11/KILL <nick> <reason>  disconnect a user
+  11/SAJOIN /SAPART /SAMODE  force channel actions (use sparingly)
+  11/CHGHOST /SETHOST  change a user's displayed host
+  11/WALLOPS <text>  message every oper
+  11/REHASH  reload config, MOTD, oper MOTD and rules
+  11/OPERMOTD  show this text again
+
+12======================================================================
+12 SEKURNET IS HIRING
+12======================================================================
+
+  09Know IRC? Like keeping a network clean? 08Become an IRCop!
+  15Regular, helpful users are the ones we look for. To apply:
+
+     111. Hang out in 11#SekurNet and 11#help and be useful.
+     112. Read the rules until you could recite them.
+     113. Ask an existing oper or an admin about opening a slot.
+
+  15Please don't ask for oper. If we need you, we'll ask you.
+
+04======================================================================
+
+  15Type 11/OPERMOTD15 to read this again.   09Stay sharp. Stay fair.

@@ -35,20 +35,27 @@ int server_init(server_t *srv, const config_t *cfg) {
     return 0;
 }
 
-void server_load_motd(server_t *srv) {
-    srv->n_motd_lines = 0;
-    char path[CFG_PATH];
-    config_motd_path(&srv->cfg, path, sizeof path);
+static void load_textfile(textfile_t *tf, const char *path) {
+    tf->n = 0;
     FILE *fp = fopen(path, "r");
-    if (!fp) return; /* no MOTD file -> 422 ERR_NOMOTD, same as Python */
+    if (!fp) return; /* missing file -> ERR_NOMOTD / ERR_NORULES on request */
     char line[MOTD_LINE_LEN];
-    while (srv->n_motd_lines < MOTD_MAX_LINES && fgets(line, sizeof line, fp)) {
+    while (tf->n < MOTD_MAX_LINES && fgets(line, sizeof line, fp)) {
         size_t len = strlen(line);
         while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) line[--len] = '\0';
-        snprintf(srv->motd_lines[srv->n_motd_lines], MOTD_LINE_LEN, "%s", line);
-        srv->n_motd_lines++;
+        snprintf(tf->lines[tf->n++], MOTD_LINE_LEN, "%s", line);
     }
     fclose(fp);
+}
+
+void server_load_motd(server_t *srv) {
+    char path[CFG_PATH];
+    config_motd_path(&srv->cfg, path, sizeof path);
+    load_textfile(&srv->motd, path);
+    config_oper_motd_path(&srv->cfg, path, sizeof path);
+    load_textfile(&srv->oper_motd, path);
+    config_rules_path(&srv->cfg, path, sizeof path);
+    load_textfile(&srv->rules, path);
 }
 
 int server_rehash(server_t *srv, char *errbuf, size_t errbufsz) {
@@ -463,19 +470,41 @@ void server_send_lusers(server_t *srv, client_t *cl) {
     client_reply(cl, N_STATSCONN, NULL, 0, msg);
 }
 
-void server_send_motd(server_t *srv, client_t *cl) {
-    if (srv->n_motd_lines == 0) {
-        client_reply(cl, N_NOMOTD, NULL, 0, "MOTD File is missing");
+static void send_textfile(client_t *cl, const textfile_t *tf, const char *start, const char *line,
+                          const char *end, const char *none, const char *none_txt, const char *title,
+                          const char *endtxt) {
+    if (tf->n == 0) {
+        client_reply(cl, none, NULL, 0, none_txt);
         return;
     }
-    char msg[MOTD_LINE_LEN + 64];
-    snprintf(msg, sizeof msg, "- %s Message of the day - ", srv->cfg.server.name);
-    client_reply(cl, N_MOTDSTART, NULL, 0, msg);
-    for (int i = 0; i < srv->n_motd_lines; i++) {
-        snprintf(msg, sizeof msg, "- %s", srv->motd_lines[i]);
-        client_reply(cl, N_MOTD, NULL, 0, msg);
+    client_reply(cl, start, NULL, 0, title);
+    char msg[MOTD_LINE_LEN + 4];
+    for (int i = 0; i < tf->n; i++) {
+        snprintf(msg, sizeof msg, "- %s", tf->lines[i]);
+        client_reply(cl, line, NULL, 0, msg);
     }
-    client_reply(cl, N_ENDOFMOTD, NULL, 0, "End of /MOTD command.");
+    client_reply(cl, end, NULL, 0, endtxt);
+}
+
+void server_send_motd(server_t *srv, client_t *cl) {
+    char title[CFG_STR + 32];
+    snprintf(title, sizeof title, "- %s Message of the day - ", srv->cfg.server.name);
+    send_textfile(cl, &srv->motd, N_MOTDSTART, N_MOTD, N_ENDOFMOTD, N_NOMOTD, "MOTD File is missing",
+                  title, "End of /MOTD command.");
+}
+
+void server_send_oper_motd(server_t *srv, client_t *cl) {
+    char title[CFG_STR + 32];
+    snprintf(title, sizeof title, "- %s Operator message of the day - ", srv->cfg.server.name);
+    send_textfile(cl, &srv->oper_motd, N_MOTDSTART, N_MOTD, N_ENDOFMOTD, N_NOMOTD, "OPERMOTD File is missing",
+                  title, "End of /OPERMOTD command.");
+}
+
+void server_send_rules(server_t *srv, client_t *cl) {
+    char title[CFG_STR + 32];
+    snprintf(title, sizeof title, "- %s server rules - ", srv->cfg.server.name);
+    send_textfile(cl, &srv->rules, N_RULESSTART, N_RULES, N_ENDOFRULES, N_NORULES, "RULES File is missing",
+                  title, "End of /RULES command.");
 }
 
 void server_send_welcome(server_t *srv, client_t *cl) {
