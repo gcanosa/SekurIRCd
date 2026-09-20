@@ -7,6 +7,7 @@
     ["install", "Install", "docs/install.html"],
     ["configuration", "Configuration", "docs/configuration.html"],
     ["commands", "Commands & modes", "docs/commands.html"],
+    ["protection", "Abuse protection", "docs/protection.html"],
     ["ircv3", "IRCv3 & SASL", "docs/ircv3.html"],
     ["chanserv", "ChanServ", "docs/chanserv.html"]
   ];
