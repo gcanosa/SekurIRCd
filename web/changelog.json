@@ -1,13 +1,5 @@
 [
   {
-    "tag": "Unreleased",
-    "date": "2026-09-21",
-    "changes": [
-      "New /RULES command backed by config/ircd.rules, and an operator MOTD (config/oper.motd) sent on /OPER and via /OPERMOTD; both reload on /REHASH",
-      "New [messages] keys: oper_motd and rules; templates for both files are included"
-    ]
-  },
-  {
     "tag": "v1.0.4",
     "date": "2026-09-21",
     "changes": [
@@ -28,7 +20,9 @@
       "Server-notice (+s) alerts for OPER, failed OPER, KILL, links, and SA*/SETHOST overrides",
       "Optional oper host masking on /OPER, human-friendly ban expiry and uptime",
       "Rootless systemd user units, make install/uninstall, and a start/stop/status wrapper script",
-      "Hardened server-link listener; random RPL_YOURID"
+      "Hardened server-link listener; random RPL_YOURID",
+      "New /RULES command backed by config/ircd.rules, and an operator MOTD (config/oper.motd) sent on /OPER and via /OPERMOTD; both reload on /REHASH",
+      "New [messages] keys: oper_motd and rules; templates for both files are included"
     ]
   },
   {
