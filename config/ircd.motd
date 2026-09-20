@@ -6,7 +6,7 @@
 02    |____/  \___| |_|\_\ \__,_||_|   |_| \_| \___|  \__|
 
 15          small network  -  secure by default  -  no nonsense
-14                  powered by SekurIRCd v0.8.4
+14                  powered by SekurIRCd v1.0.4
 
 11=====================================================================
 11 NETWORK 
@@ -17,6 +17,7 @@
   11Hostnames ..... cloaked; your real IP is not shown to other users
   11Services ...... ChanServ   /msg ChanServ HELP
   11Accounts ...... SASL PLAIN, or /REGISTER <account> <password>
+  11Website ....... https://gcanosa.github.io/SekurIRCd/
 
 03=====================================================================
 03 CHANNELS 
@@ -24,7 +25,7 @@
 
   03#SekurNet ........ main lobby - say hi
   03#help ............ questions about the network or your client
-  03#SekurIRCd-dev ... ircd development, live commit/PR feed
+  03#gh-monitoring ... GitHub commit/update feed for our projects
 
   Want your own channel? See 06[ REGISTERING A CHANNEL ] below.
 
