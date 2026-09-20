@@ -158,6 +158,21 @@ typedef struct {
 } cfg_dnsbl_t;
 
 typedef struct {
+    int enabled;                /* master switch for everything in [spam] */
+    int exempt_opers;
+    int exempt_identified;      /* accounts (+r) skip every check */
+    long trust_age;             /* seconds connected before the limits stop applying; 0 = never */
+    long new_user_period;       /* seconds a fresh connection can't PM users; 0 = off */
+    int max_targets;            /* distinct recipients per window; 0 = off */
+    long target_window;         /* seconds */
+    int max_repeat;             /* distinct recipients of one identical text per window; 0 = off */
+    char limit_action[8];       /* block | warn | kill | zline */
+    long zline_duration;        /* seconds; 0 = permanent */
+    int filters_enabled;        /* use the regex filters file */
+    char filters_file[CFG_PATH];
+} cfg_spam_t;
+
+typedef struct {
     int enabled;
     char name[CFG_STR];
     char min_level[16];
@@ -187,6 +202,7 @@ typedef struct {
     int n_vhosts;
     cfg_channels_t channels;
     cfg_dnsbl_t dnsbl;
+    cfg_spam_t spam;
     cfg_tls_t tls;
     cfg_links_t links;
     cfg_accounts_t accounts;
@@ -208,6 +224,8 @@ void config_oper_motd_path(const config_t *cfg, char *out, size_t outsz);
 void config_rules_path(const config_t *cfg, char *out, size_t outsz);
 /* Returns 1 and fills `out`, or 0 (out untouched) if klines_file is empty. */
 int config_klines_path(const config_t *cfg, char *out, size_t outsz);
+/* [spam] filters_file resolved against the config dir; 0 if unset. */
+int config_spamfilters_path(const config_t *cfg, char *out, size_t outsz);
 /* Returns 1 and fills `out`, or 0 (out untouched) if accounts are disabled. */
 int config_accounts_path(const config_t *cfg, char *out, size_t outsz);
 void config_tls_cert_path(const config_t *cfg, char *out, size_t outsz);

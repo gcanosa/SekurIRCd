@@ -11,6 +11,7 @@
 #include "net.h"
 #include "proto.h"
 #include "server.h"
+#include "spam.h"
 
 #include <assert.h>
 #include <stdio.h>
@@ -299,6 +300,117 @@ static void test_connect_flood_throttle(void) {
     for (int i = 0; i < 10; i++) assert(net_connect_flood_hit(&sec, "203.0.113.11") == 0);
 }
 
+/* --- spam protection ---------------------------------------------------------- */
+
+static void test_spam_config_defaults_and_template(void) {
+    config_t cfg;
+    config_defaults(&cfg);
+    assert(cfg.spam.enabled == 0);
+    assert(cfg.spam.max_targets == 5 && cfg.spam.new_user_period == 30);
+    /* the shipped template must parse, with [spam] off */
+    char err[256];
+    assert(config_load("config/sekurircd.template.toml", &cfg, err, sizeof err) == 0);
+    assert(cfg.spam.enabled == 0 && cfg.spam.filters_enabled == 1);
+    assert(cfg.spam.target_window == 30 && cfg.spam.zline_duration == 3600);
+    assert(strcmp(cfg.spam.limit_action, "block") == 0);
+}
+
+static void test_spam_track_limits(void) {
+    client_t *cl = client_new(-1, NULL);
+    assert(cl);
+    int distinct, same;
+    time_t t0 = 1000;
+    /* same long text to 4 different targets: distinct grows, so does `same` */
+    const char *tg[] = {"#a", "#b", "bob", "#c"};
+    for (int i = 0; i < 4; i++) spam_track(cl, tg[i], "buy cheap stuff at my site", t0, 30, &distinct, &same);
+    assert(distinct == 4 && same == 4);
+    /* repeating the identical (target,text) pair doesn't add a recipient */
+    spam_track(cl, "#a", "buy cheap stuff at my site", t0 + 1, 30, &distinct, &same);
+    assert(distinct == 4 && same == 4);
+    /* target names are case-insensitive */
+    spam_track(cl, "#A", "buy cheap stuff at my site", t0 + 2, 30, &distinct, &same);
+    assert(distinct == 4);
+    /* different text to a new target: distinct 5, same-text stays 1 */
+    spam_track(cl, "#d", "something else entirely", t0 + 3, 30, &distinct, &same);
+    assert(distinct == 5 && same == 1);
+    /* once the window has passed, old sends no longer count */
+    spam_track(cl, "#e", "fresh", t0 + 100, 30, &distinct, &same);
+    assert(distinct == 1 && same == 1);
+    client_free(cl);
+}
+
+static void test_spam_filters_and_check(void) {
+    config_t cfg;
+    config_defaults(&cfg);
+    cfg.spam.enabled = 1;
+    cfg.spam.filters_file[0] = '\0'; /* memory-only rules */
+    cfg.spam.new_user_period = 0;
+    cfg.spam.max_targets = 4;
+    cfg.spam.max_repeat = 0;
+    server_t srv;
+    assert(server_init(&srv, &cfg) == 0);
+    client_t *cl = client_new(-1, &srv);
+    cl->fd = 99; /* not a services pseudo-client; nothing is ever written to it */
+    assert(cl);
+    snprintf(cl->nick, sizeof cl->nick, "spammer");
+    snprintf(cl->ip, sizeof cl->ip, "203.0.113.5");
+
+    assert(spam_parse_targets("pcnN") == (SPAM_T_PRIVMSG_USER | SPAM_T_PRIVMSG_CHAN | SPAM_T_NOTICE_USER | SPAM_T_NOTICE_CHAN));
+    assert(spam_parse_targets("px") == 0 && spam_parse_targets("") == 0);
+
+    /* no rules yet: passes; then a live rule is added via the command path */
+    assert(spam_check_message(&srv, cl, "#chan", "cheap VIAGRA here", 0) == 0);
+    irc_message_t m;
+    memset(&m, 0, sizeof m);
+    const char *bad[] = {"ADD", "c", "block", "-", "ads", "\\1"};
+    m.nparams = 6; for (int i = 0; i < 6; i++) m.params[i] = (char *)bad[i];
+    cmd_spamfilter(&srv, cl, &m);
+    assert(srv.spam_filters == NULL); /* backreference refused */
+    const char *empty[] = {"ADD", "c", "block", "-", "ads", "x*"};
+    for (int i = 0; i < 6; i++) m.params[i] = (char *)empty[i];
+    cmd_spamfilter(&srv, cl, &m);
+    assert(srv.spam_filters == NULL); /* matches the empty string: refused */
+    const char *good[] = {"ADD", "c", "block", "-", "ads", "(cheap|free) +viagra"};
+    for (int i = 0; i < 6; i++) m.params[i] = (char *)good[i];
+    cmd_spamfilter(&srv, cl, &m);
+    assert(srv.spam_filters != NULL);
+
+    /* matches through colour codes and case; channel rule doesn't hit a PM */
+    assert(spam_check_message(&srv, cl, "#chan", "CHEAP \x02\x03""4VIAGRA here", 0) == 1);
+    assert(spam_check_message(&srv, cl, "@#chan", "just chatting", 0) == 0);
+    assert(spam_check_message(&srv, cl, "#chan", "free viagra", 1) == 0); /* rule is PRIVMSG-only */
+
+    /* recipient limit (4; #chan already counts as one): #x1-#x3 ok, #x4 blocked */
+    assert(spam_check_message(&srv, cl, "#x1", "hello there", 0) == 0);
+    assert(spam_check_message(&srv, cl, "#x2", "hello there", 0) == 0);
+    assert(spam_check_message(&srv, cl, "#x3", "hello there", 0) == 0);
+    assert(spam_check_message(&srv, cl, "#x4", "hello there", 0) == 1);
+
+    /* exempt: identified accounts skip everything */
+    snprintf(cl->account, sizeof cl->account, "bob");
+    assert(spam_check_message(&srv, cl, "#chan", "free viagra", 0) == 0);
+    cl->account[0] = '\0';
+
+    /* master switch off = inert */
+    srv.cfg.spam.enabled = 0;
+    assert(spam_check_message(&srv, cl, "#chan", "free viagra", 0) == 0);
+    srv.cfg.spam.enabled = 1;
+
+    /* zline action disconnects and lists a Z-line for the IP */
+    const char *zl[] = {"ADD", "c", "zline", "1h", "bot", "botnet-advert"};
+    for (int i = 0; i < 6; i++) m.params[i] = (char *)zl[i];
+    cmd_spamfilter(&srv, cl, &m);
+    /* rule order: first (viagra) wins, so use a text that only the new rule hits */
+    assert(spam_check_message(&srv, cl, "#chan", "BOTNET-ADVERT now", 0) == 1);
+    assert(cl->quitting == 1);
+    assert(server_kline_match(&srv, "203.0.113.5", "u", "h", 0) != NULL);
+
+    spam_free(&srv);
+    assert(srv.spam_filters == NULL);
+    cl->fd = -1;
+    client_free(cl);
+}
+
 static void test_proc_stats(void) {
     double cpu = -1;
     long rss = -1;
@@ -408,6 +520,9 @@ int main(void) {
     RUN(test_connect_flood_throttle);
     RUN(test_channel_mode_string_cannot_overflow);
     RUN(test_line_mask_hits);
+    RUN(test_spam_config_defaults_and_template);
+    RUN(test_spam_track_limits);
+    RUN(test_spam_filters_and_check);
     RUN(test_proc_stats);
     printf("OK (%d tests)\n", g_tests_run);
     return 0;

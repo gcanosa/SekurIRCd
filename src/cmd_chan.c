@@ -221,6 +221,7 @@ void cmd_part(server_t *srv, client_t *cl, irc_message_t *msg) {
     char chanlist[600];
     snprintf(chanlist, sizeof chanlist, "%s", msg->params[0]);
     const char *reason = msg->nparams > 1 ? msg->params[msg->nparams - 1] : NULL;
+    if (reason && spam_check_text(srv, cl, SPAM_T_PART, reason)) reason = NULL;
 
     char *save = NULL;
     char *tok = strtok_r(chanlist, ",", &save);
@@ -339,6 +340,7 @@ void cmd_topic(server_t *srv, client_t *cl, irc_message_t *msg) {
         return;
     }
     const char *newtopic = msg->params[msg->nparams - 1];
+    if (spam_check_text(srv, cl, SPAM_T_TOPIC, newtopic)) return;
     snprintf(chan->topic, sizeof chan->topic, "%s", newtopic);
     client_prefix(cl, chan->topic_setter, sizeof chan->topic_setter);
     chan->topic_time = time(NULL);

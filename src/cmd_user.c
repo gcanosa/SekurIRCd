@@ -57,6 +57,8 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
     char textbuf[420];
     snprintf(textbuf, sizeof textbuf, "%.*s", srv->cfg.messages.max_message_length, msg->params[msg->nparams - 1]);
 
+    if (spam_check_message(srv, cl, target, textbuf, is_notice)) return;
+
     char prefix[320];
     client_prefix(cl, prefix, sizeof prefix);
     char line[700];
@@ -387,6 +389,7 @@ void cmd_away(server_t *srv, client_t *cl, irc_message_t *msg) {
         cl->away[0] = '\0';
         client_reply(cl, N_UNAWAY, NULL, 0, "You are no longer marked as being away");
     } else {
+        if (spam_check_text(srv, cl, SPAM_T_AWAY, msg->params[msg->nparams - 1])) return;
         cl->is_away = 1;
         snprintf(cl->away, sizeof cl->away, "%.399s", msg->params[msg->nparams - 1]);
         client_reply(cl, N_NOWAWAY, NULL, 0, "You have been marked as being away");

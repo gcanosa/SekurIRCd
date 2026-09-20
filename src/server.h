@@ -74,6 +74,9 @@ typedef struct server {
      * client on each accept() to enforce max_connections_per_ip. */
     struct ipcount *ip_counts;
 
+    struct spam_filter *spam_filters; /* spam.c: linked list, file order */
+    long spam_hits;                   /* messages a spam rule/limit acted on */
+
     /* STATS m: per-command invocation counts. Linear array, fine at this
      * daemon's scale (a few dozen distinct command names). */
     struct { char name[32]; int count; } command_counts[64];

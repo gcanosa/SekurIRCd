@@ -98,6 +98,12 @@ Website & docs: <https://gcanosa.github.io/SekurIRCd/> (source in [`web/`](web/)
   polling `ISON`
 - `KNOCK` (request an invite on a `+i`/`+k` channel; delivered to channel
   ops), `LINKS`, `MAP`, `HELP`
+- Spam protection (`[spam]`, off by default): regex content filters
+  (`config/spamfilters.conf`, managed live with the oper-only `SPAMFILTER
+  LIST|ADD|DEL`) for PRIVMSG/NOTICE/AWAY/QUIT/PART/TOPIC with `block`/`warn`/
+  `kill`/`zline` actions, a new-connection PM restriction, and per-client
+  recipient/repeat limits. Opers, services and identified accounts are exempt
+  by default; every action is reported to opers with `+s`.
 - `KLINE`/`GLINE`/`ZLINE` (+ `UNKLINE`/`UNGLINE`/`UNZLINE`, oper-only),
   with an optional duration like `1d`/`12h`/`30m` -- permanent if omitted.
   `KLINE`/`GLINE` masks match an IP glob (`203.0.113.*`), a host glob
@@ -308,6 +314,8 @@ make clean
 See [`config/sekurircd.template.toml`](config/sekurircd.template.toml). Key sections:
 
 - `[server]` — name, network, version, `bind` (default `0.0.0.0`), `port` (default `6667`)
+- `[spam]` — spam protection master switch, new-user PM delay, recipient/repeat
+  limits, and the `filters_file` / `filters_enabled` regex-filter switch
 - `[security]` — line/param length limits, flood guard, keepalive
   `ping_interval` / `ping_timeout` (defaults 120s / 300s), `host_masking`
   (default `false`), `klines_file` (K/G-line persistence, empty = in-memory only),

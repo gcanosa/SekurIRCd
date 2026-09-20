@@ -35,6 +35,7 @@
 <tr><td>Connect-flood throttle</td><td>Scanners and bots that open and close sockets rapidly</td><td><code>[security] connect_flood_*</code></td></tr>
 <tr><td>Connection caps</td><td>One host holding many sockets; total overload</td><td><code>[security] max_connections*</code></td></tr>
 <tr><td>Per-client flood guard</td><td>Registered clients sending too many lines too fast</td><td><code>[security] flood_max_msgs</code>, <code>flood_window</code></td></tr>
+<tr><td>Spam protection</td><td>Advertising and mass-messaging bots that connect politely and then spam users or channels</td><td><code>[spam]</code>, <code>spamfilters.conf</code>, <code>SPAMFILTER</code></td></tr>
 <tr><td>K/G/Z-lines</td><td>Manual and automatic bans, with durations (K/G match host or <code>user@host</code>; Z is IP-only)</td><td><code>KLINE</code> <code>GLINE</code> <code>ZLINE</code>, <code>klines_file</code></td></tr>
 </table></div>
 
@@ -98,6 +99,55 @@ max_connections_per_ip = 0     # per single IP; 0 = unlimited</pre>
 <p class="note"><strong>False positives:</strong> a legitimate user who is on a DNSBL can be freed with <code>UNZLINE</code>, but their next connection triggers a fresh
   lookup and bans them again, since there is no allow-list. The reliable fixes are dropping that zone, or using <code>action = "reject"</code> so no lasting ban exists and
   pointing the user at the provider's delisting page, which is what <code>lookup_url</code> is for.</p>
+
+<h2>spam protection</h2>
+<p>The layers above act on connections. <code>[spam]</code> acts on what a connected user <em>sends</em>. It is <strong>off by default</strong>
+  (<code>enabled = false</code>); when off, none of it runs. It has three independent layers:</p>
+<ol>
+<li><strong>New-connection restriction.</strong> A fresh connection cannot PM users for <code>new_user_period</code> (default 30s). Channels stay open, and anyone can
+  always message services and opers, so nobody is locked out of asking for help.</li>
+<li><strong>Content filters.</strong> Regex rules from <code>filters_file</code> (an annotated example ships as <code>config/spamfilters.conf</code>) are matched
+  against <code>PRIVMSG</code>/<code>NOTICE</code> to users and channels, and against <code>AWAY</code>, <code>QUIT</code>, <code>PART</code> and <code>TOPIC</code> text.
+  Matching is case-insensitive POSIX ERE, run after mIRC colour and bold codes are stripped.</li>
+<li><strong>Recipient and repeat limits.</strong> Messaging more than <code>max_targets</code> different people or channels, or sending the same text (8+ characters)
+  to <code>max_repeat</code> of them, inside <code>target_window</code> triggers <code>limit_action</code>.</li>
+</ol>
+<pre>[spam]
+enabled = true
+exempt_opers = true          # opers and services are never checked
+exempt_identified = true     # neither is anyone logged in to an account
+new_user_period = "30s"      # "0" = off
+max_targets = 5              # distinct recipients per target_window; 0 = off
+target_window = "30s"
+max_repeat = 4               # same text to this many recipients; 0 = off
+limit_action = "block"       # block | warn | kill | zline
+zline_duration = "1h"
+trust_age = "0"              # connections older than this skip the limits (not the filters)
+filters_enabled = true       # false keeps the file but stops using it
+filters_file = "spamfilters.conf"</pre>
+<h3>filter rules</h3>
+<p>One rule per line: <code>&lt;targets&gt; &lt;action&gt; &lt;duration|-&gt; "&lt;reason&gt;" &lt;regex&gt;</code>. Targets are letters:
+  <code>p</code> PRIVMSG to a user, <code>c</code> PRIVMSG to a channel, <code>n</code>/<code>N</code> NOTICE to a user/channel, <code>a</code> AWAY,
+  <code>q</code> QUIT, <code>P</code> PART, <code>t</code> TOPIC. The first matching rule wins.</p>
+<div class="tablewrap"><table>
+<tr><th>Action</th><th>Effect</th></tr>
+<tr><td><code>block</code></td><td>Drops the message and tells the sender. QUIT and PART reasons are silently replaced with a blank one.</td></tr>
+<tr><td><code>warn</code></td><td>Delivers the message but notifies opers. Use it to trial a rule before enforcing it.</td></tr>
+<tr><td><code>kill</code></td><td>Disconnects the sender.</td></tr>
+<tr><td><code>zline</code></td><td>Disconnects the sender and Z-lines their IP for the rule's duration (<code>-</code> means <code>zline_duration</code>).</td></tr>
+</table></div>
+<pre>pcnN block - "advertisement" (buy|cheap) +(viagra|followers|likes)
+pc warn - "possible invite spam" (join|server) .*(discord\.gg|t\.me)
+qPt zline 1h "advertising in reason" https?://[^ ]+.*(casino|porn)</pre>
+<h3>managing rules live</h3>
+<pre>/SPAMFILTER                                   # list rules (with numbers) and the hit counter
+/SPAMFILTER ADD pc block - ad_spam :cheap +viagra
+/SPAMFILTER DEL 3</pre>
+<p><code>ADD</code> takes targets, action, duration, a reason (underscores become spaces) and the regex, and appends to the filters file. <code>DEL</code> removes the numbered
+  rule from the file and leaves your comments alone. Regexes with backreferences, or that match the empty string, are refused. Editing the file by hand and running
+  <code>/REHASH</code> reloads it; a line that fails to parse is skipped with a logged warning. If <code>filters_file = ""</code>, rules exist in memory only.</p>
+<p class="note"><strong>Scope:</strong> enforcement covers this server's own users, and each linked server keeps its own copy of the filters file. Every action sends opers with
+  <code>+s</code> a notice that includes the offending text, which is the easiest way to tune rules and limits.</p>
 
 <h2>monitoring</h2>
 <h3>server notices</h3>

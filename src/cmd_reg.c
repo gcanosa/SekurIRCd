@@ -245,8 +245,10 @@ void cmd_pong(server_t *srv, client_t *cl, irc_message_t *msg) {
 }
 
 void cmd_quit(server_t *srv, client_t *cl, irc_message_t *msg) {
-    (void)srv;
     const char *reason = msg->nparams > 0 ? msg->params[msg->nparams - 1] : "Client Quit";
+    int spammy = spam_check_text(srv, cl, SPAM_T_QUIT, reason);
+    if (cl->quitting) return; /* a spam rule already disconnected them with its own reason */
+    if (spammy) reason = "Client Quit";
     snprintf(cl->quit_reason, sizeof cl->quit_reason, "Quit: %s", reason);
     cl->quitting = 1;
 }

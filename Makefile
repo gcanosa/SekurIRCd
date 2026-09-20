@@ -71,7 +71,7 @@ CORE_SRCS := $(SRC_DIR)/proto.c $(SRC_DIR)/crypto.c $(SRC_DIR)/log.c $(SRC_DIR)/
              $(SRC_DIR)/channel.c $(SRC_DIR)/client.c $(SRC_DIR)/server.c $(SRC_DIR)/net.c \
              $(SRC_DIR)/link.c $(SRC_DIR)/accounts.c $(SRC_DIR)/worker.c \
              $(SRC_DIR)/cmd.c $(SRC_DIR)/cmd_reg.c $(SRC_DIR)/cmd_chan.c $(SRC_DIR)/cmd_user.c \
-             $(SRC_DIR)/cmd_oper.c $(SRC_DIR)/cmd_info.c
+             $(SRC_DIR)/cmd_oper.c $(SRC_DIR)/cmd_info.c $(SRC_DIR)/spam.c
 VEND_SRCS := $(VEND_DIR)/toml.c $(VEND_DIR)/cJSON.c
 MAIN_SRC  := $(SRC_DIR)/main.c
 

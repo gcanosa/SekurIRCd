@@ -8,6 +8,7 @@
 #include "client.h"
 #include "proto.h"
 #include "server.h"
+#include "spam.h"
 
 typedef void (*cmd_handler_t)(server_t *srv, client_t *cl, irc_message_t *msg);
 

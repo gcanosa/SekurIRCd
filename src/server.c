@@ -2,6 +2,7 @@
 #include "cmd.h"
 #include "log.h"
 #include "proto.h"
+#include "spam.h"
 #include "vendor/cJSON.h"
 
 #include <stdio.h>
@@ -32,6 +33,7 @@ int server_init(server_t *srv, const config_t *cfg) {
     accounts_init(&srv->accounts, has_path ? accounts_path : NULL);
 
     server_kline_load(srv);
+    spam_reload(srv);
     return 0;
 }
 
@@ -69,6 +71,7 @@ int server_rehash(server_t *srv, char *errbuf, size_t errbufsz) {
      * only the config values themselves swap in. */
     srv->cfg = tmp;
     server_load_motd(srv);
+    spam_reload(srv);
     return 0;
 }
 
@@ -722,6 +725,7 @@ const char *server_kline_match(server_t *srv, const char *ip, const char *user,
 
 void server_free_tables(server_t *srv) {
     server_kline_flush(srv);
+    spam_free(srv);
     kline_entry_t *k = srv->klines;
     while (k) { kline_entry_t *next = k->next; free(k); k = next; }
     srv->klines = NULL;

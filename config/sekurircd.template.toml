@@ -253,6 +253,61 @@ max_accounts = 10000
 
 
 # -----------------------------------------------------------------------------
+# [spam] -- spam protection (private messages, notices, channels)
+# -----------------------------------------------------------------------------
+# Catches what the per-connection flood limit and [dnsbl] can't: a bot that
+# connects politely, then advertises to lots of users or channels. Three
+# independent layers, all inert unless `enabled = true`:
+#   1. New-connection restriction: a fresh connection can't PM users for
+#      `new_user_period` (channels are still open, and it can always message
+#      services and opers, so nobody is locked out of asking for help).
+#   2. Regex content filters from `filters_file` (see config/spamfilters.conf
+#      for the format and examples), plus /SPAMFILTER for live management.
+#   3. Recipient/repeat limits: messaging more than `max_targets` different
+#      people/channels, or sending the same text to `max_repeat` of them,
+#      inside `target_window`.
+# Operators get a server notice (+s) for every action, including the message
+# text, so rules and limits are easy to tune. Off by default; try
+# limit_action = "warn" and filter rules with the `warn` action first.
+# Applies to this server's own users only; each linked server keeps its own
+# copy of the filters file.
+[spam]
+enabled = false
+
+# Who is never checked. Services and opers are always safe when
+# exempt_opers is on; exempt_identified skips anyone logged in to an account
+# (SASL or /REGISTER), the cheapest way to let regulars through.
+exempt_opers = true
+exempt_identified = true
+
+# Connections older than this stop being subject to layer 3 (the limits) --
+# not the content filters. "0" = the limits always apply. Example: "1h".
+trust_age = "0"
+
+# Layer 1. "0" turns it off. Durations: "30s", "10m", "1h", "1d".
+new_user_period = "30s"
+
+# Layer 3. 0 disables that check. max_targets is at most 31, max_repeat at
+# most 32. Repeats only count for texts of 8+ characters.
+max_targets = 5
+target_window = "30s"
+max_repeat = 4
+
+# What a breach of layer 3 does: "block" (drop the message), "warn" (only
+# tell opers), "kill" (disconnect), or "zline" (disconnect + Z-line the IP for
+# zline_duration; "0" = permanent).
+limit_action = "block"
+zline_duration = "1h"
+
+# Layer 2 on/off. Set filters_enabled = false to keep the file but not use
+# it (the limits above keep working). Relative to this config file's
+# directory; "" = no file, rules added with /SPAMFILTER then live in memory
+# only and are lost on restart.
+filters_enabled = true
+filters_file = "spamfilters.conf"
+
+
+# -----------------------------------------------------------------------------
 # [debug_channel] -- live in-IRC view of the daemon's own log
 # -----------------------------------------------------------------------------
 # Oper-only channel relaying the daemon's own WARNING+ log lines as server
