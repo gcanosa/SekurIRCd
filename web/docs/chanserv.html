@@ -33,6 +33,7 @@ password_hash = "scrypt$16384$8$1$&lt;salt-hex&gt;$&lt;digest-hex&gt;"   # from 
 <pre>cp services/services.template.toml services/services.toml
 # edit [link] host/port to the ircd's [links] bind/port,
 # name/password to the [[links.peers]] entry above (the plain secret goes here)</pre>
+<p>See the full <a href="https://github.com/gcanosa/SekurIRCd/blob/main/services/services.template.toml"><code>services.template.toml</code></a> on GitHub for every option, including <code>[storage] backup_count</code>.</p>
 
 <h2>run it</h2>
 <pre>./bin/chanserv --config services/services.toml                     # foreground
