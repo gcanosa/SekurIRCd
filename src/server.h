@@ -52,6 +52,7 @@ typedef struct server {
     uint64_t next_conn_id;  /* monotonic; see client_t.conn_id / worker.h */
     int max_users_seen;     /* peak of HASH_COUNT(users), for LOCALUSERS/GLOBALUSERS/STATSCONN */
     long total_connections; /* every accept(), regardless of whether it registered */
+    time_t accept_paused_until; /* fd exhaustion: stop polling the listeners until then (see net.c) */
     long dnsbl_hits;        /* every connection a configured DNSBL zone listed, kline'd or just rejected */
 
     char motd_lines[MOTD_MAX_LINES][MOTD_LINE_LEN];
@@ -62,6 +63,12 @@ typedef struct server {
     int whowas_count;                  /* how many slots are valid (<= WHOWAS_MAX) */
 
     kline_entry_t *klines;
+    int klines_dirty;       /* a write is pending -- net.c's tick flushes it (see server_kline_flush) */
+
+    /* Exact concurrent-connection count per IP, maintained by
+     * server_add_connection/unlink_connection -- replaces walking every
+     * client on each accept() to enforce max_connections_per_ip. */
+    struct ipcount *ip_counts;
 
     /* STATS m: per-command invocation counts. Linear array, fine at this
      * daemon's scale (a few dozen distinct command names). */
@@ -93,11 +100,21 @@ int server_rehash(server_t *srv, char *errbuf, size_t errbufsz);
 
 client_t *server_find_user(server_t *srv, const char *nick);
 channel_t *server_find_channel(server_t *srv, const char *name);
-channel_t *server_get_or_create_channel(server_t *srv, const char *name);
+channel_t *server_get_or_create_channel(server_t *srv, const char *name); /* NULL on allocation failure */
 
 /* Link a freshly-accepted connection into srv->all_clients (net.c's poll
  * set) -- called once, right after client_new. */
 void server_add_connection(server_t *srv, client_t *cl);
+/* Concurrent connections currently held by `ip` (max_connections_per_ip). */
+int server_ip_count(server_t *srv, const char *ip);
+/* Writes the K-line file if anything changed since the last flush. Called
+ * from net.c's one-second tick: a connect flood or a DNSBL burst would
+ * otherwise re-serialize and rewrite the whole list once per event. */
+void server_kline_flush(server_t *srv);
+/* Shutdown only: flush a pending K-line write and free the K-line list and
+ * the per-IP counter table (the client sweep at shutdown frees clients
+ * directly, bypassing unlink_connection's decrement). */
+void server_free_tables(server_t *srv);
 /* Register `cl` (casefold_nick already set) into srv->users. */
 void server_add_user(server_t *srv, client_t *cl);
 /* Tear down `cl`: broadcast QUIT to every channel-mate, leave every channel,
@@ -142,7 +159,9 @@ void server_notify_opers(server_t *srv, const char *message);
 /* Link `cl`'s channels list to include `chan` (does NOT touch chan->members
  * -- pair with channel_add_member). Shared by cmd_chan.c's JOIN paths and
  * link.c's trusted GUARD JOIN from a services link. */
-void server_attach_membership(client_t *cl, channel_t *chan);
+/* Records `chan` in cl->channels. Returns -1 if the node couldn't be
+ * allocated, in which case the caller must undo the channel-side join. */
+int server_attach_membership(client_t *cl, channel_t *chan);
 /* Inverse of server_attach_membership (does NOT touch chan->members --
  * pair with channel_remove_member). */
 void server_detach_membership(client_t *cl, channel_t *chan);
@@ -166,7 +185,13 @@ int server_kline_remove(server_t *srv, const char *mask);
 /* First matching line's reason (K-Lined: <reason>), or NULL if `ip` isn't
  * listed. Does NOT prune expired lines itself -- call server_kline_prune_expired
  * periodically (net.c's tick). */
-const char *server_kline_match(server_t *srv, const char *ip);
+/* True if `mask` (of the given line type) hits this connection. Z matches the
+ * IP alone; K and G also match user@host, in both the bare and tilde-prefixed
+ * ident spellings. */
+int server_line_mask_hits(const char *mask, const char *line_type, const char *ip,
+                           const char *user, const char *host, int ident_confirmed);
+const char *server_kline_match(server_t *srv, const char *ip, const char *user,
+                                const char *host, int ident_confirmed);
 
 /* Records nick/user/host/realname into the WHOWAS ring buffer -- called
  * from server_remove_client right before a client is freed. */

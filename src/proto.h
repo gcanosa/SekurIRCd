@@ -69,9 +69,18 @@ void irc_casefold(char *out, size_t outsz, const char *in);
  * protocol.py's fnmatch-bracket-escaping trick, done directly instead. */
 int irc_glob_match(const char *pattern, const char *text);
 
+/* Render the display ident for `user`: "~user", or a bare "user" when an
+ * identd confirmed it (or it already carries a tilde). "" for an empty user.
+ * This is the single rule client_prefix, irc_prefix_for and irc_mask_match
+ * all have to agree on -- they disagreed before, so a ban written against
+ * what WHOIS showed silently failed to match an ident-confirmed user. */
+void irc_ident_for(char *out, size_t outsz, const char *user, int ident_confirmed);
+
 /* nick!user@host banmask match. A mask with neither '!' nor '@' matches the
- * nick alone. */
-int irc_mask_match(const char *nick, const char *user, const char *host, const char *mask);
+ * nick alone. `ident_confirmed` must be the matched client's own flag, so the
+ * mask is tested against the same nick!user@host the client displays as. */
+int irc_mask_match(const char *nick, const char *user, const char *host, const char *mask,
+                    int ident_confirmed);
 
 /* user@host access-control match (VHOST/link peers) -- no bare-nick
  * shortcut; a mask with no '@' means "*@<mask>". */
@@ -219,17 +228,14 @@ void irc_add_time_tag(char *line, size_t linesz);
 #define N_WATCHSTAT        "603"
 #define N_NOWON            "604"
 #define N_NOWOFF           "605"
-#define N_WATCHLIST        "606"
 #define N_ENDOFWATCHLIST   "607"
 
 #define N_UNKNOWNERROR     "400"
 #define N_NOSUCHNICK       "401"
-#define N_NOSUCHSERVER     "402"
 #define N_NOSUCHCHANNEL    "403"
 #define N_CANNOTSENDTOCHAN "404"
 #define N_TOOMANYCHANNELS  "405"
 #define N_WASNOSUCHNICK    "406"
-#define N_NORECIPIENT      "411"
 #define N_NOTEXTTOSEND     "412"
 #define N_INPUTTOOLONG     "417"
 #define N_UNKNOWNCOMMAND   "421"
@@ -237,7 +243,6 @@ void irc_add_time_tag(char *line, size_t linesz);
 #define N_NONICKNAMEGIVEN  "431"
 #define N_ERRONEUSNICKNAME "432"
 #define N_NICKNAMEINUSE    "433"
-#define N_NICKCOLLISION    "436"
 #define N_UNAVAILRESOURCE  "437"
 #define N_USERNOTINCHANNEL "441"
 #define N_NOTONCHANNEL     "442"
@@ -254,7 +259,6 @@ void irc_add_time_tag(char *line, size_t linesz);
 #define N_INVITEONLYCHAN   "473"
 #define N_BANNED           "474"
 #define N_NOCHANNELKEY     "475"
-#define N_NOAVAIL          "476"
 #define N_NOPRIVILEGES     "481"
 #define N_CANTKILLSERVER   "483"
 #define N_NOTCHANNELOP     "482"
@@ -274,8 +278,6 @@ void irc_add_time_tag(char *line, size_t linesz);
 #define N_SERVLISTEND      "235"
 #define N_WHOSPCRPL        "354"
 #define N_LOGGEDIN         "900"
-#define N_LOGGEDOUT        "901"
-#define N_NICKLOCKED       "902"
 #define N_SASLSUCCESS      "903"
 #define N_SASLFAIL         "904"
 #define N_SASLTOOLONG      "905"

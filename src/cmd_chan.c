@@ -110,10 +110,16 @@ static int n_channels_of(client_t *cl) {
 void cmd_force_join(server_t *srv, client_t *cl, const char *chan_name) {
     if (!irc_valid_channel(chan_name, 50)) return;
     channel_t *chan = server_get_or_create_channel(srv, chan_name);
+    if (!chan) return;
     if (channel_find_member(chan, cl)) return;
     member_t *m = channel_add_member(chan, cl);
+    if (!m) { server_maybe_drop_channel(srv, chan); return; }
     if (channel_member_count(chan) == 1) m->rank |= RANK_OP;
-    server_attach_membership(cl, chan);
+    if (server_attach_membership(cl, chan) != 0) {
+        channel_remove_member(chan, cl);
+        server_maybe_drop_channel(srv, chan);
+        return;
+    }
     announce_join(chan, cl);
 }
 
@@ -150,8 +156,9 @@ static void do_join_one(server_t *srv, client_t *cl, const char *chan_name, cons
             if (!allowed) { err_no_such_channel(cl, chan_name); return; }
         }
         chan = server_get_or_create_channel(srv, chan_name);
+        if (!chan) { err_no_such_channel(cl, chan_name); return; }
     } else if (!(cl->umodes & UMODE_O)) {
-        if ((chan->modes & CMODE_I) && !channel_is_invited(chan, cl->nick, cl->user, cl->host, cl->account)) {
+        if ((chan->modes & CMODE_I) && !channel_is_invited(chan, cl->nick, cl->user, cl->host, cl->account, cl->ident_confirmed)) {
             const char *p[] = {chan->name};
             client_reply(cl, N_INVITEONLYCHAN, p, 1, "Cannot join channel (+i)");
             return;
@@ -166,7 +173,7 @@ static void do_join_one(server_t *srv, client_t *cl, const char *chan_name, cons
             client_reply(cl, N_CHANNELISFULL, p, 1, "Cannot join channel (+l)");
             return;
         }
-        if (channel_is_banned(chan, cl->nick, cl->user, cl->host, cl->account)) {
+        if (channel_is_banned(chan, cl->nick, cl->user, cl->host, cl->account, cl->ident_confirmed)) {
             const char *p[] = {chan->name};
             client_reply(cl, N_BANNED, p, 1, "Cannot join channel (+b)");
             return;
@@ -179,11 +186,17 @@ static void do_join_one(server_t *srv, client_t *cl, const char *chan_name, cons
     }
 
     member_t *m = channel_add_member(chan, cl);
+    if (!m) { server_maybe_drop_channel(srv, chan); err_no_such_channel(cl, chan_name); return; }
     if (is_new) m->rank |= RANK_OP;
     char cf[64];
     irc_casefold(cf, sizeof cf, cl->nick);
     channel_invite_remove(chan, cf);
-    server_attach_membership(cl, chan);
+    if (server_attach_membership(cl, chan) != 0) {
+        channel_remove_member(chan, cl);
+        server_maybe_drop_channel(srv, chan);
+        err_no_such_channel(cl, chan_name);
+        return;
+    }
     announce_join(chan, cl);
 }
 
@@ -444,6 +457,23 @@ void cmd_invite(server_t *srv, client_t *cl, irc_message_t *msg) {
     client_t *target = server_find_user(srv, msg->params[0]);
     if (!target) { err_no_such_nick(cl, msg->params[0]); return; }
     const char *chan_name = msg->params[1];
+    /* An INVITE for a channel that doesn't exist still delivers its second
+     * parameter verbatim to the target. Unvalidated, that made INVITE an
+     * arbitrary-text channel to any nick on the server, around /SILENCE, +D
+     * and +R -- all of which PRIVMSG enforces. Validate the name, and apply
+     * the same three checks. */
+    if (!irc_valid_channel(chan_name, 50)) { err_no_such_channel(cl, chan_name); return; }
+    if (client_is_silencing(target, cl)) return; /* dropped without telling the sender, as PRIVMSG does */
+    if ((target->umodes & UMODE_NOPM) && !(cl->umodes & UMODE_O) && cl != target) {
+        const char *pe[] = {target->nick};
+        client_reply(cl, N_NONONREG, pe, 1, "is not accepting private messages");
+        return;
+    }
+    if ((target->umodes & UMODE_REGONLY) && !cl->account[0] && !(cl->umodes & UMODE_O) && cl != target) {
+        const char *pe[] = {target->nick};
+        client_reply(cl, N_NONONREG, pe, 1, "is only accepting messages from registered users");
+        return;
+    }
     channel_t *chan = server_find_channel(srv, chan_name);
     if (chan) {
         member_t *me = channel_find_member(chan, cl);
@@ -633,6 +663,13 @@ void cmd_apply_channel_mode(server_t *srv, client_t *cl, channel_t *chan,
     int n_outparams = 0;
 
     for (const char *pch = modestring; *pch; pch++) {
+        /* Bounds check FIRST: several branches below end in `continue`, so a
+         * check at the bottom of the loop is simply not reached by them --
+         * an argument-free flag letter (the `flagbit` branch) then appends
+         * to outflags[] unboundedly, and "MODE #c +nnnn...", 500 letters
+         * long, smashes the stack. Every write below appends at most a sign
+         * plus a letter, so leaving 2 bytes plus the NUL is sufficient. */
+        if (of + 2 >= sizeof outflags || n_outparams >= (int)(sizeof outparams / sizeof outparams[0])) break;
         char c = *pch;
         if (c == '+' || c == '-') { sign = c; continue; }
 
@@ -729,7 +766,6 @@ void cmd_apply_channel_mode(server_t *srv, client_t *cl, channel_t *chan,
             const char *p[] = {chan->name, letterbuf};
             client_reply(cl, N_UNKNOWNMODE, p, 2, "is unknown mode char to me");
         }
-        if (of >= sizeof outflags - 2 || n_outparams >= 15) break; /* defensive */
     }
     outflags[of] = '\0';
     if (of <= 1) return;

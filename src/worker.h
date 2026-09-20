@@ -4,10 +4,12 @@
  * connection that's already gone is safely dropped by the poll loop's own
  * lookup, never by touching freed memory from a worker thread.
  *
- * ponytail: no per-job timeout enforcement inside the worker (getnameinfo/
- * gethostbyname/ident's own socket timeout are the only bounds) -- a stuck
- * DNS resolver ties up one of N_WORKERS threads, never the event loop.
- * Bump N_WORKERS (worker.c) if that's ever observed to matter.
+ * Every job type is bounded by its configured timeout: ident uses a
+ * non-blocking connect plus SO_RCVTIMEO, and the two resolver jobs run their
+ * blocking getaddrinfo/getnameinfo on a detached helper thread the worker
+ * waits on with a deadline (see worker.c's dns_with_timeout for why there is
+ * no portable timeout knob to use instead). A stuck resolver therefore ties
+ * up neither the event loop nor a pool thread beyond that timeout.
  */
 #ifndef SEKURIRCD_WORKER_H
 #define SEKURIRCD_WORKER_H
@@ -53,7 +55,11 @@ void worker_pool_start(void);
 int worker_wake_fd(void);
 void worker_drain_wake(void);
 void worker_pool_stop(void); /* joins all threads; call once, at shutdown */
-void worker_submit(const job_t *job);
+/* Queues a job. Returns 0 on success, -1 if the queue is at capacity (or the
+ * allocation failed) -- the caller must then clear whatever *_pending flag it
+ * set, so the connection isn't left waiting on a result that will never come.
+ * JOB_SASL/JOB_HASH are queued ahead of the slower DNS jobs. */
+int worker_submit(const job_t *job);
 /* Drains up to `max` completed results into `out` (main thread only). */
 int worker_poll_results(job_result_t *out, int max);
 

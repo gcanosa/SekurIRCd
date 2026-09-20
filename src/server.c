@@ -87,6 +87,7 @@ channel_t *server_get_or_create_channel(server_t *srv, const char *name) {
     char cf[CHAN_NAMELEN];
     irc_casefold(cf, sizeof cf, name);
     chan = channel_new(name, cf);
+    if (!chan) return NULL;
     HASH_ADD_STR(srv->channels, casefold_name, chan);
 
     for (const char *p = srv->cfg.channels.default_modes; *p; p++) {
@@ -111,12 +112,44 @@ channel_t *server_get_or_create_channel(server_t *srv, const char *name) {
     return chan;
 }
 
+typedef struct ipcount {
+    char ip[64];
+    int n;
+    UT_hash_handle hh;
+} ipcount_t;
+
+int server_ip_count(server_t *srv, const char *ip) {
+    ipcount_t *e;
+    HASH_FIND_STR(srv->ip_counts, ip, e);
+    return e ? e->n : 0;
+}
+
+static void ip_count_inc(server_t *srv, const char *ip) {
+    ipcount_t *e;
+    HASH_FIND_STR(srv->ip_counts, ip, e);
+    if (!e) {
+        e = calloc(1, sizeof *e);
+        if (!e) return; /* the cap just isn't enforced for this one connection */
+        snprintf(e->ip, sizeof e->ip, "%s", ip);
+        HASH_ADD_STR(srv->ip_counts, ip, e);
+    }
+    e->n++;
+}
+
+static void ip_count_dec(server_t *srv, const char *ip) {
+    ipcount_t *e;
+    HASH_FIND_STR(srv->ip_counts, ip, e);
+    if (!e) return;
+    if (--e->n <= 0) { HASH_DEL(srv->ip_counts, e); free(e); }
+}
+
 void server_add_connection(server_t *srv, client_t *cl) {
     cl->all_next = srv->all_clients;
     cl->all_prev = NULL;
     if (srv->all_clients) srv->all_clients->all_prev = cl;
     srv->all_clients = cl;
     srv->n_clients++;
+    ip_count_inc(srv, cl->ip);
 }
 
 static void unlink_connection(server_t *srv, client_t *cl) {
@@ -132,6 +165,7 @@ static void unlink_connection(server_t *srv, client_t *cl) {
     else srv->all_clients = cl->all_next;
     if (cl->all_next) cl->all_next->all_prev = cl->all_prev;
     srv->n_clients--;
+    ip_count_dec(srv, cl->ip);
 }
 
 void server_add_user(server_t *srv, client_t *cl) {
@@ -140,11 +174,13 @@ void server_add_user(server_t *srv, client_t *cl) {
     if (n > srv->max_users_seen) srv->max_users_seen = n;
 }
 
-void server_attach_membership(client_t *cl, channel_t *chan) {
+int server_attach_membership(client_t *cl, channel_t *chan) {
     chan_node_t *node = malloc(sizeof *node);
+    if (!node) return -1;
     node->chan = chan;
     node->next = cl->channels;
     cl->channels = node;
+    return 0;
 }
 
 void server_detach_membership(client_t *cl, channel_t *chan) {
@@ -502,11 +538,15 @@ static void kline_save(server_t *srv) {
         cJSON_AddItemToArray(arr, o);
     }
     char *text = cJSON_Print(arr);
-    char tmp[CFG_PATH + 4];
+    /* sizeof needs room for path + ".tmp" + NUL; at CFG_PATH + 4 a maximal
+     * path truncated to "....tm" and renamed over a different file. */
+    char tmp[CFG_PATH + 5];
     snprintf(tmp, sizeof tmp, "%s.tmp", path);
-    FILE *fp = fopen(tmp, "wb");
-    if (fp) { fputs(text, fp); fclose(fp); rename(tmp, path); }
-    free(text);
+    if (text) {
+        FILE *fp = fopen(tmp, "wb");
+        if (fp) { fputs(text, fp); fclose(fp); rename(tmp, path); }
+        free(text);
+    }
     cJSON_Delete(arr);
 }
 
@@ -520,6 +560,7 @@ void server_kline_load(server_t *srv) {
     fseek(fp, 0, SEEK_SET);
     if (len <= 0) { fclose(fp); return; }
     char *buf = malloc((size_t)len + 1);
+    if (!buf) { fclose(fp); return; }
     size_t rd = fread(buf, 1, (size_t)len, fp);
     fclose(fp);
     buf[rd] = '\0';
@@ -559,12 +600,32 @@ void server_kline_prune_expired(server_t *srv) {
             pp = &(*pp)->next;
         }
     }
-    if (pruned) kline_save(srv);
+    if (pruned) srv->klines_dirty = 1;
+}
+
+void server_kline_flush(server_t *srv) {
+    if (!srv->klines_dirty) return;
+    srv->klines_dirty = 0;
+    kline_save(srv);
 }
 
 void server_kline_add(server_t *srv, const char *mask, const char *reason,
                        const char *set_by, const char *line_type, long duration_secs) {
+    /* Refresh an existing identical line rather than appending a duplicate.
+     * DNSBL verdicts arrive asynchronously, so several clients behind one
+     * listed IP each used to append their own entry (and rewrite the whole
+     * file), growing the list -- which every accept() then walks. */
+    for (kline_entry_t *e = srv->klines; e; e = e->next) {
+        if (strcasecmp(e->mask, mask) != 0 || strcmp(e->line_type, line_type) != 0) continue;
+        time_t newexp = duration_secs > 0 ? time(NULL) + duration_secs : 0;
+        /* 0 means permanent, which outranks any expiry. */
+        if (newexp == 0 || e->expires_at == 0) e->expires_at = 0;
+        else if (newexp > e->expires_at) e->expires_at = newexp;
+        srv->klines_dirty = 1;
+        return;
+    }
     kline_entry_t *k = calloc(1, sizeof *k);
+    if (!k) return;
     snprintf(k->mask, sizeof k->mask, "%s", mask);
     snprintf(k->reason, sizeof k->reason, "%s", reason);
     snprintf(k->set_by, sizeof k->set_by, "%s", set_by);
@@ -572,7 +633,7 @@ void server_kline_add(server_t *srv, const char *mask, const char *reason,
     k->expires_at = duration_secs > 0 ? time(NULL) + duration_secs : 0;
     k->next = srv->klines;
     srv->klines = k;
-    kline_save(srv);
+    srv->klines_dirty = 1;
 
     char snote[400];
     snprintf(snote, sizeof snote, "%s added %s-Line '%s' (%s)", set_by, line_type, mask, reason);
@@ -586,7 +647,7 @@ int server_kline_remove(server_t *srv, const char *mask) {
             kline_entry_t *dead = *pp;
             *pp = dead->next;
             free(dead);
-            kline_save(srv);
+            srv->klines_dirty = 1;
             char snote[350];
             snprintf(snote, sizeof snote, "removed line on '%s'", mask);
             server_notify_opers(srv, snote);
@@ -597,15 +658,46 @@ int server_kline_remove(server_t *srv, const char *mask) {
     return 0;
 }
 
-const char *server_kline_match(server_t *srv, const char *ip) {
+int server_line_mask_hits(const char *mask, const char *line_type, const char *ip,
+                           const char *user, const char *host, int ident_confirmed) {
+    if (ip && ip[0] && irc_glob_match(mask, ip)) return 1;
+    /* A Z-line is deliberately IP-only: it's the pre-registration ban that
+     * connect-flood and DNSBL apply at accept(), before any user/host exists.
+     * K and G also match user@host -- which is what /HELP KLINE has always
+     * promised, and what an oper typing a hostname mask expects. Until this
+     * they matched the IP and nothing else, making K, G and Z three names for
+     * exactly the same ban. */
+    if (line_type && line_type[0] == 'Z') return 0;
+    if (!host || !host[0]) return 0;
+    if (irc_host_mask_match(user, host, mask)) return 1;
+    /* Try the tilde form too, so an oper needn't know whether the target's
+     * ident was identd-confirmed to write a mask that bites. */
+    if (user && user[0] && !ident_confirmed && user[0] != '~') {
+        char tilde[USERLEN + 2];
+        snprintf(tilde, sizeof tilde, "~%s", user);
+        if (irc_host_mask_match(tilde, host, mask)) return 1;
+    }
+    return 0;
+}
+
+const char *server_kline_match(server_t *srv, const char *ip, const char *user,
+                                const char *host, int ident_confirmed) {
     static char reason_buf[300];
     for (kline_entry_t *k = srv->klines; k; k = k->next) {
-        if (irc_glob_match(k->mask, ip)) {
-            snprintf(reason_buf, sizeof reason_buf, "%s-Lined: %s", k->line_type, k->reason);
-            return reason_buf;
-        }
+        if (!server_line_mask_hits(k->mask, k->line_type, ip, user, host, ident_confirmed)) continue;
+        snprintf(reason_buf, sizeof reason_buf, "%s-Lined: %s", k->line_type, k->reason);
+        return reason_buf;
     }
     return NULL;
+}
+
+void server_free_tables(server_t *srv) {
+    server_kline_flush(srv);
+    kline_entry_t *k = srv->klines;
+    while (k) { kline_entry_t *next = k->next; free(k); k = next; }
+    srv->klines = NULL;
+    ipcount_t *e, *tmp;
+    HASH_ITER(hh, srv->ip_counts, e, tmp) { HASH_DEL(srv->ip_counts, e); free(e); }
 }
 
 /* --- WHOWAS -------------------------------------------------------------- */
@@ -632,7 +724,11 @@ void server_monitor_notify(server_t *srv, client_t *cl, int online) {
     for (client_t *watcher = srv->all_clients; watcher; watcher = watcher->all_next) {
         if (watcher == cl) continue;
         for (int i = 0; i < watcher->n_monitor; i++) {
-            if (strcmp(watcher->monitor[i], cf) != 0) continue;
+            /* ponytail: still O(watchers x list), but the first-byte reject
+             * skips ~96% of the strcmps for free. An inverted index keyed by
+             * watched nick is the upgrade if a deployment ever has enough
+             * watchers x entries for this to show up in a profile. */
+            if (watcher->monitor[i][0] != cf[0] || strcmp(watcher->monitor[i], cf) != 0) continue;
             const char *code = online ? N_MONONLINE : N_MONOFFLINE;
             const char *val = online ? prefix : cl->nick;
             client_reply(watcher, code, NULL, 0, val);
@@ -652,7 +748,7 @@ void server_watch_notify(server_t *srv, client_t *cl, int online) {
     for (client_t *watcher = srv->all_clients; watcher; watcher = watcher->all_next) {
         if (watcher == cl) continue;
         for (int i = 0; i < watcher->n_watch; i++) {
-            if (strcmp(watcher->watch[i], cf) != 0) continue;
+            if (watcher->watch[i][0] != cf[0] || strcmp(watcher->watch[i], cf) != 0) continue;
             const char *p[] = {cl->nick, cl->user, cl->host, timebuf};
             client_reply(watcher, online ? N_LOGON : N_LOGOFF, p, 4, online ? "logged online" : "logged offline");
             break;

@@ -245,6 +245,11 @@ enabled = false
 # this config file's directory.
 store_file = "accounts.json"
 
+# Upper bound on registered accounts. /REGISTER is self-service account
+# creation, so without a cap one client can grow this store (and the file
+# rewritten on every registration) without limit. 0 = unlimited.
+max_accounts = 10000
+
 
 # -----------------------------------------------------------------------------
 # [debug_channel] -- live in-IRC view of the daemon's own log

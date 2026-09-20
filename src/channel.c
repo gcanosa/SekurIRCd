@@ -36,6 +36,7 @@ member_t *channel_add_member(channel_t *chan, struct client *cl) {
     member_t *m = channel_find_member(chan, cl);
     if (m) return m;
     m = calloc(1, sizeof *m);
+    if (!m) return NULL;
     m->client = cl;
     HASH_ADD_PTR(chan->members, client, m);
     return m;
@@ -71,33 +72,33 @@ int channel_is_voice(channel_t *chan, struct client *cl) {
 }
 
 int channel_mask_hit(const char *mask, const char *nick, const char *user,
-                      const char *host, const char *account) {
+                      const char *host, const char *account, int ident_confirmed) {
     if (strncasecmp(mask, "a:", 2) == 0) {
         if (!account || !account[0]) return 0; /* EXTBAN a: never matches a logged-out user */
         return irc_glob_match(mask + 2, account);
     }
-    return irc_mask_match(nick, user, host, mask);
+    return irc_mask_match(nick, user, host, mask, ident_confirmed);
 }
 
 int channel_is_banned(channel_t *chan, const char *nick, const char *user,
-                       const char *host, const char *account) {
+                       const char *host, const char *account, int ident_confirmed) {
     int banned = 0;
     for (int i = 0; i < chan->bans.n && !banned; i++)
-        if (channel_mask_hit(chan->bans.masks[i], nick, user, host, account)) banned = 1;
+        if (channel_mask_hit(chan->bans.masks[i], nick, user, host, account, ident_confirmed)) banned = 1;
     if (!banned) return 0;
     for (int i = 0; i < chan->exceptions.n; i++)
-        if (channel_mask_hit(chan->exceptions.masks[i], nick, user, host, account)) return 0;
+        if (channel_mask_hit(chan->exceptions.masks[i], nick, user, host, account, ident_confirmed)) return 0;
     return 1;
 }
 
 int channel_is_invited(channel_t *chan, const char *nick, const char *user,
-                        const char *host, const char *account) {
+                        const char *host, const char *account, int ident_confirmed) {
     char cf[64];
     irc_casefold(cf, sizeof cf, nick);
     for (int i = 0; i < chan->n_invited; i++)
         if (strcmp(chan->invited[i], cf) == 0) return 1;
     for (int i = 0; i < chan->invex.n; i++)
-        if (channel_mask_hit(chan->invex.masks[i], nick, user, host, account)) return 1;
+        if (channel_mask_hit(chan->invex.masks[i], nick, user, host, account, ident_confirmed)) return 1;
     return 0;
 }
 

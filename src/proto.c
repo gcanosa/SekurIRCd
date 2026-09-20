@@ -285,17 +285,22 @@ int irc_glob_match(const char *pattern, const char *text) {
     return *p == '\0';
 }
 
-int irc_mask_match(const char *nick, const char *user, const char *host, const char *mask) {
+void irc_ident_for(char *out, size_t outsz, const char *user, int ident_confirmed) {
+    if (!user || !user[0]) { if (outsz) out[0] = '\0'; return; }
+    /* The tilde means "self-declared, unconfirmed". An identd that answered
+     * makes cl->user authoritative, so it must NOT be tilde-prefixed -- see
+     * client_prefix, which is what the user actually sees in WHOIS/JOIN. */
+    if (ident_confirmed || user[0] == '~') snprintf(out, outsz, "%s", user);
+    else snprintf(out, outsz, "~%s", user);
+}
+
+int irc_mask_match(const char *nick, const char *user, const char *host, const char *mask,
+                    int ident_confirmed) {
     if (!strchr(mask, '!') && !strchr(mask, '@')) {
         return irc_glob_match(mask, nick ? nick : "");
     }
     char ident[128];
-    if (user && user[0]) {
-        if (user[0] == '~') snprintf(ident, sizeof ident, "%s", user);
-        else snprintf(ident, sizeof ident, "~%s", user);
-    } else {
-        ident[0] = '\0';
-    }
+    irc_ident_for(ident, sizeof ident, user, ident_confirmed);
     char full[384];
     snprintf(full, sizeof full, "%s!%s@%s", nick ? nick : "", ident, host ? host : "");
     return irc_glob_match(mask, full);
@@ -343,8 +348,9 @@ long irc_parse_duration(const char *token) {
 
 void irc_prefix_for(char *out, size_t outsz, const char *nick, const char *user, const char *host) {
     if (user && user[0]) {
-        if (user[0] == '~') snprintf(out, outsz, "%s!%s@%s", nick, user, host);
-        else snprintf(out, outsz, "%s!~%s@%s", nick, user, host);
+        char ident[128];
+        irc_ident_for(ident, sizeof ident, user, 0);
+        snprintf(out, outsz, "%s!%s@%s", nick, ident, host);
     } else {
         snprintf(out, outsz, "%s@%s", nick, host);
     }

@@ -24,6 +24,8 @@ void accounts_free(account_store_t *st);
 
 /* True if `name` (case-insensitive) is already registered. */
 int accounts_exists(account_store_t *st, const char *name);
+/* Number of registered accounts (for [accounts] max_accounts). */
+int accounts_count(account_store_t *st);
 /* Register `name` with an already-computed crypto_hash_password string,
  * persist if a path is configured. Caller must have already checked
  * !accounts_exists. */

@@ -285,11 +285,17 @@ int net_connect_flood_hit(const cfg_security_t *sec, const char *ip) {
     return t->count > sec->connect_flood_max;
 }
 
+/* errno from the last accept() that failed -- accept_clients needs to tell
+ * "backlog drained" (EAGAIN) apart from "out of descriptors" (EMFILE), and
+ * the work accept_common does after a successful accept would clobber it. */
+static int g_accept_errno;
+
 static client_t *accept_common(server_t *srv, int listen_fd) {
     struct sockaddr_in peer;
     socklen_t plen = sizeof peer;
     int fd = accept(listen_fd, (struct sockaddr *)&peer, &plen);
-    if (fd < 0) return NULL;
+    if (fd < 0) { g_accept_errno = errno; return NULL; }
+    g_accept_errno = 0;
     srv->total_connections++;
 
     char ipbuf[64];
@@ -306,7 +312,10 @@ static client_t *accept_common(server_t *srv, int listen_fd) {
     }
     net_set_nonblocking(fd);
 
-    const char *kline_reason = server_kline_match(srv, ipbuf);
+    /* Accept time: no USER/ident/rDNS yet, so only the IP and the raw host
+     * are known. A hostname K-line is re-checked once registration
+     * completes -- see cmd_send_welcome_if_ready. */
+    const char *kline_reason = server_kline_match(srv, ipbuf, NULL, ipbuf, 0);
     if (kline_reason) {
         char err[350];
         snprintf(err, sizeof err, "ERROR :Closing Link: %s (%s)\r\n", ipbuf, kline_reason);
@@ -338,9 +347,10 @@ static client_t *accept_common(server_t *srv, int listen_fd) {
     snprintf(cl->realhost, sizeof cl->realhost, "%s", ipbuf);
 
     if (srv->cfg.security.max_connections_per_ip > 0) {
-        int count = 0;
-        for (client_t *c = srv->all_clients; c; c = c->all_next)
-            if (strcmp(c->ip, cl->ip) == 0) count++;
+        /* O(1): server_add_connection/unlink_connection keep this exact.
+         * Walking all_clients here cost O(connections) on every accept(),
+         * times ACCEPT_BURST per poll wakeup, exactly when under a flood. */
+        int count = server_ip_count(srv, cl->ip);
         if (count >= srv->cfg.security.max_connections_per_ip) {
             const char *msg = "ERROR :Too many connections from your host\r\n";
             if (write(fd, msg, strlen(msg)) < 0) { /* best effort; peer may already be gone */ }
@@ -376,7 +386,9 @@ static client_t *accept_common(server_t *srv, int listen_fd) {
         j.n_zones = srv->cfg.dnsbl.n_zones < WORKER_MAX_ZONES ? srv->cfg.dnsbl.n_zones : WORKER_MAX_ZONES;
         for (int i = 0; i < j.n_zones; i++) snprintf(j.zones[i], sizeof j.zones[0], "%s", srv->cfg.dnsbl.zones[i]);
         cl->dnsbl_pending = 1;
-        worker_submit(&j);
+        /* Queue full: proceed without the verdict rather than leaving POLLIN
+         * withheld until the 30-second rescue tick. */
+        if (worker_submit(&j) != 0) cl->dnsbl_pending = 0;
     }
     if (srv->cfg.security.rdns_enabled && !srv->cfg.security.host_masking) {
         job_t j; memset(&j, 0, sizeof j);
@@ -385,7 +397,7 @@ static client_t *accept_common(server_t *srv, int listen_fd) {
         snprintf(j.ip, sizeof j.ip, "%s", ipbuf);
         j.timeout = srv->cfg.security.rdns_timeout;
         cl->rdns_pending = 1;
-        worker_submit(&j);
+        if (worker_submit(&j) != 0) cl->rdns_pending = 0;
     }
     if (srv->cfg.security.ident_enabled) {
         struct sockaddr_in local;
@@ -398,7 +410,7 @@ static client_t *accept_common(server_t *srv, int listen_fd) {
         j.local_port = (getsockname(fd, (struct sockaddr *)&local, &llen) == 0) ? ntohs(local.sin_port) : 0;
         j.timeout = srv->cfg.security.ident_timeout;
         cl->ident_pending = 1;
-        worker_submit(&j);
+        if (worker_submit(&j) != 0) cl->ident_pending = 0;
     }
 
     server_add_connection(srv, cl);
@@ -414,7 +426,20 @@ static void accept_clients(server_t *srv, int listen_fd, int tls) {
         long before = srv->total_connections;
         client_t *cl = accept_common(srv, listen_fd);
         if (!cl) {
-            if (srv->total_connections == before) return; /* EAGAIN: backlog empty */
+            if (srv->total_connections == before) {
+                /* accept() itself failed. EAGAIN just means the backlog is
+                 * drained. EMFILE/ENFILE means we're out of descriptors --
+                 * and the listener stays readable, so simply returning would
+                 * make poll() fire again immediately, forever, pegging a core
+                 * until a client happened to disconnect. Stop polling the
+                 * listeners for a moment instead. */
+                if (g_accept_errno == EMFILE || g_accept_errno == ENFILE) {
+                    log_error("net", "accept failed: %s -- pausing the listeners for 1s",
+                              strerror(g_accept_errno));
+                    srv->accept_paused_until = time(NULL) + 1;
+                }
+                return;
+            }
             continue; /* refused (limit/K-line) -- keep draining */
         }
         if (!tls) {
@@ -623,6 +648,17 @@ static void tick(server_t *srv) {
             cl->rdns_pending = cl->ident_pending = cl->dnsbl_pending = 0;
             cmd_send_welcome_if_ready(srv, cl);
         }
+        /* Same rescue for a scrypt job whose result was lost (full result
+         * ring). Without it auth_pending stays set for the rest of the
+         * connection's life and every later SASL/REGISTER/OPER/DIE/RESTART
+         * short-circuits on it -- the connection can never authenticate
+         * again. Timed from when the job was submitted, not from signon:
+         * an /OPER can happen hours in. */
+        if (cl->auth_pending && difftime(now, cl->auth_started) > 30) {
+            log_warn("net", "auth job for %s never finished -- releasing the connection", cl->ip);
+            cl->auth_pending = 0;
+            notice_self(srv, cl, "Your login timed out on the server side -- please try again.");
+        }
         double idle = difftime(now, cl->last_activity);
         if (!cl->registered && age > REGISTRATION_TIMEOUT) {
             cl->quitting = 1;
@@ -640,6 +676,7 @@ static void tick(server_t *srv) {
     link_tick(srv);
     link_leaf_tick(srv);
     server_kline_prune_expired(srv);
+    server_kline_flush(srv); /* batched: see server_kline_flush */
 
     if (srv->cfg.debug_channel.stats_interval > 0) {
         static time_t last_stats = 0;
@@ -722,7 +759,11 @@ int net_run(server_t *srv) {
         memset(fd_link, 0, nfds * sizeof *fd_link);
         int n = 0;
 
-        fds[n].fd = srv->listen_fd; fds[n].events = POLLIN; fds[n].revents = 0; n++;
+        /* While paused (see accept_clients' EMFILE handling) the listeners
+         * stay in the set but ask for no events, so an un-acceptable
+         * connection can't spin the loop. */
+        short listen_events = (srv->accept_paused_until > time(NULL)) ? 0 : POLLIN;
+        fds[n].fd = srv->listen_fd; fds[n].events = listen_events; fds[n].revents = 0; n++;
         int wake_idx = -1;
         if (worker_wake_fd() >= 0) {
             wake_idx = n;
@@ -731,12 +772,12 @@ int net_run(server_t *srv) {
         int link_listen_idx = -1;
         if (srv->link_listen_fd >= 0) {
             link_listen_idx = n;
-            fds[n].fd = srv->link_listen_fd; fds[n].events = POLLIN; fds[n].revents = 0; n++;
+            fds[n].fd = srv->link_listen_fd; fds[n].events = listen_events; fds[n].revents = 0; n++;
         }
         int tls_listen_idx = -1;
         if (srv->tls_listen_fd >= 0) {
             tls_listen_idx = n;
-            fds[n].fd = srv->tls_listen_fd; fds[n].events = POLLIN; fds[n].revents = 0; n++;
+            fds[n].fd = srv->tls_listen_fd; fds[n].events = listen_events; fds[n].revents = 0; n++;
         }
         for (client_t *cl = srv->all_clients; cl; cl = cl->all_next) {
             if (cl->fd < 0 || cl->quitting) continue;
@@ -874,6 +915,7 @@ int net_run(server_t *srv) {
      * `srv->users = NULL` would leak that. HASH_CLEAR frees it and nulls
      * the head; it never touches the (already-freed) entries themselves. */
     HASH_CLEAR(hh, srv->users);
+    server_free_tables(srv);
 
     if (srv->listen_fd >= 0) close(srv->listen_fd);
     if (srv->link_listen_fd >= 0) close(srv->link_listen_fd);

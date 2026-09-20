@@ -129,12 +129,13 @@ void cmd_trace(server_t *srv, client_t *cl, irc_message_t *msg) {
 void cmd_servlist(server_t *srv, client_t *cl, irc_message_t *msg) {
     const char *mask = msg->nparams > 0 ? msg->params[0] : "*";
     const char *type_mask = msg->nparams > 1 ? msg->params[1] : "*";
+    char mcf[NICKLEN];
+    irc_casefold(mcf, sizeof mcf, mask); /* loop-invariant */
     client_t *u, *tmp;
     HASH_ITER(hh, srv->users, u, tmp) {
         if (!u->is_service) continue;
-        char cf[NICKLEN], mcf[NICKLEN];
+        char cf[NICKLEN];
         irc_casefold(cf, sizeof cf, u->nick);
-        irc_casefold(mcf, sizeof mcf, mask);
         if (!irc_glob_match(mcf, cf)) continue;
         const char *p[] = {u->nick, srv->cfg.server.name, type_mask, "0", "0"};
         client_reply(cl, N_SERVLIST, p, 5, u->realname);
@@ -187,9 +188,13 @@ static const help_entry_t HELP_TABLE[] = {
     {"MAP", {"MAP", "Show an ASCII-tree view of the linked network."}},
     {"KICK", {"KICK <channel> <nick> [:reason]", "Remove a member from a channel. Requires chanop, halfop, or server-oper."}},
     {"KILL", {"KILL <nick> [:reason]", "Disconnect a user from the network. Server-oper only."}},
-    {"KLINE", {"KLINE [<mask> [<duration>] [:reason]]", "List, or add, an IP ban. Server-oper only."}},
+    {"KLINE", {"KLINE [<mask> [<duration>] [:reason]]",
+               "List, or add, a ban. <mask> may be an IP glob (203.0.113.*), a host glob "
+               "(*.example.com), or user@host. No argument lists all active K/G/Z-lines. Server-oper only."}},
     {"GLINE", {"GLINE [<mask> [<duration>] [:reason]]", "Same as KLINE. Server-oper only."}},
-    {"ZLINE", {"ZLINE [<mask> [<duration>] [:reason]]", "Same as KLINE. Server-oper only."}},
+    {"ZLINE", {"ZLINE [<mask> [<duration>] [:reason]]",
+               "Like KLINE, but matched at connect time against the IP only -- it cannot see a "
+               "hostname, and is what DNSBL/connect-flood bans use. Server-oper only."}},
     {"UNKLINE", {"UNKLINE <mask>", "Remove a K-line. Server-oper only."}},
     {"UNGLINE", {"UNGLINE <mask>", "Remove a G-line. Server-oper only."}},
     {"UNZLINE", {"UNZLINE <mask>", "Remove a Z-line. Server-oper only."}},

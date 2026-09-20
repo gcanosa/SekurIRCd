@@ -1,8 +1,19 @@
 [
   {
-    "tag": "Unreleased",
-    "date": "on main",
+    "tag": "v1.0.4",
+    "date": "2026-09-21",
     "changes": [
+      "Security: fixed a remotely-triggerable stack buffer overflow in channel MODE handling, reachable by any channel operator",
+      "Security: ident/rDNS/DNSBL lookups are now bounded by their configured timeouts (dnsbl.timeout and rdns_timeout were previously ignored) and can no longer stall the worker pool",
+      "Security: bans, /SILENCE and ChanServ ACCESS/AKICK now match identd-confirmed users correctly; a mask written the way WHOIS displays a user finally bites",
+      "KLINE/GLINE now match host and user@host masks, not just IPs; ZLINE stays IP-only for connect-time bans",
+      "Security: constant-time password comparison for OPER/DIE/RESTART and server links; hardened build flags (stack protector, FORTIFY_SOURCE, RELRO/BIND_NOW on Linux)",
+      "INVITE can no longer be used to send arbitrary text around /SILENCE, +D and +R",
+      "Fixed an out-of-descriptors condition that pegged a CPU core, and a lost auth result that permanently wedged a connection's ability to log in",
+      "/REGISTER is rate-limited and the account store is capped ([accounts] max_accounts)",
+      "Config validation no longer overflows on a bad host_masking_token_bytes; max_params, max_nick_length and max_message_length are range-checked",
+      "Performance: O(1) per-IP connection counting, deduplicated and batched K-line writes, debounced ChanServ store writes",
+      "A leaf server reconnect no longer freezes the event loop for the OS connect timeout",
       "SASL EXTERNAL: log in with a TLS client certificate, bound with /CERT ADD",
       "Z-lines (ZLINE/UNZLINE), /WATCH, and STATS k/g/z/l",
       "Per-IP connect-flood throttle that auto-bans scanners",
@@ -34,6 +45,8 @@
   {
     "tag": "v1.0.1",
     "date": "2026-09-15",
-    "changes": ["Initial release of the C port"]
+    "changes": [
+      "Initial release of the C port"
+    ]
   }
 ]

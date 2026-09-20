@@ -261,6 +261,7 @@ void config_defaults(config_t *out) {
     out->tls.port = 6697;
 
     snprintf(out->accounts.store_file, CFG_PATH, "accounts.json");
+    out->accounts.max_accounts = 10000;
 
     snprintf(out->links.mode, sizeof out->links.mode, "hub");
     snprintf(out->links.bind, CFG_STR, "0.0.0.0");
@@ -351,6 +352,15 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
     if (cfg_get_double(sec, "connect_flood_window", 10.0, &out->security.connect_flood_window, errbuf, errbufsz, "security.connect_flood_window")) return -1;
     if (cfg_get_str(sec, "connect_flood_kline_duration", "10m", out->security.connect_flood_kline_duration, sizeof out->security.connect_flood_kline_duration, errbuf, errbufsz, "security.connect_flood_kline_duration")) return -1;
 
+    /* Range-check BEFORE the probe below: that memsets token0[] using this
+     * value, so validating afterwards meant a large (or negative, which
+     * becomes a huge size_t) setting smashed the stack during config load --
+     * reachable from /REHASH and SIGHUP, not just startup. The upper bound
+     * matches crypto_random_hex's own 64-byte cap. */
+    if (out->security.host_masking_token_bytes < 1 || out->security.host_masking_token_bytes > 32) {
+        snprintf(errbuf, errbufsz, "security.host_masking_token_bytes must be in 1-32");
+        return -1;
+    }
     {
         char probe[CFG_STR];
         char token0[64]; memset(token0, '0', (size_t)out->security.host_masking_token_bytes * 2);
@@ -359,10 +369,6 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
             snprintf(errbuf, errbufsz, "security.host_masking_format: invalid template");
             return -1;
         }
-    }
-    if (out->security.host_masking_token_bytes < 1) {
-        snprintf(errbuf, errbufsz, "security.host_masking_token_bytes must be >= 1");
-        return -1;
     }
     {
         char probe[CFG_STR];
@@ -382,6 +388,20 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
         return -1;
     }
     if (out->security.max_line_length < 1) { snprintf(errbuf, errbufsz, "security.max_line_length must be >= 1"); return -1; }
+    /* max_params bounds IRC_MAX_PARAMS (proto.h). 0 or negative used to slip
+     * through and leave msg->params[0] unwritten for the handlers registered
+     * with min_params 0 that still index it -- an uninitialized stack read. */
+    if (out->security.max_params < 1 || out->security.max_params > IRC_MAX_PARAMS) {
+        snprintf(errbuf, errbufsz, "security.max_params must be in 1-%d", IRC_MAX_PARAMS);
+        return -1;
+    }
+    /* Upper bound is NICKLEN - 1 (client.h): anything longer is silently
+     * truncated into client_t.nick, and the advertised NICKLEN ISUPPORT
+     * token would be a promise the server can't keep. */
+    if (out->security.max_nick_length < 1 || out->security.max_nick_length > 63) {
+        snprintf(errbuf, errbufsz, "security.max_nick_length must be in 1-63");
+        return -1;
+    }
     if (out->security.flood_max_msgs < 1) { snprintf(errbuf, errbufsz, "security.flood_max_msgs must be >= 1"); return -1; }
     if (out->security.flood_window <= 0) { snprintf(errbuf, errbufsz, "security.flood_window must be > 0"); return -1; }
     if (out->security.ping_interval <= 0) { snprintf(errbuf, errbufsz, "security.ping_interval must be > 0"); return -1; }
@@ -404,6 +424,12 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
 
     if (cfg_get_str(msg, "motd", "ircd.motd", out->messages.motd, CFG_PATH, errbuf, errbufsz, "messages.motd")) return -1;
     if (cfg_get_int(msg, "max_message_length", 400, &out->messages.max_message_length, errbuf, errbufsz, "messages.max_message_length")) return -1;
+    /* Upper bound is the send_msg/cmd_squery text buffer (420) less its NUL.
+     * A negative value made the "%.*s" truncation a no-op. */
+    if (out->messages.max_message_length < 1 || out->messages.max_message_length > 419) {
+        snprintf(errbuf, errbufsz, "messages.max_message_length must be in 1-419");
+        return -1;
+    }
 
     {
         char level[16];
@@ -679,6 +705,11 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
         if (e) return -1;
         if (cfg_get_bool(acc, "enabled", 0, &out->accounts.enabled, errbuf, errbufsz, "accounts.enabled")) return -1;
         if (cfg_get_str(acc, "store_file", "accounts.json", out->accounts.store_file, CFG_PATH, errbuf, errbufsz, "accounts.store_file")) return -1;
+        if (cfg_get_int(acc, "max_accounts", 10000, &out->accounts.max_accounts, errbuf, errbufsz, "accounts.max_accounts")) return -1;
+        if (out->accounts.max_accounts < 0) {
+            snprintf(errbuf, errbufsz, "accounts.max_accounts must be >= 0 (0 = unlimited)");
+            return -1;
+        }
     }
 
     /* [debug_channel] */

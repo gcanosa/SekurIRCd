@@ -50,7 +50,6 @@ typedef struct client {
     struct link_conn *link_conn;  /* non-NULL iff fd == -1: where to forward client_send() */
     SSL *ssl;                     /* non-NULL for a TLS connection (see net.c's TLS listener) */
     int tls_handshaking;          /* SSL_accept() hasn't completed yet */
-    int is_listener_side_closed; /* peer sent EOF / we're tearing down */
     int quitting;                /* marked for removal at end of this poll tick */
     char quit_reason[256];
 
@@ -91,7 +90,10 @@ typedef struct client {
     int dnsbl_pending;      /* DNSBL zone lookup in flight -- gates ALL dispatch, not just welcome */
     int ident_confirmed;    /* an identd answered -- cl->user is authoritative, no "~" prefix */
     int auth_pending;       /* SASL verify / REGISTER hash running on a worker (scrypt is ~30ms) */
+    time_t auth_started;    /* when auth_pending was set -- net.c's tick clears a result that never came back */
     char pending_account[64];
+    int register_attempts;  /* /REGISTER is unauthenticated account creation: cap it per connection */
+    time_t register_last;
 
     uint64_t fanout_mark;   /* server_send_common_channels dedupe stamp */
 
