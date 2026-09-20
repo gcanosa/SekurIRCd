@@ -48,6 +48,18 @@ JOIN #general
 PRIVMSG #general :hello
 QUIT</pre>
 
+<h2>start/stop/status script</h2>
+<p>The repo root ships a small wrapper, <code>./sekurircd</code>, that runs both daemons in the background with the right flags and pidfiles, so you
+  don't manage them by hand:</p>
+<pre>./sekurircd start     # sekurircd, plus chanserv if services/services.toml exists
+./sekurircd status    # running/stopped for each, with pid
+./sekurircd stop      # stops chanserv first, then sekurircd (graceful)</pre>
+<p>It always works from the repo directory, using <code>config/sekurircd.toml</code>, <code>services/services.toml</code> and the pidfiles
+  <code>sekurircd.pid</code> and <code>services/chanserv.pid</code>. It refuses to start if <code>bin/</code> isn't built yet, ChanServ is skipped when it isn't
+  configured, and starting an already-running daemon is refused rather than duplicated. If <code>status</code> finds a matching process but no valid
+  pidfile, it says so instead of reporting "stopped". There is no <code>restart</code> subcommand: run <code>./sekurircd stop &amp;&amp; ./sekurircd start</code>,
+  or <code>./bin/sekurircd --rehash</code> to reload the config without restarting.</p>
+
 <h2>daemon mode</h2>
 <pre>./bin/sekurircd --config config/sekurircd.toml --daemon --pidfile /var/run/sekurircd.pid
 ./bin/sekurircd --stop   --pidfile /var/run/sekurircd.pid   # graceful stop, removes the pidfile

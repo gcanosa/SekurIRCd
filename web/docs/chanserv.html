@@ -40,6 +40,7 @@ password_hash = "scrypt$16384$8$1$&lt;salt-hex&gt;$&lt;digest-hex&gt;"   # from 
 ./bin/chanserv --config services/services.toml --daemon --pidfile services/chanserv.pid
 ./bin/chanserv --stop --pidfile services/chanserv.pid</pre>
 <p>A second <code>--daemon</code> against a live pidfile is refused. If the ircd is down or the link drops, ChanServ keeps retrying.
+  Easiest: <code>./sekurircd start</code> from the repo root starts ChanServ automatically when <code>services/services.toml</code> exists (see <a href="install.html">install</a>).
   Under systemd: <code>systemctl --user enable --now chanserv</code>.</p>
 
 <h2>commands</h2>
