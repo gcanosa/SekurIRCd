@@ -11,6 +11,7 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <poll.h>
@@ -134,10 +135,32 @@ static int write_line_blocking(link_conn_t *lc, const char *line) {
     return 0;
 }
 
-/* ponytail: a plain blocking connect() (bounded by the OS's own SYN
- * timeout) -- link establishment is rare (startup/reconnect/manual
- * /CONNECT), not a per-request path, so this doesn't need full
- * nonblocking-connect-in-progress handling like the client listeners do. */
+/* The whole leaf dial runs inside net.c's one-second tick, so every second
+ * it spends blocking is a second no connected client is serviced. A plain
+ * blocking connect() meant the OS SYN timeout (~75s) froze the entire server
+ * on every reconnect attempt against a dead uplink. Bound it explicitly.
+ * ponytail: still blocking, just briefly -- link establishment is rare
+ * (startup/reconnect/manual /CONNECT), not a per-request path, so it doesn't
+ * need full nonblocking-connect-in-progress handling. Make it a proper state
+ * machine in the poll set if these few seconds ever prove too long. */
+#define LINK_DIAL_TIMEOUT_MS 2000
+#define LINK_HANDSHAKE_TIMEOUT_MS 2000
+
+static int connect_bounded(int fd, const struct sockaddr *sa, socklen_t slen, int timeout_ms) {
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) return -1;
+    if (connect(fd, sa, slen) != 0) {
+        if (errno != EINPROGRESS) return -1;
+        struct pollfd pfd = {.fd = fd, .events = POLLOUT, .revents = 0};
+        if (poll(&pfd, 1, timeout_ms) <= 0) return -1;
+        int err = 0;
+        socklen_t elen = sizeof err;
+        if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &elen) != 0 || err != 0) return -1;
+    }
+    fcntl(fd, F_SETFL, flags); /* the handshake below wants blocking semantics */
+    return 0;
+}
+
 static int dial_uplink(const char *host, int port) {
     struct addrinfo hints, *res;
     memset(&hints, 0, sizeof hints);
@@ -148,7 +171,7 @@ static int dial_uplink(const char *host, int port) {
     if (getaddrinfo(host, portbuf, &hints, &res) != 0) return -1;
     int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
     if (fd < 0) { freeaddrinfo(res); return -1; }
-    int rc = connect(fd, res->ai_addr, res->ai_addrlen);
+    int rc = connect_bounded(fd, res->ai_addr, res->ai_addrlen, LINK_DIAL_TIMEOUT_MS);
     freeaddrinfo(res);
     if (rc != 0) { close(fd); return -1; }
     return fd;
@@ -166,6 +189,7 @@ int link_connect_leaf(server_t *srv) {
     }
 
     link_conn_t *lc = calloc(1, sizeof *lc);
+    if (!lc) { close(fd); return -1; }
     lc->fd = fd;
 
     if (srv->cfg.links.tls) {
@@ -205,7 +229,7 @@ int link_connect_leaf(server_t *srv) {
     }
 
     char resp[512];
-    if (read_line_blocking(lc, resp, sizeof resp, 5000) != 0) {
+    if (read_line_blocking(lc, resp, sizeof resp, LINK_HANDSHAKE_TIMEOUT_MS) != 0) {
         log_warn("link", "uplink '%s' did not respond to the handshake", up->name);
         goto fail;
     }
@@ -219,7 +243,7 @@ int link_connect_leaf(server_t *srv) {
     net_set_nonblocking(fd);
     lc->authenticated = 1;
     snprintf(lc->peer_name, sizeof lc->peer_name, "%s", up->name);
-    lc->last_activity = time(NULL);
+    lc->created = lc->last_activity = time(NULL);
     lc->next = srv->links;
     srv->links = lc;
     log_info("link", "connected to uplink '%s'%s", up->name, lc->ssl ? " (TLS)" : "");
@@ -256,6 +280,15 @@ void link_leaf_tick(server_t *srv) {
  * couple of concurrent connections per IP (reconnect races) is plenty; more
  * than that from one address is noise or a flood, not a legitimate peer. */
 #define LINK_MAX_UNAUTH_PER_IP 3
+/* Per-IP alone left srv->links itself unbounded, and each link_conn_t is
+ * ~40KB of fixed rbuf+sbuf (link.h) -- an attacker with many source addresses
+ * could allocate freely. Only pre-configured peers ever belong here, so a
+ * couple of dozen is already far more than any real topology needs. */
+#define LINK_MAX_TOTAL 64
+/* Hard deadline on a handshake, independent of last_activity: the two-line
+ * PASS/SERVER exchange takes milliseconds, and an idle-timeout alone lets an
+ * unauthenticated peer hold its slot indefinitely by trickling bytes. */
+#define LINK_HANDSHAKE_DEADLINE 30
 
 void link_accept(server_t *srv) {
     struct sockaddr_in peer;
@@ -268,16 +301,24 @@ void link_accept(server_t *srv) {
 
     /* Same blocklist as the client listener -- a K-lined host shouldn't get
      * a free pass at the link port just because it's a different socket. */
-    const char *kline_reason = server_kline_match(srv, ipbuf);
+    const char *kline_reason = server_kline_match(srv, ipbuf, NULL, ipbuf, 0);
     if (kline_reason) {
         close(fd);
         log_warn("link", "rejected inbound link from %s: %s", ipbuf, kline_reason);
         return;
     }
 
-    int count = 0;
-    for (link_conn_t *l = srv->links; l; l = l->next)
-        if (!l->closing && strcmp(l->ip, ipbuf) == 0) count++;
+    int count = 0, total = 0;
+    for (link_conn_t *l = srv->links; l; l = l->next) {
+        if (l->closing) continue;
+        total++;
+        if (strcmp(l->ip, ipbuf) == 0) count++;
+    }
+    if (total >= LINK_MAX_TOTAL) {
+        close(fd);
+        log_warn("link", "rejected inbound link from %s: already at %d concurrent links", ipbuf, LINK_MAX_TOTAL);
+        return;
+    }
     if (count >= LINK_MAX_UNAUTH_PER_IP) {
         close(fd);
         log_warn("link", "rejected inbound link from %s: too many concurrent connections from this host", ipbuf);
@@ -296,9 +337,10 @@ void link_accept(server_t *srv) {
 
     net_set_nonblocking(fd);
     link_conn_t *lc = calloc(1, sizeof *lc);
+    if (!lc) { close(fd); return; }
     lc->fd = fd;
     snprintf(lc->ip, sizeof lc->ip, "%s", ipbuf);
-    lc->last_activity = time(NULL);
+    lc->created = lc->last_activity = time(NULL);
     if (srv->cfg.links.tls) {
         lc->ssl = SSL_new(srv->tls_ctx);
         SSL_set_fd(lc->ssl, fd);
@@ -387,7 +429,7 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
             if (matched) {
                 ok = matched->password_hash[0]
                     ? crypto_verify_password(lc->pending_pass, matched->password_hash)
-                    : (strcmp(lc->pending_pass, matched->password) == 0);
+                    : crypto_secure_streq(lc->pending_pass, matched->password);
             }
             /* Reject outright if this name is already linked -- matches the
              * Python original's "bad credentials or already linked" check.
@@ -440,6 +482,7 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
             return 0;
         }
         client_t *svc = client_new(-1, srv);
+        if (!svc) return 0;
         svc->link_conn = lc;
         svc->is_service = 1;
         svc->registered = 1;
@@ -598,9 +641,13 @@ void link_notify_channel_join(channel_t *chan, client_t *joiner) {
         char line[500];
         /* realhost, not the cloak: the services link is trusted, and a
          * random per-connection cloak could never match an ACCESS/AKICK mask. */
+        /* The 6th field is ident_confirmed: without it ChanServ can't know
+         * whether to tilde-prefix the ident when matching ACCESS/AKICK masks,
+         * and silently mismatches every ident-confirmed user. */
         const char *p[] = {chan->name, joiner->nick, joiner->user, joiner->realhost,
-                            joiner->account[0] ? joiner->account : "*"};
-        irc_build(line, sizeof line, NULL, 0, NULL, "SVCJOIN", p, 5, NULL);
+                            joiner->account[0] ? joiner->account : "*",
+                            joiner->ident_confirmed ? "1" : "0"};
+        irc_build(line, sizeof line, NULL, 0, NULL, "SVCJOIN", p, 6, NULL);
         link_forward_line(svc->link_conn, line);
     }
 }
@@ -654,8 +701,11 @@ void link_tick(server_t *srv) {
         double idle = difftime(now, lc->last_activity);
         if (!lc->authenticated) {
             /* A handshake is two lines; an idle unauthenticated socket is
-             * just holding an fd open. */
-            if (idle > srv->cfg.links.ping_interval) {
+             * just holding an fd open. The absolute deadline matters as much
+             * as the idle one: trickling bytes keeps last_activity fresh
+             * forever without ever completing the exchange. */
+            if (idle > srv->cfg.links.ping_interval ||
+                difftime(now, lc->created) > LINK_HANDSHAKE_DEADLINE) {
                 log_warn("link", "unauthenticated link connection (fd=%d) timed out", lc->fd);
                 link_close(srv, lc);
             }

@@ -11,9 +11,9 @@
 
 /* True if `cl` is silencing `from` (any of cl->silence masks hits from's
  * nick!user@host) -- matches commands.py's Client.is_silencing. */
-static int is_silencing(client_t *cl, client_t *from) {
+int client_is_silencing(client_t *cl, client_t *from) {
     for (int i = 0; i < cl->n_silence; i++)
-        if (irc_mask_match(from->nick, from->user, from->host, cl->silence[i])) return 1;
+        if (irc_mask_match(from->nick, from->user, from->host, cl->silence[i], from->ident_confirmed)) return 1;
     return 0;
 }
 
@@ -97,7 +97,7 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
             return;
         }
         if (!(m && (m->rank & RANK_OP)) && !(cl->umodes & UMODE_O) &&
-            channel_is_banned(chan, cl->nick, cl->user, cl->host, cl->account)) {
+            channel_is_banned(chan, cl->nick, cl->user, cl->host, cl->account, cl->ident_confirmed)) {
             if (!is_notice) { const char *pe[] = {target}; client_reply(cl, N_CANNOTSENDTOCHAN, pe, 1, "Cannot send to channel (+b)"); }
             return;
         }
@@ -136,7 +136,7 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
             if (!is_notice) err_no_such_nick(cl, target);
             return;
         }
-        if (is_silencing(dst, cl)) return; /* dropped without telling the sender */
+        if (client_is_silencing(dst, cl)) return; /* dropped without telling the sender */
         if ((dst->umodes & UMODE_D) && is_blocked_ctcp(textbuf)) return; /* +d: suppress CTCP */
         if ((dst->umodes & UMODE_NOPM) && !(cl->umodes & UMODE_O) && cl != dst) {
             const char *pe[] = {dst->nick};

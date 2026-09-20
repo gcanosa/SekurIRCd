@@ -85,7 +85,10 @@ static void toml_str(toml_table_t *tab, const char *key, const char *def, char *
         toml_datum_t d = toml_string_in(tab, key);
         if (d.ok) { snprintf(out, outsz, "%s", d.u.s); free(d.u.s); return; }
     }
-    snprintf(out, outsz, "%s", def);
+    /* Callers pass the same buffer as both `def` and `out` (the field's
+     * current value doubles as its default), and snprintf with overlapping
+     * source and destination is undefined behaviour. */
+    if (out != def) snprintf(out, outsz, "%s", def);
 }
 static int toml_int(toml_table_t *tab, const char *key, int def) {
     if (tab && toml_key_exists(tab, key)) {
@@ -178,7 +181,7 @@ static void store_load(void) {
     g_store = cJSON_CreateObject();
 }
 
-static void store_save(void) {
+static void store_write_now(void) {
     if (g_cfg.backup_count > 0) {
         char oldest[600];
         snprintf(oldest, sizeof oldest, "%s.bak%d", g_cfg.storage_path, g_cfg.backup_count);
@@ -204,6 +207,7 @@ static void store_save(void) {
         }
     }
     char *text = cJSON_Print(g_store);
+    if (!text) return;
     char tmp[600];
     snprintf(tmp, sizeof tmp, "%s.tmp", g_cfg.storage_path);
     FILE *fp = fopen(tmp, "wb");
@@ -213,6 +217,21 @@ static void store_save(void) {
         rename(tmp, g_cfg.storage_path);
     }
     free(text);
+}
+
+/* Debounced. Every state-changing command used to trigger the whole of
+ * store_write_now above -- a backup rotation, a full file copy and a complete
+ * cJSON_Print of the store -- including on every /TOPIC in a TOPICLOCK
+ * channel. Mark dirty instead; run_session's one-second poll flushes it, and
+ * both the reconnect loop and shutdown flush unconditionally, so the worst
+ * case is losing under a second of changes to a hard kill (and the rotating
+ * backups still cover that). */
+static int g_store_dirty = 0;
+static void store_save(void) { g_store_dirty = 1; }
+static void store_flush(void) {
+    if (!g_store_dirty) return;
+    g_store_dirty = 0;
+    store_write_now();
 }
 
 static cJSON *store_get(const char *chan) {
@@ -263,14 +282,14 @@ static int access_level_rank(const char *level) {
 
 /* True if an ACCESS/AKICK entry (hostmask, or "=account") matches this join. */
 static int entry_matches(const char *entry, const char *nick, const char *user,
-                          const char *host, const char *account) {
+                          const char *host, const char *account, int ident_confirmed) {
     if (entry[0] == '=') return account[0] && account[0] != '*' && strcasecmp(entry + 1, account) == 0;
-    return irc_mask_match(nick, user, host, entry);
+    return irc_mask_match(nick, user, host, entry, ident_confirmed);
 }
 
 /* Strongest access level whose mask/account matches, or "" if none. */
 static const char *access_level_for(cJSON *rec, const char *nick, const char *user,
-                                     const char *host, const char *account) {
+                                     const char *host, const char *account, int ident_confirmed) {
     cJSON *access = cJSON_GetObjectItemCaseSensitive(rec, "access");
     if (!access) return "";
     static char best[2];
@@ -278,7 +297,7 @@ static const char *access_level_for(cJSON *rec, const char *nick, const char *us
     cJSON *entry;
     cJSON_ArrayForEach(entry, access) {
         if (!cJSON_IsString(entry)) continue;
-        if (!entry_matches(entry->string, nick, user, host, account)) continue;
+        if (!entry_matches(entry->string, nick, user, host, account, ident_confirmed)) continue;
         int r = access_level_rank(entry->valuestring);
         if (r > best_rank) { best_rank = r; snprintf(best, sizeof best, "%s", entry->valuestring); }
     }
@@ -286,12 +305,12 @@ static const char *access_level_for(cJSON *rec, const char *nick, const char *us
 }
 
 static int akick_matches(cJSON *rec, const char *nick, const char *user,
-                          const char *host, const char *account) {
+                          const char *host, const char *account, int ident_confirmed) {
     cJSON *akick = cJSON_GetObjectItemCaseSensitive(rec, "akick");
     if (!akick) return 0;
     cJSON *m;
     cJSON_ArrayForEach(m, akick) {
-        if (cJSON_IsString(m) && entry_matches(m->valuestring, nick, user, host, account)) return 1;
+        if (cJSON_IsString(m) && entry_matches(m->valuestring, nick, user, host, account, ident_confirmed)) return 1;
     }
     return 0;
 }
@@ -820,7 +839,7 @@ static void cmd_successor(const char *from_nick, const char *prefix, char *args)
             memcpy(user, bang + 1, ul); user[ul] = '\0';
             snprintf(host, sizeof host, "%s", at + 1);
         }
-        if (!irc_mask_match(from_nick, user, host, successor)) {
+        if (!irc_mask_match(from_nick, user, host, successor, 1)) { /* user came from the wire prefix: already display form */
             reply(from_nick, "Your current connection doesn't match the designated successor mask.");
             return;
         }
@@ -845,7 +864,8 @@ static void cmd_set(const char *from_nick, char *args) {
     if (!chan || !option) { reply(from_nick, "Syntax: SET <#channel> MLOCK|DESC|URL|ENTRYMSG <text> <password>"); return; }
     cJSON *rec = store_get(chan);
     if (!rec) { reply(from_nick, "That channel isn't registered."); return; }
-    char optlower[16];
+    char optlower[16] = ""; /* strtok_r can't hand us an empty token today, but the
+                              * loop below leaves this uninitialized if it ever does */
     for (int i = 0; option[i] && i < 15; i++) optlower[i] = (char)tolower((unsigned char)option[i]), optlower[i + 1] = '\0';
     if (strcmp(optlower, "mlock") != 0 && strcmp(optlower, "desc") != 0 &&
         strcmp(optlower, "url") != 0 && strcmp(optlower, "entrymsg") != 0) {
@@ -992,17 +1012,20 @@ static void handle_svcjoin(irc_message_t *msg) {
     const char *chan = msg->params[0], *nick = msg->params[1];
     const char *user = msg->params[2], *host = msg->params[3];
     const char *account = msg->nparams >= 5 ? msg->params[4] : "*";
+    /* 6th field (added alongside irc_mask_match's ident_confirmed parameter);
+     * an older ircd that doesn't send it degrades to the pre-fix behaviour. */
+    int ident_confirmed = msg->nparams >= 6 && msg->params[5][0] == '1';
     cJSON *rec = store_get(chan);
     if (!rec) return;
 
-    if (akick_matches(rec, nick, user, host, account)) {
+    if (akick_matches(rec, nick, user, host, account, ident_confirmed)) {
         wire_kick(chan, nick, "Banned from this channel (AKICK)");
         return;
     }
     const char *entrymsg = rec_str(rec, "entrymsg");
     if (entrymsg[0]) reply(nick, entrymsg);
 
-    const char *level = access_level_for(rec, nick, user, host, account);
+    const char *level = access_level_for(rec, nick, user, host, account, ident_confirmed);
     if (level[0]) {
         char modestring[4];
         snprintf(modestring, sizeof modestring, "+%s", level);
@@ -1231,6 +1254,7 @@ static int run_session(void) {
             if (pfd.revents & POLLOUT) flush_sbuf();
         }
         if (g_sbuf_len > 0) flush_sbuf();
+        store_flush();
         if (g_pending_register.active && difftime(time(NULL), g_pending_register.sent_at) > 5) {
             g_pending_register.active = 0;
             reply(g_pending_register.nick, "Timed out waiting for the server -- try REGISTER again.");
@@ -1345,19 +1369,26 @@ int main(int argc, char **argv) {
     int backoff = 2;
     while (!g_term) {
         int rc = run_session();
+        store_flush(); /* the link is down; don't sit on unwritten changes */
         if (rc != 0) {
             log_warn("chanserv", "could not reach hub %s:%d -- retrying in %ds",
                       g_cfg.link_host, g_cfg.link_port, backoff);
         } else {
+            /* The session actually established before it ended, so the hub is
+             * reachable -- drop any penalty accumulated by earlier failures.
+             * Without this a long-lived daemon drifts to the 60s ceiling and
+             * stays there reconnecting to a perfectly healthy hub. */
+            backoff = 2;
             log_warn("chanserv", "link session ended -- reconnecting in %ds", backoff);
         }
         if (g_term) break;
         struct timespec ts = {backoff, 0};
         nanosleep(&ts, NULL);
-        backoff = backoff < 60 ? backoff * 2 : 60;
+        if (rc != 0) backoff = backoff < 60 ? backoff * 2 : 60;
     }
 
     log_info("chanserv", "shutting down");
+    store_flush();
     if (pidfile[0]) unlink(pidfile);
     cJSON_Delete(g_store);
     return 0;

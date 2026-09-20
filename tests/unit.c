@@ -2,10 +2,15 @@
  * No framework: each test is a function that asserts; main() runs them all
  * and prints "OK" on a clean exit. A failing assert aborts with a stack
  * trace, which is enough to find the break. */
+#include "channel.h"
+#include "client.h"
+#include "cmd.h"
 #include "config.h"
 #include "crypto.h"
+#include "log.h"
 #include "net.h"
 #include "proto.h"
+#include "server.h"
 
 #include <assert.h>
 #include <stdio.h>
@@ -157,13 +162,17 @@ static void test_glob_and_masks(void) {
     assert(!irc_glob_match("work[nick]", "worknick")); /* not a char class */
 
     /* bare nick-only mask (no '!'/'@') */
-    assert(irc_mask_match("Bob", "bob", "host.example", "bob"));
-    assert(irc_mask_match("Bob", "bob", "host.example", "b*"));
+    assert(irc_mask_match("Bob", "bob", "host.example", "bob", 0));
+    assert(irc_mask_match("Bob", "bob", "host.example", "b*", 0));
 
     /* full nick!user@host mask; user gets a '~' prefix unless already present */
-    assert(irc_mask_match("nick", "user", "host.example", "nick!~user@host.example"));
-    assert(irc_mask_match("nick", "~user", "host.example", "nick!~user@host.example"));
-    assert(!irc_mask_match("nick", "user", "host.example", "other!~user@host.example"));
+    assert(irc_mask_match("nick", "user", "host.example", "nick!~user@host.example", 0));
+    assert(irc_mask_match("nick", "~user", "host.example", "nick!~user@host.example", 0));
+    assert(!irc_mask_match("nick", "user", "host.example", "other!~user@host.example", 0));
+    /* an identd-confirmed user has no tilde, so a ban written the way
+     * WHOIS displays them must match -- and the tilde form must not. */
+    assert(irc_mask_match("nick", "user", "host.example", "nick!user@host.example", 1));
+    assert(!irc_mask_match("nick", "user", "host.example", "nick!~user@host.example", 1));
 
     /* host_mask_match: no bare-nick shortcut; missing '@' means "*@<mask>" */
     assert(irc_host_mask_match("ident", "203.0.113.42", "203.0.113.*"));
@@ -300,32 +309,106 @@ static void test_proc_stats(void) {
     assert(proc_stats((pid_t)999999, &cpu, &rss) == -1);
 }
 
+
+/* Regression for the MODE stack overflow: cmd_apply_channel_mode's bounds
+ * guard used to sit at the BOTTOM of its loop, and the argument-free-flag
+ * branch ended in `continue`, jumping straight over it. "MODE #c +nnnn..."
+ * with a few hundred letters then wrote every one of them into a 64-byte
+ * stack array -- reachable by any channel operator, and creating a channel
+ * makes you one. */
+static void test_channel_mode_string_cannot_overflow(void) {
+    log_config_t lcfg = {0};
+    lcfg.enabled = 0;
+    lcfg.level = LOG_CRITICAL; /* keep the handler's log_info off stderr */
+    log_init(&lcfg, 0);
+
+    server_t srv;
+    memset(&srv, 0, sizeof srv);
+    config_defaults(&srv.cfg);
+
+    /* fd 1 is never written to here: client_send only appends to sbuf. */
+    client_t *cl = client_new(1, &srv);
+    assert(cl != NULL);
+    snprintf(cl->nick, sizeof cl->nick, "op");
+    snprintf(cl->user, sizeof cl->user, "u");
+    snprintf(cl->host, sizeof cl->host, "h");
+
+    channel_t *chan = channel_new("#c", "#c");
+    assert(chan != NULL);
+    member_t *m = channel_add_member(chan, cl);
+    assert(m != NULL);
+    m->rank = RANK_OP;
+
+    char modes[602];
+    modes[0] = '+';
+    memset(modes + 1, 'n', 600);
+    modes[601] = '\0';
+    cmd_apply_channel_mode(&srv, cl, chan, modes, NULL, 0, 1);
+
+    /* The mode itself still applies; what it emits stays one sane MODE line
+     * rather than hundreds of repeated letters. */
+    assert(chan->modes & CMODE_N);
+    assert(cl->sbuf_len > 0);
+    assert(cl->sbuf_len < 200);
+
+    /* Alternating signs exercise the same guard from the other direction. */
+    for (size_t i = 0; i < sizeof modes - 1; i++) modes[i] = (i % 2) ? 'n' : '-';
+    modes[sizeof modes - 1] = '\0';
+    cl->sbuf_len = 0;
+    cmd_apply_channel_mode(&srv, cl, chan, modes, NULL, 0, 1);
+    assert(cl->sbuf_len < 200);
+
+    channel_free(chan);
+    client_free(cl);
+}
+
+/* K and G match user@host as well as the IP; Z stays IP-only because it is
+ * applied at accept(), before any user/host exists. */
+static void test_line_mask_hits(void) {
+    assert(server_line_mask_hits("203.0.113.*", "Z", "203.0.113.7", "bob", "host.example", 0));
+    assert(!server_line_mask_hits("*.example", "Z", "203.0.113.7", "bob", "host.example", 0));
+
+    assert(server_line_mask_hits("203.0.113.*", "K", "203.0.113.7", "bob", "host.example", 0));
+    assert(server_line_mask_hits("*.example", "K", "203.0.113.7", "bob", "host.example", 0));
+    /* both ident spellings, so an oper needn't know whether identd answered */
+    assert(server_line_mask_hits("~bob@host.example", "K", "203.0.113.7", "bob", "host.example", 0));
+    assert(server_line_mask_hits("bob@host.example", "K", "203.0.113.7", "bob", "host.example", 1));
+    assert(!server_line_mask_hits("*.other", "K", "203.0.113.7", "bob", "host.example", 0));
+}
+
+/* Tiny runner: the old main() printed a hardcoded "0 assertions across 24
+ * tests" regardless of what actually ran, which is worse than no count. */
+static int g_tests_run;
+#define RUN(t) do { t(); g_tests_run++; } while (0)
+
 int main(void) {
-    test_parse_basic();
-    test_parse_prefix_and_lowercase_command();
-    test_parse_tags();
-    test_parse_tag_escapes();
-    test_parse_colon_in_middle_param_is_literal();
-    test_parse_rejects_empty_and_bare_prefix();
-    test_parse_consecutive_spaces_filtered();
-    test_build_basic();
-    test_build_strips_injection();
-    test_build_tags();
-    test_build_truncation_detected();
-    test_validators();
-    test_casefold();
-    test_glob_and_masks();
-    test_durations();
-    test_prefix_for();
-    test_add_time_tag();
-    test_scrypt_roundtrip();
-    test_scrypt_cross_compat_vector();
-    test_random_hex();
-    test_config_defaults();
-    test_config_cloak_format();
-    test_config_load_missing_file();
-    test_connect_flood_throttle();
-    test_proc_stats();
-    printf("OK (%d assertions across %d tests)\n", 0, 24);
+    RUN(test_parse_basic);
+    RUN(test_parse_prefix_and_lowercase_command);
+    RUN(test_parse_tags);
+    RUN(test_parse_tag_escapes);
+    RUN(test_parse_colon_in_middle_param_is_literal);
+    RUN(test_parse_rejects_empty_and_bare_prefix);
+    RUN(test_parse_consecutive_spaces_filtered);
+    RUN(test_build_basic);
+    RUN(test_build_strips_injection);
+    RUN(test_build_tags);
+    RUN(test_build_truncation_detected);
+    RUN(test_validators);
+    RUN(test_casefold);
+    RUN(test_glob_and_masks);
+    RUN(test_durations);
+    RUN(test_prefix_for);
+    RUN(test_add_time_tag);
+    RUN(test_scrypt_roundtrip);
+    RUN(test_scrypt_cross_compat_vector);
+    RUN(test_random_hex);
+    RUN(test_config_defaults);
+    RUN(test_config_cloak_format);
+    RUN(test_config_load_missing_file);
+    RUN(test_connect_flood_throttle);
+    RUN(test_channel_mode_string_cannot_overflow);
+    RUN(test_line_mask_hits);
+    RUN(test_proc_stats);
+    printf("OK (%d tests)\n", g_tests_run);
     return 0;
 }

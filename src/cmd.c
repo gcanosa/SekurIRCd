@@ -128,6 +128,20 @@ void notice_self(server_t *srv, client_t *cl, const char *text) {
 void cmd_send_welcome_if_ready(server_t *srv, client_t *cl) {
     if (cl->registered || !cl->got_nick || !cl->got_user || cl->cap_negotiating) return;
     if (cl->rdns_pending || cl->ident_pending) return; /* net.c's worker-result tick retries this once they clear */
+
+    /* Only now are user/host final (USER, identd and rDNS have all landed),
+     * so this is the first point a hostname K/G-line can be evaluated at all
+     * -- the accept-time check only ever had the IP. */
+    const char *kl = server_kline_match(srv, cl->ip, cl->user, cl->realhost, cl->ident_confirmed);
+    if (kl) {
+        snprintf(cl->quit_reason, sizeof cl->quit_reason, "%s", kl);
+        cl->quitting = 1;
+        char snote[400];
+        snprintf(snote, sizeof snote, "Rejected connection from %s (%s@%s): %s",
+                 cl->ip, cl->user, cl->realhost, kl);
+        server_notify_opers(srv, snote);
+        return;
+    }
     cl->registered = 1;
 
     /* Must land before server_send_welcome: its post-MOTD RPL_UMODEIS line

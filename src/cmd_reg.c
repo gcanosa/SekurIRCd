@@ -282,8 +282,12 @@ static int peer_cert_fingerprint(client_t *cl, char *out, size_t outsz) {
     if (!cert) return -1;
     unsigned char digest[EVP_MAX_MD_SIZE];
     unsigned int dlen = 0;
-    X509_digest(cert, EVP_sha256(), digest, &dlen);
+    int digest_ok = X509_digest(cert, EVP_sha256(), digest, &dlen);
     X509_free(cert);
+    /* Without this check a failed digest left dlen == 0, the hex loop below
+     * never ran, and `out` went back to the caller uninitialized -- an
+     * unterminated stack buffer used as a credential. */
+    if (digest_ok != 1 || dlen == 0) return -1;
     if (outsz < (size_t)dlen * 2 + 1) return -1;
     for (unsigned int i = 0; i < dlen; i++) snprintf(out + i * 2, 3, "%02x", digest[i]);
     return 0;
@@ -299,9 +303,22 @@ void cmd_authenticate(server_t *srv, client_t *cl, irc_message_t *msg) {
     const char *token = msg->params[0];
 
     if (!cl->sasl_mech[0]) {
+        if (cl->account[0]) {
+            client_reply(cl, N_SASLALREADY, NULL, 0, "You have already authenticated using SASL");
+            return;
+        }
         int is_plain = strcasecmp(token, "PLAIN") == 0;
         int is_external = strcasecmp(token, "EXTERNAL") == 0;
-        if ((!is_plain && !is_external) || !srv->cfg.accounts.enabled) {
+        if (!srv->cfg.accounts.enabled) {
+            client_reply(cl, N_SASLFAIL, NULL, 0, "SASL authentication failed");
+            return;
+        }
+        if (!is_plain && !is_external) {
+            /* 908 before 904: a bare "failed" gives a client that guessed the
+             * wrong mechanism no way to discover which ones exist. */
+            int external_possible = srv->cfg.tls.enabled && srv->cfg.tls.request_client_cert;
+            const char *mechs[] = {external_possible ? "PLAIN,EXTERNAL" : "PLAIN"};
+            client_reply(cl, N_SASLMECHS, mechs, 1, "are available SASL mechanisms");
             client_reply(cl, N_SASLFAIL, NULL, 0, "SASL authentication failed");
             return;
         }
@@ -339,6 +356,13 @@ void cmd_authenticate(server_t *srv, client_t *cl, irc_message_t *msg) {
         return;
     }
 
+    /* 400 bytes is the IRCv3 AUTHENTICATE chunk size; this server doesn't
+     * implement the multi-line continuation form, so anything longer can be
+     * named as such instead of reported as a generic failure. */
+    if (strlen(token) > 400) {
+        client_reply(cl, N_SASLTOOLONG, NULL, 0, "SASL message too long");
+        return;
+    }
     unsigned char blob[600];
     int blen = 0;
     if (b64_decode(token, blob, sizeof blob, &blen) != 0 || blen < 0) {
@@ -385,7 +409,11 @@ void cmd_authenticate(server_t *srv, client_t *cl, irc_message_t *msg) {
     OPENSSL_cleanse(passwd, sizeof passwd);
     snprintf(cl->pending_account, sizeof cl->pending_account, "%s", authcid);
     cl->auth_pending = 1;
-    worker_submit(&j);
+    cl->auth_started = time(NULL);
+    if (worker_submit(&j) != 0) {
+        cl->auth_pending = 0;
+        client_reply(cl, N_SASLFAIL, NULL, 0, "SASL authentication failed");
+    }
     OPENSSL_cleanse(j.secret, sizeof j.secret);
 }
 
@@ -402,6 +430,13 @@ static void send_fail(server_t *srv, client_t *cl, const char *cmd, const char *
         notice_self(srv, cl, desc);
     }
 }
+
+/* Self-service account registration is unauthenticated account creation, so
+ * it gets the same kind of throttle chanserv's password checks do: a few per
+ * connection, spaced out, on top of [accounts] max_accounts for the store as
+ * a whole. */
+#define REGISTER_MAX_PER_CONNECTION 3
+#define REGISTER_COOLDOWN 10
 
 /* Self-service account registration (``/REGISTER <account> <password>``) --
  * not RFC/IRCv3, matching this daemon's "accounts live in core, no NickServ
@@ -434,6 +469,28 @@ void cmd_register(server_t *srv, client_t *cl, irc_message_t *msg) {
         send_fail(srv, cl, "REGISTER", "TEMPORARILY_UNAVAILABLE", "Another login/registration is still in progress");
         return;
     }
+    /* auth_pending only bounds concurrency, not the total: without these,
+     * one connection could create accounts in a loop, each one rewriting the
+     * whole accounts file. */
+    if (srv->cfg.accounts.max_accounts > 0 &&
+        accounts_count(&srv->accounts) >= srv->cfg.accounts.max_accounts) {
+        send_fail(srv, cl, "REGISTER", "REG_UNAVAILABLE",
+                  "This server has reached its account limit -- ask a server operator");
+        return;
+    }
+    time_t now = time(NULL);
+    if (cl->register_attempts >= REGISTER_MAX_PER_CONNECTION) {
+        send_fail(srv, cl, "REGISTER", "REG_UNAVAILABLE",
+                  "Too many registrations on this connection -- reconnect to register another account");
+        return;
+    }
+    if (cl->register_last && difftime(now, cl->register_last) < REGISTER_COOLDOWN) {
+        send_fail(srv, cl, "REGISTER", "TEMPORARILY_UNAVAILABLE",
+                  "You are registering too fast -- wait a few seconds and try again");
+        return;
+    }
+    cl->register_last = now;
+    cl->register_attempts++;
     /* Hash on a worker (scrypt, ~30ms); net.c finishes via cmd_finish_auth. */
     job_t j; memset(&j, 0, sizeof j);
     j.type = JOB_HASH;
@@ -442,7 +499,11 @@ void cmd_register(server_t *srv, client_t *cl, irc_message_t *msg) {
     snprintf(j.secret, sizeof j.secret, "%s", password);
     snprintf(cl->pending_account, sizeof cl->pending_account, "%s", account);
     cl->auth_pending = 1;
-    worker_submit(&j);
+    cl->auth_started = time(NULL);
+    if (worker_submit(&j) != 0) {
+        cl->auth_pending = 0;
+        send_fail(srv, cl, "REGISTER", "TEMPORARILY_UNAVAILABLE", "Server is busy -- try again shortly");
+    }
     OPENSSL_cleanse(j.secret, sizeof j.secret);
 }
 

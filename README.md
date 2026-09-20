@@ -98,9 +98,15 @@ Website & docs: <https://gcanosa.github.io/SekurIRCd/> (source in [`web/`](web/)
   polling `ISON`
 - `KNOCK` (request an invite on a `+i`/`+k` channel; delivered to channel
   ops), `LINKS`, `MAP`, `HELP`
-- `KLINE`/`GLINE`/`UNKLINE`/`UNGLINE` (oper-only, IP masks, optional
-  duration like `1d`/`12h`/`30m` -- permanent if omitted) -- disconnects
-  matching connected clients and refuses future ones; persisted to
+- `KLINE`/`GLINE`/`ZLINE` (+ `UNKLINE`/`UNGLINE`/`UNZLINE`, oper-only),
+  with an optional duration like `1d`/`12h`/`30m` -- permanent if omitted.
+  `KLINE`/`GLINE` masks match an IP glob (`203.0.113.*`), a host glob
+  (`*.example.com`) or `user@host`; the ident is tried both bare and
+  `~`-prefixed, so you don't have to know whether identd answered.
+  `ZLINE` is matched at connect time against the IP only -- it never sees a
+  hostname, and is what the DNSBL and connect-flood auto-bans use. All three
+  disconnect matching connected clients and refuse future ones; a hostname
+  mask is additionally re-checked once rDNS/ident complete. Persisted to
   `[security] klines_file` if set, so lines survive `/REHASH` and a restart
 - DNSBL checking (`[dnsbl]`): reject/auto-K-line connections from IPs listed
   by a configured DNS blackhole-list provider (standard reversed-octet
@@ -326,7 +332,8 @@ See [`config/sekurircd.template.toml`](config/sekurircd.template.toml). Key sect
   / `key_file` (PEM, required if enabled), `request_client_cert` (default
   `false`, needed for SASL EXTERNAL -- see below); runs alongside
   `[server]`'s plaintext listener, never in place of it
-- `[accounts]` — `enabled` (default `false`), `store_file`; backs SASL
+- `[accounts]` — `enabled` (default `false`), `store_file`, `max_accounts`
+  (default `10000`, `0` = unlimited); backs SASL
   PLAIN/EXTERNAL, `/REGISTER`, `/CERT`, and the `a:` EXTBAN type
 - `[debug_channel]` — `enabled` (default `false`), `name` (default
   `"#server-debug"`, oper-only -- JOIN is refused to anyone else),

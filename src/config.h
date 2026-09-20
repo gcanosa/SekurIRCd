@@ -76,6 +76,7 @@ typedef struct {
 typedef struct {
     int enabled;
     char store_file[CFG_PATH];
+    int max_accounts;   /* 0 = unlimited; caps self-service /REGISTER growth */
 } cfg_accounts_t;
 
 typedef struct {

@@ -20,6 +20,7 @@ client_t *client_new(int fd, struct server *srv) {
     cl->sbuf = malloc(cl->sbuf_cap);
     cl->rbuf_cap = 4096;
     cl->rbuf = malloc(cl->rbuf_cap);
+    if (!cl->sbuf || !cl->rbuf) { free(cl->sbuf); free(cl->rbuf); free(cl); return NULL; }
     return cl;
 }
 

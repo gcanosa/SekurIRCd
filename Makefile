@@ -40,12 +40,31 @@ WARN     := -Wall -Wextra -Wno-unused-parameter -Wno-format-truncation
 # of every .c that includes it -- without this, `make` only looks at .c
 # mtimes and happily links stale .o files compiled against an old struct
 # layout, which corrupts memory in ways that are miserable to debug.
-CFLAGS   ?= -std=c11 -O2 -g $(WARN) -MMD -MP
+# Hardening. This daemon parses untrusted input on every socket, so the
+# usual defaults are worth the handful of cycles:
+#   -fstack-protector-strong  turns a stack-buffer overflow into a clean abort
+#                             instead of controlled corruption
+#   -D_FORTIFY_SOURCE=2       compile-time + runtime checks on the str*/mem*
+#                             family (needs an optimizing build, hence -O2)
+#   -Wformat-security         catches a non-literal format string
+#   -Wvla                     there are no variable-length arrays here; keep it that way
+# RELRO/BIND_NOW/noexecstack and -pie are GNU-ld spellings; macOS links PIE by
+# default and its ld rejects -z, so they're Linux-only.
+UNAME_S := $(shell uname -s)
+HARDEN_CFLAGS  := -fstack-protector-strong -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=2 \
+                  -Wformat -Wformat-security -Wvla
+HARDEN_LDFLAGS :=
+ifeq ($(UNAME_S),Linux)
+  HARDEN_CFLAGS  += -fPIE
+  HARDEN_LDFLAGS += -pie -Wl,-z,relro,-z,now -Wl,-z,noexecstack
+endif
+
+CFLAGS   ?= -std=c11 -O2 -g $(WARN) $(HARDEN_CFLAGS) -MMD -MP
 # _POSIX_C_SOURCE: glibc hides strtok_r/localtime_r/struct sigaction under
 # -std=c11 (strict ISO) unless a POSIX feature-test macro is defined; macOS's
 # libc exposes them regardless, so this was silently missing before.
 CPPFLAGS := -I$(SRC_DIR) -I$(VEND_DIR) -D_POSIX_C_SOURCE=200809L $(OPENSSL_CFLAGS)
-LDFLAGS  ?=
+LDFLAGS  ?= $(HARDEN_LDFLAGS)
 LDLIBS   := $(OPENSSL_LIBS) -lpthread
 
 CORE_SRCS := $(SRC_DIR)/proto.c $(SRC_DIR)/crypto.c $(SRC_DIR)/log.c $(SRC_DIR)/config.c \

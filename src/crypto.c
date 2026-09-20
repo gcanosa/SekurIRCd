@@ -114,7 +114,22 @@ void crypto_random_hex(char *out, size_t outsz, int count) {
     unsigned char buf[64];
     if (count < 0) count = 0;
     if (count > (int)sizeof buf) count = (int)sizeof buf;      /* defensive cap */
+    if (outsz < 3) { if (outsz) out[0] = '\0'; return; } /* (outsz - 1) / 2 would wrap at outsz == 0 */
     if ((size_t)(2 * count + 1) > outsz) count = (int)((outsz - 1) / 2);
     if (count > 0 && RAND_bytes(buf, count) != 1) abort();     /* no sane fallback for a broken CSPRNG */
     hex_encode(buf, (size_t)count, out);
+}
+
+int crypto_secure_streq(const char *a, const char *b) {
+    if (!a || !b) return 0;
+    size_t la = strlen(a), lb = strlen(b);
+    unsigned char pa[256], pb[256];
+    if (la >= sizeof pa || lb >= sizeof pb) return 0;
+    /* Compare a fixed-width zero-padded window so neither the running time
+     * nor the number of iterations depends on where the first difference is. */
+    memset(pa, 0, sizeof pa);
+    memset(pb, 0, sizeof pb);
+    memcpy(pa, a, la);
+    memcpy(pb, b, lb);
+    return CRYPTO_memcmp(pa, pb, sizeof pa) == 0;
 }

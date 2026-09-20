@@ -36,6 +36,10 @@ void err_not_channel_op(client_t *cl, const char *chan);
  * matches commands._notice_self. */
 void notice_self(server_t *srv, client_t *cl, const char *text);
 
+/* True if `cl` is silencing `from` (cmd_user.c). Shared with cmd_chan.c so
+ * INVITE honours /SILENCE the same way PRIVMSG does. */
+int client_is_silencing(client_t *cl, client_t *from);
+
 /* Registration handlers (cmd_reg.c) */
 void cmd_nick(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_user(server_t *srv, client_t *cl, irc_message_t *msg);

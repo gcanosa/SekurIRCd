@@ -23,6 +23,13 @@ int crypto_hash_password(const char *password, char *out, size_t outsz);
  * `stored` value, so a typo'd config entry fails closed instead of crashing. */
 int crypto_verify_password(const char *password, const char *stored);
 
+/* Constant-time string equality for secrets, for the paths that compare a
+ * plaintext password directly (oper/die/restart/link PASS) rather than going
+ * through scrypt. Returns 1 if equal. Strings of 256 bytes or more never
+ * compare equal -- no real password reaches that, and the cap keeps the
+ * comparison a fixed-width one. */
+int crypto_secure_streq(const char *a, const char *b);
+
 /* `count` random bytes, hex-encoded (lowercase) into `out` (needs at least
  * 2*count + 1 bytes). Used for host-cloak tokens. Aborts the process on
  * RAND_bytes failure (this daemon has no sane fallback for a broken CSPRNG). */

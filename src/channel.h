@@ -78,7 +78,7 @@ channel_t *channel_new(const char *name, const char *casefold_name);
 void channel_free(channel_t *chan);
 
 member_t *channel_find_member(channel_t *chan, struct client *cl);
-member_t *channel_add_member(channel_t *chan, struct client *cl);
+member_t *channel_add_member(channel_t *chan, struct client *cl); /* NULL on allocation failure */
 void channel_remove_member(channel_t *chan, struct client *cl);
 int channel_member_count(channel_t *chan);
 
@@ -91,13 +91,13 @@ int channel_is_voice(channel_t *chan, struct client *cl);
  * starting with "a:" matches by SASL account (empty account never matches);
  * anything else is a plain nick!user@host glob (irc_mask_match). */
 int channel_mask_hit(const char *mask, const char *nick, const char *user,
-                      const char *host, const char *account);
+                      const char *host, const char *account, int ident_confirmed);
 /* True if banned (+b hit) and not exempted (+e hit). */
 int channel_is_banned(channel_t *chan, const char *nick, const char *user,
-                       const char *host, const char *account);
+                       const char *host, const char *account, int ident_confirmed);
 /* True if past +i via an exact INVITE (channel_invite_add) or an +I mask hit. */
 int channel_is_invited(channel_t *chan, const char *nick, const char *user,
-                        const char *host, const char *account);
+                        const char *host, const char *account, int ident_confirmed);
 
 int masklist_add(masklist_t *ml, const char *mask); /* 0 ok, -1 dup/full */
 int masklist_del(masklist_t *ml, const char *mask); /* 0 removed, -1 not found */

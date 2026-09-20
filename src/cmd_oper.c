@@ -8,6 +8,7 @@
  * command handler can never leave another part of the loop holding a
  * dangling client_t* in the same iteration. */
 #include "cmd.h"
+#include "crypto.h"
 #include "link.h"
 #include "log.h"
 #include "worker.h"
@@ -110,12 +111,16 @@ void cmd_oper(server_t *srv, client_t *cl, irc_message_t *msg) {
             snprintf(j.hash, sizeof j.hash, "%s", op->password_hash);
             snprintf(cl->pending_account, sizeof cl->pending_account, "%s", op->name);
             cl->auth_pending = 1;
-            worker_submit(&j);
+            cl->auth_started = time(NULL);
+            if (worker_submit(&j) != 0) {
+                cl->auth_pending = 0;
+                client_reply(cl, N_NOOPERHOST, NULL, 0, "Server is busy -- try again shortly");
+            }
             OPENSSL_cleanse(j.secret, sizeof j.secret);
             return;
         }
 
-        finish_oper(srv, cl, op->name, strcmp(password, op->password) == 0);
+        finish_oper(srv, cl, op->name, crypto_secure_streq(password, op->password));
         return;
     }
     client_reply(cl, N_NOOPERHOST, NULL, 0, "No O-lines for your host");
@@ -130,7 +135,7 @@ void cmd_oper(server_t *srv, client_t *cl, irc_message_t *msg) {
  * plaintext case is checked here -- a configured hash routes through the
  * worker pool instead (see cmd_die/cmd_restart). */
 static int check_extra_password(const char *plain, const char *given) {
-    return plain[0] ? strcmp(plain, given) == 0 : 1;
+    return plain[0] ? crypto_secure_streq(plain, given) : 1;
 }
 
 void cmd_kill(server_t *srv, client_t *cl, irc_message_t *msg) {
@@ -211,7 +216,7 @@ static void finish_die_or_restart(server_t *srv, client_t *cl, int is_restart, i
 
 /* Submits `given` for a worker scrypt verify against `hash` -- shared by
  * cmd_die/cmd_restart when a hashed extra password is configured. */
-static void submit_privileged_check(client_t *cl, const char *given, const char *hash, auth_purpose_t purpose) {
+static int submit_privileged_check(client_t *cl, const char *given, const char *hash, auth_purpose_t purpose) {
     job_t j; memset(&j, 0, sizeof j);
     j.type = JOB_SASL;
     j.purpose = purpose;
@@ -219,8 +224,11 @@ static void submit_privileged_check(client_t *cl, const char *given, const char 
     snprintf(j.secret, sizeof j.secret, "%s", given);
     snprintf(j.hash, sizeof j.hash, "%s", hash);
     cl->auth_pending = 1;
-    worker_submit(&j);
+    cl->auth_started = time(NULL);
+    int rc = worker_submit(&j);
+    if (rc != 0) cl->auth_pending = 0;
     OPENSSL_cleanse(j.secret, sizeof j.secret);
+    return rc;
 }
 
 void cmd_die(server_t *srv, client_t *cl, irc_message_t *msg) {
@@ -230,7 +238,8 @@ void cmd_die(server_t *srv, client_t *cl, irc_message_t *msg) {
             client_reply(cl, N_PASSWDMISMATCH, NULL, 0, "Another login is already in progress -- try again shortly");
             return;
         }
-        submit_privileged_check(cl, given, srv->cfg.security.die_password_hash, AUTH_DIE);
+        if (submit_privileged_check(cl, given, srv->cfg.security.die_password_hash, AUTH_DIE) != 0)
+            client_reply(cl, N_PASSWDMISMATCH, NULL, 0, "Server is busy -- try again shortly");
         return;
     }
     finish_die_or_restart(srv, cl, 0, check_extra_password(srv->cfg.security.die_password, given));
@@ -243,7 +252,8 @@ void cmd_restart(server_t *srv, client_t *cl, irc_message_t *msg) {
             client_reply(cl, N_PASSWDMISMATCH, NULL, 0, "Another login is already in progress -- try again shortly");
             return;
         }
-        submit_privileged_check(cl, given, srv->cfg.security.restart_password_hash, AUTH_RESTART);
+        if (submit_privileged_check(cl, given, srv->cfg.security.restart_password_hash, AUTH_RESTART) != 0)
+            client_reply(cl, N_PASSWDMISMATCH, NULL, 0, "Server is busy -- try again shortly");
         return;
     }
     finish_die_or_restart(srv, cl, 1, check_extra_password(srv->cfg.security.restart_password, given));
@@ -395,12 +405,22 @@ static void line_common(server_t *srv, client_t *cl, irc_message_t *msg, const c
         if (!any) notice_self(srv, cl, "No active K/G/Z-lines");
         return;
     }
-    char mask[256];
-    snprintf(mask, sizeof mask, "%s", msg->params[0]);
-    char *at = strrchr(mask, '@');
     char maskbuf[256];
-    snprintf(maskbuf, sizeof maskbuf, "%s", at ? at + 1 : mask);
-    if (strcmp(maskbuf, "*") == 0) {
+    snprintf(maskbuf, sizeof maskbuf, "%s", msg->params[0]);
+    /* A Z-line is enforced at accept(), before any user/host exists, so it
+     * can only ever be an IP glob -- reduce a user@host spelling to its host
+     * part rather than storing a mask that could never match. K and G keep
+     * the full mask (server_line_mask_hits matches it against user@host). */
+    if (line_type[0] == 'Z') {
+        char *zat = strrchr(maskbuf, '@');
+        if (zat) memmove(maskbuf, zat + 1, strlen(zat + 1) + 1);
+    }
+    /* Refuse a mask whose host component is a bare "*": that bans every
+     * address on the network. Checked on the host part specifically, since
+     * "*@*" and "*!*@*" are just longer spellings of the same thing. */
+    const char *hostpart = strrchr(maskbuf, '@');
+    hostpart = hostpart ? hostpart + 1 : maskbuf;
+    if (strcmp(hostpart, "*") == 0) {
         notice_self(srv, cl, "Refusing to add a line matching every address (mask '*')");
         return;
     }
@@ -420,7 +440,7 @@ static void line_common(server_t *srv, client_t *cl, irc_message_t *msg, const c
         snprintf(m, sizeof m, "%s-line added: %s (%s) [expires %s]", line_type, maskbuf, reason, exp);
     } else snprintf(m, sizeof m, "%s-line added: %s (%s) [permanent]", line_type, maskbuf, reason);
     notice_self(srv, cl, m);
-    if (irc_glob_match(maskbuf, cl->ip))
+    if (server_line_mask_hits(maskbuf, line_type, cl->ip, cl->user, cl->realhost, cl->ident_confirmed))
         notice_self(srv, cl, "Warning: this mask matches your own address -- you won't be able to reconnect from it while it's active");
 
     /* enforce: disconnect anyone already connected who matches, except the
@@ -428,7 +448,7 @@ static void line_common(server_t *srv, client_t *cl, irc_message_t *msg, const c
     int matched = 0;
     for (client_t *c = srv->all_clients; c; c = c->all_next) {
         if (c == cl || c->fd < 0 || c->quitting) continue;
-        if (!irc_glob_match(maskbuf, c->ip)) continue;
+        if (!server_line_mask_hits(maskbuf, line_type, c->ip, c->user, c->realhost, c->ident_confirmed)) continue;
         char reasonbuf[300];
         snprintf(reasonbuf, sizeof reasonbuf, "%s-Lined: %s", line_type, reason);
         snprintf(c->quit_reason, sizeof c->quit_reason, "%s", reasonbuf);

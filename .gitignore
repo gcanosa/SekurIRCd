@@ -6,6 +6,7 @@
 /logs/
 /config/sekurircd.toml
 /config/accounts.json
+/config/klines.json
 /config/tls/*.pem
 /services/services.toml
 /services/*.json

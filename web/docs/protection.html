@@ -35,7 +35,7 @@
 <tr><td>Connect-flood throttle</td><td>Scanners and bots that open and close sockets rapidly</td><td><code>[security] connect_flood_*</code></td></tr>
 <tr><td>Connection caps</td><td>One host holding many sockets; total overload</td><td><code>[security] max_connections*</code></td></tr>
 <tr><td>Per-client flood guard</td><td>Registered clients sending too many lines too fast</td><td><code>[security] flood_max_msgs</code>, <code>flood_window</code></td></tr>
-<tr><td>K/G/Z-lines</td><td>Manual and automatic IP bans, with durations</td><td><code>KLINE</code> <code>GLINE</code> <code>ZLINE</code>, <code>klines_file</code></td></tr>
+<tr><td>K/G/Z-lines</td><td>Manual and automatic bans, with durations (K/G match host or <code>user@host</code>; Z is IP-only)</td><td><code>KLINE</code> <code>GLINE</code> <code>ZLINE</code>, <code>klines_file</code></td></tr>
 </table></div>
 
 <h2>dnsbl checking</h2>
@@ -88,8 +88,13 @@ max_connections_per_ip = 0     # per single IP; 0 = unlimited</pre>
 /ZLINE                                          # no arguments: list active lines
 /UNZLINE 198.51.100.7                           # remove
 /STATS z                                        # also /STATS k, /STATS g, /STATS l</pre>
-<p><code>KLINE</code>/<code>UNKLINE</code> and <code>GLINE</code>/<code>UNGLINE</code> work the same way. Durations are <code>30m</code>, <code>12h</code>, <code>1d</code>,
+<p><code>KLINE</code>/<code>UNKLINE</code> and <code>GLINE</code>/<code>UNGLINE</code> take the same arguments. Durations are <code>30m</code>, <code>12h</code>, <code>1d</code>,
   or omit for permanent. Set <code>[security] klines_file</code> so bans survive <code>REHASH</code> and restarts; without it they live in memory only.</p>
+<p><strong>What each letter matches.</strong> <code>ZLINE</code> is enforced at <code>accept()</code>, before the client has sent anything, so it can only ever match the
+  <em>IP</em> &mdash; that is why the DNSBL and connect-flood auto-bans use it. <code>KLINE</code> and <code>GLINE</code> additionally match <code>user@host</code>, so
+  <code>*.example.com</code> or <code>bob@*.example.com</code> do what they look like they do. Since a hostname isn't known until rDNS/ident finish, a host mask is
+  checked again at the end of registration rather than at connect time. The ident is tried both bare and <code>~</code>-prefixed, so a mask bites whether or not
+  identd answered.</p>
 <p class="note"><strong>False positives:</strong> a legitimate user who is on a DNSBL can be freed with <code>UNZLINE</code>, but their next connection triggers a fresh
   lookup and bans them again, since there is no allow-list. The reliable fixes are dropping that zone, or using <code>action = "reject"</code> so no lasting ban exists and
   pointing the user at the provider's delisting page, which is what <code>lookup_url</code> is for.</p>

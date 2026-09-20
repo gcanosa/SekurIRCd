@@ -47,6 +47,9 @@ typedef struct link_conn {
     size_t rbuf_len;
     char sbuf[LINK_BUF * 4];
     size_t sbuf_len;
+    time_t created;         /* absolute deadline for the handshake -- an unauthenticated
+                              * peer can otherwise hold the slot forever just by
+                              * sending junk, since that keeps last_activity fresh */
     time_t last_activity;
     struct client *service; /* the pseudo-client this link introduced, or NULL */
     struct link_conn *next;

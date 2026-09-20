@@ -20,10 +20,12 @@ void accounts_init(account_store_t *st, const char *path) {
             fseek(fp, 0, SEEK_SET);
             if (len > 0) {
                 char *buf = malloc((size_t)len + 1);
-                size_t rd = fread(buf, 1, (size_t)len, fp);
-                buf[rd] = '\0';
-                st->data = cJSON_Parse(buf);
-                free(buf);
+                if (buf) {
+                    size_t rd = fread(buf, 1, (size_t)len, fp);
+                    buf[rd] = '\0';
+                    st->data = cJSON_Parse(buf);
+                    free(buf);
+                }
             }
             fclose(fp);
         }
@@ -39,7 +41,8 @@ void accounts_free(account_store_t *st) {
 static void save(account_store_t *st) {
     if (!st->path[0]) return; /* accounts disabled -- never touch disk */
     char *text = cJSON_Print(st->data);
-    char tmp[560];
+    if (!text) return;
+    char tmp[sizeof st->path + 5];
     snprintf(tmp, sizeof tmp, "%s.tmp", st->path);
     FILE *fp = fopen(tmp, "wb");
     if (fp) {
@@ -58,6 +61,10 @@ static cJSON *find(account_store_t *st, const char *name) {
 
 int accounts_exists(account_store_t *st, const char *name) {
     return find(st, name) != NULL;
+}
+
+int accounts_count(account_store_t *st) {
+    return st->data ? cJSON_GetArraySize(st->data) : 0;
 }
 
 void accounts_register_hashed(account_store_t *st, const char *name, const char *hash) {
