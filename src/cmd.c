@@ -69,6 +69,7 @@ static const cmd_entry_t DISPATCH[] = {
     {"KLINE", cmd_kline, 0, 1, 1},
     {"GLINE", cmd_gline, 0, 1, 1},
     {"ZLINE", cmd_zline, 0, 1, 1},
+    {"SPAMFILTER", cmd_spamfilter, 0, 1, 1},
     {"UNKLINE", cmd_unkline, 1, 1, 1},
     {"UNGLINE", cmd_ungline, 1, 1, 1},
     {"UNZLINE", cmd_unzline, 1, 1, 1},

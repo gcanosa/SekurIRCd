@@ -209,6 +209,8 @@ static const help_entry_t HELP_TABLE[] = {
                  "IRCv3 efficient online/offline watch list -- the modern alternative to polling ISON."}},
     {"WATCH", {"WATCH +nick | -nick | C | L | S [...]",
                "Legacy pre-MONITOR watch list (one +/-nick or C/L/S per argument). Prefer MONITOR."}},
+    {"SPAMFILTER", {"SPAMFILTER [LIST] | ADD <targets> <block|warn|kill|zline> <duration|-> <reason_with_underscores> <regex> | DEL <n>",
+                    "Server-oper only: manage the [spam] regex content filters (targets: p c n N a q P t)."}},
     {"REHASH", {"REHASH", "Reload the config file live. Server-oper only."}},
     {"DIE", {"DIE [password]", "Shut the server down. Server-oper only."}},
     {"RESTART", {"RESTART [password]", "Shut the server down and restart it in place. Server-oper only."}},

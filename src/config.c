@@ -1,4 +1,5 @@
 #include "config.h"
+#include "client.h" /* SPAM_TRACK */
 #include "proto.h"
 #include "version.h"
 #include "vendor/toml.h"
@@ -102,6 +103,23 @@ static int cfg_get_str(toml_table_t *tab, const char *key, const char *def,
     return 0;
 }
 
+/* A duration string ("30s", "10m", "1h", "1d", bare seconds) or "" / "0" for
+ * zero, stored as seconds. */
+static int cfg_get_duration(toml_table_t *tab, const char *key, long def, long *out,
+                             char *errbuf, size_t errbufsz, const char *fieldname) {
+    if (!tab || !toml_key_exists(tab, key)) { *out = def; return 0; }
+    char buf[32];
+    if (cfg_get_str(tab, key, "", buf, sizeof buf, errbuf, errbufsz, fieldname)) return -1;
+    if (buf[0] == '\0') { *out = 0; return 0; }
+    long v = irc_parse_duration(buf);
+    if (v < 0) {
+        snprintf(errbuf, errbufsz, "%s \"%s\" is not a valid duration (e.g. \"30s\", \"10m\", \"1h\", \"1d\")", fieldname, buf);
+        return -1;
+    }
+    *out = v;
+    return 0;
+}
+
 static int cfg_get_str_array(toml_table_t *tab, const char *key,
                               char out[][CFG_STR], int max, int *n,
                               char *errbuf, size_t errbufsz, const char *fieldname) {
@@ -168,6 +186,12 @@ void config_rules_path(const config_t *cfg, char *out, size_t outsz) {
 int config_klines_path(const config_t *cfg, char *out, size_t outsz) {
     if (cfg->security.klines_file[0] == '\0') return 0;
     resolve_against_config_dir(cfg, cfg->security.klines_file, out, outsz);
+    return 1;
+}
+
+int config_spamfilters_path(const config_t *cfg, char *out, size_t outsz) {
+    if (cfg->spam.filters_file[0] == '\0') return 0;
+    resolve_against_config_dir(cfg, cfg->spam.filters_file, out, outsz);
     return 1;
 }
 
@@ -285,6 +309,17 @@ void config_defaults(config_t *out) {
     snprintf(out->dnsbl.action, sizeof out->dnsbl.action, "kline");
     snprintf(out->dnsbl.kline_duration, sizeof out->dnsbl.kline_duration, "1d");
     out->dnsbl.timeout = 5.0;
+
+    out->spam.exempt_opers = 1;
+    out->spam.exempt_identified = 1;
+    out->spam.new_user_period = 30;
+    out->spam.max_targets = 5;
+    out->spam.target_window = 30;
+    out->spam.max_repeat = 4;
+    snprintf(out->spam.limit_action, sizeof out->spam.limit_action, "block");
+    out->spam.zline_duration = 3600;
+    out->spam.filters_enabled = 1;
+    snprintf(out->spam.filters_file, CFG_PATH, "spamfilters.conf");
 
     snprintf(out->debug_channel.name, CFG_STR, "#server-debug");
     snprintf(out->debug_channel.min_level, sizeof out->debug_channel.min_level, "WARNING");
@@ -585,6 +620,43 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
         }
         if (out->dnsbl.kline_duration[0] && irc_parse_duration(out->dnsbl.kline_duration) < 0) {
             snprintf(errbuf, errbufsz, "dnsbl.kline_duration \"%s\" is not a valid duration (e.g. \"1d\", \"12h\", \"30m\", or a number of seconds)", out->dnsbl.kline_duration);
+            return -1;
+        }
+    }
+
+    /* [spam] */
+    {
+        int e;
+        toml_table_t *sp = cfg_get_section(raw, "spam", errbuf, errbufsz, &e);
+        if (e) return -1;
+        cfg_spam_t *o = &out->spam;
+        if (cfg_get_bool(sp, "enabled", 0, &o->enabled, errbuf, errbufsz, "spam.enabled")) return -1;
+        if (cfg_get_bool(sp, "exempt_opers", 1, &o->exempt_opers, errbuf, errbufsz, "spam.exempt_opers")) return -1;
+        if (cfg_get_bool(sp, "exempt_identified", 1, &o->exempt_identified, errbuf, errbufsz, "spam.exempt_identified")) return -1;
+        if (cfg_get_duration(sp, "trust_age", 0, &o->trust_age, errbuf, errbufsz, "spam.trust_age")) return -1;
+        if (cfg_get_duration(sp, "new_user_period", 30, &o->new_user_period, errbuf, errbufsz, "spam.new_user_period")) return -1;
+        if (cfg_get_int(sp, "max_targets", 5, &o->max_targets, errbuf, errbufsz, "spam.max_targets")) return -1;
+        if (cfg_get_duration(sp, "target_window", 30, &o->target_window, errbuf, errbufsz, "spam.target_window")) return -1;
+        if (cfg_get_int(sp, "max_repeat", 4, &o->max_repeat, errbuf, errbufsz, "spam.max_repeat")) return -1;
+        if (cfg_get_str(sp, "limit_action", "block", o->limit_action, sizeof o->limit_action, errbuf, errbufsz, "spam.limit_action")) return -1;
+        if (cfg_get_duration(sp, "zline_duration", 3600, &o->zline_duration, errbuf, errbufsz, "spam.zline_duration")) return -1;
+        if (cfg_get_bool(sp, "filters_enabled", 1, &o->filters_enabled, errbuf, errbufsz, "spam.filters_enabled")) return -1;
+        if (cfg_get_str(sp, "filters_file", "spamfilters.conf", o->filters_file, CFG_PATH, errbuf, errbufsz, "spam.filters_file")) return -1;
+        if (o->max_targets < 0 || o->max_targets >= SPAM_TRACK) {
+            snprintf(errbuf, errbufsz, "spam.max_targets must be 0 (off) to %d", SPAM_TRACK - 1);
+            return -1;
+        }
+        if (o->max_repeat < 0 || o->max_repeat > SPAM_TRACK) {
+            snprintf(errbuf, errbufsz, "spam.max_repeat must be 0 (off) to %d", SPAM_TRACK);
+            return -1;
+        }
+        if (o->target_window < 1 && (o->max_targets || o->max_repeat)) {
+            snprintf(errbuf, errbufsz, "spam.target_window must be at least 1s while max_targets/max_repeat are on");
+            return -1;
+        }
+        if (strcmp(o->limit_action, "block") && strcmp(o->limit_action, "warn") &&
+            strcmp(o->limit_action, "kill") && strcmp(o->limit_action, "zline")) {
+            snprintf(errbuf, errbufsz, "spam.limit_action must be \"block\", \"warn\", \"kill\" or \"zline\"");
             return -1;
         }
     }

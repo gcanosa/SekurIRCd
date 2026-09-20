@@ -18,6 +18,7 @@ struct channel;
 struct server;
 struct link_conn;
 
+#define SPAM_TRACK  32          /* spam.c: recent sends remembered per client */
 #define NICKLEN     64
 #define USERLEN     64
 #define HOSTLEN     256
@@ -106,6 +107,10 @@ typedef struct client {
 
     time_t flood_window_start;
     int flood_count;
+
+    /* Spam protection (spam.c): recent (target, text) sends, deduped per pair. */
+    struct { uint32_t tgt, txt; time_t at; } spam_ring[SPAM_TRACK];
+    int spam_head;
 
     chan_node_t *channels;
 

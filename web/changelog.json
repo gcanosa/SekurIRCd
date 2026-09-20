@@ -1,5 +1,15 @@
 [
   {
+    "tag": "v1.0.5",
+    "date": "2026-09-21",
+    "changes": [
+      "New spam protection module ([spam], off by default): regex content filters for PRIVMSG/NOTICE (users and channels) plus AWAY, QUIT, PART and TOPIC text; a new-connection restriction on PMs; and recipient/repeat limits that catch bots messaging many targets",
+      "Filters live in config/spamfilters.conf (an example file is included) with actions block, warn, kill and zline; filters_enabled turns the file off without touching the rest",
+      "New /SPAMFILTER LIST|ADD|DEL oper command edits the filters file live; regexes are validated (no backreferences, no empty matches); rules reload on /REHASH",
+      "Opers with +s get a notice for every spam action, and services, opers and identified accounts are exempt by default"
+    ]
+  },
+  {
     "tag": "v1.0.4",
     "date": "2026-09-21",
     "changes": [
