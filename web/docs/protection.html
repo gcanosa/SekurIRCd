@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Abuse protection · SekurIRCd docs</title>
+<meta name="description" content="Built-in drone and proxy protection in SekurIRCd: DNSBL checks, connect-flood throttling, connection caps, K/G/Z-lines, and how to monitor them.">
+<link rel="icon" href="../img/favicon.ico" sizes="any">
+<script>(function(){var t;try{t=localStorage.getItem("theme")}catch(e){}if(t!=="light"&&t!=="dark")t=matchMedia("(prefers-color-scheme: light)").matches?"light":"dark";document.documentElement.dataset.theme=t})()</script>
+<link rel="stylesheet" href="../css/site.css">
+</head>
+<body data-root="../" data-page="protection">
+<header id="site-header"></header>
+<div class="wrap docs-layout">
+<aside id="docs-nav" class="docs-nav"></aside>
+<main class="docs">
+<h1>abuse protection</h1>
+<p>Every public IRC server is scanned within hours of going online. Botnets and drone networks connect by the hundreds to flood channels, spam
+  users and probe for open proxies, and plain scanners open and drop sockets just to fingerprint you. SekurIRCd ships with several layers that
+  stop most of this <em>before</em> a client ever registers, with no external services or extra processes.</p>
+
+<h2>why it matters</h2>
+<ul>
+  <li><strong>Drones and proxies hide the attacker.</strong> Most flood and spam traffic arrives through open proxies or infected machines, so banning by nick or
+    hostmask after the fact does little. Blocking the address at connect time does.</li>
+  <li><strong>Cheap for you, costly for them.</strong> A refused connection uses almost no resources, while a fully registered flood client
+    joins channels, fires off WHOIS/LIST storms and burns CPU.</li>
+  <li><strong>Protects your real users.</strong> Bans happen at the socket, before any user or channel is touched.</li>
+</ul>
+
+<h2>the layers</h2>
+<div class="tablewrap"><table>
+<tr><th>Layer</th><th>Catches</th><th>Config</th></tr>
+<tr><td>DNSBL check</td><td>Known open proxies, drones and spam hosts listed by a DNS blocklist</td><td><code>[dnsbl]</code></td></tr>
+<tr><td>Connect-flood throttle</td><td>Scanners and bots that open and close sockets rapidly</td><td><code>[security] connect_flood_*</code></td></tr>
+<tr><td>Connection caps</td><td>One host holding many sockets; total overload</td><td><code>[security] max_connections*</code></td></tr>
+<tr><td>Per-client flood guard</td><td>Registered clients sending too many lines too fast</td><td><code>[security] flood_max_msgs</code>, <code>flood_window</code></td></tr>
+<tr><td>K/G/Z-lines</td><td>Manual and automatic IP bans, with durations</td><td><code>KLINE</code> <code>GLINE</code> <code>ZLINE</code>, <code>klines_file</code></td></tr>
+</table></div>
+
+<h2>dnsbl checking</h2>
+<p>A DNSBL (DNS blocklist) is a DNS zone that answers "is this IP known-bad?". SekurIRCd reverses the connecting IPv4 address, looks up
+  <code>d.c.b.a.&lt;zone&gt;</code> on a worker thread, and treats any answer as "listed". Lookups never block the main loop: the new connection is simply
+  held, with no input read, until the verdict arrives. IPv6 addresses are not checked, and a zone that does not answer fails open, so the connection is let through.</p>
+<p>No zone is hardcoded, so a provider changing its policy can't surprise you. The shipped template enables the check with the EFnet RBL, an IRC-focused
+  list of open proxies, drones and spamming hosts with no query-volume restrictions.</p>
+
+<h3>enable and configure</h3>
+<pre>[dnsbl]
+enabled = true
+zones = ["rbl.efnetrbl.org"]        # checked in order; first hit wins
+timeout = 5.0                       # seconds per lookup before "not listed"
+action = "kline"                    # "kline" or "reject"
+kline_duration = "1d"               # "1d", "12h", "30m", or seconds; "" = permanent
+#lookup_url = "https://dronebl.org/lookup?ip={ip}"   # optional link added to the ban reason</pre>
+<ul>
+  <li><code>enabled = true</code> needs at least one zone, otherwise the config is rejected at load. If you remove the whole <code>[dnsbl]</code> section, the check stays off.</li>
+  <li><code>action = "kline"</code> refuses the connection <em>and</em> records a ban for that IP, so repeat attempts are refused without another DNS lookup.
+    <code>"reject"</code> only refuses that one attempt and leaves no lasting ban.</li>
+  <li>Keep <code>kline_duration</code> short (the default is one day). Dynamic IPs get reassigned, and a permanent ban from a single listing is rarely right.</li>
+  <li>Add more zones only after confirming they are still live and accept your query volume; a dead zone just times out silently. The template comments
+    weigh Spamhaus ZEN (email-focused, licensing limits), Tor exit lists (blocks every Tor user) and DroneBL (its public DNSBL was shut down in 2021, not recommended).</li>
+</ul>
+<p>To see whether an address is listed, reverse its octets and query the zone yourself: <code>dig +short 4.3.2.1.rbl.efnetrbl.org</code> checks
+  <code>1.2.3.4</code>. Any answer means listed; no answer means clean.</p>
+
+<h2>connect-flood throttle</h2>
+<p>Scanners often connect and drop faster than a concurrency cap can see. This tracks connections per IP over a time window; once an IP exceeds the
+  limit it is banned automatically and told <code>reconnecting too fast</code>.</p>
+<pre>[security]
+connect_flood_max = 5                 # more than this many connects...
+connect_flood_window = 10.0           # ...within this many seconds -> ban
+connect_flood_kline_duration = "10m"  # "" or 0 = permanent; connect_flood_max = 0 disables the check</pre>
+<p>Raise <code>connect_flood_max</code> if many legitimate users share one NAT'd IP, such as a school, an office, or a web gateway like Kiwi in front of your server.</p>
+
+<h2>connection caps</h2>
+<pre>[security]
+max_connections = 0            # total simultaneous connections; 0 = unlimited
+max_connections_per_ip = 0     # per single IP; 0 = unlimited</pre>
+<p>Both default to unlimited. Set them on any public server; a per-IP cap of 3 to 5 suits most networks, higher if gateways or shared NATs front real users.
+  Refused connections get a plain <code>ERROR</code> before registration.</p>
+
+<h2>bans: k-line, g-line, z-line</h2>
+<p>All three ban by IP mask, are enforced before registration, and disconnect matching clients that are already online. Automatic bans from DNSBL hits and the
+  connect-flood throttle are recorded as <strong>Z-lines</strong> (a pure-IP ban applied before registration), tagged with what set them: <code>dnsbl</code>
+  or <code>connect-flood</code>.</p>
+<pre>/ZLINE 198.51.100.7 1d :abuse from this host    # add: mask, optional duration, reason
+/ZLINE                                          # no arguments: list active lines
+/UNZLINE 198.51.100.7                           # remove
+/STATS z                                        # also /STATS k, /STATS g, /STATS l</pre>
+<p><code>KLINE</code>/<code>UNKLINE</code> and <code>GLINE</code>/<code>UNGLINE</code> work the same way. Durations are <code>30m</code>, <code>12h</code>, <code>1d</code>,
+  or omit for permanent. Set <code>[security] klines_file</code> so bans survive <code>REHASH</code> and restarts; without it they live in memory only.</p>
+<p class="note"><strong>False positives:</strong> a legitimate user who is on a DNSBL can be freed with <code>UNZLINE</code>, but their next connection triggers a fresh
+  lookup and bans them again, since there is no allow-list. The reliable fixes are dropping that zone, or using <code>action = "reject"</code> so no lasting ban exists and
+  pointing the user at the provider's delisting page, which is what <code>lookup_url</code> is for.</p>
+
+<h2>monitoring</h2>
+<h3>server notices</h3>
+<p>Opers get user mode <code>+s</code> automatically on <code>/OPER</code> and receive a notice for every refused connection, for example
+  <code>Rejected connection from 203.0.113.9: Proxy/Drone detected (rbl.efnetrbl.org)</code>, and for every ban added, removed or expired. If it gets noisy
+  during an attack, silence it with <code>/MODE &lt;yournick&gt; -s</code>.</p>
+
+<h3>debug channel and log</h3>
+<pre>[debug_channel]
+enabled = true
+name = "#server-debug"      # oper-only; JOIN is refused to everyone else
+min_level = "WARNING"       # DNSBL hits are logged at WARNING, so they appear here
+stats_interval = 300        # seconds between summary lines; these are INFO, so also set min_level = "INFO"</pre>
+<p>Each DNSBL hit is also written to the log (<code>[logging]</code>) as a warning:</p>
+<pre>dnsbl: 203.0.113.9 listed in rbl.efnetrbl.org -- K-lined</pre>
+<p>With <code>stats_interval</code> set, the periodic summary tells you how well protection is working (example output):</p>
+<pre>stats: users=142 (peak 190), channels=61 (18 registered), connections=9314 total,
+       lines active=0 K/0 G/37 Z (35 from DNSBL), dnsbl hits=412 total, ircd cpu=0.4% mem=21MB</pre>
+<p>Watch <code>dnsbl hits</code> and the count of active lines <em>from DNSBL</em>: a steady trickle is normal, and a sudden climb means an attack is being absorbed.
+  If the hit count stays at zero on a public server for weeks, check that the zone still resolves with <code>dig</code>.</p>
+
+<h2>recommended setup</h2>
+<pre>[security]
+max_connections_per_ip = 4
+connect_flood_max = 5
+connect_flood_window = 10.0
+connect_flood_kline_duration = "10m"
+klines_file = "klines.json"          # persist bans across restarts
+
+[dnsbl]
+enabled = true
+zones = ["rbl.efnetrbl.org"]
+action = "kline"
+kline_duration = "1d"
+
+[debug_channel]
+enabled = true
+min_level = "INFO"
+stats_interval = 300</pre>
+<p>Apply with <code>/REHASH</code>. Then open a client as an oper, join <code>#server-debug</code>, and confirm the summary line shows up. See the
+  <a href="configuration.html">configuration</a> page and the full template on
+  <a href="https://github.com/gcanosa/SekurIRCd/blob/main/config/sekurircd.template.toml">GitHub</a> for every key.</p>
+</main>
+</div>
+<footer id="site-footer"></footer>
+<script src="../js/site.js"></script>
+</body>
+</html>
