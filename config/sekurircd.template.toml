@@ -8,6 +8,7 @@
 #
 #          cp config/sekurircd.template.toml /etc/sekurircd/sekurircd.toml
 #          cp config/ircd.motd               /etc/sekurircd/ircd.motd
+#          cp config/oper.motd config/ircd.rules /etc/sekurircd/
 #
 #   2. Edit the copy to taste (port, network name, logging, security limits,
 #      operators, admin contact, vhosts, channel-creation policy, DNSBL, ...).
@@ -289,6 +290,12 @@ chanserv_pidfile = ""
 
 # MOTD file, resolved relative to this config file's directory.
 motd = "ircd.motd"
+
+# Shown to a user on /OPER success and by /OPERMOTD (opers only). Colors ok.
+oper_motd = "oper.motd"
+
+# Shown by /RULES. Keep it plain text, lines under 78 characters.
+rules = "ircd.rules"
 
 # Maximum number of bytes per PRIVMSG/NOTICE payload before truncation.
 max_message_length = 400

@@ -128,7 +128,7 @@ Website & docs: <https://gcanosa.github.io/SekurIRCd/> (source in [`web/`](web/)
 - `PING`/`PONG`, `QUIT`, `WHOIS`, `WHO`, `VERSION`, `TIME`, `AWAY`, `INFO` --
   plus a server-initiated keepalive `PING` that drops unresponsive clients
   after `security.ping_timeout`
-- Message of the Day from `config/ircd.motd`
+- Message of the Day from `config/ircd.motd`, operator MOTD (`oper.motd`, shown on /OPER and /OPERMOTD) and `/RULES` from `ircd.rules`
 - File logging (rotating) + console logging, both configurable in TOML, with a
   `debug` switch for protocol-level trace output; console output is
   color-coded by level when attached to a terminal (auto-disabled when piped,

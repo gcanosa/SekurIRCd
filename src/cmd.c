@@ -84,6 +84,8 @@ static const cmd_entry_t DISPATCH[] = {
     {"INFO", cmd_info, 0, 1, 0},
     {"HELP", cmd_help, 0, 1, 0},
     {"MOTD", cmd_motd, 0, 1, 0},
+    {"RULES", cmd_rules, 0, 1, 0},
+    {"OPERMOTD", cmd_opermotd, 0, 1, 1},
     {"LUSERS", cmd_lusers, 0, 1, 0},
     {"UPTIME", cmd_uptime, 0, 1, 0},
     {"ADMIN", cmd_admin, 0, 1, 0},

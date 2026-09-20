@@ -1,5 +1,13 @@
 [
   {
+    "tag": "Unreleased",
+    "date": "2026-09-21",
+    "changes": [
+      "New /RULES command backed by config/ircd.rules, and an operator MOTD (config/oper.motd) sent on /OPER and via /OPERMOTD; both reload on /REHASH",
+      "New [messages] keys: oper_motd and rules; templates for both files are included"
+    ]
+  },
+  {
     "tag": "v1.0.4",
     "date": "2026-09-21",
     "changes": [

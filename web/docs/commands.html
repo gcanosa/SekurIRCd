@@ -30,6 +30,7 @@
 <tr><td><code>MODE</code></td><td>Query or change channel and user modes.</td></tr>
 <tr><td><code>VHOST</code></td><td>Activate a configured virtual host, or <code>VHOST off</code>.</td></tr>
 <tr><td><code>REGISTER</code> <code>AUTHENTICATE</code> <code>CERT</code></td><td>Accounts: create an account, SASL login, bind a TLS client certificate. Needs <code>[accounts] enabled</code>.</td></tr>
+<tr><td><code>RULES</code></td><td>Show the network rules from <code>ircd.rules</code> (plain text, lines under 78 characters).</td></tr>
 <tr><td><code>MOTD</code> <code>ADMIN</code> <code>INFO</code> <code>VERSION</code> <code>TIME</code> <code>UPTIME</code> <code>LUSERS</code> <code>LINKS</code> <code>MAP</code> <code>STATS</code> <code>HELP</code></td><td>Server information. <code>STATS m</code> and <code>u</code> are open to everyone.</td></tr>
 <tr><td><code>SERVLIST</code> <code>SQUERY</code></td><td>List and message services pseudo-users such as ChanServ.</td></tr>
 <tr><td><code>GLOB</code></td><td>Non-standard: glob-match nicknames server-wide (invisible users hidden unless you share a channel or you are an oper).</td></tr>
@@ -45,7 +46,8 @@
 <tr><td><code>KLINE</code> <code>GLINE</code> <code>ZLINE</code></td><td><code>&lt;mask&gt; [duration] [:reason]</code>. With no arguments, list active lines.</td></tr>
 <tr><td><code>UNKLINE</code> <code>UNGLINE</code> <code>UNZLINE</code></td><td>Remove a line.</td></tr>
 <tr><td><code>WALLOPS</code></td><td>Message every user with <code>+w</code>.</td></tr>
-<tr><td><code>REHASH</code></td><td>Reload the config live.</td></tr>
+<tr><td><code>REHASH</code></td><td>Reload the config, MOTD, oper MOTD and rules live.</td></tr>
+<tr><td><code>OPERMOTD</code></td><td>Show <code>oper.motd</code>. It is also sent automatically when you <code>/OPER</code> up.</td></tr>
 <tr><td><code>DIE</code> <code>RESTART</code></td><td>Shut down, or re-exec in place. Can require an extra password.</td></tr>
 <tr><td><code>CHGHOST</code> <code>SETHOST</code></td><td>Force-set another local user's displayed host, or your own (<code>SETHOST off</code> clears it).</td></tr>
 <tr><td><code>SAJOIN</code> <code>SAPART</code> <code>SAMODE</code></td><td>Force a user into or out of channels, or change channel modes, bypassing <code>+i +k +l +b +z</code> and op requirements. <code>+r</code> stays services-only.</td></tr>

@@ -157,6 +157,14 @@ void config_motd_path(const config_t *cfg, char *out, size_t outsz) {
     resolve_against_config_dir(cfg, cfg->messages.motd, out, outsz);
 }
 
+void config_oper_motd_path(const config_t *cfg, char *out, size_t outsz) {
+    resolve_against_config_dir(cfg, cfg->messages.oper_motd, out, outsz);
+}
+
+void config_rules_path(const config_t *cfg, char *out, size_t outsz) {
+    resolve_against_config_dir(cfg, cfg->messages.rules, out, outsz);
+}
+
 int config_klines_path(const config_t *cfg, char *out, size_t outsz) {
     if (cfg->security.klines_file[0] == '\0') return 0;
     resolve_against_config_dir(cfg, cfg->security.klines_file, out, outsz);
@@ -247,6 +255,8 @@ void config_defaults(config_t *out) {
     snprintf(out->security.connect_flood_kline_duration, sizeof out->security.connect_flood_kline_duration, "10m");
 
     snprintf(out->messages.motd, CFG_PATH, "ircd.motd");
+    snprintf(out->messages.oper_motd, CFG_PATH, "oper.motd");
+    snprintf(out->messages.rules, CFG_PATH, "ircd.rules");
     out->messages.max_message_length = 400;
 
     out->logging.enabled = 1;
@@ -423,6 +433,8 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
     }
 
     if (cfg_get_str(msg, "motd", "ircd.motd", out->messages.motd, CFG_PATH, errbuf, errbufsz, "messages.motd")) return -1;
+    if (cfg_get_str(msg, "oper_motd", "oper.motd", out->messages.oper_motd, CFG_PATH, errbuf, errbufsz, "messages.oper_motd")) return -1;
+    if (cfg_get_str(msg, "rules", "ircd.rules", out->messages.rules, CFG_PATH, errbuf, errbufsz, "messages.rules")) return -1;
     if (cfg_get_int(msg, "max_message_length", 400, &out->messages.max_message_length, errbuf, errbufsz, "messages.max_message_length")) return -1;
     /* Upper bound is the send_msg/cmd_squery text buffer (420) less its NUL.
      * A negative value made the "%.*s" truncation a no-op. */

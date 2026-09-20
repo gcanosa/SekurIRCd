@@ -29,6 +29,8 @@ void cmd_time(server_t *srv, client_t *cl, irc_message_t *msg) {
 }
 
 void cmd_motd(server_t *srv, client_t *cl, irc_message_t *msg) { (void)msg; server_send_motd(srv, cl); }
+void cmd_rules(server_t *srv, client_t *cl, irc_message_t *msg) { (void)msg; server_send_rules(srv, cl); }
+void cmd_opermotd(server_t *srv, client_t *cl, irc_message_t *msg) { (void)msg; server_send_oper_motd(srv, cl); }
 void cmd_lusers(server_t *srv, client_t *cl, irc_message_t *msg) { (void)msg; server_send_lusers(srv, cl); }
 
 void cmd_admin(server_t *srv, client_t *cl, irc_message_t *msg) {
@@ -247,6 +249,8 @@ static const help_entry_t HELP_TABLE[] = {
     {"TIME", {"TIME", "Show the server's current time."}},
     {"INFO", {"INFO", "Show general information about the server software."}},
     {"MOTD", {"MOTD", "Show the message of the day."}},
+    {"RULES", {"RULES", "Show the network rules."}},
+    {"OPERMOTD", {"OPERMOTD", "Show the operator message of the day. Server-oper only."}},
     {"HELP", {"HELP [command]", "Show this general summary, or detailed usage for one command."}},
 };
 
@@ -254,7 +258,7 @@ static const char *GENERAL_HELP[] = {
     "SekurIRCd commands: NICK USER JOIN PART QUIT PRIVMSG NOTICE TOPIC NAMES",
     "WHO WHOIS WHOWAS AWAY SETNAME MODE OPER INVITE KNOCK LIST LINKS MAP KICK",
     "KILL MONITOR WATCH SILENCE USERHOST ISON WALLOPS ADMIN LUSERS STATS VERSION",
-    "TIME INFO MOTD REHASH VHOST CHGHOST SETHOST SAJOIN SAPART SAMODE CONNECT",
+    "TIME INFO MOTD RULES OPERMOTD REHASH VHOST CHGHOST SETHOST SAJOIN SAPART SAMODE CONNECT",
     "SQUIT TRACE SERVLIST SQUERY REGISTER AUTHENTICATE CERT.",
     "Type /HELP <command> for that command's usage and parameters.",
 };
