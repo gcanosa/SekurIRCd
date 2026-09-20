@@ -11,10 +11,26 @@
 
 void cmd_version(server_t *srv, client_t *cl, irc_message_t *msg) {
     (void)msg;
-    char swver[CFG_STR + 16];
+    /* ircu/solanum style: "351 <nick> <version>(<build>). <server> :<flags>",
+     * then the 005 lines. The flags are the optional features switched on
+     * here: A accounts/SASL, D DNSBL, L server links, S spam protection,
+     * T TLS listener ("-" when none). */
+    char swver[CFG_STR + 48];
     server_software_version(srv, swver, sizeof swver);
+    size_t vl = strlen(swver);
+    swver[vl] = '.'; swver[vl + 1] = '\0'; /* room reserved by the +48 above */
+    char flags[8];
+    int n = 0;
+    if (srv->cfg.accounts.enabled) flags[n++] = 'A';
+    if (srv->cfg.dnsbl.enabled) flags[n++] = 'D';
+    if (srv->cfg.links.enabled) flags[n++] = 'L';
+    if (srv->cfg.spam.enabled) flags[n++] = 'S';
+    if (srv->cfg.tls.enabled) flags[n++] = 'T';
+    if (!n) flags[n++] = '-';
+    flags[n] = '\0';
     const char *p[] = {swver, srv->cfg.server.name};
-    client_reply(cl, N_VERSION, p, 2, "SekurIRCd (C port)");
+    client_reply(cl, N_VERSION, p, 2, flags);
+    server_send_isupport(srv, cl);
 }
 
 void cmd_time(server_t *srv, client_t *cl, irc_message_t *msg) {
@@ -247,7 +263,7 @@ static const help_entry_t HELP_TABLE[] = {
     {"CAP", {"CAP LS|REQ|END|LIST", "IRCv3 capability negotiation -- normally handled by your client, not typed by hand."}},
     {"PING", {"PING <token>", "Request a PONG from the server."}},
     {"QUIT", {"QUIT [:reason]", "Disconnect from the server."}},
-    {"VERSION", {"VERSION", "Show the server's software version."}},
+    {"VERSION", {"VERSION", "Show the server's software version and build, its optional-feature flags (A accounts, D dnsbl, L links, S spam, T tls), and the 005 ISUPPORT tokens."}},
     {"TIME", {"TIME", "Show the server's current time."}},
     {"INFO", {"INFO", "Show general information about the server software."}},
     {"MOTD", {"MOTD", "Show the message of the day."}},

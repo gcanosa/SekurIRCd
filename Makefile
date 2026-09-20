@@ -71,13 +71,21 @@ CORE_SRCS := $(SRC_DIR)/proto.c $(SRC_DIR)/crypto.c $(SRC_DIR)/log.c $(SRC_DIR)/
              $(SRC_DIR)/channel.c $(SRC_DIR)/client.c $(SRC_DIR)/server.c $(SRC_DIR)/net.c \
              $(SRC_DIR)/link.c $(SRC_DIR)/accounts.c $(SRC_DIR)/worker.c \
              $(SRC_DIR)/cmd.c $(SRC_DIR)/cmd_reg.c $(SRC_DIR)/cmd_chan.c $(SRC_DIR)/cmd_user.c \
-             $(SRC_DIR)/cmd_oper.c $(SRC_DIR)/cmd_info.c $(SRC_DIR)/spam.c
+             $(SRC_DIR)/cmd_oper.c $(SRC_DIR)/cmd_info.c $(SRC_DIR)/spam.c $(SRC_DIR)/build.c
 VEND_SRCS := $(VEND_DIR)/toml.c $(VEND_DIR)/cJSON.c
 MAIN_SRC  := $(SRC_DIR)/main.c
 
 ALL_SRCS  := $(CORE_SRCS) $(VEND_SRCS) $(MAIN_SRC)
 ALL_OBJS  := $(patsubst %.c,$(OBJ_DIR)/%.o,$(ALL_SRCS))
 
+# Build id for /VERSION: date + short commit (+ -dirty). build.o depends on
+# every other object, so it is regenerated whenever anything else is.
+BUILD_ID := $(shell date +%Y%m%d)-$(shell git rev-parse --short HEAD 2>/dev/null || echo release)$(shell git diff --quiet HEAD 2>/dev/null || echo -dirty)
+$(OBJ_DIR)/$(SRC_DIR)/build.o: CPPFLAGS += -DSEKURIRCD_BUILD='"$(BUILD_ID)"'
+$(OBJ_DIR)/$(SRC_DIR)/build.o: $(filter-out $(OBJ_DIR)/$(SRC_DIR)/build.o,$(ALL_OBJS))
+build-debug/$(SRC_DIR)/build.o: CPPFLAGS += -DSEKURIRCD_BUILD='"$(BUILD_ID)-asan"'
+
+.DEFAULT_GOAL := all
 .PHONY: all debug check clean
 all: $(BIN_DIR)/sekurircd $(BIN_DIR)/chanserv
 

@@ -99,7 +99,10 @@ typedef struct server {
 /* "SekurIRCd-<version>" -- daemon-name+version form for wire fields that
  * must name the software (004 MYINFO, 351 VERSION). buf must hold at least
  * strlen("SekurIRCd-") + sizeof(cfg.server.version). */
+extern const char sekurircd_build[]; /* build.c */
 void server_software_version(const server_t *srv, char *buf, size_t bufsz);
+/* Send the 005 RPL_ISUPPORT lines (also re-sent by /VERSION, ircu-style). */
+void server_send_isupport(server_t *srv, client_t *cl);
 
 int server_init(server_t *srv, const config_t *cfg);
 void server_load_motd(server_t *srv);
