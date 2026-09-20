@@ -1,0 +1,39 @@
+[
+  {
+    "tag": "Unreleased",
+    "date": "on main",
+    "changes": [
+      "SASL EXTERNAL: log in with a TLS client certificate, bound with /CERT ADD",
+      "Z-lines (ZLINE/UNZLINE), /WATCH, and STATS k/g/z/l",
+      "Per-IP connect-flood throttle that auto-bans scanners",
+      "Server-notice (+s) alerts for OPER, failed OPER, KILL, links, and SA*/SETHOST overrides",
+      "Optional oper host masking on /OPER, human-friendly ban expiry and uptime",
+      "Rootless systemd user units, make install/uninstall, and a start/stop/status wrapper script",
+      "Hardened server-link listener; random RPL_YOURID"
+    ]
+  },
+  {
+    "tag": "v1.0.3",
+    "date": "2026-09-16",
+    "changes": [
+      "Periodic stats server notice for opers",
+      "ChanServ bug fixes",
+      "README rewritten as a standalone project doc"
+    ]
+  },
+  {
+    "tag": "v1.0.2",
+    "date": "2026-09-16",
+    "changes": [
+      "Fixed crashes, security holes and performance stalls; wired up previously dead config options",
+      "New channel and user modes: +P +C +T +S +V +Q +N",
+      "Fixed the Linux build (glibc POSIX gating) and added a TLS connect notice",
+      "Expanded ChanServ HELP; fixed OPER re-auth and TOPICLOCK sync; WHOX support"
+    ]
+  },
+  {
+    "tag": "v1.0.1",
+    "date": "2026-09-15",
+    "changes": ["Initial release of the C port"]
+  }
+]
