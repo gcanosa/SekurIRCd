@@ -7,6 +7,7 @@
 
 15          small network  -  secure by default  -  no nonsense
 14                  powered by SekurIRCd v1.0.4
+14                https://gcanosa.github.io/SekurIRCd/
 
 11=====================================================================
 11 NETWORK 
@@ -17,7 +18,6 @@
   11Hostnames ..... cloaked; your real IP is not shown to other users
   11Services ...... ChanServ   /msg ChanServ HELP
   11Accounts ...... SASL PLAIN, or /REGISTER <account> <password>
-  11Website ....... https://gcanosa.github.io/SekurIRCd/
 
 03=====================================================================
 03 CHANNELS 
