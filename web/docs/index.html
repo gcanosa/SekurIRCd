@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Documentation · SekurIRCd docs</title>
+<meta name="description" content="SekurIRCd documentation: install, configuration, commands, IRCv3 and SASL, ChanServ.">
+<link rel="icon" href="../img/favicon.ico" sizes="any">
+<script>(function(){var t;try{t=localStorage.getItem("theme")}catch(e){}if(t!=="light"&&t!=="dark")t=matchMedia("(prefers-color-scheme: light)").matches?"light":"dark";document.documentElement.dataset.theme=t})()</script>
+<link rel="stylesheet" href="../css/site.css">
+</head>
+<body data-root="../" data-page="docs">
+<header id="site-header"></header>
+<div class="wrap docs-layout">
+<aside id="docs-nav" class="docs-nav"></aside>
+<main class="docs">
+<h1>docs</h1>
+<p>SekurIRCd is a lightweight, secure IRC daemon written in C11. Pick a topic:</p>
+<div class="grid">
+  <a class="card" href="install.html"><h3>Install</h3><p>Dependencies, build, daemon mode, systemd user units.</p></a>
+  <a class="card" href="configuration.html"><h3>Configuration</h3><p>Sections of <code>sekurircd.toml</code>, operators, TLS, cloaking.</p></a>
+  <a class="card" href="commands.html"><h3>Commands &amp; modes</h3><p>User and operator commands, channel and user modes.</p></a>
+  <a class="card" href="ircv3.html"><h3>IRCv3 &amp; SASL</h3><p>Capabilities, accounts, SASL PLAIN and EXTERNAL.</p></a>
+  <a class="card" href="chanserv.html"><h3>ChanServ</h3><p>Optional channel services over a server link.</p></a>
+  <a class="card" href="../changelog.html"><h3>Changelog</h3><p>What changed in each release.</p></a>
+</div>
+<h2>security notes</h2>
+<p>No <code>eval</code>, <code>system</code> or shell-out in the request path; enforced line, parameter and nick limits; a per-client flood guard;
+  per-connection isolation so one bad client cannot crash the daemon. Prefer scrypt <code>password_hash</code> over plain passwords, enable
+  <code>[tls]</code>, and restrict <code>[server].bind</code> for network-level isolation. <code>make debug</code> builds an ASan+UBSan binary.</p>
+</main>
+</div>
+<footer id="site-footer"></footer>
+<script src="../js/site.js"></script>
+</body>
+</html>

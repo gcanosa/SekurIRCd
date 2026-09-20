@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Configuration · SekurIRCd docs</title>
+<meta name="description" content="Every section of sekurircd.toml: server, security, TLS, accounts, operators, channels, DNSBL and links.">
+<link rel="icon" href="../img/favicon.ico" sizes="any">
+<script>(function(){var t;try{t=localStorage.getItem("theme")}catch(e){}if(t!=="light"&&t!=="dark")t=matchMedia("(prefers-color-scheme: light)").matches?"light":"dark";document.documentElement.dataset.theme=t})()</script>
+<link rel="stylesheet" href="../css/site.css">
+</head>
+<body data-root="../" data-page="configuration">
+<header id="site-header"></header>
+<div class="wrap docs-layout">
+<aside id="docs-nav" class="docs-nav"></aside>
+<main class="docs">
+<h1>configuration</h1>
+<p>Copy <code>config/sekurircd.template.toml</code> to a live file and point the daemon at it with <code>--config</code>.
+  The template documents every key. <code>REHASH</code> (or <code>--rehash</code>) reloads it without dropping anyone.</p>
+<p>Relative paths: <code>motd</code>, <code>tls.cert_file</code> and <code>tls.key_file</code> resolve against the config file's
+  directory; <code>logging.directory</code> resolves against the current working directory. Absolute paths always work.</p>
+
+<h2>sections</h2>
+<div class="tablewrap"><table>
+<tr><th>Section</th><th>What it controls</th></tr>
+<tr><td><code>[server]</code></td><td><code>name</code>, <code>network</code>, <code>bind</code> (default <code>0.0.0.0</code>), <code>port</code> (default <code>6667</code>).</td></tr>
+<tr><td><code>[security]</code></td><td>Line/param/nick length limits, flood guard (<code>flood_max_msgs</code>, <code>flood_window</code>), keepalive (<code>ping_interval</code> 120s, <code>ping_timeout</code> 300s),
+  <code>host_masking</code> and its format, <code>klines_file</code>, <code>default_user_modes</code> (e.g. <code>"iw"</code>), <code>max_connections</code>, <code>max_connections_per_ip</code>,
+  connect-flood auto-bans, <code>reserved_nicks</code>, ident and reverse-DNS lookups, <code>DIE</code>/<code>RESTART</code> passwords, <code>oper_auto_join</code>.</td></tr>
+<tr><td><code>[tls]</code></td><td><code>enabled</code> (default false), <code>port</code> (default 6697), <code>cert_file</code>, <code>key_file</code>, <code>request_client_cert</code> (needed for SASL EXTERNAL).
+  Runs alongside the plaintext listener, never instead of it.</td></tr>
+<tr><td><code>[accounts]</code></td><td><code>enabled</code> (default false), <code>store_file</code>. Backs SASL, <code>/REGISTER</code>, <code>/CERT</code> and the <code>a:</code> extban.</td></tr>
+<tr><td><code>[messages]</code></td><td><code>motd</code> file and max message length.</td></tr>
+<tr><td><code>[logging]</code></td><td><code>enabled</code>, <code>directory</code>, <code>level</code>, <code>debug</code> (protocol trace), <code>file</code>, rotation (<code>max_bytes</code>, <code>backup_count</code>).</td></tr>
+<tr><td><code>[[operators]]</code></td><td>One table per <code>/OPER</code> login. See below.</td></tr>
+<tr><td><code>[admin]</code></td><td>Location and email reported by <code>/ADMIN</code>.</td></tr>
+<tr><td><code>[[vhosts]]</code></td><td><code>host</code> plus <code>allowed_hosts</code> (ident@IP masks, never nicks) that <code>/VHOST</code> may activate.</td></tr>
+<tr><td><code>[channels]</code></td><td><code>restrict_creation</code>, <code>allowed_channels</code>, <code>default_modes</code> (default <code>"nt"</code>), <code>auto_join</code>.</td></tr>
+<tr><td><code>[dnsbl]</code></td><td><code>enabled</code>, <code>zones</code>, <code>timeout</code>, <code>action</code> (<code>"kline"</code> or <code>"reject"</code>), <code>kline_duration</code>, <code>lookup_url</code>.</td></tr>
+<tr><td><code>[debug_channel]</code></td><td>Oper-only channel (default <code>#server-debug</code>) that relays WARNING+ log lines as notices.</td></tr>
+<tr><td><code>[links]</code></td><td>Server-to-server linking: <code>mode</code> (<code>"hub"</code> or <code>"leaf"</code>), <code>bind</code>/<code>port</code>, <code>tls</code>, reconnect delays and <code>[[links.peers]]</code>. See <a href="chanserv.html">ChanServ</a> for a worked example.</td></tr>
+</table></div>
+
+<h2>tls</h2>
+<pre>[tls]
+enabled   = true
+port      = 6697
+cert_file = "tls/cert.pem"
+key_file  = "tls/key.pem"</pre>
+<p>A self-signed certificate still encrypts the connection. Clients just need "only allow trusted certificates" unchecked.
+  Channel mode <code>+z</code> then restricts a channel to clients connected this way.</p>
+
+<h2>operators</h2>
+<p>An <code>[[operators]]</code> entry is a <code>/OPER</code> login: <code>name</code>, <code>hosts</code> (ident@IP masks it may log in from)
+  and exactly one of <code>password_hash</code> (scrypt, recommended) or a legacy plain <code>password</code>.</p>
+<pre>./bin/sekurircd --hash-password
+# -> scrypt$16384$8$1$3f9c1a7b2e8d4f56...$91ab...   (example, truncated)</pre>
+<pre>[[operators]]
+name = "admin"
+password_hash = "scrypt$16384$8$1$&lt;salt-hex&gt;$&lt;digest-hex&gt;"   # from the step above
+hosts = ["*@*"]                                       # or restrict, e.g. ["*@203.0.113.42"]</pre>
+<p>Apply it with <code>/REHASH</code> from an already-opered client, <code>sekurircd --rehash</code>, or a restart, then confirm with
+  <code>/OPER admin &lt;password&gt;</code>. Rotating a password is the same edit in place. Removing an entry does not deop clients
+  that are already opered under it until they reconnect.</p>
+
+<h2>host cloaking</h2>
+<pre>[security]
+host_masking = true
+host_masking_format = "{token}.users.{network}"
+host_masking_token_bytes = 4</pre>
+<p>Real IPs and hostnames stay off the wire. An oper, or the user themselves, still sees the real address via <code>WHOIS</code>.</p>
+
+<h2>bans</h2>
+<p><code>KLINE</code>, <code>GLINE</code> and <code>ZLINE</code> take an IP mask and an optional duration (<code>1d</code>, <code>12h</code>, <code>30m</code>; permanent if omitted).
+  Set <code>[security] klines_file</code> to persist them across <code>REHASH</code> and restarts.</p>
+</main>
+</div>
+<footer id="site-footer"></footer>
+<script src="../js/site.js"></script>
+</body>
+</html>

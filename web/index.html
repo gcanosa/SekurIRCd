@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SekurIRCd</title>
+<meta name="description" content="SekurIRCd is a lightweight, secure IRC daemon written in C11 for macOS, Linux and the BSDs. TLS, SASL, IRCv3, server linking and ChanServ. MIT licensed.">
+<meta property="og:title" content="SekurIRCd">
+<meta property="og:description" content="A lightweight, secure IRC daemon written in C11. TLS, SASL, IRCv3, server linking, ChanServ. MIT licensed.">
+<meta property="og:image" content="https://gcanosa.github.io/SekurIRCd/img/og.png">
+<meta property="og:type" content="website">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="img/favicon.ico" sizes="any">
+<link rel="apple-touch-icon" href="img/favicon.png">
+<script>(function(){var t;try{t=localStorage.getItem("theme")}catch(e){}if(t!=="light"&&t!=="dark")t=matchMedia("(prefers-color-scheme: light)").matches?"light":"dark";document.documentElement.dataset.theme=t})()</script>
+<link rel="stylesheet" href="css/site.css">
+</head>
+<body data-root="./" data-page="home">
+<header id="site-header"></header>
+<main class="wrap">
+
+<section class="hero">
+  <img class="logo logo-dark" src="img/logo-dark.png" alt="SekurIRCd: IRC daemon for Mac/Linux/BSDs" width="1471" height="315">
+  <img class="logo logo-light" src="img/logo-light.png" alt="SekurIRCd: IRC daemon for Mac/Linux/BSDs" width="1480" height="316">
+  <h1 class="sr">SekurIRCd</h1>
+  <p class="lead">A lightweight, <strong>secure</strong> IRC daemon written in C11. Native TLS, SASL, IRCv3,
+    server linking and optional channel services. No runtime dependencies beyond OpenSSL.</p>
+  <div class="btns">
+    <a class="btn primary" href="docs/install.html">Get started</a>
+    <a class="btn" href="https://github.com/gcanosa/SekurIRCd">View on GitHub</a>
+  </div>
+  <div class="badges">
+    <span class="badge">C11</span>
+    <span class="badge">MIT</span>
+    <span class="badge">macOS &middot; Linux &middot; BSD</span>
+    <span class="badge">latest <span data-version>v1.0.3</span></span>
+  </div>
+</section>
+
+<section>
+  <h2>sekurircd --quickstart</h2>
+  <div class="term">
+    <div class="term-bar"><i></i><i></i><i></i><span>bash</span></div>
+<pre><span class="hl-p">$ </span>git clone https://github.com/gcanosa/SekurIRCd.git &amp;&amp; cd SekurIRCd
+<span class="hl-p">$ </span>make                                   <span class="hl-c"># bin/sekurircd, bin/chanserv</span>
+<span class="hl-p">$ </span>cp config/sekurircd.template.toml config/sekurircd.toml
+<span class="hl-p">$ </span>./bin/sekurircd --config config/sekurircd.toml</pre>
+  </div>
+  <p>Needs a C11 compiler, <code>make</code> and OpenSSL 3 (or LibreSSL). TOML, JSON and hash-table libraries are vendored.
+    Full steps in the <a href="docs/install.html">install guide</a>.</p>
+</section>
+
+<section>
+  <h2>sekurircd --features</h2>
+  <div class="grid">
+    <div class="card"><h3>TLS built in</h3><p>Opt-in TLS listener on 6697 alongside plaintext. Channel mode <code>+z</code> restricts a channel to TLS clients; <code>+Z</code> marks them in WHOIS.</p></div>
+    <div class="card"><h3>Accounts &amp; SASL</h3><p>Self-service accounts with SASL PLAIN and EXTERNAL (TLS client-certificate login via <code>/CERT</code>), plus account-based ban masks.</p></div>
+    <div class="card"><h3>IRCv3</h3><p>away-notify, multi-prefix, extended-join, account-tag, server-time, echo-message, setname, chghost, MONITOR, WHOX and more.</p></div>
+    <div class="card"><h3>Scrypt operators</h3><p>Operator passwords stored as scrypt hashes, each login limited to an ident@host mask list. Generate with <code>--hash-password</code>.</p></div>
+    <div class="card"><h3>Host cloaking</h3><p>Hide real IPs and hostnames behind per-connection cloaks, with named vhosts and oper <code>CHGHOST</code>/<code>SETHOST</code>. Opers and the user still see the truth in WHOIS.</p></div>
+    <div class="card"><h3>Abuse controls</h3><p>KLINE, GLINE and ZLINE with durations, DNSBL checks, per-IP connection limits, connect-flood auto-bans and a per-client flood guard.</p></div>
+    <div class="card"><h3>Server linking</h3><p>Hub-and-leaf topology with scrypt-authenticated peers, optional TLS, network-wide KILL/WALLOPS/ban propagation and exponential-backoff reconnect.</p></div>
+    <div class="card"><h3>ChanServ</h3><p>A separate, optional process that links in and keeps channels registered: IDENTIFY, ACCESS, AKICK, GUARD, TOPICLOCK, SUCCESSOR, SET MLOCK.</p></div>
+    <div class="card"><h3>Operator tooling</h3><p>Snomask-style server notices, an oper-only debug channel, SAJOIN/SAPART/SAMODE overrides, and live <code>REHASH</code> without dropping anyone.</p></div>
+    <div class="card"><h3>Daemon-friendly</h3><p><code>--daemon</code>, <code>--stop</code>, <code>--rehash</code>, PID files, rotating logs, and ready-made systemd user units. No root required.</p></div>
+    <div class="card"><h3>Small &amp; testable</h3><p>Plain C11, <code>-Wall -Wextra</code>, an ASan+UBSan debug build and an assert-based self-check via <code>make check</code>.</p></div>
+    <div class="card"><h3>Standard protocol</h3><p>RFC 1459/2812 with IRCv3 negotiation. Works with WeeChat, irssi, HexChat, BitchX, The Lounge and Kiwi.</p></div>
+  </div>
+</section>
+
+<section>
+  <h2>sekurircd --security</h2>
+  <p>No <code>eval</code>, <code>system</code> or shell-out anywhere in the request path. Line length, parameter count and nick
+    length are enforced, every client is isolated so one bad connection cannot take the daemon down, and slow
+    ident/reverse-DNS lookups run on worker threads so they never block the event loop.
+    Found something? Open an issue on <a href="https://github.com/gcanosa/SekurIRCd/issues">GitHub</a>.</p>
+</section>
+
+<section>
+  <h2>tail -f /dev/irc</h2>
+  <div class="term nocopy">
+    <div class="term-bar"><i></i><i></i><i></i><span>irssi</span></div>
+<pre><span class="hl-c">-!- Connected, using TLS (secure connection)</span>
+<span class="hl-p">&gt; </span>/oper admin ********
+<span class="hl-o">-!- You are now an IRC operator</span>
+<span class="hl-p">&gt; </span>/msg ChanServ REGISTER #lobby ********
+<span class="hl-o">-ChanServ- #lobby is now registered. Use IDENTIFY to reclaim access after a reconnect.</span>
+<span class="hl-p">&gt; </span>/mode #lobby +z
+<span class="hl-o">-!- mode/#lobby [+z] by alice</span></pre>
+  </div>
+</section>
+
+<section>
+  <h2>sekurircd --docs</h2>
+  <div class="grid">
+    <a class="card" href="docs/install.html"><h3>Install</h3><p>Dependencies, build, run as a daemon or systemd service.</p></a>
+    <a class="card" href="docs/configuration.html"><h3>Configuration</h3><p>Every section of <code>sekurircd.toml</code>, operators, TLS.</p></a>
+    <a class="card" href="docs/commands.html"><h3>Commands &amp; modes</h3><p>User, channel and operator commands.</p></a>
+    <a class="card" href="docs/ircv3.html"><h3>IRCv3 &amp; SASL</h3><p>Capabilities, accounts and certificate login.</p></a>
+    <a class="card" href="docs/chanserv.html"><h3>ChanServ</h3><p>Setting up and using channel services.</p></a>
+    <a class="card" href="changelog.html"><h3>Changelog</h3><p>What changed in each release.</p></a>
+  </div>
+</section>
+
+</main>
+<footer id="site-footer"></footer>
+<script src="js/site.js"></script>
+</body>
+</html>

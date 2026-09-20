@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Install · SekurIRCd docs</title>
+<meta name="description" content="Build SekurIRCd from source, run it as a daemon or as a systemd user service.">
+<link rel="icon" href="../img/favicon.ico" sizes="any">
+<script>(function(){var t;try{t=localStorage.getItem("theme")}catch(e){}if(t!=="light"&&t!=="dark")t=matchMedia("(prefers-color-scheme: light)").matches?"light":"dark";document.documentElement.dataset.theme=t})()</script>
+<link rel="stylesheet" href="../css/site.css">
+</head>
+<body data-root="../" data-page="install">
+<header id="site-header"></header>
+<div class="wrap docs-layout">
+<aside id="docs-nav" class="docs-nav"></aside>
+<main class="docs">
+<h1>install</h1>
+<p>SekurIRCd builds from source with a C11 compiler and <code>make</code>. It runs on macOS, Linux and the BSDs.</p>
+
+<h2>dependencies</h2>
+<ul>
+  <li>A C11 compiler (clang or gcc) and <code>make</code>.</li>
+  <li>OpenSSL 3 (or LibreSSL) headers and libraries, used for scrypt hashing, randomness and TLS.
+    macOS: <code>brew install openssl@3</code>. Debian/Ubuntu: <code>apt install libssl-dev</code>.</li>
+  <li>Everything else (tomlc99, cJSON, uthash/utlist) is vendored in <code>src/vendor/</code>.</li>
+</ul>
+
+<h2>build</h2>
+<pre>git clone https://github.com/gcanosa/SekurIRCd.git
+cd SekurIRCd
+make            # release build -> bin/sekurircd, bin/chanserv
+make debug      # ASan+UBSan build -> bin/sekurircd-debug
+make check      # build and run tests/unit.c
+make clean</pre>
+
+<h2>run</h2>
+<pre>cp config/sekurircd.template.toml config/sekurircd.toml
+# edit config/sekurircd.toml (port, operators, TLS, ...)
+./bin/sekurircd --config config/sekurircd.toml    # listens on 0.0.0.0:6667 by default
+
+./bin/sekurircd --hash-password    # prompts, no echo, prints an scrypt hash for [[operators]]
+./bin/sekurircd --version</pre>
+<p>Smoke test from another terminal:</p>
+<pre>nc 127.0.0.1 6667
+NICK test
+USER test 0 * :Test User
+JOIN #general
+PRIVMSG #general :hello
+QUIT</pre>
+
+<h2>daemon mode</h2>
+<pre>./bin/sekurircd --config config/sekurircd.toml --daemon --pidfile /var/run/sekurircd.pid
+./bin/sekurircd --stop   --pidfile /var/run/sekurircd.pid   # graceful stop, removes the pidfile
+./bin/sekurircd --rehash --pidfile /var/run/sekurircd.pid   # reload config live (SIGHUP)</pre>
+<p>Without <code>--pidfile</code> the default is <code>./sekurircd.pid</code> (or <code>$SEKURIRCD_PIDFILE</code>).
+  Once daemonized, stdout and stderr go to <code>/dev/null</code>, so enable <code>[logging]</code> in the config.</p>
+
+<h2>systemd user service</h2>
+<p><code>make install</code> sets both daemons up as systemd <strong>user</strong> units (Linux only). Nothing needs root:
+  everything installs under <code>$HOME</code>, and the default ports (6667/6697) are above 1024.</p>
+<pre>make
+make install
+#  binaries         -> ~/.local/bin
+#  config templates -> ~/.config/sekurircd   (never overwrites a live sekurircd.toml)
+#  state and logs   -> ~/.local/state/sekurircd/{ircd,chanserv}
+#  units            -> ~/.config/systemd/user
+
+cp ~/.config/sekurircd/sekurircd.template.toml ~/.config/sekurircd/sekurircd.toml
+systemctl --user enable --now sekurircd
+systemctl --user reload sekurircd      # same as --rehash
+journalctl --user -u sekurircd -f</pre>
+<p>A user unit stops when your last session ends. To keep it running after logout or start it at boot:
+  <code>loginctl enable-linger $(whoami)</code>. <code>make uninstall</code> removes binaries and units but leaves
+  your config and state. Override <code>PREFIX</code>, <code>SYSCONFDIR</code>, <code>STATEDIR</code> or
+  <code>UNITDIR</code> on the <code>make</code> command line to relocate any of it.</p>
+
+<h2>next</h2>
+<p>Continue with <a href="configuration.html">configuration</a>, or add <a href="chanserv.html">ChanServ</a>.</p>
+</main>
+</div>
+<footer id="site-footer"></footer>
+<script src="../js/site.js"></script>
+</body>
+</html>
