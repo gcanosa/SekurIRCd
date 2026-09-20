@@ -11,12 +11,12 @@
 #include <strings.h>
 #include <time.h>
 
-/* "SekurIRCd-1.0.1" -- the daemon-name+version form wire fields that name
+/* "SekurIRCd-1.0.4(20260921-abc1234)" -- the daemon-name+version+build form wire fields that name
  * the software use (004 MYINFO, 351 VERSION), matching UnrealIRCd/InspIRCd
  * convention. cfg.server.version stays the bare number everywhere else
  * (logging, ADMIN, MOTD %version%, etc). */
 void server_software_version(const server_t *srv, char *buf, size_t bufsz) {
-    snprintf(buf, bufsz, "SekurIRCd-%s", srv->cfg.server.version);
+    snprintf(buf, bufsz, "SekurIRCd-%s(%s)", srv->cfg.server.version, sekurircd_build);
 }
 
 int server_init(server_t *srv, const config_t *cfg) {
@@ -388,7 +388,7 @@ void server_remove_client(server_t *srv, client_t *cl, const char *quit_reason) 
     client_free(cl);
 }
 
-static void send_isupport(server_t *srv, client_t *cl) {
+void server_send_isupport(server_t *srv, client_t *cl) {
     char netbuf[CFG_STR + 16];
     snprintf(netbuf, sizeof netbuf, "NETWORK=%s", srv->cfg.server.network);
     char nicklen[32], chanlen[32], topiclen[32];
@@ -401,7 +401,7 @@ static void send_isupport(server_t *srv, client_t *cl) {
         nicklen, chanlen, topiclen, "CASEMAPPING=ascii", "MODES=6",
         "STATUSMSG=@%+", "AWAYLEN=400", "KICKLEN=400",
         "MAXLIST=beI:100", "EXCEPTS=e", "INVEX=I", "MONITOR=100", "WATCH=128", "SILENCE=15",
-        "EXTBAN=,a", "ELIST=MNU",
+        "EXTBAN=,a", "ELIST=MNU", "WHOX", "MAXCHANNELS=200",
     };
     int total = (int)(sizeof tokens / sizeof tokens[0]);
     for (int i = 0; i < total; i += 12) {
@@ -544,7 +544,7 @@ void server_send_welcome(server_t *srv, client_t *cl) {
     const char *idp[] = {cl->your_id};
     client_reply(cl, N_YOURID, idp, 1, "your unique ID");
 
-    send_isupport(srv, cl);
+    server_send_isupport(srv, cl);
     server_send_lusers(srv, cl);
     server_send_motd(srv, cl);
 
