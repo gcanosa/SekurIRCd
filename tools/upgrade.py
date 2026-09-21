@@ -52,6 +52,7 @@ class Log:
 LOG: Log = None  # type: ignore  # set in main()
 ARGS: argparse.Namespace = None  # type: ignore  # set in main()
 _step = 0
+_total = 9  # steps in a full upgrade run; main() sets 1 for --rollback
 
 
 def out(s=""): print(s); LOG.w(s)
@@ -64,7 +65,8 @@ def fail(s): out(f"  {red('✘')} {s}")
 def step(title):
     global _step
     _step += 1
-    out(); out(bold(cyan(f"━━ Step {_step}: {title}")))
+    f = int(12 * _step / _total)
+    out(); out(bold(cyan(f"━━ [{'█' * f}{'░' * (12 - f)}] Step {_step}/{_total}: {title}")))
 
 
 def die(msg, code=1) -> NoReturn:
@@ -699,7 +701,7 @@ def selftest():
 
 
 def main():
-    global ARGS, LOG
+    global ARGS, LOG, _total
     ap = argparse.ArgumentParser(description="SekurIRCd upgrade assistant")
     ap.add_argument("--channel", help="release | main | <tag or commit> (skips the menu)")
     ap.add_argument("-y", "--yes", action="store_true", help="accept defaults (restart stays off unless --restart)")
@@ -713,6 +715,7 @@ def main():
     ARGS = ap.parse_args()
     if ARGS.selftest: return selftest()
     os.chdir(ROOT)
+    if ARGS.rollback: _total = 1
     kind = "rollback" if ARGS.rollback else "check" if ARGS.check else "upgrade"
     LOG = Log(kind)
     LOG.w(f"SekurIRCd {kind} log -- {time.strftime('%Y-%m-%d %H:%M:%S %z')}")
