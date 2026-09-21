@@ -721,7 +721,8 @@ def main():
     LOG.w(f"SekurIRCd {kind} log -- {time.strftime('%Y-%m-%d %H:%M:%S %z')}")
     LOG.w(f"host={socket.gethostname()} user={getpass.getuser()} os={platform.platform()} python={platform.python_version()}")
     LOG.w(f"cwd={ROOT} args={sys.argv[1:]}")
-    out(bold(cyan("\n  SekurIRCd upgrade assistant")) + (yellow("  [DRY RUN]") if ARGS.dry_run else ""))
+    subprocess.run(["bash", "-c", 'source tools/lib.sh; banner'])  # shared banner; clears the screen on a tty
+    out(bold(cyan("  Upgrade assistant")) + (yellow("  [DRY RUN]") if ARGS.dry_run else ""))
     out(dim(f"  {ROOT}\n  log: {LOG.path}"))
     try:
         if ARGS.check:
