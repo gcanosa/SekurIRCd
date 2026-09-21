@@ -21,3 +21,5 @@ tags
 plans/
 .codegraph/
 .DS_Store
+
+*.upstream-*
