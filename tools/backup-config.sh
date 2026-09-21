@@ -4,6 +4,8 @@
 # Usage: tools/backup-config.sh [DEST_DIR]     (prompts if omitted)
 set -u
 
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+banner
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 if [ -t 1 ]; then
