@@ -71,7 +71,7 @@ CORE_SRCS := $(SRC_DIR)/proto.c $(SRC_DIR)/crypto.c $(SRC_DIR)/log.c $(SRC_DIR)/
              $(SRC_DIR)/channel.c $(SRC_DIR)/client.c $(SRC_DIR)/server.c $(SRC_DIR)/net.c \
              $(SRC_DIR)/link.c $(SRC_DIR)/accounts.c $(SRC_DIR)/worker.c \
              $(SRC_DIR)/cmd.c $(SRC_DIR)/cmd_reg.c $(SRC_DIR)/cmd_chan.c $(SRC_DIR)/cmd_user.c \
-             $(SRC_DIR)/cmd_oper.c $(SRC_DIR)/cmd_info.c $(SRC_DIR)/spam.c $(SRC_DIR)/build.c
+             $(SRC_DIR)/cmd_oper.c $(SRC_DIR)/cmd_info.c $(SRC_DIR)/spam.c $(SRC_DIR)/protection.c $(SRC_DIR)/build.c
 VEND_SRCS := $(VEND_DIR)/toml.c $(VEND_DIR)/cJSON.c
 MAIN_SRC  := $(SRC_DIR)/main.c
 
@@ -160,6 +160,7 @@ install: all
 	sed -e 's|^chanserv_pidfile = ""|chanserv_pidfile = "$(STATEDIR)/chanserv/chanserv.pid"|' \
 	    config/sekurircd.template.toml > $(SYSCONFDIR)/sekurircd.template.toml
 	chmod 644 $(SYSCONFDIR)/sekurircd.template.toml
+	install -m644 config/protection.template.toml config/spamfilters.conf $(SYSCONFDIR)/
 	install -m644 services/services.template.toml $(SYSCONFDIR)/
 	test -f $(SYSCONFDIR)/ircd.motd || install -m644 config/ircd.motd $(SYSCONFDIR)/
 	sed -e 's|/usr/local/bin|$(PREFIX)/bin|g' -e 's|/etc/sekurircd|$(SYSCONFDIR)|g' -e 's|/var/lib/sekurircd|$(STATEDIR)|g' \
@@ -169,6 +170,7 @@ install: all
 	systemctl --user daemon-reload
 	@echo "installed under $(PREFIX), $(SYSCONFDIR), $(STATEDIR)."
 	@echo "next: cp $(SYSCONFDIR)/sekurircd.template.toml $(SYSCONFDIR)/sekurircd.toml (edit it), then:"
+	@echo "  optional Protection bundle (DNSBL, proxy scanner, limits, spam): cp $(SYSCONFDIR)/protection.template.toml $(SYSCONFDIR)/protection.toml"
 	@echo "  systemctl --user enable --now sekurircd chanserv"
 	@echo "to keep running after logout / before login: loginctl enable-linger \$$(whoami)  (no sudo; may prompt for your own password)"
 

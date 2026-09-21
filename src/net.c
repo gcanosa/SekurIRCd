@@ -68,12 +68,13 @@ static void emit_stats_snote(server_t *srv) {
         if (ch->modes & CMODE_R) n_reg_chans++;
     }
 
-    int n_klines = 0, n_glines = 0, n_zlines = 0, n_dnsbl_active = 0;
+    int n_klines = 0, n_glines = 0, n_zlines = 0, n_dnsbl_active = 0, n_scan_active = 0;
     for (kline_entry_t *k = srv->klines; k; k = k->next) {
         if (k->line_type[0] == 'K') n_klines++;
         else if (k->line_type[0] == 'Z') n_zlines++;
         else n_glines++;
         if (strcmp(k->set_by, "dnsbl") == 0) n_dnsbl_active++;
+        else if (strcmp(k->set_by, "protection") == 0) n_scan_active++;
     }
 
     double ircd_cpu = 0;
@@ -112,10 +113,14 @@ static void emit_stats_snote(server_t *srv) {
         }
     }
 
+    char scan_part[160] = "";
+    if (srv->cfg.protection.scan_enabled)
+        snprintf(scan_part, sizeof scan_part, ", proxy scanner: scanned=%ld proxies=%ld in-flight=%d negcache=%d",
+                 srv->prot.scanned, srv->prot.hits, srv->prot.n_scans, protection_negcache_count(srv));
     log_info("stats", "users=%d (peak %d), channels=%d (%d registered), connections=%ld total, "
-              "lines active=%d K/%d G/%d Z (%d from DNSBL), dnsbl hits=%ld total, ircd cpu=%.1f%% mem=%ldMB%s",
+              "lines active=%d K/%d G/%d Z (%d from DNSBL, %d from scanner), dnsbl hits=%ld total%s, ircd cpu=%.1f%% mem=%ldMB%s",
               HASH_COUNT(srv->users), srv->max_users_seen, n_chans, n_reg_chans, srv->total_connections,
-              n_klines, n_glines, n_zlines, n_dnsbl_active, srv->dnsbl_hits,
+              n_klines, n_glines, n_zlines, n_dnsbl_active, n_scan_active, srv->dnsbl_hits, scan_part,
               ircd_cpu, ircd_rss / 1024, chanserv_part);
 }
 
@@ -328,7 +333,12 @@ static client_t *accept_common(server_t *srv, int listen_fd) {
         return NULL;
     }
 
-    if (net_connect_flood_hit(&srv->cfg.security, ipbuf)) {
+    /* A scan probe relays back to our own listener from the address being
+     * scanned; that connection is ours, not a flood, and needs no second
+     * DNSBL lookup or scan. */
+    int scan_related = protection_ip_related(srv, ipbuf);
+
+    if (!scan_related && net_connect_flood_hit(&srv->cfg.security, ipbuf)) {
         long dur = srv->cfg.security.connect_flood_kline_duration[0]
             ? irc_parse_duration(srv->cfg.security.connect_flood_kline_duration) : 0;
         if (dur < 0) dur = 0;
@@ -346,7 +356,7 @@ static client_t *accept_common(server_t *srv, int listen_fd) {
     cl->port = ntohs(peer.sin_port);
     snprintf(cl->realhost, sizeof cl->realhost, "%s", ipbuf);
 
-    if (srv->cfg.security.max_connections_per_ip > 0) {
+    if (!scan_related && srv->cfg.security.max_connections_per_ip > 0) {
         /* O(1): server_add_connection/unlink_connection keep this exact.
          * Walking all_clients here cost O(connections) on every accept(),
          * times ACCEPT_BURST per poll wakeup, exactly when under a flood. */
@@ -377,14 +387,16 @@ static client_t *accept_common(server_t *srv, int listen_fd) {
     cl->conn_id = ++srv->next_conn_id;
     crypto_random_hex(cl->your_id, sizeof cl->your_id, 8);
 
-    if (srv->cfg.dnsbl.enabled && srv->cfg.dnsbl.n_zones > 0) {
+    const cfg_protection_t *prot = &srv->cfg.protection;
+    int exempt = protection_exempt(prot, ipbuf);
+    if (prot->bl_enabled && prot->n_blacklists > 0 && !exempt && !scan_related) {
         job_t j; memset(&j, 0, sizeof j);
         j.type = JOB_DNSBL;
         j.conn_id = cl->conn_id;
         snprintf(j.ip, sizeof j.ip, "%s", ipbuf);
-        j.timeout = srv->cfg.dnsbl.timeout;
-        j.n_zones = srv->cfg.dnsbl.n_zones < WORKER_MAX_ZONES ? srv->cfg.dnsbl.n_zones : WORKER_MAX_ZONES;
-        for (int i = 0; i < j.n_zones; i++) snprintf(j.zones[i], sizeof j.zones[0], "%s", srv->cfg.dnsbl.zones[i]);
+        j.timeout = prot->bl_timeout;
+        j.n_zones = prot->n_blacklists < WORKER_MAX_ZONES ? prot->n_blacklists : WORKER_MAX_ZONES;
+        for (int i = 0; i < j.n_zones; i++) snprintf(j.zones[i], sizeof j.zones[0], "%s", prot->blacklists[i].zone);
         cl->dnsbl_pending = 1;
         /* Queue full: proceed without the verdict rather than leaving POLLIN
          * withheld until the 30-second rescue tick. */
@@ -414,6 +426,16 @@ static client_t *accept_common(server_t *srv, int listen_fd) {
     }
 
     server_add_connection(srv, cl);
+
+    /* The standard first line every ircd sends. Besides being what clients
+     * expect, it is the default string the proxy scanner watches for coming
+     * back through a relay (protection.template.toml [scanner.target]). */
+    char banner[300];
+    const char *bp[] = {"AUTH"};
+    irc_build(banner, sizeof banner, NULL, 0, srv->cfg.server.name, "NOTICE", bp, 1, "*** Looking up your hostname");
+    client_send(cl, banner);
+
+    if (!scan_related && !exempt) protection_scan_start(srv, ipbuf);
     return cl;
 }
 
@@ -592,32 +614,34 @@ static void drain_worker_results(server_t *srv) {
                 cmd_send_welcome_if_ready(srv, cl);
             } else if (r->type == JOB_DNSBL) {
                 cl->dnsbl_pending = 0;
-                if (r->success) {
+                char replytext[CFG_STR];
+                int bi = r->success ? protection_bl_match(&srv->cfg.protection, r->zone_code, WORKER_MAX_ZONES,
+                                                          replytext, sizeof replytext) : -1;
+                if (bi >= 0) {
+                    const cfg_protection_t *pp = &srv->cfg.protection;
+                    const cfg_blacklist_t *z = &pp->blacklists[bi];
                     srv->dnsbl_hits++;
                     char reason[350];
-                    if (srv->cfg.dnsbl.lookup_url[0]) {
-                        char urlbuf[350];
-                        const char *p = strstr(srv->cfg.dnsbl.lookup_url, "{ip}");
-                        if (p) snprintf(urlbuf, sizeof urlbuf, "%.*s%s%s", (int)(p - srv->cfg.dnsbl.lookup_url),
-                                          srv->cfg.dnsbl.lookup_url, cl->ip, p + 4);
-                        else snprintf(urlbuf, sizeof urlbuf, "%s", srv->cfg.dnsbl.lookup_url);
-                        snprintf(reason, sizeof reason, "Proxy/Drone detected (%s). Check %s for details.", r->text, urlbuf);
-                    } else {
-                        snprintf(reason, sizeof reason, "Proxy/Drone detected (%s)", r->text);
-                    }
-                    int as_kline = strcmp(srv->cfg.dnsbl.action, "kline") == 0;
-                    if (as_kline) {
-                        long dur = srv->cfg.dnsbl.kline_duration[0] ? irc_parse_duration(srv->cfg.dnsbl.kline_duration) : 0;
+                    protection_expand(z->reason, cl->ip, z->zone, replytext, reason, sizeof reason);
+                    int reject = strcmp(pp->bl_action, "reject") == 0;
+                    if (!reject) {
+                        long dur = pp->bl_ban_duration[0] ? irc_parse_duration(pp->bl_ban_duration) : 0;
                         if (dur < 0) dur = 0;
-                        server_kline_add(srv, cl->ip, reason, "dnsbl", "Z", dur); /* pure-IP pre-registration ban; itself calls server_notify_opers */
+                        int as_k = strcmp(pp->bl_action, "kline") == 0;
+                        server_kline_add(srv, cl->ip, reason, "dnsbl", as_k ? "K" : "Z", dur); /* IP-only ban; itself calls server_notify_opers */
                     } else {
                         char snote[400];
                         snprintf(snote, sizeof snote, "Rejected connection from %s: %s", cl->ip, reason);
                         server_notify_opers(srv, snote);
                     }
+                    /* Everyone else already connected from this address goes too. */
+                    char quit[400];
+                    snprintf(quit, sizeof quit, reject ? "%s" : "Z-Lined: %s", reason);
+                    server_kline_enforce(srv, cl->ip, "Z", quit, cl);
                     snprintf(cl->quit_reason, sizeof cl->quit_reason, "%s", reason);
                     cl->quitting = 1;
-                    log_warn("dnsbl", "%s listed in %s -- %s", cl->ip, r->text, as_kline ? "K-lined" : "rejected");
+                    log_warn("dnsbl", "%s listed in %s (%s) -- %s", cl->ip, z->zone, replytext,
+                             reject ? "rejected" : strcmp(pp->bl_action, "kline") == 0 ? "K-lined" : "Z-lined");
                 }
                 /* not listed: POLLIN resumes next poll() build, nothing else to do */
             } else if (r->type == JOB_SASL || r->type == JOB_HASH) {
@@ -675,6 +699,7 @@ static void tick(server_t *srv) {
     }
     link_tick(srv);
     link_leaf_tick(srv);
+    protection_tick(srv);
     server_kline_prune_expired(srv);
     server_kline_flush(srv); /* batched: see server_kline_flush */
 
@@ -731,6 +756,7 @@ int net_run(server_t *srv) {
     struct pollfd *fds = NULL;
     client_t **fd_client = NULL;
     link_conn_t **fd_link = NULL;
+    protection_scan_t **fd_scan = NULL;
     size_t fds_cap = 0;
 
     while (!srv->shutdown_requested) {
@@ -744,6 +770,7 @@ int net_run(server_t *srv) {
 
         size_t nfds = 4 + (size_t)srv->n_clients;
         for (link_conn_t *lc = srv->links; lc; lc = lc->next) nfds++;
+        nfds += (size_t)srv->prot.n_scans;
         if (nfds > fds_cap) {
             size_t cap = nfds * 2;
             struct pollfd *nf = realloc(fds, cap * sizeof *fds);
@@ -752,11 +779,14 @@ int net_run(server_t *srv) {
             if (nc) fd_client = nc;
             link_conn_t **nl = realloc(fd_link, cap * sizeof *fd_link);
             if (nl) fd_link = nl;
-            if (!nf || !nc || !nl) { log_critical("net", "out of memory growing poll set"); break; }
+            protection_scan_t **ns = realloc(fd_scan, cap * sizeof *fd_scan);
+            if (ns) fd_scan = ns;
+            if (!nf || !nc || !nl || !ns) { log_critical("net", "out of memory growing poll set"); break; }
             fds_cap = cap;
         }
         memset(fd_client, 0, nfds * sizeof *fd_client);
         memset(fd_link, 0, nfds * sizeof *fd_link);
+        memset(fd_scan, 0, nfds * sizeof *fd_scan);
         int n = 0;
 
         /* While paused (see accept_clients' EMFILE handling) the listeners
@@ -805,6 +835,8 @@ int net_run(server_t *srv) {
             n++;
         }
 
+        protection_poll_fill(srv, fds, fd_scan, &n);
+
         /* Anything already marked for teardown (e.g. a write error in the
          * flush above) shouldn't wait out a full poll timeout. */
         int timeout = 1000;
@@ -838,6 +870,10 @@ int net_run(server_t *srv) {
                     }
                     if (fds[i].revents & POLLIN) read_client(srv, cl);
                     if (!cl->quitting && (fds[i].revents & POLLOUT)) write_client(cl);
+                } else if (fd_scan[i]) {
+                    /* A hit frees every probe for that address (protection.c),
+                     * so later slots of this same address may already be gone. */
+                    if (fds[i].revents && protection_scan_live(srv, fd_scan[i])) protection_handle(srv, fd_scan[i], fds[i].revents);
                 } else if (fd_link[i]) {
                     link_conn_t *lc = fd_link[i];
                     if (lc->closing) continue;
@@ -869,7 +905,7 @@ int net_run(server_t *srv) {
             cl = next;
         }
     }
-    free(fds); free(fd_client); free(fd_link);
+    free(fds); free(fd_client); free(fd_link); free(fd_scan);
     log_set_hook(NULL);
 
     log_info("net", "shutting down");

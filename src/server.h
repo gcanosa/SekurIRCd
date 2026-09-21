@@ -12,6 +12,7 @@
 #include "client.h"
 #include "config.h"
 #include "link.h"
+#include "protection.h"
 
 #include <signal.h>
 #include <time.h>
@@ -59,6 +60,7 @@ typedef struct server {
     long total_connections; /* every accept(), regardless of whether it registered */
     time_t accept_paused_until; /* fd exhaustion: stop polling the listeners until then (see net.c) */
     long dnsbl_hits;        /* every connection a configured DNSBL zone listed, kline'd or just rejected */
+    protection_state_t prot; /* active proxy scanner + its caches (protection.c) */
 
     textfile_t motd, oper_motd, rules;
 
@@ -203,6 +205,11 @@ int server_kline_remove(server_t *srv, const char *mask);
  * ident spellings. */
 int server_line_mask_hits(const char *mask, const char *line_type, const char *ip,
                            const char *user, const char *host, int ident_confirmed);
+/* Marks every connected client matching `mask` (per server_line_mask_hits
+ * for `line_type`) as quitting with `quit_reason`, except `except`. Returns how
+ * many. Shared by the KLINE/GLINE/ZLINE commands, DNSBL hits and the scanner. */
+int server_kline_enforce(server_t *srv, const char *mask, const char *line_type,
+                          const char *quit_reason, client_t *except);
 const char *server_kline_match(server_t *srv, const char *ip, const char *user,
                                 const char *host, int ident_confirmed);
 

@@ -105,19 +105,52 @@ Website & docs: <https://gcanosa.github.io/SekurIRCd/> (source in [`web/`](web/)
   polling `ISON`
 - `KNOCK` (request an invite on a `+i`/`+k` channel; delivered to channel
   ops), `LINKS`, `MAP`, `HELP`
-- Spam protection (`[spam]`, off by default): regex content filters
-  (`config/spamfilters.conf`, managed live with the oper-only `SPAMFILTER
-  LIST|ADD|DEL`) for PRIVMSG/NOTICE/AWAY/QUIT/PART/TOPIC with `block`/`warn`/
-  `kill`/`zline` actions, a new-connection PM restriction, and per-client
-  recipient/repeat limits. Opers, services and identified accounts are exempt
-  by default; every action is reported to opers with `+s`.
+- **Protection bundle** (optional; one file, `config/protection.toml`, template
+  in `config/protection.template.toml`): the daemon's abuse-protection layer,
+  grouped in one place you can switch on, tune or leave out entirely.
+  It holds:
+  - **DNSBL blacklists** (`[blacklist]`): every connecting IP is looked up in
+    each configured zone (standard reversed-octet lookup, works with any
+    provider -- EFnet RBL by default). Per zone you choose which reply codes
+    count (exact or bitmask), whether unknown codes ban, and the ban reason
+    (`%i` ip, `%t` zone, `%r` matched reply text). Bans default to a 1-day
+    Z-line so repeat connects skip the lookup.
+  - **Active open-proxy scanner** (`[scanner]`, off by default): on connect the
+    server tries HTTP CONNECT, HTTP POST, SOCKS4 and SOCKS5 back through the
+    client's own address to its own public address; if the connect banner comes
+    back through, it is a working open proxy and the address is banned along
+    with everyone connected from it. Runs in the background (clients never
+    wait on it), on non-blocking sockets in the main poll loop, with a
+    per-probe timeout, a concurrency cap and an optional negative cache.
+  - **Connection limits** (`[connection]`): total and per-IP caps and the
+    connect-flood throttle. Connections a scan probe relays back are exempt.
+  - **Flood guard** (`[flood]`) and **spam protection** (`[spam]`, off by
+    default): regex content filters (`config/spamfilters.conf`, managed live
+    with the oper-only `SPAMFILTER LIST|ADD|DEL`) for
+    PRIVMSG/NOTICE/AWAY/QUIT/PART/TOPIC with `block`/`warn`/`kill`/`zline`
+    actions, a new-connection PM restriction, and per-client recipient/repeat
+    limits. Opers, services and identified accounts are exempt by default.
+  - **`[exempt]`**: IP globs that are never DNSBL-checked or scanned.
+
+  Everything it does is reported: bans and scan verdicts are logged with the
+  `protection` / `dnsbl` tag and relayed into `[debug_channel]` (so
+  `#server-debug` is its live feed, including a rolling stats line), opers with
+  `+s` get a notice for every ban, and the oper-only `PROTECT` command prints
+  the current state (`PROTECT SCAN <ip>` scans an address on demand).
+  `VERSION` shows `D` (blacklists) and `P` (scanner) among the feature flags.
+  Without the file the daemon behaves as before, and the older keys (the
+  `[spam]` and `[dnsbl]` sections, `max_connections*`, `connect_flood_*`,
+  `flood_*`) keep working from `sekurircd.toml`; when the bundle file sets one,
+  it wins. Turning the scanner on: set `[scanner.target] ip` to the server's
+  **public** address -- see the warnings in the template about outbound
+  connections and abuse reports.
 - `KLINE`/`GLINE`/`ZLINE` (+ `UNKLINE`/`UNGLINE`/`UNZLINE`, oper-only),
   with an optional duration like `1d`/`12h`/`30m` -- permanent if omitted.
   `KLINE`/`GLINE` masks match an IP glob (`203.0.113.*`), a host glob
   (`*.example.com`) or `user@host`; the ident is tried both bare and
   `~`-prefixed, so you don't have to know whether identd answered.
   `ZLINE` is matched at connect time against the IP only -- it never sees a
-  hostname, and is what the DNSBL and connect-flood auto-bans use. All three
+  hostname, and is what the Protection bundle's DNSBL, scanner and connect-flood auto-bans use. All three
   disconnect matching connected clients and refuse future ones; a hostname
   mask is additionally re-checked once rDNS/ident complete. Persisted to
   `[security] klines_file` if set, so lines survive `/REHASH` and a restart
@@ -321,13 +354,16 @@ make clean
 See [`config/sekurircd.template.toml`](config/sekurircd.template.toml). Key sections:
 
 - `[server]` — name, network, version, `bind` (default `0.0.0.0`), `port` (default `6667`)
-- `[spam]` — spam protection master switch, new-user PM delay, recipient/repeat
-  limits, and the `filters_file` / `filters_enabled` regex-filter switch
 - `[security]` — line/param length limits, flood guard, keepalive
   `ping_interval` / `ping_timeout` (defaults 120s / 300s), `host_masking`
   (default `false`), `klines_file` (K/G-line persistence, empty = in-memory only),
-  `default_user_modes` (default `""`, e.g. `"iw"`), `max_connections` /
-  `max_connections_per_ip`, `reserved_nicks`
+  `default_user_modes` (default `""`, e.g. `"iw"`), `reserved_nicks`,
+  `protection_file` (the Protection bundle, default `protection.toml`)
+- **Protection bundle** — a separate file, [`config/protection.template.toml`](config/protection.template.toml),
+  found via `[security] protection_file`: `[exempt]`, `[connection]` (caps,
+  connect-flood throttle), `[flood]`, `[spam]`, `[blacklist]` (DNSBL zones and
+  reply rules) and `[scanner]` (active proxy scan). Optional; overrides the
+  matching legacy keys of `sekurircd.toml`
 - `[messages]` — `motd` file (relative to the config file), max message length
 - `[logging]` — `enabled`, `directory` (default `logs/`), `debug` (protocol trace),
   `level`, `file`, rotation `max_bytes` / `backup_count`
@@ -341,8 +377,6 @@ See [`config/sekurircd.template.toml`](config/sekurircd.template.toml). Key sect
   `/VHOST` may activate; none by default
 - `[channels]` — `restrict_creation` (default `false`) + `allowed_channels` +
   `default_modes` (default `"nt"`) + `auto_join`, see "Features" above
-- `[dnsbl]` — `enabled` (default `true`, EFnet RBL), `zones`, `timeout` (default 5s),
-  `action` (`"kline"` or `"reject"`), `kline_duration`, `lookup_url`
 - `[tls]` — `enabled` (default `false`), `port` (default `6697`), `cert_file`
   / `key_file` (PEM, required if enabled), `request_client_cert` (default
   `false`, needed for SASL EXTERNAL -- see below); runs alongside

@@ -10,12 +10,15 @@
 #include "log.h"
 #include "net.h"
 #include "proto.h"
+#include "protection.h"
 #include "server.h"
 #include "spam.h"
 
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 static void test_parse_basic(void) {
@@ -491,6 +494,180 @@ static void test_line_mask_hits(void) {
 /* Tiny runner: the old main() printed a hardcoded "0 assertions across 24
  * tests" regardless of what actually ran, which is worse than no count. */
 static int g_tests_run;
+
+/* --- Protection bundle ------------------------------------------------------ */
+
+static void test_protection_pure_helpers(void) {
+    assert(protection_find((const unsigned char *)"abc\0def", 7, "def") == 4); /* binary-safe past a NUL */
+    assert(protection_find((const unsigned char *)"abc", 3, "abcd") == -1);
+    assert(protection_find((const unsigned char *)"abc", 3, "") == -1);
+
+    char out[64];
+    protection_expand("%i listed in %t (%r) 100%%", "1.2.3.4", "zone.example", "drone", out, sizeof out);
+    assert(strcmp(out, "1.2.3.4 listed in zone.example (drone) 100%") == 0);
+    protection_expand("port %p %z", "1.2.3.4", "socks5", "1080", out, sizeof out);
+    assert(strcmp(out, "port 1080 %z") == 0); /* unknown escapes pass through */
+    protection_expand("%i%i%i%i%i%i%i%i%i%i", "255.255.255.255", "", "", out, 20);
+    assert(strlen(out) == 19); /* truncates, always terminates */
+
+    unsigned char b[512];
+    size_t n = protection_probe_bytes(SCAN_SOCKS4, "1.2.3.4", 6667, 0, b, sizeof b);
+    static const unsigned char s4[] = {4, 1, 0x1a, 0x0b, 1, 2, 3, 4, 0};
+    assert(n == sizeof s4 && memcmp(b, s4, n) == 0);
+    n = protection_probe_bytes(SCAN_SOCKS5, "1.2.3.4", 6667, 0, b, sizeof b);
+    static const unsigned char s5a[] = {5, 1, 0};
+    assert(n == 3 && memcmp(b, s5a, n) == 0);
+    n = protection_probe_bytes(SCAN_SOCKS5, "1.2.3.4", 6667, 1, b, sizeof b);
+    static const unsigned char s5b[] = {5, 1, 0, 1, 1, 2, 3, 4, 0x1a, 0x0b};
+    assert(n == sizeof s5b && memcmp(b, s5b, n) == 0);
+    n = protection_probe_bytes(SCAN_HTTP, "1.2.3.4", 6667, 0, b, sizeof b);
+    assert(n && strncmp((char *)b, "CONNECT 1.2.3.4:6667 HTTP/1.0\r\n\r\n", n) == 0 && n == 33);
+    n = protection_probe_bytes(SCAN_HTTPPOST, "1.2.3.4", 6667, 0, b, sizeof b);
+    assert(n && strncmp((char *)b, "POST http://1.2.3.4:6667/ HTTP/1.0\r\n", 36) == 0);
+    assert(protection_probe_bytes(SCAN_HTTP, "not-an-ip", 1, 0, b, sizeof b) == 0);
+
+    assert(config_scan_proto_parse("SOCKS5") == SCAN_SOCKS5 && config_scan_proto_parse("http") == SCAN_HTTP);
+    assert(config_scan_proto_parse("gopher") == 0);
+}
+
+static void test_protection_bl_match(void) {
+    cfg_protection_t p;
+    memset(&p, 0, sizeof p);
+    p.n_blacklists = 3;
+    /* zone 0: exact codes, unknown listings NOT banned */
+    snprintf(p.blacklists[0].zone, CFG_STR, "a.example");
+    p.blacklists[0].n_replies = 2;
+    p.blacklists[0].replies[0].code = 1; snprintf(p.blacklists[0].replies[0].text, CFG_STR, "open proxy");
+    p.blacklists[0].replies[1].code = 5; snprintf(p.blacklists[0].replies[1].text, CFG_STR, "drone");
+    /* zone 1: bitmask */
+    snprintf(p.blacklists[1].zone, CFG_STR, "b.example");
+    p.blacklists[1].bitmask = 1;
+    p.blacklists[1].n_replies = 1;
+    p.blacklists[1].replies[0].code = 4; snprintf(p.blacklists[1].replies[0].text, CFG_STR, "exploit");
+    /* zone 2: no reply rules -- any listing bans */
+    snprintf(p.blacklists[2].zone, CFG_STR, "c.example");
+
+    char text[64];
+    int codes[3] = {-1, -1, -1};
+    assert(protection_bl_match(&p, codes, 3, text, sizeof text) == -1);      /* nothing listed */
+    codes[0] = 5;
+    assert(protection_bl_match(&p, codes, 3, text, sizeof text) == 0 && strcmp(text, "drone") == 0);
+    codes[0] = 9;                                                            /* listed, unknown code, ban_unknown=0 */
+    assert(protection_bl_match(&p, codes, 3, text, sizeof text) == -1);
+    p.blacklists[0].ban_unknown = 1;
+    assert(protection_bl_match(&p, codes, 3, text, sizeof text) == 0 && strcmp(text, "reply 9") == 0);
+    codes[0] = -1; codes[1] = 6;                                             /* 6 = 4|2: the exploit bit is set */
+    assert(protection_bl_match(&p, codes, 3, text, sizeof text) == 1 && strcmp(text, "exploit") == 0);
+    codes[1] = 3;                                                            /* 3 = 2|1: no exploit bit */
+    assert(protection_bl_match(&p, codes, 3, text, sizeof text) == -1);
+    codes[2] = 2;
+    assert(protection_bl_match(&p, codes, 3, text, sizeof text) == 2);
+
+    p.n_exempt = 1;
+    snprintf(p.exempt[0], CFG_MASK, "10.*");
+    assert(protection_exempt(&p, "10.1.2.3") && !protection_exempt(&p, "11.1.2.3"));
+}
+
+static void write_file(const char *dir, const char *name, const char *body) {
+    char path[512];
+    snprintf(path, sizeof path, "%s/%s", dir, name);
+    FILE *f = fopen(path, "w");
+    assert(f);
+    fputs(body, f);
+    fclose(f);
+}
+
+static void test_protection_bundle_config(void) {
+    char dir[64];
+    snprintf(dir, sizeof dir, "/tmp/sekurircd-prot-%d", (int)getpid());
+    assert(mkdir(dir, 0700) == 0);
+    char main_path[600], err[512], cwd[400];
+    snprintf(main_path, sizeof main_path, "%s/sekurircd.toml", dir);
+    config_t cfg;
+
+    /* No bundle file: legacy keys and [dnsbl] carry on, [dnsbl] is adapted. */
+    write_file(dir, "sekurircd.toml",
+               "[security]\nmax_connections_per_ip = 7\n[dnsbl]\nenabled = true\nzones = [\"z.example\"]\n"
+               "action = \"kline\"\nkline_duration = \"2h\"\nlookup_url = \"https://x/?ip={ip}\"\n");
+    assert(config_load(main_path, &cfg, err, sizeof err) == 0);
+    assert(!cfg.protection.loaded && cfg.security.max_connections_per_ip == 7);
+    assert(cfg.protection.n_blacklists == 1 && cfg.protection.bl_legacy && cfg.protection.bl_enabled);
+    assert(strcmp(cfg.protection.bl_action, "zline") == 0 && strcmp(cfg.protection.bl_ban_duration, "2h") == 0);
+    assert(strstr(cfg.protection.blacklists[0].reason, "https://x/?ip=%i") != NULL);
+    assert(!cfg.protection.scan_enabled);
+
+    /* Bundle present: it overlays only the keys it sets. */
+    write_file(dir, "protection.toml",
+               "[connection]\nmax_connections = 9\n[flood]\nmax_msgs = 3\n"
+               "[spam]\nenabled = true\nmax_repeat = 2\n[exempt]\nips = [\"10.*\"]\n");
+    assert(config_load(main_path, &cfg, err, sizeof err) == 0);
+    assert(cfg.protection.loaded && cfg.security.max_connections == 9);
+    assert(cfg.security.max_connections_per_ip == 7);           /* untouched: file didn't set it */
+    assert(cfg.security.flood_max_msgs == 3 && cfg.security.flood_window == 1.0);
+    assert(cfg.spam.enabled == 1 && cfg.spam.max_repeat == 2 && cfg.spam.max_targets == 5);
+    assert(cfg.protection.n_exempt == 1);
+    assert(cfg.protection.n_blacklists == 1 && cfg.protection.bl_legacy); /* no [blacklist]: legacy zones stay */
+
+    /* An explicit [blacklist] wins over [dnsbl], and an explicit off stays off. */
+    write_file(dir, "protection.toml", "[blacklist]\nenabled = false\n");
+    assert(config_load(main_path, &cfg, err, sizeof err) == 0);
+    assert(!cfg.protection.bl_enabled);
+
+    /* Validation: each names the offending key. */
+    write_file(dir, "protection.toml", "[scanner]\nenabled = true\nprotocols = [\"socks5:1080\"]\n");
+    assert(config_load(main_path, &cfg, err, sizeof err) != 0 && strstr(err, "scanner.target.ip"));
+    write_file(dir, "protection.toml", "[scanner]\nprotocols = [\"gopher:70\"]\n");
+    assert(config_load(main_path, &cfg, err, sizeof err) != 0 && strstr(err, "scanner.protocols"));
+    write_file(dir, "protection.toml", "[scanner]\nprotocols = [\"socks5:99999\"]\n");
+    assert(config_load(main_path, &cfg, err, sizeof err) != 0);
+    write_file(dir, "protection.toml", "[scanner]\naction = \"nuke\"\n");
+    assert(config_load(main_path, &cfg, err, sizeof err) != 0 && strstr(err, "scanner.action"));
+    write_file(dir, "protection.toml", "[[blacklist.zone]]\nname = \"z\"\ntype = \"weird\"\n");
+    assert(config_load(main_path, &cfg, err, sizeof err) != 0 && strstr(err, "blacklist.zone.type"));
+    write_file(dir, "protection.toml", "[[blacklist.zone]]\nname = \"z\"\nreplies = [\"nocolon\"]\n");
+    assert(config_load(main_path, &cfg, err, sizeof err) != 0 && strstr(err, "replies"));
+    write_file(dir, "protection.toml", "[flood]\nmax_msgs = 0\n");
+    assert(config_load(main_path, &cfg, err, sizeof err) != 0 && strstr(err, "flood.max_msgs"));
+    write_file(dir, "protection.toml", "this is = = not toml\n");
+    assert(config_load(main_path, &cfg, err, sizeof err) != 0 && strstr(err, "protection.toml"));
+
+    /* A complete scanner config parses, with the built-in target strings. */
+    write_file(dir, "protection.toml",
+               "[scanner]\nenabled = true\nnegcache = \"1h\"\nprotocols = [\"http:8080\", \"SOCKS4:1080\", \"socks5:1080\"]\n"
+               "[scanner.target]\nip = \"203.0.113.10\"\nport = 6668\n");
+    assert(config_load(main_path, &cfg, err, sizeof err) == 0);
+    assert(cfg.protection.scan_enabled && cfg.protection.n_protocols == 3 && cfg.protection.scan_negcache == 3600);
+    assert(cfg.protection.protocols[1].type == SCAN_SOCKS4 && cfg.protection.protocols[1].port == 1080);
+    assert(cfg.protection.target_port == 6668 && cfg.protection.n_target_strings == 3);
+    assert(strstr(cfg.protection.target_strings[0], "Looking up your hostname"));
+
+    /* protection_file = "" never looks for one. */
+    write_file(dir, "sekurircd.toml", "[security]\nprotection_file = \"\"\n");
+    assert(config_load(main_path, &cfg, err, sizeof err) == 0 && !cfg.protection.loaded);
+
+    /* The shipped template must parse as a bundle file, safely off/inert. */
+    assert(getcwd(cwd, sizeof cwd));
+    char body[900];
+    snprintf(body, sizeof body, "[security]\nprotection_file = \"%s/config/protection.template.toml\"\n", cwd);
+    write_file(dir, "sekurircd.toml", body);
+    assert(config_load(main_path, &cfg, err, sizeof err) == 0);
+    assert(cfg.protection.loaded && !cfg.protection.scan_enabled && !cfg.protection.bl_legacy);
+    assert(cfg.protection.bl_enabled && cfg.protection.n_blacklists == 1);
+    assert(strcmp(cfg.protection.blacklists[0].zone, "rbl.efnetrbl.org") == 0 && cfg.protection.blacklists[0].n_replies == 5);
+    assert(cfg.protection.n_protocols >= 4 && cfg.protection.n_exempt == 1);
+    assert(strcmp(cfg.security.connect_flood_kline_duration, "10m") == 0 && cfg.spam.enabled == 0);
+
+    /* ...and so must the main template, which no longer carries those sections. */
+    write_file(dir, "sekurircd.toml", "");
+    snprintf(body, sizeof body, "cp config/sekurircd.template.toml %s/sekurircd.toml", dir);
+    assert(system(body) == 0);
+    assert(config_load(main_path, &cfg, err, sizeof err) == 0);
+    assert(!cfg.dnsbl.enabled && !cfg.protection.bl_legacy);
+
+    snprintf(body, sizeof body, "rm -rf %s", dir);
+    assert(system(body) == 0);
+}
+
 #define RUN(t) do { t(); g_tests_run++; } while (0)
 
 int main(void) {
@@ -524,6 +701,9 @@ int main(void) {
     RUN(test_spam_track_limits);
     RUN(test_spam_filters_and_check);
     RUN(test_proc_stats);
+    RUN(test_protection_pure_helpers);
+    RUN(test_protection_bl_match);
+    RUN(test_protection_bundle_config);
     printf("OK (%d tests)\n", g_tests_run);
     return 0;
 }

@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Configuration · SekurIRCd docs</title>
-<meta name="description" content="Every section of sekurircd.toml: server, security, TLS, accounts, operators, channels, DNSBL and links.">
+<meta name="description" content="Every section of sekurircd.toml: server, security, TLS, accounts, operators, channels and links, plus the optional Protection bundle file.">
 <link rel="icon" href="../img/favicon.ico" sizes="any">
 <script>(function(){var t;try{t=localStorage.getItem("theme")}catch(e){}if(t!=="light"&&t!=="dark")t=matchMedia("(prefers-color-scheme: light)").matches?"light":"dark";document.documentElement.dataset.theme=t})()</script>
 <link rel="stylesheet" href="../css/site.css">
@@ -29,9 +29,10 @@
 <div class="tablewrap"><table>
 <tr><th>Section</th><th>What it controls</th></tr>
 <tr><td><code>[server]</code></td><td><code>name</code>, <code>network</code>, <code>bind</code> (default <code>0.0.0.0</code>), <code>port</code> (default <code>6667</code>).</td></tr>
-<tr><td><code>[security]</code></td><td>Line/param/nick length limits, flood guard (<code>flood_max_msgs</code>, <code>flood_window</code>), keepalive (<code>ping_interval</code> 120s, <code>ping_timeout</code> 300s),
-  <code>host_masking</code> and its format, <code>klines_file</code>, <code>default_user_modes</code> (e.g. <code>"iw"</code>), <code>max_connections</code>, <code>max_connections_per_ip</code>,
-  connect-flood auto-bans, <code>reserved_nicks</code>, ident and reverse-DNS lookups, <code>DIE</code>/<code>RESTART</code> passwords, <code>oper_auto_join</code>.</td></tr>
+<tr><td><code>[security]</code></td><td>Line/param/nick length limits, keepalive (<code>ping_interval</code> 120s, <code>ping_timeout</code> 300s),
+  <code>host_masking</code> and its format, <code>klines_file</code>, <code>default_user_modes</code> (e.g. <code>"iw"</code>), <code>protection_file</code>,
+  <code>reserved_nicks</code>, ident and reverse-DNS lookups, <code>DIE</code>/<code>RESTART</code> passwords, <code>oper_auto_join</code>. The flood guard, connection caps and
+  connect-flood keys still work here but now live in the Protection bundle.</td></tr>
 <tr><td><code>[tls]</code></td><td><code>enabled</code> (default false), <code>port</code> (default 6697), <code>cert_file</code>, <code>key_file</code>, <code>request_client_cert</code> (needed for SASL EXTERNAL).
   Runs alongside the plaintext listener, never instead of it.</td></tr>
 <tr><td><code>[accounts]</code></td><td><code>enabled</code> (default false), <code>store_file</code>. Backs SASL, <code>/REGISTER</code>, NickServ REGISTER/IDENTIFY, <code>draft/account-registration</code>, <code>/CERT</code> and the <code>a:</code> extban.</td></tr>
@@ -41,8 +42,7 @@
 <tr><td><code>[admin]</code></td><td>Location and email reported by <code>/ADMIN</code>.</td></tr>
 <tr><td><code>[[vhosts]]</code></td><td><code>host</code> plus <code>allowed_hosts</code> (ident@IP masks, never nicks) that <code>/VHOST</code> may activate.</td></tr>
 <tr><td><code>[channels]</code></td><td><code>restrict_creation</code>, <code>allowed_channels</code>, <code>default_modes</code> (default <code>"nt"</code>), <code>auto_join</code>.</td></tr>
-<tr><td><code>[spam]</code></td><td><code>enabled</code> (default <code>false</code>), <code>exempt_opers</code>, <code>exempt_identified</code>, <code>trust_age</code>, <code>new_user_period</code>, <code>max_targets</code>, <code>target_window</code>, <code>max_repeat</code>, <code>limit_action</code>, <code>zline_duration</code>, <code>filters_enabled</code>, <code>filters_file</code>. See <a href="protection.html">abuse protection</a>.</td></tr>
-<tr><td><code>[dnsbl]</code></td><td><code>enabled</code>, <code>zones</code>, <code>timeout</code>, <code>action</code> (<code>"kline"</code> or <code>"reject"</code>), <code>kline_duration</code>, <code>lookup_url</code>.</td></tr>
+<tr><td><em>Protection bundle</em></td><td>A separate optional file, <code>protection.toml</code> (found via <code>[security] protection_file</code>): <code>[exempt]</code>, <code>[connection]</code> (caps and connect-flood throttle), <code>[flood]</code>, <code>[spam]</code>, <code>[blacklist]</code> (DNSBL zones and reply rules) and <code>[scanner]</code> (active open-proxy scan). Overrides the matching legacy keys below. See the <a href="protection.html">protection bundle</a> page.</td></tr>
 <tr><td><code>[debug_channel]</code></td><td>Oper-only channel (default <code>#server-debug</code>) that relays WARNING+ log lines as notices.</td></tr>
 <tr><td><code>[links]</code></td><td>Server-to-server linking: <code>mode</code> (<code>"hub"</code> or <code>"leaf"</code>), <code>bind</code>/<code>port</code>, <code>tls</code>, reconnect delays and <code>[[links.peers]]</code>. See <a href="chanserv.html">ChanServ</a> for a worked example.</td></tr>
 </table></div>
@@ -78,7 +78,7 @@ host_masking_token_bytes = 4</pre>
 
 <h2>bans</h2>
 <p><code>KLINE</code>, <code>GLINE</code> and <code>ZLINE</code> take an IP mask and an optional duration (<code>1d</code>, <code>12h</code>, <code>30m</code>; permanent if omitted).
-  Set <code>[security] klines_file</code> to persist them across <code>REHASH</code> and restarts. See <a href="protection.html">abuse protection</a> for DNSBL, connect-flood limits and monitoring.</p>
+  Set <code>[security] klines_file</code> to persist them across <code>REHASH</code> and restarts. See the <a href="protection.html">protection bundle</a> for DNSBL, the proxy scanner, connect-flood limits and monitoring.</p>
 </main>
 </div>
 <footer id="site-footer"></footer>
