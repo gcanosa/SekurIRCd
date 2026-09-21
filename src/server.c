@@ -401,7 +401,7 @@ void server_send_isupport(server_t *srv, client_t *cl) {
         nicklen, chanlen, topiclen, "CASEMAPPING=ascii", "MODES=6",
         "STATUSMSG=@%+", "AWAYLEN=400", "KICKLEN=400",
         "MAXLIST=beI:100", "EXCEPTS=e", "INVEX=I", "MONITOR=100", "WATCH=128", "SILENCE=15",
-        "EXTBAN=,a", "ELIST=MNU", "WHOX", "MAXCHANNELS=200",
+        "EXTBAN=,a", "ELIST=MNU", "WHOX", "MAXCHANNELS=200", "BOT=B",
     };
     int total = (int)(sizeof tokens / sizeof tokens[0]);
     for (int i = 0; i < total; i += 12) {

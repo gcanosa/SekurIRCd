@@ -19,8 +19,24 @@ int client_is_silencing(client_t *cl, client_t *from) {
 
 /* IRCv3 account-tag: `rcpt` gets `acct_tagged` if it negotiated the cap and
  * the sender has an account to report, else the plain `line`. */
-static void deliver(client_t *rcpt, const char *line, const char *acct_tagged) {
-    client_send(rcpt, (acct_tagged && (rcpt->caps & CAP_ACCOUNT_TAG)) ? acct_tagged : line);
+/* One rendering of a message per tag combination: [0] plain, [1] +account,
+ * [2] +bot, [3] both. Only the ones the sender needs are built. */
+#define LINE_SZ 760
+static void build_lines(char lines[4][LINE_SZ], client_t *from, const char *prefix, const char *verb,
+                        const char **p, const char *text) {
+    irc_build(lines[0], LINE_SZ, NULL, 0, prefix, verb, p, 1, text);
+    int acct = from->account[0] != '\0', bot = (from->umodes & UMODE_B) != 0;
+    irc_tag_t ta = {"account", from->account}, tb = {"bot", ""};
+    if (acct) irc_build(lines[1], LINE_SZ, &ta, 1, prefix, verb, p, 1, text);
+    if (bot) irc_build(lines[2], LINE_SZ, &tb, 1, prefix, verb, p, 1, text);
+    if (acct && bot) { irc_tag_t both[] = {ta, tb}; irc_build(lines[3], LINE_SZ, both, 2, prefix, verb, p, 1, text); }
+}
+
+/* account tag needs account-tag; the IRCv3 bot tag needs message-tags. */
+static void deliver(client_t *rcpt, client_t *from, char lines[4][LINE_SZ]) {
+    int i = ((from->account[0] && (rcpt->caps & CAP_ACCOUNT_TAG)) ? 1 : 0) |
+            (((from->umodes & UMODE_B) && (rcpt->caps & CAP_MESSAGE_TAGS)) ? 2 : 0);
+    client_send(rcpt, lines[i]);
 }
 
 /* +S: drop mIRC colour (\x03[fg[,bg]]) and the other single-byte formatting
@@ -61,8 +77,7 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
 
     char prefix[320];
     client_prefix(cl, prefix, sizeof prefix);
-    char line[700];
-    char line_acct[750];
+    char lines[4][LINE_SZ];
 
     /* STATUSMSG (ISUPPORT STATUSMSG=@%+): "@#chan"/"%#chan"/"+#chan"
      * delivers only to members holding at least that rank. */
@@ -107,11 +122,7 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
         const char *outtext = textbuf;
         if (chan->modes & CMODE_STRIPCOLOR) { strip_formatting(stripbuf, sizeof stripbuf, textbuf); outtext = stripbuf; }
 
-        irc_build(line, sizeof line, NULL, 0, prefix, verb, p, 1, outtext);
-        if (cl->account[0]) {
-            irc_tag_t tags[] = {{"account", cl->account}};
-            irc_build(line_acct, sizeof line_acct, tags, 1, prefix, verb, p, 1, outtext);
-        }
+        build_lines(lines, cl, prefix, verb, p, outtext);
 
         member_t *mm, *tmp;
         if (status_prefix) {
@@ -122,14 +133,14 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
                 int has_it = (min_rank == RANK_OP) ? (rank & RANK_OP)
                            : (min_rank == RANK_HALFOP) ? (rank & (RANK_OP | RANK_HALFOP))
                            : (rank & (RANK_OP | RANK_HALFOP | RANK_VOICE));
-                if (has_it) deliver(mm->client, line, cl->account[0] ? line_acct : NULL);
+                if (has_it) deliver(mm->client, cl, lines);
             }
             return; /* STATUSMSG has no echo-message in upstream either */
         }
 
         HASH_ITER(hh, chan->members, mm, tmp) {
             if (mm->client == cl) continue;
-            deliver(mm->client, line, cl->account[0] ? line_acct : NULL);
+            deliver(mm->client, cl, lines);
         }
         delivered = 1;
     } else {
@@ -158,17 +169,13 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
             const char *pa[] = {dst->nick};
             client_reply(cl, N_AWAY, pa, 1, dst->away);
         }
-        irc_build(line, sizeof line, NULL, 0, prefix, verb, p, 1, textbuf);
-        if (cl->account[0]) {
-            irc_tag_t tags[] = {{"account", cl->account}};
-            irc_build(line_acct, sizeof line_acct, tags, 1, prefix, verb, p, 1, textbuf);
-        }
-        deliver(dst, line, cl->account[0] ? line_acct : NULL);
+        build_lines(lines, cl, prefix, verb, p, textbuf);
+        deliver(dst, cl, lines);
         delivered = 1;
     }
     /* IRCv3 echo-message: the sender gets its own message back too, once
      * delivery actually happened. */
-    if (delivered && (cl->caps & CAP_ECHO_MESSAGE)) deliver(cl, line, cl->account[0] ? line_acct : NULL);
+    if (delivered && (cl->caps & CAP_ECHO_MESSAGE)) deliver(cl, cl, lines);
 }
 
 void cmd_privmsg(server_t *srv, client_t *cl, irc_message_t *msg) { send_msg(srv, cl, msg, "PRIVMSG", 0); }
@@ -192,6 +199,12 @@ static void whois_one(server_t *srv, client_t *cl, const char *nick) {
     if ((target->umodes & UMODE_O) && (!(target->umodes & UMODE_H) || self_or_oper)) {
         const char *p3[] = {target->nick};
         client_reply(cl, N_WHOISOPERATOR, p3, 1, "is an IRC operator");
+    }
+    if (target->umodes & UMODE_B) {
+        const char *p3b[] = {target->nick};
+        char m[200];
+        snprintf(m, sizeof m, "is a Bot on %s", srv->cfg.server.network);
+        client_reply(cl, N_WHOISBOT, p3b, 1, m);
     }
     if (target->umodes & UMODE_Z) {
         const char *p3z[] = {target->nick};
@@ -275,7 +288,7 @@ static const char *whox_value(char letter, client_t *u, channel_t *chan, client_
         member_t *m = chan ? channel_find_member(chan, u) : NULL;
         char rankch[4];
         who_rank_flags(m ? m->rank : 0, multi, rankch);
-        snprintf(scratch, scratchsz, "%s%s%s", u->is_away ? "G" : "H", (u->umodes & UMODE_O) ? "*" : "", rankch);
+        snprintf(scratch, scratchsz, "%s%s%s%s", u->is_away ? "G" : "H", (u->umodes & UMODE_O) ? "*" : "", (u->umodes & UMODE_B) ? "B" : "", rankch);
         return scratch;
     }
     case 'd': return "0";
@@ -309,7 +322,7 @@ static void send_who_classic(client_t *cl, client_t *u, channel_t *chan, int mul
     member_t *m = chan ? channel_find_member(chan, u) : NULL;
     who_rank_flags(m ? m->rank : 0, multi, rankch);
     char flags[10];
-    snprintf(flags, sizeof flags, "%s%s%s", u->is_away ? "G" : "H", (u->umodes & UMODE_O) ? "*" : "", rankch);
+    snprintf(flags, sizeof flags, "%s%s%s%s", u->is_away ? "G" : "H", (u->umodes & UMODE_O) ? "*" : "", (u->umodes & UMODE_B) ? "B" : "", rankch);
     const char *p[] = {chan ? chan->name : "*", u->user, u->host, cl->srv->cfg.server.name, u->nick, flags};
     char trailing[600];
     snprintf(trailing, sizeof trailing, "0 %s", u->realname);
@@ -662,7 +675,7 @@ void cmd_glob(server_t *srv, client_t *cl, irc_message_t *msg) {
             if (!shared) continue;
         }
         char flags[8];
-        snprintf(flags, sizeof flags, "%s%s", u->is_away ? "G" : "H", (u->umodes & UMODE_O) ? "*" : "");
+        snprintf(flags, sizeof flags, "%s%s%s", u->is_away ? "G" : "H", (u->umodes & UMODE_O) ? "*" : "", (u->umodes & UMODE_B) ? "B" : "");
         const char *p[] = {"*", u->user, u->host, srv->cfg.server.name, u->nick, flags};
         char trailing[600];
         snprintf(trailing, sizeof trailing, "0 %s", u->realname);

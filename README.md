@@ -31,7 +31,9 @@ Website & docs: <https://gcanosa.github.io/SekurIRCd/> (source in [`web/`](web/)
   reliably shows whether a channel is actually registered
 - User modes via `MODE`: self-togglable `+i` (invisible -- hidden from
   `GLOB` unless you share a channel or the searcher's an oper), `+w`
-  (WALLOPS), `+d` (drop CTCP sent to you), plus `+o` (operator, granted by
+  (WALLOPS), `+d` (drop CTCP sent to you), `+B` (mark yourself as a bot:
+  `335` in WHOIS, `B` in the WHO flags, an IRCv3 `bot` tag on your messages
+  for `message-tags` clients, `BOT=B` in `005`), plus `+o` (operator, granted by
   `/OPER`, which also grants `+s` and `+w`), and `+Z` (connected over TLS --
   set by the server, not self-togglable); `[security] default_user_modes` (e.g.
   `"iw"`) applies self-togglable modes automatically once a client
