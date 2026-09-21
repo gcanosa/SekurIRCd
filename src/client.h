@@ -46,6 +46,10 @@ typedef struct chan_node {
     struct chan_node *next;
 } chan_node_t;
 
+#define AUTH_STYLE_LEGACY 0   /* SASL numerics / plain /REGISTER notice */
+#define AUTH_STYLE_NICKSERV 1 /* NOTICE from NickServ */
+#define AUTH_STYLE_DRAFT 2    /* draft/account-registration REGISTER SUCCESS */
+
 typedef struct client {
     int fd;                       /* -1 for a service pseudo-client (see link.h) */
     struct link_conn *link_conn;  /* non-NULL iff fd == -1: where to forward client_send() */
@@ -93,6 +97,7 @@ typedef struct client {
     int auth_pending;       /* SASL verify / REGISTER hash running on a worker (scrypt is ~30ms) */
     time_t auth_started;    /* when auth_pending was set -- net.c's tick clears a result that never came back */
     char pending_account[64];
+    int auth_style;         /* AUTH_STYLE_*: how to word the result of the pending login/register */
     int register_attempts;  /* /REGISTER is unauthenticated account creation: cap it per connection */
     time_t register_last;
 

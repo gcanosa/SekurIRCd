@@ -233,7 +233,8 @@ request_client_cert = false
 # -----------------------------------------------------------------------------
 # [accounts] -- self-service accounts (SASL PLAIN/EXTERNAL, /REGISTER, /CERT)
 # -----------------------------------------------------------------------------
-# Backs SASL PLAIN/EXTERNAL, /REGISTER, /CERT, EXTBAN's "a:" account type, and
+# Backs SASL PLAIN/EXTERNAL, /REGISTER, /msg NickServ REGISTER|IDENTIFY, the
+# IRCv3 draft/account-registration cap, /CERT, EXTBAN's "a:" account type, and
 # the account-notify/account-tag IRCv3 caps. Off by default. Deliberately
 # independent of channel services (services/chanserv.py, which stays
 # password-only per-channel, no accounts) -- a small standalone store in

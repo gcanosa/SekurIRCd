@@ -54,7 +54,7 @@
   <h2>sekurircd --features</h2>
   <div class="grid">
     <div class="card"><h3>TLS built in</h3><p>Opt-in TLS listener on 6697 alongside plaintext. Channel mode <code>+z</code> restricts a channel to TLS clients; <code>+Z</code> marks them in WHOIS.</p></div>
-    <div class="card"><h3>Accounts &amp; SASL</h3><p>Self-service accounts with SASL PLAIN and EXTERNAL (TLS client-certificate login via <code>/CERT</code>), plus account-based ban masks.</p></div>
+    <div class="card"><h3>Accounts &amp; SASL</h3><p>Self-service accounts with SASL PLAIN and EXTERNAL (TLS client-certificate login via <code>/CERT</code>), register via NickServ, <code>/REGISTER</code> or IRCv3 <code>draft/account-registration</code>, plus account-based ban masks.</p></div>
     <div class="card"><h3>IRCv3</h3><p>away-notify, multi-prefix, extended-join, account-tag, server-time, echo-message, setname, chghost, MONITOR, WHOX and more.</p></div>
     <div class="card"><h3>Scrypt operators</h3><p>Operator passwords stored as scrypt hashes, each login limited to an ident@host mask list. Generate with <code>--hash-password</code>.</p></div>
     <div class="card"><h3>Host cloaking</h3><p>Hide real IPs and hostnames behind per-connection cloaks, with named vhosts and oper <code>CHGHOST</code>/<code>SETHOST</code>. Opers and the user still see the truth in WHOIS.</p></div>
