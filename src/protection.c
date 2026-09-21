@@ -6,7 +6,6 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <math.h>
 #include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -239,7 +238,11 @@ static int start_probe(struct server *srv, uint32_t ip_be, const char *ip, const
     s->port = pr->port;
     s->fd = fd;
     s->state = ST_CONNECTING;
-    s->deadline = time(NULL) + (time_t)ceil(p->scan_timeout);
+    /* Round the timeout up to whole seconds without libm's ceil() -- Linux
+     * links libm separately (-lm) and nothing else here needs it. */
+    time_t secs = (time_t)p->scan_timeout;
+    if ((double)secs < p->scan_timeout) secs++;
+    s->deadline = time(NULL) + secs;
     s->next = srv->prot.scans;
     srv->prot.scans = s;
     srv->prot.n_scans++;
