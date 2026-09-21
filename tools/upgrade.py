@@ -7,12 +7,14 @@ optionally restart -- and roll back if something goes wrong. Your live config
 is never modified. Every run writes logs/SekurIRCd-upgrade-<date>.log.
 
   tools/upgrade.py                    interactive
+  tools/upgrade.py --check            report new releases/commits only (exit 10 = updates)
   tools/upgrade.py --dry-run          show everything, change nothing
   tools/upgrade.py --channel release --yes --backup-dir /srv/backups
   tools/upgrade.py --rollback         undo the last upgrade
 """
 import argparse, collections, getpass, glob, hashlib, json, os, platform, re
 import shutil, socket, subprocess, sys, tarfile, textwrap, time, urllib.request
+from typing import Any, NoReturn
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TTY = sys.stdout.isatty()
@@ -47,8 +49,8 @@ class Log:
             self.f.write(f"{time.strftime('%H:%M:%S')}  {line}\n")
 
 
-LOG = None
-ARGS = None
+LOG: Log = None  # type: ignore  # set in main()
+ARGS: argparse.Namespace = None  # type: ignore  # set in main()
 _step = 0
 
 
@@ -65,7 +67,7 @@ def step(title):
     out(); out(bold(cyan(f"━━ Step {_step}: {title}")))
 
 
-def die(msg, code=1):
+def die(msg, code=1) -> NoReturn:
     fail(msg)
     LOG.w("RESULT: ABORTED")
     print(dim(f"  Log: {LOG.path}"))
@@ -145,7 +147,7 @@ def version_of(text):
     return m.group(1) if m else None
 
 
-def describe(ref):
+def describe(ref) -> Any:
     p = run(["git", "rev-parse", "--verify", "--quiet", ref + "^{commit}"], check=False)
     if p.returncode:
         return None
@@ -157,7 +159,7 @@ def describe(ref):
 def is_ancestor(a, b): return run(["git", "merge-base", "--is-ancestor", a, b], check=False).returncode == 0
 
 
-def latest_release():
+def latest_release() -> Any:
     """(tag, title, source): gh CLI, then GitHub API, then newest local tag."""
     if shutil.which("gh"):
         p = run(["gh", "release", "list", "--limit", "1", "--exclude-drafts", "--exclude-pre-releases",
@@ -381,6 +383,7 @@ def build(expect_version):
     cmd = ["make", f"-j{os.cpu_count() or 2}", "BIN_DIR=bin.new", "OBJ_DIR=build.new"]
     LOG.w("$ " + " ".join(cmd))
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
+    assert p.stdout
     n, tail = 0, collections.deque(maxlen=25)
     for line in p.stdout:
         LOG.w(line.rstrip()); tail.append(line.rstrip())
@@ -628,6 +631,60 @@ def rollback():
     ok(bold("Rolled back.")); info(f"log: {LOG.path}"); LOG.w("RESULT: ROLLED BACK")
 
 
+def check():
+    """Report-only: is there a newer release, or new commits on origin's default branch?
+    Exit 0 = up to date, 10 = updates available (handy for cron)."""
+    p = run(["git", "fetch", "--tags", "origin"], check=False)
+    if p.returncode: warn("could not reach origin -- reporting against what's already fetched")
+    cur = current_state()
+    out(); info(f"Installed  {bold('v' + cur['version'])}  {dim(cur['short'] + ' · ' + cur['date'])}  "
+                f"on {cur['branch'] or 'detached HEAD'}")
+    news = 0
+
+    out(); out(bold(cyan("  Releases")))
+    rel = latest_release()
+    d = describe(rel[0]) if rel else None
+    if not d:
+        warn("could not determine the latest release")
+    elif vt(rel[0]) > vt(cur["version"]):
+        news += 1
+        warn(f"{bold(yellow('NEW RELEASE'))} {bold(rel[0])} {dim('(' + d['date'] + ', via ' + rel[2] + ')')}"
+             f"  — you run v{cur['version']}")
+        try: entries = json.loads(gshow(d["sha"], "web/changelog.json") or "[]")
+        except ValueError: entries = []
+        for e in [e for e in entries if vt(cur["version"]) < vt(e["tag"]) <= vt(rel[0])]:
+            info(bold(green(f"{e['tag']}  ({e['date']})")))
+            for ch in e["changes"]: out(wrap("• " + ch))
+    else:
+        ok(f"Up to date with the latest release ({bold(rel[0])})")
+
+    out(); out(bold(cyan("  Commits")))
+    branch = (git("symbolic-ref", "--short", "refs/remotes/origin/HEAD", check=False) or "origin/main").split("/", 1)[1]
+    m = describe(f"origin/{branch}")
+    if not m:
+        warn(f"origin/{branch} not found")
+    elif m["sha"] == cur["sha"] or is_ancestor(m["sha"], cur["sha"]):
+        ok(f"No new commits on origin/{branch}")
+    elif is_ancestor(cur["sha"], m["sha"]):
+        news += 1
+        log = git("log", "--format=%h|%cs|%s", "--no-decorate", f"{cur['sha']}..{m['sha']}").splitlines()
+        warn(f"{bold(yellow(str(len(log)) + ' new commit(s)'))} on origin/{branch} "
+             f"{dim('(version ' + str(m['version']) + ')')} since your checkout")
+        for l in log[:10]:
+            h, dt, s = l.split("|", 2)
+            info(f"  {cyan(h)} {dim(dt)} {s}")
+        if len(log) > 10: info(dim(f"  ... and {len(log) - 10} more"))
+    else:
+        warn(red("Your checkout has diverged from ") + f"origin/{branch}" + " — upgrade would need a manual look")
+        news += 1
+
+    out()
+    if news: out(bold(yellow("  ▲ Updates available")) + f"  — run {bold('tools/upgrade.py')} to upgrade")
+    else: out(bold(green("  ✔ Everything is up to date")))
+    LOG.w(f"RESULT: CHECK news={news}")
+    sys.exit(10 if news else 0)
+
+
 def selftest():
     assert vt("1.0.10") > vt("1.0.9") and vt("v1.2") == (1, 2, 0)
     old = "[a]\n# doc line\nx = 1\n"
@@ -651,18 +708,22 @@ def main():
     ap.add_argument("--restart", action="store_true", help="restart services without asking")
     ap.add_argument("--no-restart", action="store_true", help="never restart")
     ap.add_argument("--rollback", action="store_true", help="undo the last upgrade")
+    ap.add_argument("--check", action="store_true", help="only report new releases/commits (exit 10 if any)")
     ap.add_argument("--selftest", action="store_true")
     ARGS = ap.parse_args()
     if ARGS.selftest: return selftest()
     os.chdir(ROOT)
-    LOG = Log("rollback" if ARGS.rollback else "upgrade")
-    LOG.w(f"SekurIRCd {'rollback' if ARGS.rollback else 'upgrade'} log -- {time.strftime('%Y-%m-%d %H:%M:%S %z')}")
+    kind = "rollback" if ARGS.rollback else "check" if ARGS.check else "upgrade"
+    LOG = Log(kind)
+    LOG.w(f"SekurIRCd {kind} log -- {time.strftime('%Y-%m-%d %H:%M:%S %z')}")
     LOG.w(f"host={socket.gethostname()} user={getpass.getuser()} os={platform.platform()} python={platform.python_version()}")
     LOG.w(f"cwd={ROOT} args={sys.argv[1:]}")
     out(bold(cyan("\n  SekurIRCd upgrade assistant")) + (yellow("  [DRY RUN]") if ARGS.dry_run else ""))
     out(dim(f"  {ROOT}\n  log: {LOG.path}"))
     try:
-        if ARGS.rollback:
+        if ARGS.check:
+            check()
+        elif ARGS.rollback:
             rollback()
         else:
             cur, st = preflight()
