@@ -366,6 +366,12 @@ void server_remove_client(server_t *srv, client_t *cl, const char *quit_reason) 
         server_whowas_record(srv, cl->nick, cl->user, cl->host, cl->realname);
         server_monitor_notify(srv, cl, 0);
         server_watch_notify(srv, cl, 0);
+
+        /* ircd-hybrid format, so HOPM-style bots can track exits. */
+        char snote[400];
+        snprintf(snote, sizeof snote, "Client exiting: %s (%s@%s) [%s] [%s]", cl->nick, cl->user, cl->host,
+                 quit_reason ? quit_reason : "", cl->ip);
+        server_notify_opers(srv, snote);
     }
 
     server_send_common_channels(srv, cl, line, 0);
