@@ -165,6 +165,10 @@ static void render_supported_caps(server_t *srv, char *out, size_t outsz) {
          * cert to match, so don't advertise a mechanism that can't work. */
         int external_possible = srv->cfg.tls.enabled && srv->cfg.tls.request_client_cert;
         strncat(out, external_possible ? "sasl=PLAIN,EXTERNAL" : "sasl=PLAIN", outsz - strlen(out) - 1);
+        /* No before-connect (REGISTER needs a registered connection) and no
+         * email-required (email is accepted but not stored/verified);
+         * custom-account-name because the account needn't match the nick. */
+        strncat(out, " draft/account-registration=custom-account-name", outsz - strlen(out) - 1);
     }
 }
 
@@ -201,7 +205,8 @@ void cmd_cap(server_t *srv, client_t *cl, irc_message_t *msg) {
             char *save = NULL;
             for (char *tok = strtok_r(probe, " ", &save); tok; tok = strtok_r(NULL, " ", &save)) {
                 const char *name = tok[0] == '-' ? tok + 1 : tok;
-                int known = (strcasecmp(name, "sasl") == 0 && srv->cfg.accounts.enabled);
+                int known = ((strcasecmp(name, "sasl") == 0 || strcasecmp(name, "draft/account-registration") == 0) &&
+                             srv->cfg.accounts.enabled);
                 for (int i = 0; !known && i < N_CAP_ATTRS; i++)
                     if (strcasecmp(name, CAP_ATTRS[i].name) == 0) known = 1;
                 if (!known) { ok = 0; break; }
@@ -292,6 +297,31 @@ static int peer_cert_fingerprint(client_t *cl, char *out, size_t outsz) {
     if (digest_ok != 1 || dlen == 0) return -1;
     if (outsz < (size_t)dlen * 2 + 1) return -1;
     for (unsigned int i = 0; i < dlen; i++) snprintf(out + i * 2, 3, "%02x", digest[i]);
+    return 0;
+}
+
+/* Starts a password check for `authcid` on a worker (scrypt is ~30ms, so it
+ * never runs on the event loop; net.c applies the result via
+ * cmd_finish_auth). Shared by SASL PLAIN and NickServ IDENTIFY. One in flight
+ * per connection bounds the queue. 0 = submitted, -1 = refused (unknown
+ * account, one already pending, or worker queue full) -- the caller words the
+ * failure for its own protocol. */
+static int start_plain_login(server_t *srv, client_t *cl, const char *authcid, const char *passwd, int style) {
+    const char *hash = accounts_hash(&srv->accounts, authcid);
+    if (!hash || cl->auth_pending) return -1;
+    job_t j; memset(&j, 0, sizeof j);
+    j.type = JOB_SASL;
+    j.purpose = AUTH_SASL;
+    j.conn_id = cl->conn_id;
+    snprintf(j.secret, sizeof j.secret, "%s", passwd);
+    snprintf(j.hash, sizeof j.hash, "%s", hash);
+    snprintf(cl->pending_account, sizeof cl->pending_account, "%s", authcid);
+    cl->auth_style = style;
+    cl->auth_pending = 1;
+    cl->auth_started = time(NULL);
+    int rc = worker_submit(&j);
+    OPENSSL_cleanse(j.secret, sizeof j.secret);
+    if (rc != 0) { cl->auth_pending = 0; return -1; }
     return 0;
 }
 
@@ -393,30 +423,9 @@ void cmd_authenticate(server_t *srv, client_t *cl, irc_message_t *msg) {
     memcpy(passwd, pw_start, pw_len);
     passwd[pw_len] = '\0';
 
-    const char *hash = strcmp(mech, "PLAIN") == 0 ? accounts_hash(&srv->accounts, authcid) : NULL;
-    if (!hash || cl->auth_pending) {
-        OPENSSL_cleanse(passwd, sizeof passwd);
-        client_reply(cl, N_SASLFAIL, NULL, 0, "SASL authentication failed");
-        return;
-    }
-    /* scrypt verify is ~30ms -- run it on a worker so a login (or a SASL
-     * spammer) never stalls the event loop; net.c applies the result. One
-     * in flight per connection bounds the queue. */
-    job_t j; memset(&j, 0, sizeof j);
-    j.type = JOB_SASL;
-    j.purpose = AUTH_SASL;
-    j.conn_id = cl->conn_id;
-    snprintf(j.secret, sizeof j.secret, "%s", passwd);
-    snprintf(j.hash, sizeof j.hash, "%s", hash);
+    int rc = strcmp(mech, "PLAIN") == 0 ? start_plain_login(srv, cl, authcid, passwd, AUTH_STYLE_LEGACY) : -1;
     OPENSSL_cleanse(passwd, sizeof passwd);
-    snprintf(cl->pending_account, sizeof cl->pending_account, "%s", authcid);
-    cl->auth_pending = 1;
-    cl->auth_started = time(NULL);
-    if (worker_submit(&j) != 0) {
-        cl->auth_pending = 0;
-        client_reply(cl, N_SASLFAIL, NULL, 0, "SASL authentication failed");
-    }
-    OPENSSL_cleanse(j.secret, sizeof j.secret);
+    if (rc != 0) client_reply(cl, N_SASLFAIL, NULL, 0, "SASL authentication failed");
 }
 
 /* IRCv3 standard-replies: a structured FAIL for a command with no natural
@@ -440,35 +449,53 @@ static void send_fail(server_t *srv, client_t *cl, const char *cmd, const char *
 #define REGISTER_MAX_PER_CONNECTION 3
 #define REGISTER_COOLDOWN 10
 
-/* Self-service account registration (``/REGISTER <account> <password>``) --
- * not RFC/IRCv3, matching this daemon's "accounts live in core, no NickServ
- * required" design (see accounts.h). Ported from commands.cmd_register. */
-void cmd_register(server_t *srv, client_t *cl, irc_message_t *msg) {
+/* NickServ-style reply: a NOTICE from a virtual "NickServ" -- there's no real
+ * services pseudo-client behind it (accounts live in core, see accounts.h). */
+static void ns_say(server_t *srv, client_t *cl, const char *text) {
+    char line[500];
+    char prefix[160];
+    snprintf(prefix, sizeof prefix, "NickServ!NickServ@%s", srv->cfg.server.name);
+    const char *p[] = {cl->nick[0] ? cl->nick : "*"};
+    irc_build(line, sizeof line, NULL, 0, prefix, "NOTICE", p, 1, text);
+    client_send(cl, line);
+}
+
+/* Failure reply in whichever dialect the request came in. */
+static void reg_fail(server_t *srv, client_t *cl, int style, const char *code, const char *desc) {
+    if (style == AUTH_STYLE_NICKSERV) ns_say(srv, cl, desc);
+    else send_fail(srv, cl, "REGISTER", code, desc);
+}
+
+/* Validates and starts an account registration; the hash runs on a worker and
+ * cmd_finish_auth completes it. Shared by /REGISTER (both forms) and
+ * NickServ REGISTER. */
+static void start_register(server_t *srv, client_t *cl, const char *account, const char *password, int style) {
     if (!srv->cfg.accounts.enabled) {
-        send_fail(srv, cl, "REGISTER", "REG_UNAVAILABLE", "Account registration is not enabled on this server");
+        reg_fail(srv, cl, style, "REG_UNAVAILABLE", "Account registration is not enabled on this server");
         return;
     }
-    const char *account = msg->params[0];
-    const char *password = msg->params[1];
-    if (!password[0]) { err_need_more_params(cl, "REGISTER"); return; }
+    if (cl->account[0]) {
+        reg_fail(srv, cl, style, "ALREADY_AUTHENTICATED", "You are already logged in to an account");
+        return;
+    }
     if (!irc_valid_user(account, 30)) {
         char m[200];
         snprintf(m, sizeof m, "%s is not a valid account name", account);
-        send_fail(srv, cl, "REGISTER", "BAD_ACCOUNT_NAME", m);
+        reg_fail(srv, cl, style, "BAD_ACCOUNT_NAME", m);
         return;
     }
     if (accounts_exists(&srv->accounts, account)) {
         char m[200];
         snprintf(m, sizeof m, "Account %s already exists", account);
-        send_fail(srv, cl, "REGISTER", "ACCOUNT_EXISTS", m);
+        reg_fail(srv, cl, style, "ACCOUNT_EXISTS", m);
         return;
     }
     if (strlen(password) >= sizeof ((job_t *)0)->secret) {
-        send_fail(srv, cl, "REGISTER", "BAD_PASSWORD", "Password is too long");
+        reg_fail(srv, cl, style, "BAD_PASSWORD", "Password is too long");
         return;
     }
     if (cl->auth_pending) {
-        send_fail(srv, cl, "REGISTER", "TEMPORARILY_UNAVAILABLE", "Another login/registration is still in progress");
+        reg_fail(srv, cl, style, "TEMPORARILY_UNAVAILABLE", "Another login/registration is still in progress");
         return;
     }
     /* auth_pending only bounds concurrency, not the total: without these,
@@ -476,19 +503,19 @@ void cmd_register(server_t *srv, client_t *cl, irc_message_t *msg) {
      * whole accounts file. */
     if (srv->cfg.accounts.max_accounts > 0 &&
         accounts_count(&srv->accounts) >= srv->cfg.accounts.max_accounts) {
-        send_fail(srv, cl, "REGISTER", "REG_UNAVAILABLE",
-                  "This server has reached its account limit -- ask a server operator");
+        reg_fail(srv, cl, style, "REG_UNAVAILABLE",
+                 "This server has reached its account limit -- ask a server operator");
         return;
     }
     time_t now = time(NULL);
     if (cl->register_attempts >= REGISTER_MAX_PER_CONNECTION) {
-        send_fail(srv, cl, "REGISTER", "REG_UNAVAILABLE",
-                  "Too many registrations on this connection -- reconnect to register another account");
+        reg_fail(srv, cl, style, "REG_UNAVAILABLE",
+                 "Too many registrations on this connection -- reconnect to register another account");
         return;
     }
     if (cl->register_last && difftime(now, cl->register_last) < REGISTER_COOLDOWN) {
-        send_fail(srv, cl, "REGISTER", "TEMPORARILY_UNAVAILABLE",
-                  "You are registering too fast -- wait a few seconds and try again");
+        reg_fail(srv, cl, style, "TEMPORARILY_UNAVAILABLE",
+                 "You are registering too fast -- wait a few seconds and try again");
         return;
     }
     cl->register_last = now;
@@ -500,13 +527,65 @@ void cmd_register(server_t *srv, client_t *cl, irc_message_t *msg) {
     j.conn_id = cl->conn_id;
     snprintf(j.secret, sizeof j.secret, "%s", password);
     snprintf(cl->pending_account, sizeof cl->pending_account, "%s", account);
+    cl->auth_style = style;
     cl->auth_pending = 1;
     cl->auth_started = time(NULL);
     if (worker_submit(&j) != 0) {
         cl->auth_pending = 0;
-        send_fail(srv, cl, "REGISTER", "TEMPORARILY_UNAVAILABLE", "Server is busy -- try again shortly");
+        reg_fail(srv, cl, style, "TEMPORARILY_UNAVAILABLE", "Server is busy -- try again shortly");
     }
     OPENSSL_cleanse(j.secret, sizeof j.secret);
+}
+
+/* Self-service account registration -- not RFC/IRCv3-final, matching this
+ * daemon's "accounts live in core" design (see accounts.h). Two forms:
+ *   REGISTER <account> <password>               legacy, this daemon's own
+ *   REGISTER <account|*> <email|*> <password>   draft/account-registration
+ * where "*" for the account means the current nick. The email is accepted
+ * but neither stored nor verified. */
+void cmd_register(server_t *srv, client_t *cl, irc_message_t *msg) {
+    const char *account = msg->params[0];
+    const char *password = msg->params[1];
+    int style = AUTH_STYLE_LEGACY;
+    if (msg->nparams >= 3) {
+        style = AUTH_STYLE_DRAFT;
+        password = msg->params[2];
+        if (strcmp(account, "*") == 0) account = cl->nick;
+    }
+    if (!password[0]) { err_need_more_params(cl, "REGISTER"); return; }
+    start_register(srv, cl, account, password, style);
+}
+
+/* PRIVMSG to "NickServ" when no real user by that name exists (see
+ * cmd_user.c send_msg). Maps the familiar commands onto the same account code
+ * as /REGISTER and SASL: the account name is the current nick, as with Anope
+ * and Atheme. */
+void nickserv_message(server_t *srv, client_t *cl, const char *text) {
+    char buf[420];
+    snprintf(buf, sizeof buf, "%s", text);
+    char *save = NULL;
+    char *cmd = strtok_r(buf, " ", &save);
+    char *a = cmd ? strtok_r(NULL, " ", &save) : NULL;
+    char *b = cmd ? strtok_r(NULL, " ", &save) : NULL;
+
+    if (!srv->cfg.accounts.enabled) {
+        ns_say(srv, cl, "Accounts are not enabled on this server");
+    } else if (cmd && strcasecmp(cmd, "REGISTER") == 0) {
+        /* REGISTER <password> [email] -- email ignored, see cmd_register. */
+        if (!a) ns_say(srv, cl, "Syntax: REGISTER <password> [email]");
+        else start_register(srv, cl, cl->nick, a, AUTH_STYLE_NICKSERV);
+    } else if (cmd && (strcasecmp(cmd, "IDENTIFY") == 0 || strcasecmp(cmd, "ID") == 0)) {
+        /* IDENTIFY [account] <password> */
+        const char *account = b ? a : cl->nick;
+        const char *password = b ? b : a;
+        if (!password) ns_say(srv, cl, "Syntax: IDENTIFY [account] <password>");
+        else if (cl->account[0]) ns_say(srv, cl, "You are already identified");
+        else if (start_plain_login(srv, cl, account, password, AUTH_STYLE_NICKSERV) != 0)
+            ns_say(srv, cl, "Invalid account or password");
+    } else {
+        ns_say(srv, cl, "Commands: REGISTER <password> [email], IDENTIFY [account] <password>");
+    }
+    OPENSSL_cleanse(buf, sizeof buf);
 }
 
 /* ``/CERT ADD|DEL|INFO`` -- binds (or clears, or reports) the SASL EXTERNAL
@@ -556,28 +635,47 @@ void cmd_cert(server_t *srv, client_t *cl, irc_message_t *msg) {
 
 void cmd_finish_auth(server_t *srv, client_t *cl, int is_register, int success, const char *hash) {
     cl->auth_pending = 0;
+    int style = cl->auth_style;
+    cl->auth_style = AUTH_STYLE_LEGACY;
     const char *account = cl->pending_account;
     if (!is_register) {
         if (success) {
             server_login(srv, cl, account);
-            client_reply(cl, N_SASLSUCCESS, NULL, 0, "SASL authentication successful");
+            if (style == AUTH_STYLE_NICKSERV) {
+                char m[200];
+                snprintf(m, sizeof m, "You are now identified for %s", account);
+                ns_say(srv, cl, m);
+            } else {
+                client_reply(cl, N_SASLSUCCESS, NULL, 0, "SASL authentication successful");
+            }
             log_info("sasl", "%s authenticated as %s", cl->nick, account);
+        } else if (style == AUTH_STYLE_NICKSERV) {
+            ns_say(srv, cl, "Invalid account or password");
         } else {
             client_reply(cl, N_SASLFAIL, NULL, 0, "SASL authentication failed");
         }
         return;
     }
-    if (!success) { send_fail(srv, cl, "REGISTER", "TEMPORARILY_UNAVAILABLE", "Internal error hashing password -- try again"); return; }
+    if (!success) { reg_fail(srv, cl, style, "TEMPORARILY_UNAVAILABLE", "Internal error hashing password -- try again"); return; }
     if (accounts_exists(&srv->accounts, account)) { /* lost a race with another REGISTER */
         char m[200];
         snprintf(m, sizeof m, "Account %s already exists", account);
-        send_fail(srv, cl, "REGISTER", "ACCOUNT_EXISTS", m);
+        reg_fail(srv, cl, style, "ACCOUNT_EXISTS", m);
         return;
     }
     accounts_register_hashed(&srv->accounts, account, hash);
     server_login(srv, cl, account);
     char m[200];
     snprintf(m, sizeof m, "Account %s registered -- you are now logged in as it", account);
-    notice_self(srv, cl, m);
+    if (style == AUTH_STYLE_NICKSERV) {
+        ns_say(srv, cl, m);
+    } else if (style == AUTH_STYLE_DRAFT) {
+        char line[500];
+        const char *p[] = {"SUCCESS", account};
+        irc_build(line, sizeof line, NULL, 0, srv->cfg.server.name, "REGISTER", p, 2, m);
+        client_send(cl, line);
+    } else {
+        notice_self(srv, cl, m);
+    }
     log_info("main", "%s registered account %s", cl->nick, account);
 }

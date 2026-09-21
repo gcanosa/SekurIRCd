@@ -77,7 +77,12 @@ Website & docs: <https://gcanosa.github.io/SekurIRCd/> (source in [`web/`](web/)
   `account-notify`, `invite-notify`, `standard-replies`, and `sasl` (see
   Accounts below)
 - Self-service accounts (`[accounts]`, off by default) + SASL PLAIN and
-  EXTERNAL (`AUTHENTICATE`) and `/REGISTER <account> <password>` -- backs
+  EXTERNAL (`AUTHENTICATE`), `/REGISTER <account> <password>`, IRCv3
+  `draft/account-registration` (`REGISTER <account|*> <email|*> <password>`,
+  `*` = your nick; email accepted but not stored) and a virtual NickServ
+  (`/msg NickServ REGISTER <password>`, `/msg NickServ IDENTIFY [account]
+  <password>`; the account is your nick, only answers when no real user of
+  that name exists) -- backs
   `330 RPL_WHOISACCOUNT` and `EXTBAN=,a` (`+b`/`+e`/`+I` masks like
   `a:<account>`, matching by SASL account instead of hostmask). A small
   standalone store in core, independent of channel services below. SASL

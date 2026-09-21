@@ -34,7 +34,7 @@
   connect-flood auto-bans, <code>reserved_nicks</code>, ident and reverse-DNS lookups, <code>DIE</code>/<code>RESTART</code> passwords, <code>oper_auto_join</code>.</td></tr>
 <tr><td><code>[tls]</code></td><td><code>enabled</code> (default false), <code>port</code> (default 6697), <code>cert_file</code>, <code>key_file</code>, <code>request_client_cert</code> (needed for SASL EXTERNAL).
   Runs alongside the plaintext listener, never instead of it.</td></tr>
-<tr><td><code>[accounts]</code></td><td><code>enabled</code> (default false), <code>store_file</code>. Backs SASL, <code>/REGISTER</code>, <code>/CERT</code> and the <code>a:</code> extban.</td></tr>
+<tr><td><code>[accounts]</code></td><td><code>enabled</code> (default false), <code>store_file</code>. Backs SASL, <code>/REGISTER</code>, NickServ REGISTER/IDENTIFY, <code>draft/account-registration</code>, <code>/CERT</code> and the <code>a:</code> extban.</td></tr>
 <tr><td><code>[messages]</code></td><td><code>motd</code>, <code>oper_motd</code> (shown to opers) and <code>rules</code> (for <code>/RULES</code>) files, and max message length.</td></tr>
 <tr><td><code>[logging]</code></td><td><code>enabled</code>, <code>directory</code>, <code>level</code>, <code>debug</code> (protocol trace), <code>file</code>, rotation (<code>max_bytes</code>, <code>backup_count</code>).</td></tr>
 <tr><td><code>[[operators]]</code></td><td>One table per <code>/OPER</code> login. See below.</td></tr>

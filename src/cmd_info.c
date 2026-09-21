@@ -249,8 +249,10 @@ static const help_entry_t HELP_TABLE[] = {
     {"TRACE", {"TRACE", "Show connected clients (and, for a server-oper, linked servers)."}},
     {"SERVLIST", {"SERVLIST [<mask> [<type>]]", "List services pseudo-users (e.g. ChanServ) currently online."}},
     {"SQUERY", {"SQUERY <servicename> <text>", "Like PRIVMSG, but the target must be a services pseudo-user."}},
-    {"REGISTER", {"REGISTER <account> <password>",
-                  "Non-standard: create a self-service account and log in as it. Only available when the "
+    {"REGISTER", {"REGISTER <account> <password> | REGISTER <account|*> <email|*> <password>",
+                  "Create a self-service account and log in as it (the second form is IRCv3 "
+                  "draft/account-registration; * means your nick). Also: /msg NickServ REGISTER <password> "
+                  "and /msg NickServ IDENTIFY [account] <password>. Only available when the "
                   "server has [accounts] enabled -- ask a server operator if this fails."}},
     {"AUTHENTICATE", {"AUTHENTICATE PLAIN|EXTERNAL",
                        "SASL login to an existing account -- normally sent by your client automatically "

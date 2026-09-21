@@ -134,6 +134,10 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
         delivered = 1;
     } else {
         client_t *dst = server_find_user(srv, target);
+        if (!dst && !is_notice && strcasecmp(target, "NickServ") == 0) {
+            nickserv_message(srv, cl, textbuf); /* virtual NickServ -- see cmd_reg.c */
+            return;
+        }
         if (!dst) {
             if (!is_notice) err_no_such_nick(cl, target);
             return;

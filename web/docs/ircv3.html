@@ -21,6 +21,7 @@
 <div class="tablewrap"><table>
 <tr><th>Capability</th><th>Effect</th></tr>
 <tr><td><code>sasl</code></td><td>Login during connection. Advertised as <code>sasl=PLAIN</code>, or <code>sasl=PLAIN,EXTERNAL</code> when <code>request_client_cert</code> is on.</td></tr>
+<tr><td><code>draft/account-registration</code></td><td>Create an account from your client. Advertised as <code>draft/account-registration=custom-account-name</code>. See <a href="#accounts">accounts</a>.</td></tr>
 <tr><td><code>account-notify</code> <code>account-tag</code></td><td>Account login/logout notices and the sender's account on messages.</td></tr>
 <tr><td><code>away-notify</code></td><td>Live <code>AWAY</code> updates for channel-mates.</td></tr>
 <tr><td><code>multi-prefix</code> <code>userhost-in-names</code></td><td>All rank prefixes, and full <code>nick!user@host</code>, in <code>NAMES</code> and <code>WHO</code>.</td></tr>
@@ -31,11 +32,19 @@
 </table></div>
 <p>Also advertised in <code>005</code>: <code>MONITOR=100</code>, <code>ELIST=MNU</code>, <code>EXTBAN=,a</code>, <code>STATUSMSG=@%+</code>, <code>EXCEPTS</code>, <code>INVEX</code>.</p>
 
-<h2>accounts</h2>
+<h2 id="accounts">accounts</h2>
 <pre>[accounts]
 enabled    = true
 store_file = "accounts.json"</pre>
-<p>Then <code>/REGISTER &lt;account&gt; &lt;password&gt;</code> creates an account and logs you in. Accounts back <code>330 RPL_WHOISACCOUNT</code>
+<p>Ways to register, all creating the same account and logging you in at once:</p>
+<div class="tablewrap"><table>
+<tr><th>Method</th><th>Command</th></tr>
+<tr><td>NickServ</td><td><code>/msg NickServ REGISTER &lt;password&gt; [email]</code>. The account is named after your current nick.</td></tr>
+<tr><td>IRCv3 draft</td><td><code>REGISTER &lt;account|*&gt; &lt;email|*&gt; &lt;password&gt;</code>. <code>*</code> means your nick. Replies <code>REGISTER SUCCESS</code>. The email is accepted but not stored or verified. Not available before the connection is registered.</td></tr>
+<tr><td>Classic</td><td><code>/REGISTER &lt;account&gt; &lt;password&gt;</code></td></tr>
+</table></div>
+<p>To log in later: <code>/msg NickServ IDENTIFY [account] &lt;password&gt;</code> (account defaults to your nick). The best way is SASL, below, which logs you in during connection so no IDENTIFY is needed.
+  NickServ here is built in: it answers only when no real user or service is called NickServ, and does not appear in <code>/WHOIS</code>. Accounts back <code>330 RPL_WHOISACCOUNT</code>
   and the extban <code>a:&lt;account&gt;</code> for <code>+b</code>, <code>+e</code> and <code>+I</code>, matching by account instead of hostmask.
   The store is independent of ChanServ.</p>
 

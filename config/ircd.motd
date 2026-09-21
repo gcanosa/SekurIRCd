@@ -17,7 +17,7 @@
   11TLS/SSL ....... port 6697   (09recommended - gets you user mode +z)
   11Hostnames ..... cloaked; your real IP is not shown to other users
   11Services ...... ChanServ   /msg ChanServ HELP
-  11Accounts ...... SASL PLAIN, or /REGISTER <account> <password>
+  11Accounts ...... /msg NickServ REGISTER <pass>  (see ACCOUNTS)
 
 03=====================================================================
 03 CHANNELS 
@@ -50,6 +50,26 @@
   our call, no appeals via PM spam. Incidents may be reported to
   your provider. If you wouldn't let your kids do it at home, don't
   do it here.
+
+11=====================================================================
+11 ACCOUNTS: REGISTER A NICK 
+11=====================================================================
+
+  Register once, then log in each time you connect:
+
+  1. Register:  11/msg NickServ REGISTER <password>
+     or         11/REGISTER <account> <password>
+     You are logged in at once; the account is named after your nick.
+  2. Log in:    11/msg NickServ IDENTIFY <password>
+     other name 11/msg NickServ IDENTIFY <account> <pass>
+
+  09Best way: SASL. Put your account and password in your client's
+  SASL PLAIN settings and it logs you in while connecting - no
+  IDENTIFY needed. Clients with IRCv3 account registration
+  (draft/account-registration) can create the account for you.
+  TLS users can log in by certificate instead: 11/CERT ADD
+
+  Pick a strong password and keep it to yourself.
 
 06=====================================================================
 06 REGISTERING A CHANNEL 
