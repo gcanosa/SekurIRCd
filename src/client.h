@@ -40,6 +40,7 @@ struct link_conn;
 #define UMODE_Q        0x400  /* q: unkickable from channels except by IRCOps */
 #define UMODE_REGONLY  0x800  /* R: only accept PMs from identified (registered-account) users */
 #define UMODE_NOPM     0x1000 /* D: accept PMs from nobody except IRCOps */
+#define UMODE_B        0x2000 /* B: marks the user as a bot -- self-settable; WHOIS 335, WHO flag B, @bot tag */
 
 typedef struct chan_node {
     struct channel *chan;

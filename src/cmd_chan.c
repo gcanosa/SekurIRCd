@@ -634,6 +634,7 @@ static void cmd_mode_user(client_t *cl, irc_message_t *msg, const char *target) 
         else if (c == 'q') bit = UMODE_Q;
         else if (c == 'R') bit = UMODE_REGONLY;
         else if (c == 'D') bit = UMODE_NOPM;
+        else if (c == 'B') bit = UMODE_B;
         else if (c == 'H') { if (cl->umodes & UMODE_O) bit = UMODE_H; else continue; }
         else continue;
         if (sign == '+') cl->umodes |= bit; else cl->umodes &= ~bit;

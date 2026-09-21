@@ -28,7 +28,8 @@
       "New /SPAMFILTER LIST|ADD|DEL oper command edits the filters file live; regexes are validated (no backreferences, no empty matches); rules reload on /REHASH",
       "Opers with +s get a notice for every spam action, and services, opers and identified accounts are exempt by default",
       "/VERSION is now ircu/solanum-style: SekurIRCd-<version>(<date>-<commit>) plus feature flags and the full 005 ISUPPORT list; WHOX and MAXCHANNELS are now advertised, and 004 carries the same build string",
-      "Accounts: IRCv3 draft/account-registration (REGISTER <account|*> <email|*> <password>) and a built-in NickServ (REGISTER / IDENTIFY) alongside /REGISTER and SASL; registering while already logged in is now refused"
+      "Accounts: IRCv3 draft/account-registration (REGISTER <account|*> <email|*> <password>) and a built-in NickServ (REGISTER / IDENTIFY) alongside /REGISTER and SASL; registering while already logged in is now refused",
+      "User mode +B marks a client as a bot (IRCv3 bot mode): 335 in WHOIS, B in WHO flags, @bot message tag, BOT=B in 005"
     ]
   },
   {

@@ -24,7 +24,7 @@ static int is_valid_level(const char *s) {
 }
 
 /* self-togglable user modes (client.USER_MODE_SELF) */
-#define USER_MODE_SELF "iwds"
+#define USER_MODE_SELF "iwdsB"
 /* argument-free channel modes a deployment may set as a default
  * (channel.CHAN_MODES - MODE_ARG - {"r"}) */
 #define CHAN_FLAG_MODES "niptsmz"

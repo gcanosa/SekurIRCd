@@ -203,6 +203,7 @@ void irc_add_time_tag(char *line, size_t linesz);
 #define N_ENDOFMOTD        "376"
 #define N_WHOISHOST        "378"
 #define N_WHOISSECURE      "671"
+#define N_WHOISBOT         "335"
 #define N_TIME             "391"
 
 #define N_UMODEIS          "221"
