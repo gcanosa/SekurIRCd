@@ -90,6 +90,26 @@
   Pick a strong channel password and keep it to yourself.
   Full command list: 11/msg ChanServ HELP
 
+07=====================================================================
+07 SECURITY: SCANNED FOR YOUR PROTECTION 
+07=====================================================================
+
+  To keep drones, botnets and open proxies out, every connection is
+  checked automatically by our 07Protection bundle:
+
+  1. 11DNS blocklists - your IP is looked up in DNSBLs of known
+     open proxies, drones and abusive hosts.
+  2. 11Proxy scan - your IP may be scanned: the server opens a few
+     connections back to your address on common proxy ports (HTTP,
+     SOCKS4, SOCKS5) to test whether it relays traffic. It never
+     reads your files or data - it only checks for an open proxy.
+
+  Seeing short connections from us in your firewall log right after
+  you connect? That is why - nothing is wrong, no action is needed.
+
+  Listed, or found to be an open proxy? The address is 04banned for a
+  while. Close the proxy, then ask in 11#help and we will sort it out.
+
 14=====================================================================
 14 PRIVACY 
 14=====================================================================
