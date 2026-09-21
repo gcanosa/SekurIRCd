@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Abuse protection · SekurIRCd docs</title>
-<meta name="description" content="Built-in drone and proxy protection in SekurIRCd: DNSBL checks, connect-flood throttling, connection caps, K/G/Z-lines, and how to monitor them.">
+<title>Protection bundle · SekurIRCd docs</title>
+<meta name="description" content="The SekurIRCd Protection bundle: an optional, single-file abuse-protection layer with DNSBL blacklists, an active open-proxy scanner, connection limits, flood and spam protection.">
 <link rel="icon" href="../img/favicon.ico" sizes="any">
 <script>(function(){var t;try{t=localStorage.getItem("theme")}catch(e){}if(t!=="light"&&t!=="dark")t=matchMedia("(prefers-color-scheme: light)").matches?"light":"dark";document.documentElement.dataset.theme=t})()</script>
 <link rel="stylesheet" href="../css/site.css">
@@ -14,10 +14,12 @@
 <div class="wrap docs-layout">
 <aside id="docs-nav" class="docs-nav"></aside>
 <main class="docs">
-<h1>abuse protection</h1>
+<h1>protection bundle</h1>
 <p>Every public IRC server is scanned within hours of going online. Botnets and drone networks connect by the hundreds to flood channels, spam
-  users and probe for open proxies, and plain scanners open and drop sockets just to fingerprint you. SekurIRCd ships with several layers that
-  stop most of this <em>before</em> a client ever registers, with no external services or extra processes.</p>
+  users and probe for open proxies, and plain scanners open and drop sockets just to fingerprint you. The <strong>Protection bundle</strong> is
+  SekurIRCd's answer: an optional layer, built into the daemon and configured from a single file, that stops most of this
+  <em>before</em> a client ever registers. No external services, no extra processes.</p>
+<p>It is a module you choose to run. Leave the file out and the daemon behaves as a plain ircd; drop it in and edit one place to tune all of it.</p>
 
 <h2>why it matters</h2>
 <ul>
@@ -30,61 +32,133 @@
 
 <h2>the layers</h2>
 <div class="tablewrap"><table>
-<tr><th>Layer</th><th>Catches</th><th>Config</th></tr>
-<tr><td>DNSBL check</td><td>Known open proxies, drones and spam hosts listed by a DNS blocklist</td><td><code>[dnsbl]</code></td></tr>
-<tr><td>Connect-flood throttle</td><td>Scanners and bots that open and close sockets rapidly</td><td><code>[security] connect_flood_*</code></td></tr>
-<tr><td>Connection caps</td><td>One host holding many sockets; total overload</td><td><code>[security] max_connections*</code></td></tr>
-<tr><td>Per-client flood guard</td><td>Registered clients sending too many lines too fast</td><td><code>[security] flood_max_msgs</code>, <code>flood_window</code></td></tr>
+<tr><th>Layer</th><th>Catches</th><th>Section</th></tr>
+<tr><td>Blacklists (DNSBL)</td><td>Known open proxies, drones and spam hosts listed by a DNS blocklist</td><td><code>[blacklist]</code></td></tr>
+<tr><td>Proxy scanner</td><td>Open proxies nobody has reported yet, found by testing the connecting address</td><td><code>[scanner]</code></td></tr>
+<tr><td>Connection limits</td><td>One host holding many sockets, total overload, and scanners that open and close sockets rapidly</td><td><code>[connection]</code></td></tr>
+<tr><td>Per-client flood guard</td><td>Registered clients sending too many lines too fast</td><td><code>[flood]</code></td></tr>
 <tr><td>Spam protection</td><td>Advertising and mass-messaging bots that connect politely and then spam users or channels</td><td><code>[spam]</code>, <code>spamfilters.conf</code>, <code>SPAMFILTER</code></td></tr>
+<tr><td>Exemptions</td><td>Trusted addresses that must never be checked or scanned</td><td><code>[exempt]</code></td></tr>
 <tr><td>K/G/Z-lines</td><td>Manual and automatic bans, with durations (K/G match host or <code>user@host</code>; Z is IP-only)</td><td><code>KLINE</code> <code>GLINE</code> <code>ZLINE</code>, <code>klines_file</code></td></tr>
 </table></div>
 
-<h2>dnsbl checking</h2>
+<h2>turning it on</h2>
+<p>The bundle is one file, <code>protection.toml</code>, kept next to <code>sekurircd.toml</code>. A fully commented template ships as
+  <code>config/protection.template.toml</code>.</p>
+<pre>cp config/protection.template.toml /etc/sekurircd/protection.toml
+$EDITOR /etc/sekurircd/protection.toml
+/REHASH                              # no restart needed
+/PROTECT                             # shows what is active</pre>
+<ul>
+  <li><strong>The file is optional.</strong> Its location is <code>[security] protection_file</code> (default <code>"protection.toml"</code>, relative to the config directory;
+    <code>""</code> never looks for one). With no file, nothing changes from a plain <code>sekurircd.toml</code> setup.</li>
+  <li><strong>It wins over the old keys.</strong> The keys that now live in the bundle (<code>[spam]</code>, <code>[dnsbl]</code>, <code>max_connections*</code>,
+    <code>connect_flood_*</code>, <code>flood_*</code>) are still honoured from <code>sekurircd.toml</code>, so existing setups keep working untouched. When the bundle sets
+    one of them, the bundle's value is used; a key it leaves out keeps its old value.</li>
+  <li><strong>Legacy <code>[dnsbl]</code></strong> keeps working when the bundle defines no zones, and logs a one-time deprecation warning pointing here.</li>
+  <li><code>VERSION</code> shows the feature flags: <code>D</code> when blacklists are active, <code>P</code> when the proxy scanner is.</li>
+</ul>
+
+<h2>blacklists (dnsbl)</h2>
 <p>A DNSBL (DNS blocklist) is a DNS zone that answers "is this IP known-bad?". SekurIRCd reverses the connecting IPv4 address, looks up
-  <code>d.c.b.a.&lt;zone&gt;</code> on a worker thread, and treats any answer as "listed". Lookups never block the main loop: the new connection is simply
-  held, with no input read, until the verdict arrives. IPv6 addresses are not checked, and a zone that does not answer fails open, so the connection is let through.</p>
-<p>No zone is hardcoded, so a provider changing its policy can't surprise you. The shipped template enables the check with the EFnet RBL, an IRC-focused
+  <code>d.c.b.a.&lt;zone&gt;</code> on a worker thread, and reads the answer's last octet, the <em>reply code</em>, which says <em>why</em> it is listed.
+  Lookups never block the main loop: the new connection is simply held, with no input read, until the verdict arrives. IPv6 addresses are not checked, and a zone that
+  does not answer fails open, so the connection is let through.</p>
+<p>No zone is hardcoded, so a provider changing its policy can't surprise you. The template enables the EFnet RBL, an IRC-focused
   list of open proxies, drones and spamming hosts with no query-volume restrictions.</p>
 
-<h3>enable and configure</h3>
-<pre>[dnsbl]
+<h3>configure</h3>
+<pre>[blacklist]
 enabled = true
-zones = ["rbl.efnetrbl.org"]        # checked in order; first hit wins
-timeout = 5.0                       # seconds per lookup before "not listed"
-action = "kline"                    # "kline" or "reject"
-kline_duration = "1d"               # "1d", "12h", "30m", or seconds; "" = permanent
-#lookup_url = "https://dronebl.org/lookup?ip={ip}"   # optional link added to the ban reason</pre>
+timeout = 5.0                 # seconds to wait before treating the address as "not listed"
+action = "zline"              # "zline" | "kline" | "reject"
+ban_duration = "1d"           # "1d", "12h", "30m", or seconds; "" = permanent
+
+[[blacklist.zone]]
+name = "rbl.efnetrbl.org"
+type = "reply"                # "reply": last octet must equal a code below; "bitmask": bit test
+ban_unknown = true            # listed with a code that is not below: ban anyway?
+reason = "Blacklisted (%r) -- for more information, visit https://rbl.efnetrbl.org/?i=%i"
+replies = ["1:open proxy", "2:spamtrap666", "3:spamtrap50", "4:TOR", "5:drones / flooding"]</pre>
 <ul>
-  <li><code>enabled = true</code> needs at least one zone, otherwise the config is rejected at load. If you remove the whole <code>[dnsbl]</code> section, the check stays off.</li>
-  <li><code>action = "kline"</code> refuses the connection <em>and</em> records a ban for that IP, so repeat attempts are refused without another DNS lookup.
-    <code>"reject"</code> only refuses that one attempt and leaves no lasting ban.</li>
-  <li>Keep <code>kline_duration</code> short (the default is one day). Dynamic IPs get reassigned, and a permanent ban from a single listing is rarely right.</li>
+  <li>Add one <code>[[blacklist.zone]]</code> per zone. All are queried together, and the first in file order whose rules match decides.</li>
+  <li><code>replies</code> is what makes a general-purpose list usable: list only the categories you care about and set <code>ban_unknown = false</code>, and everything else is
+    ignored. With no <code>replies</code>, <em>any</em> listing bans. Use <code>type = "bitmask"</code> for lists that combine categories as bits in the last octet.</li>
+  <li>In <code>reason</code>: <code>%i</code> is the address, <code>%t</code> the zone, <code>%r</code> the matched reply text.</li>
+  <li><code>action = "zline"</code> refuses the connection <em>and</em> records a ban for that IP, so repeat attempts are refused without another DNS lookup, and every other
+    connection from that address is dropped too. <code>"reject"</code> only refuses that one attempt and leaves no lasting ban.</li>
+  <li>Keep <code>ban_duration</code> short (the default is one day). Dynamic IPs get reassigned, and a permanent ban from a single listing is rarely right.</li>
   <li>Add more zones only after confirming they are still live and accept your query volume; a dead zone just times out silently. The template comments
     weigh Spamhaus ZEN (email-focused, licensing limits), Tor exit lists (blocks every Tor user) and DroneBL (its public DNSBL was shut down in 2021, not recommended).</li>
 </ul>
 <p>To see whether an address is listed, reverse its octets and query the zone yourself: <code>dig +short 4.3.2.1.rbl.efnetrbl.org</code> checks
-  <code>1.2.3.4</code>. Any answer means listed; no answer means clean.</p>
+  <code>1.2.3.4</code>. Any answer means listed; the last octet is the reply code.</p>
 
-<h2>connect-flood throttle</h2>
+<h2>proxy scanner</h2>
+<p>A blacklist only knows about proxies somebody already reported. The scanner finds the rest itself. When a client connects, the server opens connections
+  <em>back</em> to that client's address on the classic proxy ports and asks each to relay to this server. If this server's own connect banner
+  (<code>*** Looking up your hostname</code>) comes back through the relay, the address is a working open proxy: it is banned, and so is everyone connected from it.</p>
+<div class="tablewrap"><table>
+<tr><th>Probe</th><th>What it does</th></tr>
+<tr><td><code>http</code></td><td>HTTP <code>CONNECT</code> to this server. The most common open proxy, found on many ports.</td></tr>
+<tr><td><code>httppost</code></td><td>An HTTP <code>POST</code> through a forward proxy. Sends one block of data, but enough of them still make a flood.</td></tr>
+<tr><td><code>socks4</code></td><td>SOCKS4 connect request.</td></tr>
+<tr><td><code>socks5</code></td><td>SOCKS5 with no authentication, then a connect request.</td></tr>
+</table></div>
+<p>The scan runs in the background: the client registers and chats as normal until a scan confirms, so honest users never wait on it. It uses non-blocking sockets in the
+  main event loop, not the worker threads, and is bounded three ways: a per-probe timeout, a <code>max_concurrent</code> cap on open probe sockets (a connection flood can't
+  exhaust your file descriptors), and an optional negative cache so a clean address isn't rescanned.</p>
+<pre>[scanner]
+enabled = false               # off by default
+action = "zline"              # "zline" | "kline" | "reject"
+ban_duration = "1d"
+protocols = ["http:80", "http:8080", "http:3128", "http:6588", "httppost:80",
+             "httppost:8080", "socks4:1080", "socks5:1080"]
+timeout = 10.0
+max_concurrent = 256
+negcache = "0"                # e.g. "1h": skip addresses that just scanned clean
+
+[scanner.target]
+ip = "203.0.113.10"           # THIS server's PUBLIC address (required)
+port = 6667</pre>
+<p class="note"><strong>Before you enable it:</strong></p>
+<ul>
+  <li><code>target.ip</code> must be this server's <strong>public</strong> address, reachable from anywhere. A proxy on the internet cannot reach <code>127.0.0.1</code> or
+    <code>192.168.x.x</code>, so a private address means the scanner runs and never finds anything. The server logs a warning at startup if the address looks private.</li>
+  <li>It makes outbound connections to arbitrary addresses. Some networks treat that as a port scan and report it to your hosting provider, so check your provider's policy.
+    <code>log_all_scans = true</code> records every probe (at DEBUG, in the log file) as an audit trail.</li>
+  <li>The connections a probe relays back to your server are recognised and exempt from the connect-flood throttle and the per-IP cap, and are never scanned themselves.</li>
+  <li>Try <code>action = "reject"</code> first if you want to watch what it finds before it bans anything.</li>
+  <li>A negative cache trades safety for speed: anyone running a proxy can switch it off for one scan, connect, and switch it back on. Off by default.</li>
+</ul>
+<p>Scan an address on demand as an oper with <code>/PROTECT SCAN &lt;ip&gt;</code>.</p>
+
+<h2>connection limits</h2>
+<h3>connect-flood throttle</h3>
 <p>Scanners often connect and drop faster than a concurrency cap can see. This tracks connections per IP over a time window; once an IP exceeds the
   limit it is banned automatically and told <code>reconnecting too fast</code>.</p>
-<pre>[security]
+<pre>[connection]
 connect_flood_max = 5                 # more than this many connects...
 connect_flood_window = 10.0           # ...within this many seconds -> ban
-connect_flood_kline_duration = "10m"  # "" or 0 = permanent; connect_flood_max = 0 disables the check</pre>
+connect_flood_ban_duration = "10m"    # "" = permanent; connect_flood_max = 0 disables the check</pre>
 <p>Raise <code>connect_flood_max</code> if many legitimate users share one NAT'd IP, such as a school, an office, or a web gateway like Kiwi in front of your server.</p>
 
-<h2>connection caps</h2>
-<pre>[security]
+<h3>connection caps</h3>
+<pre>[connection]
 max_connections = 0            # total simultaneous connections; 0 = unlimited
 max_connections_per_ip = 0     # per single IP; 0 = unlimited</pre>
 <p>Both default to unlimited. Set them on any public server; a per-IP cap of 3 to 5 suits most networks, higher if gateways or shared NATs front real users.
   Refused connections get a plain <code>ERROR</code> before registration.</p>
 
+<h2>per-client flood guard</h2>
+<pre>[flood]
+max_msgs = 20      # a registered client sending more than this many lines...
+window = 1.0       # ...within this many seconds is disconnected</pre>
+
 <h2>bans: k-line, g-line, z-line</h2>
-<p>All three ban by IP mask, are enforced before registration, and disconnect matching clients that are already online. Automatic bans from DNSBL hits and the
-  connect-flood throttle are recorded as <strong>Z-lines</strong> (a pure-IP ban applied before registration), tagged with what set them: <code>dnsbl</code>
-  or <code>connect-flood</code>.</p>
+<p>All three ban by IP mask, are enforced before registration, and disconnect matching clients that are already online. Automatic bans from blacklist hits, the proxy scanner and the
+  connect-flood throttle are recorded as <strong>Z-lines</strong> (a pure-IP ban applied before registration), tagged with what set them: <code>dnsbl</code>,
+  <code>protection</code> (the scanner) or <code>connect-flood</code>.</p>
 <pre>/ZLINE 198.51.100.7 1d :abuse from this host    # add: mask, optional duration, reason
 /ZLINE                                          # no arguments: list active lines
 /UNZLINE 198.51.100.7                           # remove
@@ -92,13 +166,14 @@ max_connections_per_ip = 0     # per single IP; 0 = unlimited</pre>
 <p><code>KLINE</code>/<code>UNKLINE</code> and <code>GLINE</code>/<code>UNGLINE</code> take the same arguments. Durations are <code>30m</code>, <code>12h</code>, <code>1d</code>,
   or omit for permanent. Set <code>[security] klines_file</code> so bans survive <code>REHASH</code> and restarts; without it they live in memory only.</p>
 <p><strong>What each letter matches.</strong> <code>ZLINE</code> is enforced at <code>accept()</code>, before the client has sent anything, so it can only ever match the
-  <em>IP</em> &mdash; that is why the DNSBL and connect-flood auto-bans use it. <code>KLINE</code> and <code>GLINE</code> additionally match <code>user@host</code>, so
+  <em>IP</em> &mdash; that is why the blacklist, scanner and connect-flood auto-bans use it. <code>KLINE</code> and <code>GLINE</code> additionally match <code>user@host</code>, so
   <code>*.example.com</code> or <code>bob@*.example.com</code> do what they look like they do. Since a hostname isn't known until rDNS/ident finish, a host mask is
   checked again at the end of registration rather than at connect time. The ident is tried both bare and <code>~</code>-prefixed, so a mask bites whether or not
   identd answered.</p>
 <p class="note"><strong>False positives:</strong> a legitimate user who is on a DNSBL can be freed with <code>UNZLINE</code>, but their next connection triggers a fresh
-  lookup and bans them again, since there is no allow-list. The reliable fixes are dropping that zone, or using <code>action = "reject"</code> so no lasting ban exists and
-  pointing the user at the provider's delisting page, which is what <code>lookup_url</code> is for.</p>
+  lookup and bans them again, unless the address is under <code>[exempt]</code>. The reliable fixes are that exemption, dropping the zone, narrowing it with
+  <code>replies</code> and <code>ban_unknown = false</code>, or using <code>action = "reject"</code> so no lasting ban exists and pointing the user at the provider's
+  delisting page, which is what <code>%i</code> in the ban <code>reason</code> is for.</p>
 
 <h2>spam protection</h2>
 <p>The layers above act on connections. <code>[spam]</code> acts on what a connected user <em>sends</em>. It is <strong>off by default</strong>
@@ -152,44 +227,68 @@ qPt zline 1h "advertising in reason" https?://[^ ]+.*(casino|porn)</pre>
 <h2>monitoring</h2>
 <h3>server notices</h3>
 <p>Opers get user mode <code>+s</code> automatically on <code>/OPER</code> and receive a notice for every refused connection, for example
-  <code>Rejected connection from 203.0.113.9: Proxy/Drone detected (rbl.efnetrbl.org)</code>, and for every ban added, removed or expired. If it gets noisy
+  <code>Rejected connection from 203.0.113.9: Blacklisted (drones / flooding) ...</code>, and for every ban added, removed or expired. If it gets noisy
   during an attack, silence it with <code>/MODE &lt;yournick&gt; -s</code>.</p>
 
+<h3>/PROTECT</h3>
+<pre>/PROTECT                 # server opers: what is active, and the counters
+/PROTECT SCAN 203.0.113.9</pre>
+<p>Prints the bundle file in use, the blacklists (zones, action, hits so far), the scanner (probes per client, target, in flight, scanned, proxies found, negcache size), the
+  connection limits, the flood guard and spam protection.</p>
+
 <h3>debug channel and log</h3>
+<p>The bundle needs no notification setup of its own. Everything it does is logged, and the <code>[debug_channel]</code> you already have relays it, so
+  <code>#server-debug</code> doubles as its live feed:</p>
 <pre>[debug_channel]
 enabled = true
 name = "#server-debug"      # oper-only; JOIN is refused to everyone else
-min_level = "WARNING"       # DNSBL hits are logged at WARNING, so they appear here
-stats_interval = 300        # seconds between summary lines; these are INFO, so also set min_level = "INFO"</pre>
-<p>Each DNSBL hit is also written to the log (<code>[logging]</code>) as a warning:</p>
-<pre>dnsbl: 203.0.113.9 listed in rbl.efnetrbl.org -- K-lined</pre>
-<p>With <code>stats_interval</code> set, the periodic summary tells you how well protection is working (example output):</p>
+min_level = "INFO"          # bans are WARNING, the startup summary and stats lines are INFO
+stats_interval = 300        # seconds between summary lines</pre>
+<pre>[WARNING] protection: 203.0.113.9 is an open socks5 proxy (port 1080) -- Z-lined for the configured duration, 3 client(s) disconnected
+[WARNING] dnsbl: 203.0.113.44 listed in rbl.efnetrbl.org (drones / flooding) -- Z-lined
+[INFO] protection: scanner: 8 probe(s) per client [http:80 ... socks5:1080], target 198.51.100.7:6667, action=zline, negcache 3600s, max 256 in flight
+[WARNING] protection: scanner.target.ip 10.0.0.5 is a private address -- proxies on the internet can't reach it ...</pre>
+<p>The startup summary is logged at start and after every <code>/REHASH</code>, so you can confirm what a reload actually turned on. With <code>stats_interval</code> set, the
+  periodic summary tells you how well protection is working (example output):</p>
 <pre>stats: users=142 (peak 190), channels=61 (18 registered), connections=9314 total,
-       lines active=0 K/0 G/37 Z (35 from DNSBL), dnsbl hits=412 total, ircd cpu=0.4% mem=21MB</pre>
-<p>Watch <code>dnsbl hits</code> and the count of active lines <em>from DNSBL</em>: a steady trickle is normal, and a sudden climb means an attack is being absorbed.
-  If the hit count stays at zero on a public server for weeks, check that the zone still resolves with <code>dig</code>.</p>
+       lines active=0 K/0 G/38 Z (35 from DNSBL, 3 from scanner), dnsbl hits=412 total,
+       proxy scanner: scanned=8817 proxies=3 in-flight=2 negcache=641, ircd cpu=0.4% mem=21MB</pre>
+<p>Watch <code>dnsbl hits</code>, <code>proxies</code> and the count of active lines from each: a steady trickle is normal, and a sudden climb means an attack is being absorbed.
+  If the hit count stays at zero on a public server for weeks, check that the zone still resolves with <code>dig</code>. Per-probe detail (<code>log_all_scans</code>)
+  goes to the log file at DEBUG, deliberately not to the channel.</p>
 
 <h2>recommended setup</h2>
-<pre>[security]
+<pre># protection.toml
+[exempt]
+ips = ["127.*"]
+
+[connection]
 max_connections_per_ip = 4
 connect_flood_max = 5
 connect_flood_window = 10.0
-connect_flood_kline_duration = "10m"
-klines_file = "klines.json"          # persist bans across restarts
+connect_flood_ban_duration = "10m"
 
-[dnsbl]
+[blacklist]
 enabled = true
-zones = ["rbl.efnetrbl.org"]
-action = "kline"
-kline_duration = "1d"
+action = "zline"
+ban_duration = "1d"
+
+[[blacklist.zone]]
+name = "rbl.efnetrbl.org"
+ban_unknown = true
+replies = ["1:open proxy", "2:spamtrap666", "3:spamtrap50", "4:TOR", "5:drones / flooding"]
+
+# sekurircd.toml
+[security]
+klines_file = "klines.json"          # persist bans across restarts
 
 [debug_channel]
 enabled = true
 min_level = "INFO"
 stats_interval = 300</pre>
-<p>Apply with <code>/REHASH</code>. Then open a client as an oper, join <code>#server-debug</code>, and confirm the summary line shows up. See the
-  <a href="configuration.html">configuration</a> page and the full template on
-  <a href="https://github.com/gcanosa/SekurIRCd/blob/main/config/sekurircd.template.toml">GitHub</a> for every key.</p>
+<p>Apply with <code>/REHASH</code>. Then open a client as an oper, join <code>#server-debug</code>, and confirm the summary line shows up. Add the <code>[scanner]</code> once you have
+  read the notes above and know your public address. See the <a href="configuration.html">configuration</a> page and the full template on
+  <a href="https://github.com/gcanosa/SekurIRCd/blob/main/config/protection.template.toml">GitHub</a> for every key.</p>
 </main>
 </div>
 <footer id="site-footer"></footer>

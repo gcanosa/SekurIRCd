@@ -102,11 +102,17 @@ static int do_rdns(const char *ip, char *out, size_t outsz) {
     return 1;
 }
 
-/* Standard reversed-octet DNSBL query convention (Spamhaus/SORBS/etc). */
-static int do_dnsbl(const job_t *j, char *out, size_t outsz) {
+/* Standard reversed-octet DNSBL query convention (Spamhaus/SORBS/etc). Asks
+ * every zone (the caller's per-zone reply policy decides which listings count,
+ * so "first hit wins" is no longer this function's call) and records each
+ * answer's last octet -- the DNSBL reply code -- in codes[]. Returns 1 if any
+ * zone listed the address, with the first listing's zone in `out`. */
+static int do_dnsbl(const job_t *j, char *out, size_t outsz, int *codes) {
+    for (int i = 0; i < WORKER_MAX_ZONES; i++) codes[i] = -1;
     unsigned int a, b, c, d;
     if (sscanf(j->ip, "%u.%u.%u.%u", &a, &b, &c, &d) != 4) return 0;
-    for (int i = 0; i < j->n_zones; i++) {
+    int listed = 0;
+    for (int i = 0; i < j->n_zones && i < WORKER_MAX_ZONES; i++) {
         char query[300];
         snprintf(query, sizeof query, "%u.%u.%u.%u.%s", d, c, b, a, j->zones[i]);
         /* getaddrinfo, not gethostbyname: this runs on N_WORKERS threads at
@@ -115,12 +121,13 @@ static int do_dnsbl(const job_t *j, char *out, size_t outsz) {
         memset(&hints, 0, sizeof hints);
         hints.ai_family = AF_INET;
         if (getaddrinfo(query, NULL, &hints, &res) == 0) {
+            codes[i] = (int)(ntohl(((struct sockaddr_in *)res->ai_addr)->sin_addr.s_addr) & 0xff);
             freeaddrinfo(res);
-            snprintf(out, outsz, "%s", j->zones[i]);
-            return 1;
+            if (!listed) snprintf(out, outsz, "%s", j->zones[i]);
+            listed = 1;
         }
     }
-    return 0;
+    return listed;
 }
 
 /* --- bounded resolver calls ------------------------------------------------
@@ -144,6 +151,7 @@ typedef struct {
     job_t job;
     int success;
     char text[256];
+    int codes[WORKER_MAX_ZONES];
 } dns_call_t;
 
 static void dns_call_release(dns_call_t *c) {
@@ -160,9 +168,12 @@ static void dns_call_release(dns_call_t *c) {
 static void *dns_call_main(void *arg) {
     dns_call_t *c = (dns_call_t *)arg;
     char text[256] = "";
+    int codes[WORKER_MAX_ZONES];
+    for (int i = 0; i < WORKER_MAX_ZONES; i++) codes[i] = -1;
     int ok = (c->job.type == JOB_RDNS) ? do_rdns(c->job.ip, text, sizeof text)
-                                        : do_dnsbl(&c->job, text, sizeof text);
+                                        : do_dnsbl(&c->job, text, sizeof text, codes);
     pthread_mutex_lock(&c->mu);
+    memcpy(c->codes, codes, sizeof codes);
     c->success = ok;
     memcpy(c->text, text, sizeof text);
     c->done = 1;
@@ -175,7 +186,7 @@ static void *dns_call_main(void *arg) {
 /* Runs `job`'s resolver lookup under a hard deadline. Returns 1 with the
  * answer in `out` if it finished in time, 0 on timeout, failure, or if the
  * helper thread couldn't be started. */
-static int dns_with_timeout(const job_t *job, char *out, size_t outsz) {
+static int dns_with_timeout(const job_t *job, char *out, size_t outsz, int *codes) {
     double timeout = job->timeout > 0 ? job->timeout : 5.0;
     dns_call_t *c = calloc(1, sizeof *c);
     if (!c) return 0;
@@ -211,6 +222,7 @@ static int dns_with_timeout(const job_t *job, char *out, size_t outsz) {
     if (c->done) {
         success = c->success;
         snprintf(out, outsz, "%s", c->text);
+        if (codes) memcpy(codes, c->codes, sizeof c->codes);
     }
     pthread_mutex_unlock(&c->mu);
     dns_call_release(c);
@@ -308,7 +320,8 @@ static void *worker_main(void *arg) {
         switch (node->job.type) {
             case JOB_RDNS:
             case JOB_DNSBL:
-                r.success = dns_with_timeout(&node->job, r.text, sizeof r.text);
+                for (int i = 0; i < WORKER_MAX_ZONES; i++) r.zone_code[i] = -1;
+                r.success = dns_with_timeout(&node->job, r.text, sizeof r.text, r.zone_code);
                 break;
             case JOB_IDENT:
                 r.success = do_ident(node->job.ip, node->job.remote_port, node->job.local_port,

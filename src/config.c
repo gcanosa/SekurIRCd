@@ -1,4 +1,6 @@
 #include "config.h"
+
+#include <arpa/inet.h>
 #include "client.h" /* SPAM_TRACK */
 #include "proto.h"
 #include "version.h"
@@ -8,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -195,6 +198,28 @@ int config_spamfilters_path(const config_t *cfg, char *out, size_t outsz) {
     return 1;
 }
 
+int config_protection_path(const config_t *cfg, char *out, size_t outsz) {
+    if (cfg->security.protection_file[0] == '\0' || cfg->path[0] == '\0') return 0;
+    resolve_against_config_dir(cfg, cfg->security.protection_file, out, outsz);
+    return 1;
+}
+
+static const struct { const char *name; int type; } SCAN_PROTOS[] = {
+    {"http", SCAN_HTTP}, {"httppost", SCAN_HTTPPOST}, {"socks4", SCAN_SOCKS4}, {"socks5", SCAN_SOCKS5},
+};
+
+int config_scan_proto_parse(const char *name) {
+    for (size_t i = 0; i < sizeof SCAN_PROTOS / sizeof SCAN_PROTOS[0]; i++)
+        if (strcasecmp(name, SCAN_PROTOS[i].name) == 0) return SCAN_PROTOS[i].type;
+    return 0;
+}
+
+const char *config_scan_proto_name(int type) {
+    for (size_t i = 0; i < sizeof SCAN_PROTOS / sizeof SCAN_PROTOS[0]; i++)
+        if (SCAN_PROTOS[i].type == type) return SCAN_PROTOS[i].name;
+    return "?";
+}
+
 int config_accounts_path(const config_t *cfg, char *out, size_t outsz) {
     if (!cfg->accounts.enabled) return 0;
     resolve_against_config_dir(cfg, cfg->accounts.store_file, out, outsz);
@@ -278,6 +303,19 @@ void config_defaults(config_t *out) {
     out->security.connect_flood_window = 10.0;
     snprintf(out->security.connect_flood_kline_duration, sizeof out->security.connect_flood_kline_duration, "10m");
 
+    snprintf(out->security.protection_file, CFG_PATH, "protection.toml");
+
+    snprintf(out->protection.bl_action, sizeof out->protection.bl_action, "zline");
+    snprintf(out->protection.bl_ban_duration, sizeof out->protection.bl_ban_duration, "1d");
+    out->protection.bl_timeout = 5.0;
+    snprintf(out->protection.scan_action, sizeof out->protection.scan_action, "zline");
+    snprintf(out->protection.scan_ban_duration, sizeof out->protection.scan_ban_duration, "1d");
+    snprintf(out->protection.scan_reason, CFG_STR, "Open %%t proxy found on your host (port %%p) -- secure it and reconnect");
+    out->protection.scan_timeout = 10.0;
+    out->protection.scan_max_read = 4096;
+    out->protection.scan_max_concurrent = 256;
+    out->protection.target_port = 6667;
+
     snprintf(out->messages.motd, CFG_PATH, "ircd.motd");
     snprintf(out->messages.oper_motd, CFG_PATH, "oper.motd");
     snprintf(out->messages.rules, CFG_PATH, "ircd.rules");
@@ -325,6 +363,49 @@ void config_defaults(config_t *out) {
     snprintf(out->debug_channel.min_level, sizeof out->debug_channel.min_level, "WARNING");
     out->debug_channel.stats_interval = 0;
     snprintf(out->debug_channel.chanserv_pidfile, CFG_PATH, "%s", "");
+}
+
+/* [spam]. Defaults are the values already in `out`, so this can run twice --
+ * once over sekurircd.toml, once over the Protection bundle file -- with the
+ * second pass only overriding the keys that file actually sets. */
+static int parse_spam(toml_table_t *sp, config_t *out, char *errbuf, size_t errbufsz) {
+    cfg_spam_t *o = &out->spam;
+    /* cfg_get_str snprintf's the default into `out`; passing `out` itself as
+     * the default would be an overlapping copy, so hand it a snapshot. */
+    char dflt[sizeof o->limit_action], dflt2[sizeof o->filters_file];
+    snprintf(dflt, sizeof dflt, "%s", o->limit_action);
+    snprintf(dflt2, sizeof dflt2, "%s", o->filters_file);
+    if (cfg_get_bool(sp, "enabled", o->enabled, &o->enabled, errbuf, errbufsz, "spam.enabled")) return -1;
+    if (cfg_get_bool(sp, "exempt_opers", o->exempt_opers, &o->exempt_opers, errbuf, errbufsz, "spam.exempt_opers")) return -1;
+    if (cfg_get_bool(sp, "exempt_identified", o->exempt_identified, &o->exempt_identified, errbuf, errbufsz, "spam.exempt_identified")) return -1;
+    if (cfg_get_duration(sp, "trust_age", o->trust_age, &o->trust_age, errbuf, errbufsz, "spam.trust_age")) return -1;
+    if (cfg_get_duration(sp, "new_user_period", o->new_user_period, &o->new_user_period, errbuf, errbufsz, "spam.new_user_period")) return -1;
+    if (cfg_get_int(sp, "max_targets", o->max_targets, &o->max_targets, errbuf, errbufsz, "spam.max_targets")) return -1;
+    if (cfg_get_duration(sp, "target_window", o->target_window, &o->target_window, errbuf, errbufsz, "spam.target_window")) return -1;
+    if (cfg_get_int(sp, "max_repeat", o->max_repeat, &o->max_repeat, errbuf, errbufsz, "spam.max_repeat")) return -1;
+    if (cfg_get_str(sp, "limit_action", dflt, o->limit_action, sizeof o->limit_action, errbuf, errbufsz, "spam.limit_action")) return -1;
+    if (cfg_get_duration(sp, "zline_duration", o->zline_duration, &o->zline_duration, errbuf, errbufsz, "spam.zline_duration")) return -1;
+    if (cfg_get_bool(sp, "filters_enabled", o->filters_enabled, &o->filters_enabled, errbuf, errbufsz, "spam.filters_enabled")) return -1;
+    if (cfg_get_str(sp, "filters_file", dflt2, o->filters_file, CFG_PATH, errbuf, errbufsz, "spam.filters_file")) return -1;
+    if (o->max_targets < 0 || o->max_targets >= SPAM_TRACK) {
+        snprintf(errbuf, errbufsz, "spam.max_targets must be 0 (off) to %d", SPAM_TRACK - 1);
+        return -1;
+    }
+    if (o->max_repeat < 0 || o->max_repeat > SPAM_TRACK) {
+        snprintf(errbuf, errbufsz, "spam.max_repeat must be 0 (off) to %d", SPAM_TRACK);
+        return -1;
+    }
+    if (o->target_window < 1 && (o->max_targets || o->max_repeat)) {
+        snprintf(errbuf, errbufsz, "spam.target_window must be at least 1s while max_targets/max_repeat are on");
+        return -1;
+    }
+    if (strcmp(o->limit_action, "block") && strcmp(o->limit_action, "warn") &&
+        strcmp(o->limit_action, "kill") && strcmp(o->limit_action, "zline")) {
+        snprintf(errbuf, errbufsz, "spam.limit_action must be \"block\", \"warn\", \"kill\" or \"zline\"");
+        return -1;
+    }
+
+    return 0;
 }
 
 /* --- build from parsed TOML ---------------------------------------------------- */
@@ -381,6 +462,7 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
     if (cfg_get_bool(sec, "oper_host_masking", 0, &out->security.oper_host_masking, errbuf, errbufsz, "security.oper_host_masking")) return -1;
     if (cfg_get_str(sec, "oper_host_format", "netadmin.{network}", out->security.oper_host_format, CFG_STR, errbuf, errbufsz, "security.oper_host_format")) return -1;
     if (cfg_get_str(sec, "klines_file", "", out->security.klines_file, CFG_PATH, errbuf, errbufsz, "security.klines_file")) return -1;
+    if (cfg_get_str(sec, "protection_file", "protection.toml", out->security.protection_file, CFG_PATH, errbuf, errbufsz, "security.protection_file")) return -1;
     if (cfg_get_str(sec, "default_user_modes", "", out->security.default_user_modes, sizeof out->security.default_user_modes, errbuf, errbufsz, "security.default_user_modes")) return -1;
     if (cfg_get_str(sec, "oper_auto_join", "", out->security.oper_auto_join, CFG_STR, errbuf, errbufsz, "security.oper_auto_join")) return -1;
     if (cfg_get_str(sec, "die_password", "", out->security.die_password, CFG_STR, errbuf, errbufsz, "security.die_password")) return -1;
@@ -629,36 +711,7 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
         int e;
         toml_table_t *sp = cfg_get_section(raw, "spam", errbuf, errbufsz, &e);
         if (e) return -1;
-        cfg_spam_t *o = &out->spam;
-        if (cfg_get_bool(sp, "enabled", 0, &o->enabled, errbuf, errbufsz, "spam.enabled")) return -1;
-        if (cfg_get_bool(sp, "exempt_opers", 1, &o->exempt_opers, errbuf, errbufsz, "spam.exempt_opers")) return -1;
-        if (cfg_get_bool(sp, "exempt_identified", 1, &o->exempt_identified, errbuf, errbufsz, "spam.exempt_identified")) return -1;
-        if (cfg_get_duration(sp, "trust_age", 0, &o->trust_age, errbuf, errbufsz, "spam.trust_age")) return -1;
-        if (cfg_get_duration(sp, "new_user_period", 30, &o->new_user_period, errbuf, errbufsz, "spam.new_user_period")) return -1;
-        if (cfg_get_int(sp, "max_targets", 5, &o->max_targets, errbuf, errbufsz, "spam.max_targets")) return -1;
-        if (cfg_get_duration(sp, "target_window", 30, &o->target_window, errbuf, errbufsz, "spam.target_window")) return -1;
-        if (cfg_get_int(sp, "max_repeat", 4, &o->max_repeat, errbuf, errbufsz, "spam.max_repeat")) return -1;
-        if (cfg_get_str(sp, "limit_action", "block", o->limit_action, sizeof o->limit_action, errbuf, errbufsz, "spam.limit_action")) return -1;
-        if (cfg_get_duration(sp, "zline_duration", 3600, &o->zline_duration, errbuf, errbufsz, "spam.zline_duration")) return -1;
-        if (cfg_get_bool(sp, "filters_enabled", 1, &o->filters_enabled, errbuf, errbufsz, "spam.filters_enabled")) return -1;
-        if (cfg_get_str(sp, "filters_file", "spamfilters.conf", o->filters_file, CFG_PATH, errbuf, errbufsz, "spam.filters_file")) return -1;
-        if (o->max_targets < 0 || o->max_targets >= SPAM_TRACK) {
-            snprintf(errbuf, errbufsz, "spam.max_targets must be 0 (off) to %d", SPAM_TRACK - 1);
-            return -1;
-        }
-        if (o->max_repeat < 0 || o->max_repeat > SPAM_TRACK) {
-            snprintf(errbuf, errbufsz, "spam.max_repeat must be 0 (off) to %d", SPAM_TRACK);
-            return -1;
-        }
-        if (o->target_window < 1 && (o->max_targets || o->max_repeat)) {
-            snprintf(errbuf, errbufsz, "spam.target_window must be at least 1s while max_targets/max_repeat are on");
-            return -1;
-        }
-        if (strcmp(o->limit_action, "block") && strcmp(o->limit_action, "warn") &&
-            strcmp(o->limit_action, "kill") && strcmp(o->limit_action, "zline")) {
-            snprintf(errbuf, errbufsz, "spam.limit_action must be \"block\", \"warn\", \"kill\" or \"zline\"");
-            return -1;
-        }
+        if (parse_spam(sp, out, errbuf, errbufsz)) return -1;
     }
 
     /* [tls] */
@@ -822,6 +875,252 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
     return 0;
 }
 
+/* --- Protection bundle ----------------------------------------------------------
+ *
+ * config/protection.toml groups every abuse-protection knob in one file. Its
+ * [connection] / [flood] / [spam] sections overlay the matching
+ * [security] / [spam] keys of sekurircd.toml (only the keys it sets), and
+ * [blacklist] / [scanner] / [exempt] are read into cfg.protection. Absent file
+ * = nothing overlaid, and a legacy [dnsbl] section keeps working. */
+
+static int check_ban_action(const char *field, const char *v, char *errbuf, size_t errbufsz) {
+    if (strcmp(v, "zline") && strcmp(v, "kline") && strcmp(v, "reject")) {
+        snprintf(errbuf, errbufsz, "%s must be \"zline\", \"kline\" or \"reject\"", field);
+        return -1;
+    }
+    return 0;
+}
+
+static int check_duration(const char *field, const char *v, char *errbuf, size_t errbufsz) {
+    if (v[0] && irc_parse_duration(v) < 0) {
+        snprintf(errbuf, errbufsz, "%s \"%s\" is not a valid duration (e.g. \"1d\", \"12h\", \"30m\", or a number of seconds)", field, v);
+        return -1;
+    }
+    return 0;
+}
+
+static int parse_bl_zones(toml_table_t *bl, cfg_protection_t *p, char *errbuf, size_t errbufsz) {
+    if (!bl || !toml_key_exists(bl, "zone")) return 0;
+    toml_array_t *arr = toml_array_in(bl, "zone");
+    if (!arr) { snprintf(errbuf, errbufsz, "[[blacklist.zone]] must be an array of tables"); return -1; }
+    int cnt = toml_array_nelem(arr);
+    if (cnt > CFG_MAX_BLACKLISTS) { snprintf(errbuf, errbufsz, "at most %d [[blacklist.zone]] entries are supported", CFG_MAX_BLACKLISTS); return -1; }
+    for (int i = 0; i < cnt; i++) {
+        toml_table_t *t = toml_table_at(arr, i);
+        cfg_blacklist_t *z = &p->blacklists[p->n_blacklists];
+        char type[16], replies[CFG_MAX_BL_REPLIES][CFG_STR];
+        int nrep = 0;
+        if (cfg_get_str(t, "name", "", z->zone, CFG_STR, errbuf, errbufsz, "blacklist.zone.name")) return -1;
+        if (!z->zone[0]) { snprintf(errbuf, errbufsz, "every [[blacklist.zone]] needs a non-empty name"); return -1; }
+        if (cfg_get_str(t, "type", "reply", type, sizeof type, errbuf, errbufsz, "blacklist.zone.type")) return -1;
+        if (strcmp(type, "reply") && strcmp(type, "bitmask")) {
+            snprintf(errbuf, errbufsz, "blacklist.zone.type must be \"reply\" or \"bitmask\" (zone %s)", z->zone);
+            return -1;
+        }
+        z->bitmask = strcmp(type, "bitmask") == 0;
+        if (cfg_get_bool(t, "ban_unknown", 1, &z->ban_unknown, errbuf, errbufsz, "blacklist.zone.ban_unknown")) return -1;
+        if (cfg_get_str(t, "reason", "Proxy/Drone detected (%t)", z->reason, CFG_STR, errbuf, errbufsz, "blacklist.zone.reason")) return -1;
+        if (cfg_get_str_array(t, "replies", replies, CFG_MAX_BL_REPLIES, &nrep, errbuf, errbufsz, "blacklist.zone.replies")) return -1;
+        for (int r = 0; r < nrep; r++) {
+            char *colon = strchr(replies[r], ':');
+            int code = colon ? atoi(replies[r]) : 0;
+            if (!colon || code < 0 || code > 255) {
+                snprintf(errbuf, errbufsz, "blacklist.zone.replies entries look like \"<0-255>:<text>\" (zone %s: \"%s\")", z->zone, replies[r]);
+                return -1;
+            }
+            z->replies[z->n_replies].code = code;
+            snprintf(z->replies[z->n_replies].text, CFG_STR, "%s", colon + 1);
+            z->n_replies++;
+        }
+        p->n_blacklists++;
+    }
+    return 0;
+}
+
+static int parse_scanner(toml_table_t *sc, cfg_protection_t *p, char *errbuf, size_t errbufsz) {
+    char dflt_a[sizeof p->scan_action], dflt_d[sizeof p->scan_ban_duration], dflt_r[CFG_STR];
+    snprintf(dflt_a, sizeof dflt_a, "%s", p->scan_action);
+    snprintf(dflt_d, sizeof dflt_d, "%s", p->scan_ban_duration);
+    snprintf(dflt_r, sizeof dflt_r, "%s", p->scan_reason);
+    if (cfg_get_bool(sc, "enabled", 0, &p->scan_enabled, errbuf, errbufsz, "scanner.enabled")) return -1;
+    if (cfg_get_str(sc, "action", dflt_a, p->scan_action, sizeof p->scan_action, errbuf, errbufsz, "scanner.action")) return -1;
+    if (cfg_get_str(sc, "ban_duration", dflt_d, p->scan_ban_duration, sizeof p->scan_ban_duration, errbuf, errbufsz, "scanner.ban_duration")) return -1;
+    if (cfg_get_str(sc, "reason", dflt_r, p->scan_reason, CFG_STR, errbuf, errbufsz, "scanner.reason")) return -1;
+    if (cfg_get_double(sc, "timeout", p->scan_timeout, &p->scan_timeout, errbuf, errbufsz, "scanner.timeout")) return -1;
+    if (cfg_get_int(sc, "max_read", p->scan_max_read, &p->scan_max_read, errbuf, errbufsz, "scanner.max_read")) return -1;
+    if (cfg_get_int(sc, "max_concurrent", p->scan_max_concurrent, &p->scan_max_concurrent, errbuf, errbufsz, "scanner.max_concurrent")) return -1;
+    if (cfg_get_str(sc, "bind", "", p->scan_bind, sizeof p->scan_bind, errbuf, errbufsz, "scanner.bind")) return -1;
+    if (cfg_get_duration(sc, "negcache", 0, &p->scan_negcache, errbuf, errbufsz, "scanner.negcache")) return -1;
+    if (cfg_get_bool(sc, "log_all_scans", 0, &p->scan_log_all, errbuf, errbufsz, "scanner.log_all_scans")) return -1;
+
+    char protos[CFG_MAX_SCAN_PROTOCOLS][CFG_STR];
+    int np = 0;
+    if (cfg_get_str_array(sc, "protocols", protos, CFG_MAX_SCAN_PROTOCOLS, &np, errbuf, errbufsz, "scanner.protocols")) return -1;
+    for (int i = 0; i < np; i++) {
+        char *colon = strchr(protos[i], ':');
+        int port = colon ? atoi(colon + 1) : 0;
+        if (colon) *colon = '\0';
+        int type = config_scan_proto_parse(protos[i]);
+        if (!colon || !type || port < 1 || port > 65535) {
+            snprintf(errbuf, errbufsz, "scanner.protocols entries look like \"socks5:1080\" -- type is http, httppost, socks4 or socks5, port 1-65535");
+            return -1;
+        }
+        p->protocols[p->n_protocols].type = type;
+        p->protocols[p->n_protocols].port = port;
+        p->n_protocols++;
+    }
+
+    toml_table_t *tg = sc ? toml_table_in(sc, "target") : NULL;
+    if (cfg_get_str(tg, "ip", "", p->target_ip, sizeof p->target_ip, errbuf, errbufsz, "scanner.target.ip")) return -1;
+    if (cfg_get_int(tg, "port", p->target_port, &p->target_port, errbuf, errbufsz, "scanner.target.port")) return -1;
+    if (cfg_get_str_array(tg, "strings", p->target_strings, CFG_MAX_TARGET_STRINGS, &p->n_target_strings, errbuf, errbufsz, "scanner.target.strings")) return -1;
+    if (p->n_target_strings == 0) {
+        /* What this ircd itself sends first (net.c's connect banner), plus the
+         * two refusals a relayed scan connection can hit instead. */
+        static const char *DEF[] = {"*** Looking up your hostname", "ERROR :Closing Link", "ERROR :Too many connections"};
+        for (int i = 0; i < 3; i++) snprintf(p->target_strings[i], CFG_STR, "%s", DEF[i]);
+        p->n_target_strings = 3;
+    }
+    for (int i = 0; i < p->n_target_strings; i++)
+        if (!p->target_strings[i][0] || strlen(p->target_strings[i]) > 200) {
+            snprintf(errbuf, errbufsz, "scanner.target.strings entries must be 1-200 characters");
+            return -1;
+        }
+
+    if (p->scan_timeout <= 0) { snprintf(errbuf, errbufsz, "scanner.timeout must be > 0"); return -1; }
+    if (p->scan_max_read < 64 || p->scan_max_read > 65536) { snprintf(errbuf, errbufsz, "scanner.max_read must be 64-65536"); return -1; }
+    if (p->scan_max_concurrent < 1) { snprintf(errbuf, errbufsz, "scanner.max_concurrent must be >= 1"); return -1; }
+    if (p->target_port < 1 || p->target_port > 65535) { snprintf(errbuf, errbufsz, "scanner.target.port must be in 1-65535"); return -1; }
+    if (check_ban_action("scanner.action", p->scan_action, errbuf, errbufsz)) return -1;
+    if (check_duration("scanner.ban_duration", p->scan_ban_duration, errbuf, errbufsz)) return -1;
+    struct in_addr ia;
+    if (p->scan_bind[0] && inet_pton(AF_INET, p->scan_bind, &ia) != 1) { snprintf(errbuf, errbufsz, "scanner.bind must be an IPv4 address"); return -1; }
+    if (p->scan_enabled) {
+        if (p->n_protocols == 0) { snprintf(errbuf, errbufsz, "scanner.enabled is true but scanner.protocols is empty"); return -1; }
+        if (inet_pton(AF_INET, p->target_ip, &ia) != 1) {
+            snprintf(errbuf, errbufsz, "scanner.enabled is true but scanner.target.ip is not set to an IPv4 address -- it must be this server's PUBLIC address, reachable from the internet");
+            return -1;
+        }
+    }
+    return 0;
+}
+
+/* Overlays a parsed protection file onto `out`. */
+static int apply_protection(toml_table_t *raw, config_t *out, char *errbuf, size_t errbufsz) {
+    cfg_security_t *sec = &out->security;
+    cfg_protection_t *p = &out->protection;
+    int e;
+
+    toml_table_t *ex = cfg_get_section(raw, "exempt", errbuf, errbufsz, &e);
+    if (e) return -1;
+    if (cfg_get_str_array(ex, "ips", p->exempt, CFG_MAX_EXEMPTS, &p->n_exempt, errbuf, errbufsz, "exempt.ips")) return -1;
+
+    toml_table_t *cn = cfg_get_section(raw, "connection", errbuf, errbufsz, &e);
+    if (e) return -1;
+    char dur[sizeof sec->connect_flood_kline_duration];
+    snprintf(dur, sizeof dur, "%s", sec->connect_flood_kline_duration);
+    if (cfg_get_int(cn, "max_connections", sec->max_connections, &sec->max_connections, errbuf, errbufsz, "connection.max_connections")) return -1;
+    if (cfg_get_int(cn, "max_connections_per_ip", sec->max_connections_per_ip, &sec->max_connections_per_ip, errbuf, errbufsz, "connection.max_connections_per_ip")) return -1;
+    if (cfg_get_int(cn, "connect_flood_max", sec->connect_flood_max, &sec->connect_flood_max, errbuf, errbufsz, "connection.connect_flood_max")) return -1;
+    if (cfg_get_double(cn, "connect_flood_window", sec->connect_flood_window, &sec->connect_flood_window, errbuf, errbufsz, "connection.connect_flood_window")) return -1;
+    if (cfg_get_str(cn, "connect_flood_ban_duration", dur, sec->connect_flood_kline_duration, sizeof sec->connect_flood_kline_duration, errbuf, errbufsz, "connection.connect_flood_ban_duration")) return -1;
+    if (sec->max_connections < 0) { snprintf(errbuf, errbufsz, "connection.max_connections must be >= 0 (0 = unlimited)"); return -1; }
+    if (sec->max_connections_per_ip < 0) { snprintf(errbuf, errbufsz, "connection.max_connections_per_ip must be >= 0 (0 = unlimited)"); return -1; }
+    if (check_duration("connection.connect_flood_ban_duration", sec->connect_flood_kline_duration, errbuf, errbufsz)) return -1;
+
+    toml_table_t *fl = cfg_get_section(raw, "flood", errbuf, errbufsz, &e);
+    if (e) return -1;
+    if (cfg_get_int(fl, "max_msgs", sec->flood_max_msgs, &sec->flood_max_msgs, errbuf, errbufsz, "flood.max_msgs")) return -1;
+    if (cfg_get_double(fl, "window", sec->flood_window, &sec->flood_window, errbuf, errbufsz, "flood.window")) return -1;
+    if (sec->flood_max_msgs < 1) { snprintf(errbuf, errbufsz, "flood.max_msgs must be >= 1"); return -1; }
+    if (sec->flood_window <= 0) { snprintf(errbuf, errbufsz, "flood.window must be > 0"); return -1; }
+
+    toml_table_t *sp = cfg_get_section(raw, "spam", errbuf, errbufsz, &e);
+    if (e) return -1;
+    if (sp && parse_spam(sp, out, errbuf, errbufsz)) return -1;
+
+    toml_table_t *bl = cfg_get_section(raw, "blacklist", errbuf, errbufsz, &e);
+    if (e) return -1;
+    if (bl) {
+        p->bl_configured = 1;
+        char dflt_a[sizeof p->bl_action], dflt_d[sizeof p->bl_ban_duration];
+        snprintf(dflt_a, sizeof dflt_a, "%s", p->bl_action);
+        snprintf(dflt_d, sizeof dflt_d, "%s", p->bl_ban_duration);
+        if (cfg_get_bool(bl, "enabled", 1, &p->bl_enabled, errbuf, errbufsz, "blacklist.enabled")) return -1;
+        if (cfg_get_double(bl, "timeout", p->bl_timeout, &p->bl_timeout, errbuf, errbufsz, "blacklist.timeout")) return -1;
+        if (cfg_get_str(bl, "action", dflt_a, p->bl_action, sizeof p->bl_action, errbuf, errbufsz, "blacklist.action")) return -1;
+        if (cfg_get_str(bl, "ban_duration", dflt_d, p->bl_ban_duration, sizeof p->bl_ban_duration, errbuf, errbufsz, "blacklist.ban_duration")) return -1;
+        if (parse_bl_zones(bl, p, errbuf, errbufsz)) return -1;
+        if (p->bl_timeout <= 0) { snprintf(errbuf, errbufsz, "blacklist.timeout must be > 0"); return -1; }
+        if (check_ban_action("blacklist.action", p->bl_action, errbuf, errbufsz)) return -1;
+        if (check_duration("blacklist.ban_duration", p->bl_ban_duration, errbuf, errbufsz)) return -1;
+        if (p->bl_enabled && p->n_blacklists == 0) {
+            snprintf(errbuf, errbufsz, "blacklist.enabled is true but there is no [[blacklist.zone]] -- add at least one");
+            return -1;
+        }
+    }
+    toml_table_t *sc = cfg_get_section(raw, "scanner", errbuf, errbufsz, &e);
+    if (e) return -1;
+    if (sc && parse_scanner(sc, p, errbuf, errbufsz)) return -1;
+    return 0;
+}
+
+/* Legacy [dnsbl] -> one blacklist entry per zone, when the bundle configures none. */
+static void protection_legacy_dnsbl(config_t *out) {
+    cfg_protection_t *p = &out->protection;
+    if (p->bl_configured || p->n_blacklists > 0 || !out->dnsbl.enabled) return;
+    p->bl_enabled = 1;
+    p->bl_legacy = 1;
+    p->bl_timeout = out->dnsbl.timeout;
+    /* [dnsbl] "kline" has always meant a Z-line (IP-only pre-registration ban). */
+    snprintf(p->bl_action, sizeof p->bl_action, "%s", strcmp(out->dnsbl.action, "kline") == 0 ? "zline" : "reject");
+    snprintf(p->bl_ban_duration, sizeof p->bl_ban_duration, "%s", out->dnsbl.kline_duration);
+    for (int i = 0; i < out->dnsbl.n_zones && i < CFG_MAX_BLACKLISTS; i++) {
+        cfg_blacklist_t *z = &p->blacklists[p->n_blacklists++];
+        snprintf(z->zone, CFG_STR, "%s", out->dnsbl.zones[i]);
+        z->ban_unknown = 1;
+        if (out->dnsbl.lookup_url[0]) {
+            /* {ip} -> %i, and any literal '%' doubled would need escaping; a URL rarely has one. */
+            char url[CFG_PATH]; size_t o = 0;
+            for (const char *c = out->dnsbl.lookup_url; *c && o + 3 < sizeof url; c++) {
+                if (strncmp(c, "{ip}", 4) == 0) { url[o++] = '%'; url[o++] = 'i'; c += 3; }
+                else url[o++] = *c;
+            }
+            url[o] = '\0';
+            snprintf(z->reason, CFG_STR, "Proxy/Drone detected (%%t). Check %s for details.", url);
+        } else {
+            snprintf(z->reason, CFG_STR, "Proxy/Drone detected (%%t)");
+        }
+    }
+}
+
+static int load_protection_file(config_t *out, char *errbuf, size_t errbufsz) {
+    char path[CFG_PATH];
+    if (config_protection_path(out, path, sizeof path)) {
+        FILE *fp = fopen(path, "rb");
+        if (fp) { /* a missing file is fine: enabling the bundle is "copy the template" */
+            char toml_err[256];
+            toml_table_t *raw = toml_parse_file(fp, toml_err, sizeof toml_err);
+            fclose(fp);
+            if (!raw) {
+                snprintf(errbuf, errbufsz, "invalid TOML in %s: %s", path, toml_err);
+                return -1;
+            }
+            out->protection.loaded = 1;
+            int rc = apply_protection(raw, out, errbuf, errbufsz);
+            if (rc) {
+                char msg[512];
+                snprintf(msg, sizeof msg, "%s: %s", path, errbuf);
+                snprintf(errbuf, errbufsz, "%s", msg);
+            }
+            toml_free(raw);
+            if (rc) return -1;
+        }
+    }
+    protection_legacy_dnsbl(out);
+    return 0;
+}
+
 int config_load(const char *path, config_t *out, char *errbuf, size_t errbufsz) {
     char resolved[CFG_PATH];
 
@@ -860,5 +1159,6 @@ int config_load(const char *path, config_t *out, char *errbuf, size_t errbufsz) 
 
     int rc = build_config(raw, resolved, out, errbuf, errbufsz);
     toml_free(raw);
+    if (rc == 0) rc = load_protection_file(out, errbuf, errbufsz);
     return rc;
 }

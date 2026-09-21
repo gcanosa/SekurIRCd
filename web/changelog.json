@@ -1,5 +1,20 @@
 [
   {
+    "tag": "v1.0.5",
+    "date": "2026-09-21",
+    "changes": [
+      "New Protection bundle: an optional, one-file abuse-protection layer (config/protection.toml, template in config/protection.template.toml) that groups DNSBL blacklists, the new proxy scanner, connection limits, the connect-flood throttle, the per-client flood guard and spam protection. Leave the file out and nothing changes",
+      "Active open-proxy scanner ([scanner], off by default): on connect the server tries HTTP CONNECT, HTTP POST, SOCKS4 and SOCKS5 back through the client's own address to its own public address; a working relay bans the address and drops everyone connected from it. Runs in the background on non-blocking sockets in the main loop, with a per-probe timeout, a concurrency cap and an optional negative cache",
+      "DNSBL blacklists moved into the bundle ([blacklist]) and gained per-zone reply rules: exact or bitmask reply codes, ban_unknown, and a per-zone ban reason with %i/%t/%r placeholders. The old [dnsbl] section keeps working and logs a deprecation warning",
+      "Connection caps, the connect-flood throttle, the flood guard and [spam] can now live in the bundle file ([connection], [flood], [spam]); where the bundle sets a key it overrides sekurircd.toml, and the old keys still work",
+      "[exempt] lists IP globs that are never DNSBL-checked or scanned; connections a scan relays back to the server are exempt from the connect-flood throttle and per-IP cap",
+      "New oper command /PROTECT shows the bundle's state and counters; /PROTECT SCAN <ip> scans an address on demand. /VERSION shows a P flag for the scanner",
+      "Bundle activity is logged with the protection/dnsbl tags and relayed into your debug channel: bans, a startup/REHASH summary and the periodic stats line now include proxy-scanner counters",
+      "A DNSBL hit now also disconnects every other connection from that address; the server sends the standard NOTICE AUTH \"*** Looking up your hostname\" line on connect",
+      "Docs: new Protection bundle page and config template"
+    ]
+  },
+  {
     "tag": "v1.0.4",
     "date": "2026-09-21",
     "changes": [

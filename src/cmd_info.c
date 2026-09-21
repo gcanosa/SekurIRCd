@@ -13,7 +13,7 @@ void cmd_version(server_t *srv, client_t *cl, irc_message_t *msg) {
     (void)msg;
     /* ircu/solanum style: "351 <nick> <version>(<build>). <server> :<flags>",
      * then the 005 lines. The flags are the optional features switched on
-     * here: A accounts/SASL, D DNSBL, L server links, S spam protection,
+     * here: A accounts/SASL, D DNSBL, L server links, P proxy scanner (Protection bundle), S spam protection,
      * T TLS listener ("-" when none). */
     char swver[CFG_STR + 48];
     server_software_version(srv, swver, sizeof swver);
@@ -22,7 +22,8 @@ void cmd_version(server_t *srv, client_t *cl, irc_message_t *msg) {
     char flags[8];
     int n = 0;
     if (srv->cfg.accounts.enabled) flags[n++] = 'A';
-    if (srv->cfg.dnsbl.enabled) flags[n++] = 'D';
+    if (srv->cfg.protection.bl_enabled && srv->cfg.protection.n_blacklists) flags[n++] = 'D';
+    if (srv->cfg.protection.scan_enabled) flags[n++] = 'P';
     if (srv->cfg.links.enabled) flags[n++] = 'L';
     if (srv->cfg.spam.enabled) flags[n++] = 'S';
     if (srv->cfg.tls.enabled) flags[n++] = 'T';
@@ -227,6 +228,8 @@ static const help_entry_t HELP_TABLE[] = {
                "Legacy pre-MONITOR watch list (one +/-nick or C/L/S per argument). Prefer MONITOR."}},
     {"SPAMFILTER", {"SPAMFILTER [LIST] | ADD <targets> <block|warn|kill|zline> <duration|-> <reason_with_underscores> <regex> | DEL <n>",
                     "Server-oper only: manage the [spam] regex content filters (targets: p c n N a q P t)."}},
+    {"PROTECT", {"PROTECT [SCAN <ipv4>]",
+                 "Server-oper only: show the Protection bundle status (blacklists, proxy scanner, limits), or SCAN an address now."}},
     {"REHASH", {"REHASH", "Reload the config file live. Server-oper only."}},
     {"DIE", {"DIE [password]", "Shut the server down. Server-oper only."}},
     {"RESTART", {"RESTART [password]", "Shut the server down and restart it in place. Server-oper only."}},
@@ -265,7 +268,7 @@ static const help_entry_t HELP_TABLE[] = {
     {"CAP", {"CAP LS|REQ|END|LIST", "IRCv3 capability negotiation -- normally handled by your client, not typed by hand."}},
     {"PING", {"PING <token>", "Request a PONG from the server."}},
     {"QUIT", {"QUIT [:reason]", "Disconnect from the server."}},
-    {"VERSION", {"VERSION", "Show the server's software version and build, its optional-feature flags (A accounts, D dnsbl, L links, S spam, T tls), and the 005 ISUPPORT tokens."}},
+    {"VERSION", {"VERSION", "Show the server's software version and build, its optional-feature flags (A accounts, D dnsbl, L links, P proxy scanner, S spam, T tls), and the 005 ISUPPORT tokens."}},
     {"TIME", {"TIME", "Show the server's current time."}},
     {"INFO", {"INFO", "Show general information about the server software."}},
     {"MOTD", {"MOTD", "Show the message of the day."}},

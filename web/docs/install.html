@@ -36,6 +36,7 @@ make clean</pre>
 <h2>run</h2>
 <pre>cp config/sekurircd.template.toml config/sekurircd.toml
 # edit config/sekurircd.toml (port, operators, TLS, ...)
+cp config/protection.template.toml config/protection.toml   # optional: the Protection bundle
 ./bin/sekurircd --config config/sekurircd.toml    # listens on 0.0.0.0:6667 by default
 
 ./bin/sekurircd --hash-password    # prompts, no echo, prints an scrypt hash for [[operators]]
@@ -78,6 +79,7 @@ make install
 #  units            -> ~/.config/systemd/user
 
 cp ~/.config/sekurircd/sekurircd.template.toml ~/.config/sekurircd/sekurircd.toml
+cp ~/.config/sekurircd/protection.template.toml ~/.config/sekurircd/protection.toml   # optional: the Protection bundle
 systemctl --user enable --now sekurircd
 systemctl --user reload sekurircd      # same as --rehash
 journalctl --user -u sekurircd -f</pre>

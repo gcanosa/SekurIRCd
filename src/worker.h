@@ -44,7 +44,8 @@ typedef struct {
     job_type_t type;
     uint64_t conn_id;
     int success;     /* 1 = got a usable result (hostname / ident / listed-zone) */
-    char text[256];  /* hostname / ident / listed zone / (JOB_HASH) new scrypt string */
+    char text[256];  /* hostname / ident / first listed zone / (JOB_HASH) new scrypt string */
+    int zone_code[WORKER_MAX_ZONES]; /* JOB_DNSBL: per submitted zone, the answer's last octet, or -1 = not listed */
     auth_purpose_t purpose; /* sasl/hash only, copied through from job_t */
 } job_result_t;
 

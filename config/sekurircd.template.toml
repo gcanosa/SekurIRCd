@@ -10,8 +10,14 @@
 #          cp config/ircd.motd               /etc/sekurircd/ircd.motd
 #          cp config/oper.motd config/ircd.rules /etc/sekurircd/
 #
+#      Optional, recommended -- the Protection bundle (DNSBL, proxy scanner,
+#      connection limits, flood and spam protection in one file):
+#
+#          cp config/protection.template.toml /etc/sekurircd/protection.toml
+#          cp config/spamfilters.conf         /etc/sekurircd/
+#
 #   2. Edit the copy to taste (port, network name, logging, security limits,
-#      operators, admin contact, vhosts, channel-creation policy, DNSBL, ...).
+#      operators, admin contact, vhosts, channel-creation policy, ...).
 #
 #   3. Start the daemon pointing at the copy:
 #
@@ -65,10 +71,9 @@ max_params = 15
 # Maximum allowed length of a nickname.
 max_nick_length = 30
 
-# Flood guard: more than this many messages within one second drops the
-# client, measured over a sliding window of this many seconds.
-flood_max_msgs = 20
-flood_window = 1
+# (The per-client flood guard, connection caps, connect-flood throttle, DNSBL,
+# proxy scanner and spam protection all live in the Protection bundle file --
+# see protection_file below and config/protection.template.toml.)
 
 # Seconds of silence before the server sends a keepalive PING, and seconds of
 # total silence (no line at all, including a PONG) before the connection is
@@ -141,29 +146,22 @@ default_user_modes = "iw"
 #die_password = ""
 #restart_password = ""
 
-# --- connection caps and connect-flood throttle -----------------------------
+# --- Protection bundle -------------------------------------------------------
 
-# Hard cap on total simultaneous connections (registered or not); refused
-# with a plain ERROR before registration, same as a K/G-line. 0 = unlimited.
-max_connections = 0
-
-# Hard cap on simultaneous connections from a single IP; 0 = unlimited.
-# Cheap defense against one host opening a large number of sockets --
-# doesn't require that host to be otherwise misbehaving (K/G-lines and
-# [dnsbl] below only catch already-known-bad addresses).
-max_connections_per_ip = 0
-
-# Connect-rate throttle: an IP that opens more than connect_flood_max
-# connections within connect_flood_window seconds gets an automatic K-line
-# for connect_flood_kline_duration (same duration syntax as [dnsbl]
-# kline_duration below, e.g. "10m", "1h", "1d"; 0 or "" = permanent).
-# Catches scanners/port-probes that connect and disconnect too fast for
-# max_connections_per_ip (a concurrency cap) to ever see -- each individual
-# hit is cheap, but an IP hammering the accept() path indefinitely still
-# isn't something to just shrug off. 0 disables this check.
-connect_flood_max = 5
-connect_flood_window = 10.0
-connect_flood_kline_duration = "10m"
+# The optional abuse-protection layer: DNSBL blacklists, the active open-proxy
+# scanner, connection caps, the connect-flood throttle, the per-client flood
+# guard and spam protection, all in ONE file -- config/protection.template.toml.
+# Relative to this config file's directory. The file is optional; with none the
+# server runs on the built-in defaults (no DNSBL, no scanner, no caps). "" =
+# never look for one.
+#
+# Compatibility: the older keys that now live in the bundle -- flood_max_msgs,
+# flood_window, max_connections, max_connections_per_ip, connect_flood_max,
+# connect_flood_window, connect_flood_kline_duration, and the [dnsbl] and
+# [spam] sections -- are still read from THIS file, so an existing
+# sekurircd.toml keeps working untouched. When a bundle file exists, the keys
+# it sets take precedence. New setups should use the bundle.
+protection_file = "protection.toml"
 
 # --- reserved nicks, ident, reverse-DNS -------------------------------------
 
@@ -254,61 +252,6 @@ max_accounts = 10000
 
 
 # -----------------------------------------------------------------------------
-# [spam] -- spam protection (private messages, notices, channels)
-# -----------------------------------------------------------------------------
-# Catches what the per-connection flood limit and [dnsbl] can't: a bot that
-# connects politely, then advertises to lots of users or channels. Three
-# independent layers, all inert unless `enabled = true`:
-#   1. New-connection restriction: a fresh connection can't PM users for
-#      `new_user_period` (channels are still open, and it can always message
-#      services and opers, so nobody is locked out of asking for help).
-#   2. Regex content filters from `filters_file` (see config/spamfilters.conf
-#      for the format and examples), plus /SPAMFILTER for live management.
-#   3. Recipient/repeat limits: messaging more than `max_targets` different
-#      people/channels, or sending the same text to `max_repeat` of them,
-#      inside `target_window`.
-# Operators get a server notice (+s) for every action, including the message
-# text, so rules and limits are easy to tune. Off by default; try
-# limit_action = "warn" and filter rules with the `warn` action first.
-# Applies to this server's own users only; each linked server keeps its own
-# copy of the filters file.
-[spam]
-enabled = false
-
-# Who is never checked. Services and opers are always safe when
-# exempt_opers is on; exempt_identified skips anyone logged in to an account
-# (SASL or /REGISTER), the cheapest way to let regulars through.
-exempt_opers = true
-exempt_identified = true
-
-# Connections older than this stop being subject to layer 3 (the limits) --
-# not the content filters. "0" = the limits always apply. Example: "1h".
-trust_age = "0"
-
-# Layer 1. "0" turns it off. Durations: "30s", "10m", "1h", "1d".
-new_user_period = "30s"
-
-# Layer 3. 0 disables that check. max_targets is at most 31, max_repeat at
-# most 32. Repeats only count for texts of 8+ characters.
-max_targets = 5
-target_window = "30s"
-max_repeat = 4
-
-# What a breach of layer 3 does: "block" (drop the message), "warn" (only
-# tell opers), "kill" (disconnect), or "zline" (disconnect + Z-line the IP for
-# zline_duration; "0" = permanent).
-limit_action = "block"
-zline_duration = "1h"
-
-# Layer 2 on/off. Set filters_enabled = false to keep the file but not use
-# it (the limits above keep working). Relative to this config file's
-# directory; "" = no file, rules added with /SPAMFILTER then live in memory
-# only and are lost on restart.
-filters_enabled = true
-filters_file = "spamfilters.conf"
-
-
-# -----------------------------------------------------------------------------
 # [debug_channel] -- live in-IRC view of the daemon's own log
 # -----------------------------------------------------------------------------
 # Oper-only channel relaying the daemon's own WARNING+ log lines as server
@@ -329,9 +272,9 @@ min_level = "WARNING"
 
 # Seconds between periodic "users/channels/connections/K-G-lines + CPU/mem"
 # snotes, logged at INFO (so they need min_level = INFO above to show up).
-# Includes how many active K/G-lines came from [dnsbl] hits (and the
-# cumulative DNSBL hit count) as a rough read on how much the DNSBL/proxy
-# protection is actually catching. 0 = off.
+# Includes how many active K/G/Z-lines came from the Protection bundle's
+# DNSBL hits and proxy scanner (plus the cumulative counts) as a rough read on
+# how much it is actually catching. 0 = off.
 stats_interval = 0
 
 # Path to chanserv's pidfile, to report its CPU/mem alongside the ircd's own
@@ -483,76 +426,6 @@ default_modes = "nt"
 # afterward like any other channel. Created on first use. Empty (the
 # default) means no auto-join.
 auto_join = []
-
-
-# -----------------------------------------------------------------------------
-# [dnsbl] -- DNS-based blackhole list checking
-# -----------------------------------------------------------------------------
-# Reject connections from IPs listed as known open proxies/drones/botnets by
-# a DNSBL provider. Uses the standard reversed-octet DNS-lookup protocol
-# (works with any provider's zone -- no zone is built in, since a
-# third-party service's hostname/policy can change; pick one whose terms you
-# accept). Adds up to `timeout` seconds of connect latency per configured
-# zone when on.
-[dnsbl]
-
-# On by default with EFnet RBL below -- an IRC-specific, no-strings-attached
-# DNSBL (unlike Spamhaus ZEN, which targets email spam sources and restricts
-# unlicensed high-volume/commercial querying). Set to false to disable.
-enabled = true
-
-# DNSBL zone hostnames to query, in order (first hit wins). Required if
-# enabled = true.
-zones = [
-    # EFnet RBL -- run for the EFnet IRC network specifically, for open
-    # proxies/drones/spamming hosts. No usage terms beyond "don't abuse it",
-    # and no query-volume restrictions -- the default for exactly this reason.
-    "rbl.efnetrbl.org",
-]
-
-# Other public zones you might add (uncomment and verify each is still
-# live/accepting queries before relying on it -- DNSBL providers come and
-# go, and a dead zone just times out silently rather than protecting
-# anything):
-#
-#   - "zen.spamhaus.org"   Spamhaus ZEN (proxies/spam sources) -- the
-#                          best-known DNSBL overall, but aimed at email
-#                          abuse and free only for low-volume/non-commercial
-#                          use; check Spamhaus's current usage terms before
-#                          adding it here.
-#   - "tor.dan.me.uk"      dan.me.uk's Tor exit-node list exposed as a DNSBL
-#                          (any-port form of their query -- see
-#                          https://www.dan.me.uk/dnsbl for the port-specific
-#                          variant this simple reversed-octet lookup can't
-#                          express). Blocks Tor exits, not just proxies.
-#   - "dnsbl.dronebl.org"  DroneBL -- NOT recommended: the project announced
-#                          it shut down its public DNSBL in 2021 and this
-#                          zone likely no longer resolves. Listed here only
-#                          so it isn't silently rediscovered and assumed to
-#                          work; confirm before use.
-
-# Seconds to wait for a zone's lookup before treating it as "not listed" and
-# trying the next zone (or letting the connection through if it was the
-# last one).
-timeout = 5.0
-
-# What happens when a connecting IP is listed: "kline" refuses the
-# connection AND records an in-memory K-line for that IP (persisted if
-# security.klines_file is set), so later attempts skip the DNS lookup
-# entirely; "reject" only refuses this one connection attempt.
-action = "kline"
-
-# How long an action = "kline" auto-line lasts: "1d", "12h", "30m", or a bare
-# number of seconds. Dynamic IPs get reassigned, so a permanent ban from one
-# DNSBL hit usually isn't appropriate. Empty string = permanent.
-kline_duration = "1d"
-
-# Optional human-facing verification link included in the auto-K-line's
-# reason ("{ip}" is replaced with the connecting address), e.g. how
-# UnrealIRCd's TKL reasons read: "Proxy/Drone detected. Check <url> for
-# details." Empty by default -- no third-party URL is assumed unless you
-# opt in.
-#lookup_url = "https://dronebl.org/lookup?ip={ip}"
 
 
 # -----------------------------------------------------------------------------

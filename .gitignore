@@ -5,6 +5,7 @@
 *.pid
 /logs/
 /config/sekurircd.toml
+/config/protection.toml
 /config/accounts.json
 /config/klines.json
 /config/tls/*.pem

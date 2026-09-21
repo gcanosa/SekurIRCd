@@ -31,6 +31,11 @@
 #define CFG_MAX_AUTO_JOIN        32
 #define CFG_MAX_DNSBL_ZONES      16
 #define CFG_MAX_LINK_PEERS       32
+#define CFG_MAX_SCAN_PROTOCOLS   32
+#define CFG_MAX_BLACKLISTS       16 /* == WORKER_MAX_ZONES (worker.h) */
+#define CFG_MAX_BL_REPLIES       16
+#define CFG_MAX_EXEMPTS          64
+#define CFG_MAX_TARGET_STRINGS    8
 
 typedef struct {
     char name[CFG_STR];
@@ -54,6 +59,7 @@ typedef struct {
     int oper_host_masking;
     char oper_host_format[CFG_STR];
     char klines_file[CFG_PATH];
+    char protection_file[CFG_PATH]; /* Protection bundle (config/protection.toml); "" = don't load one */
     char default_user_modes[16];
     char oper_auto_join[CFG_STR];
     char die_password[CFG_STR];
@@ -180,6 +186,61 @@ typedef struct {
     char chanserv_pidfile[CFG_PATH]; /* "" = don't report chanserv CPU/mem */
 } cfg_debug_channel_t;
 
+/* Protection bundle (config/protection.toml). Everything that guards the
+ * server against abusive connections lives in that one file: the DNSBL
+ * blacklists, the active open-proxy scanner, connection caps, the connect
+ * flood throttle, the per-client flood guard and [spam]. The last four are
+ * not stored here -- when the file is present it simply overlays the
+ * matching cfg.security.* / cfg.spam.* fields, so the rest of the daemon is
+ * unchanged. The blacklists and scanner are new state, held below. */
+#define SCAN_HTTP     1
+#define SCAN_HTTPPOST 2
+#define SCAN_SOCKS4   3
+#define SCAN_SOCKS5   4
+
+typedef struct { int type; int port; } cfg_scan_proto_t;
+typedef struct { int code; char text[CFG_STR]; } cfg_bl_reply_t;
+typedef struct {
+    char zone[CFG_STR];
+    int bitmask;                /* 1: reply codes are bit values; 0: exact last-octet match */
+    int ban_unknown;            /* listed with a code not in replies[]: ban anyway? */
+    char reason[CFG_STR];       /* %i ip, %t zone, %r matched reply text */
+    cfg_bl_reply_t replies[CFG_MAX_BL_REPLIES];
+    int n_replies;              /* 0 = any listing bans */
+} cfg_blacklist_t;
+
+typedef struct {
+    int loaded;                 /* a protection file was found and parsed */
+    char exempt[CFG_MAX_EXEMPTS][CFG_MASK]; /* IP globs never scanned or DNSBL-checked */
+    int n_exempt;
+
+    int bl_enabled;
+    int bl_configured;          /* the bundle file has a [blacklist] section: it overrides legacy [dnsbl] */
+    int bl_legacy;              /* zones came from the deprecated [dnsbl] section */
+    double bl_timeout;
+    char bl_action[16];         /* "zline" | "kline" | "reject" */
+    char bl_ban_duration[16];
+    cfg_blacklist_t blacklists[CFG_MAX_BLACKLISTS];
+    int n_blacklists;
+
+    int scan_enabled;
+    char scan_action[16];       /* "zline" | "kline" | "reject" */
+    char scan_ban_duration[16];
+    char scan_reason[CFG_STR];  /* %i ip, %t protocol, %p port */
+    double scan_timeout;
+    int scan_max_read;
+    int scan_max_concurrent;
+    char scan_bind[64];
+    long scan_negcache;         /* seconds a clean IP isn't rescanned; 0 = off */
+    int scan_log_all;
+    char target_ip[64];
+    int target_port;
+    char target_strings[CFG_MAX_TARGET_STRINGS][CFG_STR];
+    int n_target_strings;
+    cfg_scan_proto_t protocols[CFG_MAX_SCAN_PROTOCOLS];
+    int n_protocols;
+} cfg_protection_t;
+
 typedef struct {
     int enabled;
     char directory[CFG_PATH];
@@ -207,6 +268,7 @@ typedef struct {
     cfg_links_t links;
     cfg_accounts_t accounts;
     cfg_debug_channel_t debug_channel;
+    cfg_protection_t protection;
     char path[CFG_PATH]; /* "" = built-in defaults, no file loaded */
 } config_t;
 
@@ -226,6 +288,11 @@ void config_rules_path(const config_t *cfg, char *out, size_t outsz);
 int config_klines_path(const config_t *cfg, char *out, size_t outsz);
 /* [spam] filters_file resolved against the config dir; 0 if unset. */
 int config_spamfilters_path(const config_t *cfg, char *out, size_t outsz);
+/* [security] protection_file resolved against the config dir; 0 if unset. */
+int config_protection_path(const config_t *cfg, char *out, size_t outsz);
+/* Scanner protocol name <-> SCAN_* (case-insensitive). 0 / "?" if unknown. */
+int config_scan_proto_parse(const char *name);
+const char *config_scan_proto_name(int type);
 /* Returns 1 and fills `out`, or 0 (out untouched) if accounts are disabled. */
 int config_accounts_path(const config_t *cfg, char *out, size_t outsz);
 void config_tls_cert_path(const config_t *cfg, char *out, size_t outsz);

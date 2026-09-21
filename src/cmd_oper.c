@@ -446,16 +446,9 @@ static void line_common(server_t *srv, client_t *cl, irc_message_t *msg, const c
 
     /* enforce: disconnect anyone already connected who matches, except the
      * oper setting the line (even if their own address matches). */
-    int matched = 0;
-    for (client_t *c = srv->all_clients; c; c = c->all_next) {
-        if (c == cl || c->fd < 0 || c->quitting) continue;
-        if (!server_line_mask_hits(maskbuf, line_type, c->ip, c->user, c->realhost, c->ident_confirmed)) continue;
-        char reasonbuf[300];
-        snprintf(reasonbuf, sizeof reasonbuf, "%s-Lined: %s", line_type, reason);
-        snprintf(c->quit_reason, sizeof c->quit_reason, "%s", reasonbuf);
-        c->quitting = 1;
-        matched++;
-    }
+    char reasonbuf[300];
+    snprintf(reasonbuf, sizeof reasonbuf, "%s-Lined: %s", line_type, reason);
+    int matched = server_kline_enforce(srv, maskbuf, line_type, reasonbuf, cl);
     if (matched) log_info("oper", "%s %sLINE disconnected %d client(s) matching %s", cl->nick, line_type, matched, maskbuf);
 }
 

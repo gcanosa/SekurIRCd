@@ -11,7 +11,7 @@
 #include <strings.h>
 #include <time.h>
 
-/* "SekurIRCd-1.0.4(20260921-abc1234)" -- the daemon-name+version+build form wire fields that name
+/* "SekurIRCd-1.0.5(20260921-abc1234)" -- the daemon-name+version+build form wire fields that name
  * the software use (004 MYINFO, 351 VERSION), matching UnrealIRCd/InspIRCd
  * convention. cfg.server.version stays the bare number everywhere else
  * (logging, ADMIN, MOTD %version%, etc). */
@@ -34,6 +34,7 @@ int server_init(server_t *srv, const config_t *cfg) {
 
     server_kline_load(srv);
     spam_reload(srv);
+    protection_reload(srv);
     return 0;
 }
 
@@ -72,6 +73,7 @@ int server_rehash(server_t *srv, char *errbuf, size_t errbufsz) {
     srv->cfg = tmp;
     server_load_motd(srv);
     spam_reload(srv);
+    protection_reload(srv);
     return 0;
 }
 
@@ -678,6 +680,19 @@ void server_kline_add(server_t *srv, const char *mask, const char *reason,
     server_notify_opers(srv, snote);
 }
 
+int server_kline_enforce(server_t *srv, const char *mask, const char *line_type,
+                          const char *quit_reason, client_t *except) {
+    int matched = 0;
+    for (client_t *c = srv->all_clients; c; c = c->all_next) {
+        if (c == except || c->fd < 0 || c->quitting) continue;
+        if (!server_line_mask_hits(mask, line_type, c->ip, c->user, c->realhost, c->ident_confirmed)) continue;
+        snprintf(c->quit_reason, sizeof c->quit_reason, "%s", quit_reason);
+        c->quitting = 1;
+        matched++;
+    }
+    return matched;
+}
+
 int server_kline_remove(server_t *srv, const char *mask) {
     kline_entry_t **pp = &srv->klines;
     while (*pp) {
@@ -732,6 +747,7 @@ const char *server_kline_match(server_t *srv, const char *ip, const char *user,
 void server_free_tables(server_t *srv) {
     server_kline_flush(srv);
     spam_free(srv);
+    protection_free(srv);
     kline_entry_t *k = srv->klines;
     while (k) { kline_entry_t *next = k->next; free(k); k = next; }
     srv->klines = NULL;
