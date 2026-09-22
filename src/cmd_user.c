@@ -114,7 +114,7 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
             return;
         }
         if (!(m && (m->rank & RANK_OP)) && !(cl->umodes & UMODE_O) &&
-            channel_is_banned(chan, cl->nick, cl->user, cl->host, cl->account, cl->ident_confirmed)) {
+            channel_is_banned(chan, cl->nick, cl->user, cl->host, cl->realhost, cl->ip, cl->account, cl->ident_confirmed)) {
             if (!is_notice) { const char *pe[] = {target}; client_reply(cl, N_CANNOTSENDTOCHAN, pe, 1, "Cannot send to channel (+b)"); }
             return;
         }
@@ -145,6 +145,13 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
         delivered = 1;
     } else {
         client_t *dst = server_find_user(srv, target);
+        /* A connection that only sent NICK (not USER/welcome yet) holds its
+         * nick in srv->users for up to REGISTRATION_TIMEOUT -- it isn't a
+         * real, reachable user yet, so treat it as "no such nick" rather
+         * than letting messages queue into a socket that may never even
+         * finish registering (or reconnect and hold a different identity
+         * under the same nick). */
+        if (dst && !dst->registered) dst = NULL;
         if (!dst && !is_notice && strcasecmp(target, "NickServ") == 0) {
             nickserv_message(srv, cl, textbuf); /* virtual NickServ -- see cmd_reg.c */
             return;
@@ -183,6 +190,7 @@ void cmd_notice(server_t *srv, client_t *cl, irc_message_t *msg) { send_msg(srv,
 
 static void whois_one(server_t *srv, client_t *cl, const char *nick) {
     client_t *target = server_find_user(srv, nick);
+    if (target && !target->registered) target = NULL; /* not yet USER/welcomed -- see send_msg's dst check */
     if (!target) {
         err_no_such_nick(cl, nick);
         const char *pe[] = {nick};

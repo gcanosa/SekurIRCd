@@ -201,8 +201,24 @@ static void scan_hit(struct server *srv, protection_scan_t *s) {
 int protection_ip_related(struct server *srv, const char *ip) {
     struct in_addr ia;
     if (inet_pton(AF_INET, ip, &ia) != 1) return 0;
-    return ip_has_scans(srv, ia.s_addr) ||
-           slot_live(srv->prot.recent, PROT_RECENT_SLOTS, ia.s_addr, time(NULL));
+    time_t now = time(NULL);
+    if (!ip_has_scans(srv, ia.s_addr) && !slot_live(srv->prot.recent, PROT_RECENT_SLOTS, ia.s_addr, now))
+        return 0;
+    /* Single-use: an actual proxy relay is exactly one inbound connection
+     * back to our own listener. Without consuming the slot here, EVERY
+     * connection from a scanned IP -- not just the relay -- skipped
+     * max_connections_per_ip, the connect-flood check and a repeat DNSBL/
+     * scan for the rest of RECENT_GRACE (plus the whole scan_timeout while a
+     * scan is in flight): connect once to start a scan, then open as many
+     * connections as you like from that address for ~25s. Expiring the
+     * recent-grace slot on the first hit, and treating "still scanning" the
+     * same way via the same slot (set for the scan's full lifetime in
+     * protection_scan_start), limits the exemption to one connection per
+     * scan cycle -- if an attacker's own connection races the real relay and
+     * consumes it first, the real one just falls through to the normal
+     * checks, which is the safe direction to fail in. */
+    slot_set(srv->prot.recent, PROT_RECENT_SLOTS, ia.s_addr, now);
+    return 1;
 }
 
 static int start_probe(struct server *srv, uint32_t ip_be, const char *ip, const cfg_scan_proto_t *pr) {
@@ -268,7 +284,15 @@ int protection_scan_start(struct server *srv, const char *ip) {
     }
     int started = 0;
     for (int i = 0; i < p->n_protocols; i++) started += start_probe(srv, ia.s_addr, ip, &p->protocols[i]);
-    if (started && p->scan_log_all) log_debug("protection", "scanning %s with %d probe(s)", ip, started);
+    if (started) {
+        /* Cover the exemption window from scan start (not just scan_done/
+         * scan_hit) through scan_timeout + RECENT_GRACE, single-use -- see
+         * protection_ip_related. */
+        time_t secs = (time_t)p->scan_timeout;
+        if ((double)secs < p->scan_timeout) secs++;
+        slot_set(srv->prot.recent, PROT_RECENT_SLOTS, ia.s_addr, now + secs + RECENT_GRACE);
+        if (p->scan_log_all) log_debug("protection", "scanning %s with %d probe(s)", ip, started);
+    }
     return started;
 }
 

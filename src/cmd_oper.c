@@ -113,6 +113,7 @@ void cmd_oper(server_t *srv, client_t *cl, irc_message_t *msg) {
             snprintf(cl->pending_account, sizeof cl->pending_account, "%s", op->name);
             cl->auth_pending = 1;
             cl->auth_started = time(NULL);
+            j.gen = ++cl->auth_gen;
             if (worker_submit(&j) != 0) {
                 cl->auth_pending = 0;
                 client_reply(cl, N_NOOPERHOST, NULL, 0, "Server is busy -- try again shortly");
@@ -226,6 +227,7 @@ static int submit_privileged_check(client_t *cl, const char *given, const char *
     snprintf(j.hash, sizeof j.hash, "%s", hash);
     cl->auth_pending = 1;
     cl->auth_started = time(NULL);
+    j.gen = ++cl->auth_gen;
     int rc = worker_submit(&j);
     if (rc != 0) cl->auth_pending = 0;
     OPENSSL_cleanse(j.secret, sizeof j.secret);

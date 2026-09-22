@@ -80,14 +80,25 @@ int channel_mask_hit(const char *mask, const char *nick, const char *user,
     return irc_mask_match(nick, user, host, mask, ident_confirmed);
 }
 
+/* True if `mask` hits any of host/realhost/ip (see channel_is_banned's doc). */
+static int mask_hit_any_host(const char *mask, const char *nick, const char *user,
+                              const char *host, const char *realhost, const char *ip,
+                              const char *account, int ident_confirmed) {
+    if (channel_mask_hit(mask, nick, user, host, account, ident_confirmed)) return 1;
+    if (strcmp(realhost, host) != 0 && channel_mask_hit(mask, nick, user, realhost, account, ident_confirmed)) return 1;
+    if (strcmp(ip, host) != 0 && strcmp(ip, realhost) != 0 && channel_mask_hit(mask, nick, user, ip, account, ident_confirmed)) return 1;
+    return 0;
+}
+
 int channel_is_banned(channel_t *chan, const char *nick, const char *user,
-                       const char *host, const char *account, int ident_confirmed) {
+                       const char *host, const char *realhost, const char *ip,
+                       const char *account, int ident_confirmed) {
     int banned = 0;
     for (int i = 0; i < chan->bans.n && !banned; i++)
-        if (channel_mask_hit(chan->bans.masks[i], nick, user, host, account, ident_confirmed)) banned = 1;
+        if (mask_hit_any_host(chan->bans.masks[i], nick, user, host, realhost, ip, account, ident_confirmed)) banned = 1;
     if (!banned) return 0;
     for (int i = 0; i < chan->exceptions.n; i++)
-        if (channel_mask_hit(chan->exceptions.masks[i], nick, user, host, account, ident_confirmed)) return 0;
+        if (mask_hit_any_host(chan->exceptions.masks[i], nick, user, host, realhost, ip, account, ident_confirmed)) return 0;
     return 1;
 }
 

@@ -3,6 +3,7 @@
  * cmd_authenticate/cmd_register. */
 #include "accounts.h"
 #include "cmd.h"
+#include "crypto.h"
 #include "log.h"
 #include "worker.h"
 
@@ -65,8 +66,17 @@ void cmd_nick(server_t *srv, client_t *cl, irc_message_t *msg) {
     }
 
     if (strcmp(cl->casefold_nick, cf) == 0) {
-        /* case-only change: no collision, no re-key needed by identity,
-         * but the hash key IS the casefold form, so still safe to skip. */
+        /* case-only change: no collision, no re-key needed by identity (the
+         * hash key is the casefold form, unchanged) -- but it must still be
+         * announced like any other NICK. Silently rewriting cl->nick left
+         * the client's own display case out of sync with itself and with
+         * everyone else's view, permanently, with no way to notice. */
+        char prefix[320];
+        client_prefix(cl, prefix, sizeof prefix);
+        char line[400];
+        irc_build(line, sizeof line, NULL, 0, prefix, "NICK", NULL, 0, newnick);
+        client_send(cl, line);
+        server_send_common_channels(srv, cl, line, 0);
         snprintf(cl->nick, sizeof cl->nick, "%s", newnick);
         return;
     }
@@ -300,25 +310,88 @@ static int peer_cert_fingerprint(client_t *cl, char *out, size_t outsz) {
     return 0;
 }
 
+/* Per-IP failed-login throttle for SASL/NickServ IDENTIFY -- both go through
+ * start_plain_login below, before *and* after registration. Same fixed-slot
+ * eviction shape as net.c's connect-flood table: a full table evicts the
+ * oldest entry rather than tracking every IP forever. Without this, an
+ * unlimited number of connections (or nick changes on one) can each grind
+ * through the account/password space at whatever rate the worker pool keeps
+ * up with -- there was no failure counter at all, only "one attempt in
+ * flight per connection". */
+#define AUTH_FAIL_SLOTS  256
+#define AUTH_FAIL_MAX    5
+#define AUTH_FAIL_WINDOW 60
+typedef struct { char ip[64]; time_t window_start; int count; } auth_fail_track_t;
+static auth_fail_track_t g_auth_fail_tracks[AUTH_FAIL_SLOTS];
+
+static int auth_fail_throttled(const char *ip) {
+    time_t now = time(NULL);
+    for (int i = 0; i < AUTH_FAIL_SLOTS; i++) {
+        auth_fail_track_t *t = &g_auth_fail_tracks[i];
+        if (strcmp(t->ip, ip) != 0) continue;
+        return now - t->window_start <= AUTH_FAIL_WINDOW && t->count >= AUTH_FAIL_MAX;
+    }
+    return 0;
+}
+
+static void auth_fail_record(const char *ip) {
+    time_t now = time(NULL);
+    int slot = -1, oldest_i = 0;
+    time_t oldest = now + 1;
+    for (int i = 0; i < AUTH_FAIL_SLOTS; i++) {
+        if (strcmp(g_auth_fail_tracks[i].ip, ip) == 0) { slot = i; break; }
+        time_t ws = g_auth_fail_tracks[i].window_start;
+        if (!g_auth_fail_tracks[i].ip[0]) { oldest_i = i; oldest = 0; }
+        else if (ws < oldest) { oldest = ws; oldest_i = i; }
+    }
+    if (slot < 0) slot = oldest_i;
+    auth_fail_track_t *t = &g_auth_fail_tracks[slot];
+    if (strcmp(t->ip, ip) != 0 || now - t->window_start > AUTH_FAIL_WINDOW) {
+        snprintf(t->ip, sizeof t->ip, "%s", ip);
+        t->window_start = now;
+        t->count = 0;
+    }
+    t->count++;
+}
+
+/* A precomputed scrypt hash for a password nobody knows, used in place of a
+ * real account's hash when `authcid` doesn't exist -- so an unknown account
+ * still costs a full ~30ms verify instead of failing instantly, closing the
+ * timing side-channel that let a client tell "no such account" apart from
+ * "wrong password" by how fast the reply came back. Computed once, lazily
+ * (itself a ~30ms scrypt hash, off the hot path). */
+static const char *auth_decoy_hash(void) {
+    static char buf[160];
+    static int ready;
+    if (!ready) { crypto_hash_password("sekurircd-timing-decoy, not a real password", buf, sizeof buf); ready = 1; }
+    return buf;
+}
+
 /* Starts a password check for `authcid` on a worker (scrypt is ~30ms, so it
  * never runs on the event loop; net.c applies the result via
  * cmd_finish_auth). Shared by SASL PLAIN and NickServ IDENTIFY. One in flight
- * per connection bounds the queue. 0 = submitted, -1 = refused (unknown
- * account, one already pending, or worker queue full) -- the caller words the
- * failure for its own protocol. */
+ * per connection bounds the queue. 0 = submitted, -1 = refused (too many
+ * recent failures from this IP, one already pending, or worker queue full)
+ * -- the caller words the failure for its own protocol. */
 static int start_plain_login(server_t *srv, client_t *cl, const char *authcid, const char *passwd, int style) {
+    if (cl->auth_pending || auth_fail_throttled(cl->ip)) return -1;
     const char *hash = accounts_hash(&srv->accounts, authcid);
-    if (!hash || cl->auth_pending) return -1;
+    int unknown = !hash;
+    if (unknown) hash = auth_decoy_hash();
     job_t j; memset(&j, 0, sizeof j);
     j.type = JOB_SASL;
     j.purpose = AUTH_SASL;
     j.conn_id = cl->conn_id;
     snprintf(j.secret, sizeof j.secret, "%s", passwd);
     snprintf(j.hash, sizeof j.hash, "%s", hash);
-    snprintf(cl->pending_account, sizeof cl->pending_account, "%s", authcid);
+    /* Never record an account name the store doesn't have -- cmd_finish_auth
+     * would otherwise log in as it in the (cryptographically negligible, but
+     * not worth relying on) case the decoy hash ever matched. */
+    snprintf(cl->pending_account, sizeof cl->pending_account, "%s", unknown ? "" : authcid);
     cl->auth_style = style;
     cl->auth_pending = 1;
     cl->auth_started = time(NULL);
+    j.gen = ++cl->auth_gen;
     int rc = worker_submit(&j);
     OPENSSL_cleanse(j.secret, sizeof j.secret);
     if (rc != 0) { cl->auth_pending = 0; return -1; }
@@ -530,6 +603,7 @@ static void start_register(server_t *srv, client_t *cl, const char *account, con
     cl->auth_style = style;
     cl->auth_pending = 1;
     cl->auth_started = time(NULL);
+    j.gen = ++cl->auth_gen;
     if (worker_submit(&j) != 0) {
         cl->auth_pending = 0;
         reg_fail(srv, cl, style, "TEMPORARILY_UNAVAILABLE", "Server is busy -- try again shortly");
@@ -649,10 +723,10 @@ void cmd_finish_auth(server_t *srv, client_t *cl, int is_register, int success, 
                 client_reply(cl, N_SASLSUCCESS, NULL, 0, "SASL authentication successful");
             }
             log_info("sasl", "%s authenticated as %s", cl->nick, account);
-        } else if (style == AUTH_STYLE_NICKSERV) {
-            ns_say(srv, cl, "Invalid account or password");
         } else {
-            client_reply(cl, N_SASLFAIL, NULL, 0, "SASL authentication failed");
+            auth_fail_record(cl->ip);
+            if (style == AUTH_STYLE_NICKSERV) ns_say(srv, cl, "Invalid account or password");
+            else client_reply(cl, N_SASLFAIL, NULL, 0, "SASL authentication failed");
         }
         return;
     }

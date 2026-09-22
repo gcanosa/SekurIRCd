@@ -317,6 +317,7 @@ static void *worker_main(void *arg) {
         r.type = node->job.type;
         r.conn_id = node->job.conn_id;
         r.purpose = node->job.purpose;
+        r.gen = node->job.gen;
         switch (node->job.type) {
             case JOB_RDNS:
             case JOB_DNSBL:

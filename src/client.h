@@ -56,6 +56,7 @@ typedef struct client {
     struct link_conn *link_conn;  /* non-NULL iff fd == -1: where to forward client_send() */
     SSL *ssl;                     /* non-NULL for a TLS connection (see net.c's TLS listener) */
     int tls_handshaking;          /* SSL_accept() hasn't completed yet */
+    int tls_want_write;           /* last SSL_accept() said WANT_WRITE -- see net.c tls_try_handshake */
     int quitting;                /* marked for removal at end of this poll tick */
     char quit_reason[256];
 
@@ -97,6 +98,7 @@ typedef struct client {
     int ident_confirmed;    /* an identd answered -- cl->user is authoritative, no "~" prefix */
     int auth_pending;       /* SASL verify / REGISTER hash running on a worker (scrypt is ~30ms) */
     time_t auth_started;    /* when auth_pending was set -- net.c's tick clears a result that never came back */
+    uint64_t auth_gen;      /* bumped on every SASL/REGISTER/OPER/DIE/RESTART job submitted -- see worker.h job_t.gen */
     char pending_account[64];
     int auth_style;         /* AUTH_STYLE_*: how to word the result of the pending login/register */
     int register_attempts;  /* /REGISTER is unauthenticated account creation: cap it per connection */

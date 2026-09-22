@@ -336,7 +336,8 @@ int spam_check_text(server_t *srv, client_t *cl, unsigned kind, const char *text
 
 int spam_check_message(server_t *srv, client_t *cl, const char *target, const char *text, int is_notice) {
     const cfg_spam_t *sp = &srv->cfg.spam;
-    if (!sp->enabled || is_exempt(sp, cl)) return 0;
+    if (!sp->enabled) return 0;
+    if (cl->fd < 0 || cl->is_service || (sp->exempt_opers && (cl->umodes & UMODE_O))) return 0;
 
     const char *t = target;
     if ((t[0] == '@' || t[0] == '%' || t[0] == '+') && t[1] == '#') t++; /* STATUSMSG */
@@ -347,6 +348,20 @@ int spam_check_message(server_t *srv, client_t *cl, const char *target, const ch
         if (dst && (dst->is_service || (dst->umodes & UMODE_O))) return 0;
     }
     time_t now = time(NULL);
+
+    /* exempt_identified is meant for an account this server has trusted for
+     * a while, not "anyone who just ran /REGISTER" -- that's instant,
+     * unverified self-service (see cmd_reg.c), so without an age floor it's
+     * a one-line bypass of every check below. Age-gate it against the same
+     * new_user_period a fresh *connection* already has to wait out; with
+     * new_user_period == 0 (the feature off) this is always true, same as
+     * the old unconditional exemption. */
+    int trusted_account = 0;
+    if (sp->exempt_identified && cl->account[0]) {
+        long created = accounts_created_at(&srv->accounts, cl->account);
+        trusted_account = created > 0 && now - created >= sp->new_user_period;
+    }
+    if (trusted_account) return 0;
 
     /* 1. fresh connections can't PM users */
     if (!chan && sp->new_user_period > 0 && now - cl->signon_time < sp->new_user_period) {

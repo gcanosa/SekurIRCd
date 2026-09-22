@@ -109,12 +109,19 @@ static int n_channels_of(client_t *cl) {
 
 void cmd_force_join(server_t *srv, client_t *cl, const char *chan_name) {
     if (!irc_valid_channel(chan_name, 50)) return;
-    channel_t *chan = server_get_or_create_channel(srv, chan_name);
+    channel_t *existing = server_find_channel(srv, chan_name);
+    int is_new = (existing == NULL);
+    channel_t *chan = existing ? existing : server_get_or_create_channel(srv, chan_name);
     if (!chan) return;
     if (channel_find_member(chan, cl)) return;
     member_t *m = channel_add_member(chan, cl);
     if (!m) { server_maybe_drop_channel(srv, chan); return; }
-    if (channel_member_count(chan) == 1) m->rank |= RANK_OP;
+    /* Only op on actually creating the channel, matching do_join_one --
+     * "first member currently present" also fired for the first (re)join of
+     * an existing, previously-emptied +P channel, handing ops to whoever
+     * happened to reconnect first rather than nobody, as a normal JOIN of
+     * the same channel would. */
+    if (is_new) m->rank |= RANK_OP;
     if (server_attach_membership(cl, chan) != 0) {
         channel_remove_member(chan, cl);
         server_maybe_drop_channel(srv, chan);
@@ -173,7 +180,7 @@ static void do_join_one(server_t *srv, client_t *cl, const char *chan_name, cons
             client_reply(cl, N_CHANNELISFULL, p, 1, "Cannot join channel (+l)");
             return;
         }
-        if (channel_is_banned(chan, cl->nick, cl->user, cl->host, cl->account, cl->ident_confirmed)) {
+        if (channel_is_banned(chan, cl->nick, cl->user, cl->host, cl->realhost, cl->ip, cl->account, cl->ident_confirmed)) {
             const char *p[] = {chan->name};
             client_reply(cl, N_BANNED, p, 1, "Cannot join channel (+b)");
             return;
@@ -292,11 +299,13 @@ void cmd_sapart(server_t *srv, client_t *cl, irc_message_t *msg) {
         const char *p[] = {chan->name};
         irc_build(line, sizeof line, NULL, 0, prefix, "PART", p, 1, reason);
         server_broadcast_channel(chan, line, NULL);
+        char chan_name_buf[CHAN_NAMELEN];
+        snprintf(chan_name_buf, sizeof chan_name_buf, "%s", chan->name); /* chan may be freed below */
         channel_remove_member(chan, target);
         server_detach_membership(target, chan);
         server_maybe_drop_channel(srv, chan);
         if (parted[0]) strncat(parted, ", ", sizeof parted - strlen(parted) - 1);
-        strncat(parted, chan->name, sizeof parted - strlen(parted) - 1);
+        strncat(parted, chan_name_buf, sizeof parted - strlen(parted) - 1);
     }
     if (parted[0]) {
         char m[700];
@@ -590,10 +599,15 @@ void cmd_kick(server_t *srv, client_t *cl, irc_message_t *msg) {
     irc_build(line, sizeof line, NULL, 0, prefix, "KICK", p, 2, reason);
     server_broadcast_channel(chan, line, NULL);
 
+    /* server_maybe_drop_channel frees chan once it's empty (e.g. the kicker
+     * kicking themself from a channel they're alone in) -- log using the
+     * name captured before that, not chan->name after. */
+    char chan_name_buf[CHAN_NAMELEN];
+    snprintf(chan_name_buf, sizeof chan_name_buf, "%s", chan->name);
     channel_remove_member(chan, target);
     server_detach_membership(target, chan);
     server_maybe_drop_channel(srv, chan);
-    log_info("chan", "%s kicked %s from %s: %s", cl->nick, target->nick, chan->name, reason);
+    log_info("chan", "%s kicked %s from %s: %s", cl->nick, target->nick, chan_name_buf, reason);
 }
 
 /* --- MODE --------------------------------------------------------------- */
@@ -631,7 +645,7 @@ static void cmd_mode_user(client_t *cl, irc_message_t *msg, const char *target) 
         else if (c == 's') bit = UMODE_S;
         else if (c == 'p') bit = UMODE_P;
         else if (c == 'I') bit = UMODE_HIDEIDLE;
-        else if (c == 'q') bit = UMODE_Q;
+        else if (c == 'q') { if (cl->umodes & UMODE_O) bit = UMODE_Q; else continue; } /* q: unkickable -- oper-only settable, like H */
         else if (c == 'R') bit = UMODE_REGONLY;
         else if (c == 'D') bit = UMODE_NOPM;
         else if (c == 'B') bit = UMODE_B;
@@ -716,6 +730,7 @@ void cmd_apply_channel_mode(server_t *srv, client_t *cl, channel_t *chan,
         if (c == 'k') {
             if (sign == '+') {
                 if (argi >= nargs) continue;
+                if (strchr(args[argi], ' ')) { argi++; continue; } /* a spaced key desyncs every client's parser -- still consume the arg */
                 snprintf(chan->key, sizeof chan->key, "%s", args[argi]);
                 chan->modes |= CMODE_K;
                 if (cursign != sign) { outflags[of++] = sign; cursign = sign; }
@@ -757,6 +772,7 @@ void cmd_apply_channel_mode(server_t *srv, client_t *cl, channel_t *chan,
             argi++;
         } else if (c == 'b' || c == 'e' || c == 'I') {
             if (argi >= nargs) continue;
+            if (strchr(args[argi], ' ')) { argi++; continue; } /* see the +k note above -- still consume the arg */
             const char *mask = args[argi];
             masklist_t *ml = (c == 'b') ? &chan->bans : (c == 'e') ? &chan->exceptions : &chan->invex;
             if (sign == '+') masklist_add(ml, mask); else masklist_del(ml, mask);

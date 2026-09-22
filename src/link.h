@@ -43,6 +43,7 @@ typedef struct link_conn {
     SSL *ssl;                /* non-NULL iff [links] tls=true for this connection */
     int tls_handshaking;    /* hub side only: SSL_accept() hasn't completed yet (leaf side
                               * blocks through its handshake in link_connect_leaf, see there) */
+    int tls_want_write;     /* last SSL_accept() said WANT_WRITE -- see net.c's tls_try_handshake */
     char rbuf[LINK_BUF];
     size_t rbuf_len;
     char sbuf[LINK_BUF * 4];
