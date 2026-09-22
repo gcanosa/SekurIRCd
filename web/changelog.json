@@ -1,5 +1,21 @@
 [
   {
+    "tag": "v1.1.0",
+    "date": "2026-09-22",
+    "changes": [
+      "Security audit: fixed a TLS handshake busy-loop DoS, umode +q (unkickable) being settable by any user instead of opers only, a proxy-scanner flood/cap-limit bypass, and hostname K/G-lines and channel bans that silently never matched (rDNS result and bans now check the real host/IP, not just a possibly-cloaked displayed one)",
+      "Security: new per-IP throttle on SASL/NickServ IDENTIFY, a timing-safe decoy for unknown accounts, and a fix for a second login attempt applying its result to the wrong pending account",
+      "Security: /REGISTER's instant self-service account creation no longer grants full spam-check exemption immediately; accounts.json/klines.json are now written 0600 with fsync-before-rename",
+      "Bugfix: use-after-free on self-KICK/SAPART, case-only nick changes never being announced, and SAJOIN/auto_join handing out ops on a channel it didn't actually create",
+      "ChanServ: SUCCESSOR CLAIM now checks a claimant's real identity over the link instead of the (possibly cloaked) PRIVMSG sender host, so a hostmask or \"=account\" successor actually works; identified-founder state now expires and is cleared on DROP/reconnect instead of occasionally sticking forever and permanently blocking a legitimate CLAIM; AKICK now also sets a ban; several crash/data-loss fixes in the JSON store",
+      "New channel modes +R (registered-only join), +O (oper-only join), +M (registered/voice+ only speak), +c (reject colour/formatting outright)",
+      "New quiet extban m:/~m: (blocks speaking, not joining); ~a: alias for the existing a:account extban; /LIST now matches a #-prefixed pattern and a leading ! negates",
+      "New ChanServ commands: OP/DEOP/VOICE/DEVOICE/HALFOP/DEHALFOP, INVITE, UNBAN, KICK, TOPIC",
+      "New IRCv3 STS support ([tls] sts_duration)",
+      "Performance: O(1) worker-result lookup (was O(n) per result, O(n^2) across a connect burst) and a send buffer that shrinks back down after a large burst instead of staying at its peak size for the connection's life"
+    ]
+  },
+  {
     "tag": "v1.0.5",
     "date": "2026-09-21",
     "changes": [

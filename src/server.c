@@ -12,7 +12,7 @@
 #include <time.h>
 #include <unistd.h>
 
-/* "SekurIRCd-1.0.5(20260921-abc1234)" -- the daemon-name+version+build form wire fields that name
+/* "SekurIRCd-1.1.0(20260921-abc1234)" -- the daemon-name+version+build form wire fields that name
  * the software use (004 MYINFO, 351 VERSION), matching UnrealIRCd/InspIRCd
  * convention. cfg.server.version stays the bare number everywhere else
  * (logging, ADMIN, MOTD %version%, etc). */
