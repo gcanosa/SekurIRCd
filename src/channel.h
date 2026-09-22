@@ -92,9 +92,14 @@ int channel_is_voice(channel_t *chan, struct client *cl);
  * anything else is a plain nick!user@host glob (irc_mask_match). */
 int channel_mask_hit(const char *mask, const char *nick, const char *user,
                       const char *host, const char *account, int ident_confirmed);
-/* True if banned (+b hit) and not exempted (+e hit). */
+/* True if banned (+b hit) and not exempted (+e hit). Checked against `host`
+ * (the displayed/possibly-cloaked host) AND `realhost`/`ip` -- a mask
+ * written against the real hostname or bare IP must still catch a client
+ * whose displayed host is a random per-connection cloak (host_masking), and
+ * vice versa. Pass realhost/ip == host if unavailable (never NULL). */
 int channel_is_banned(channel_t *chan, const char *nick, const char *user,
-                       const char *host, const char *account, int ident_confirmed);
+                       const char *host, const char *realhost, const char *ip,
+                       const char *account, int ident_confirmed);
 /* True if past +i via an exact INVITE (channel_invite_add) or an +I mask hit. */
 int channel_is_invited(channel_t *chan, const char *nick, const char *user,
                         const char *host, const char *account, int ident_confirmed);

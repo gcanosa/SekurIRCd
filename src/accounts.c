@@ -1,6 +1,7 @@
 #include "accounts.h"
 #include "proto.h"
 
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -44,12 +45,21 @@ static void save(account_store_t *st) {
     if (!text) return;
     char tmp[sizeof st->path + 5];
     snprintf(tmp, sizeof tmp, "%s.tmp", st->path);
-    FILE *fp = fopen(tmp, "wb");
-    if (fp) {
-        fputs(text, fp);
-        fclose(fp);
-        rename(tmp, st->path); /* atomic on POSIX */
-    }
+    /* O_CREAT with an explicit 0600 (not fopen()+chmod after the fact,
+     * racy) -- this file holds every account's scrypt hash and any bound
+     * SASL EXTERNAL certificate fingerprint; main.c's umask(0022) would
+     * otherwise leave it world-readable. fsync before rename so a write
+     * that loses the race with a crash/power loss can't replace the good
+     * file on disk with a truncated one. */
+    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) { free(text); return; }
+    FILE *fp = fdopen(fd, "wb");
+    if (!fp) { close(fd); free(text); return; }
+    size_t len = strlen(text);
+    int ok = fwrite(text, 1, len, fp) == len && fflush(fp) == 0 && fsync(fd) == 0;
+    if (fclose(fp) != 0) ok = 0;
+    if (ok) rename(tmp, st->path); /* atomic on POSIX */
+    else unlink(tmp);
     free(text);
 }
 
@@ -81,6 +91,11 @@ void accounts_register_hashed(account_store_t *st, const char *name, const char 
 const char *accounts_hash(account_store_t *st, const char *name) {
     cJSON *hash = cJSON_GetObjectItemCaseSensitive(find(st, name), "pw_hash");
     return cJSON_IsString(hash) ? hash->valuestring : NULL;
+}
+
+long accounts_created_at(account_store_t *st, const char *name) {
+    cJSON *v = cJSON_GetObjectItemCaseSensitive(find(st, name), "created_at");
+    return cJSON_IsNumber(v) ? (long)v->valuedouble : 0;
 }
 
 void accounts_set_fingerprint(account_store_t *st, const char *name, const char *fp) {

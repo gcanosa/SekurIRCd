@@ -38,6 +38,14 @@ typedef struct {
     char secret[256];  /* sasl/hash: plaintext password (cleansed after use) */
     char hash[256];    /* sasl only: stored scrypt string to verify against */
     auth_purpose_t purpose; /* sasl/hash only */
+    /* sasl/hash only: cl->auth_gen at submit time, incremented on every new
+     * submission for that connection. A result whose gen doesn't match the
+     * client's *current* auth_gen is from a job a later one superseded (the
+     * connection sent a second SASL/REGISTER/OPER/DIE/RESTART attempt, for a
+     * different account/password, before the first one's scrypt finished) --
+     * net.c drops it instead of applying it to whatever pending_account
+     * happens to be set now. */
+    uint64_t gen;
 } job_t;
 
 typedef struct {
@@ -47,6 +55,7 @@ typedef struct {
     char text[256];  /* hostname / ident / first listed zone / (JOB_HASH) new scrypt string */
     int zone_code[WORKER_MAX_ZONES]; /* JOB_DNSBL: per submitted zone, the answer's last octet, or -1 = not listed */
     auth_purpose_t purpose; /* sasl/hash only, copied through from job_t */
+    uint64_t gen;           /* sasl/hash only, copied through from job_t -- see job_t.gen */
 } job_result_t;
 
 void worker_pool_start(void);

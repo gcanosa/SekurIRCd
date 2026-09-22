@@ -184,6 +184,27 @@ static void test_glob_and_masks(void) {
     assert(!irc_host_mask_match("ident", "203.0.113.42", "204.*"));
 }
 
+/* Regression: a ban written against the real hostname or bare IP must still
+ * catch a client whose *displayed* host is a random per-connection cloak
+ * (host_masking) -- channel_is_banned used to check `host` alone. */
+static void test_channel_ban_matches_realhost_and_ip(void) {
+    channel_t *chan = channel_new("#test", "#test");
+    assert(chan);
+    assert(masklist_add(&chan->bans, "*!*@bad.example.com") == 0);
+
+    /* displayed host is a cloak; ban is written against the real hostname */
+    assert(channel_is_banned(chan, "nick", "user", "abcd1234.users.net", "bad.example.com", "198.51.100.7", "", 0));
+    /* ban written against the bare IP still catches the cloaked display */
+    channel_t *chan2 = channel_new("#test2", "#test2");
+    assert(masklist_add(&chan2->bans, "*!*@198.51.100.7") == 0);
+    assert(channel_is_banned(chan2, "nick", "user", "cloak.example.net", "real.example.net", "198.51.100.7", "", 0));
+    /* none of the three match: not banned */
+    assert(!channel_is_banned(chan2, "nick", "user", "cloak.example.net", "real.example.net", "203.0.113.99", "", 0));
+
+    channel_free(chan);
+    channel_free(chan2);
+}
+
 static void test_durations(void) {
     assert(irc_parse_duration("1d") == 86400);
     assert(irc_parse_duration("12h") == 12 * 3600);
@@ -298,6 +319,19 @@ static void test_connect_flood_throttle(void) {
     /* a different IP has its own independent counter */
     assert(net_connect_flood_hit(&sec, "203.0.113.10") == 0);
 
+    /* Regression: two IPs alternating within the same second used to land on
+     * the same `now % CONNECT_FLOOD_SLOTS` slot every time and evict each
+     * other's counter on every call, so neither ever accumulated enough
+     * count to trip -- new-IP eviction now picks the oldest/empty slot
+     * instead, so each of these two keeps its own counter. */
+    sec.connect_flood_max = 2;
+    int tripped_a = 0, tripped_b = 0;
+    for (int i = 0; i < 6; i++) {
+        if (net_connect_flood_hit(&sec, "203.0.113.20")) tripped_a = 1;
+        if (net_connect_flood_hit(&sec, "203.0.113.21")) tripped_b = 1;
+    }
+    assert(tripped_a && tripped_b);
+
     /* connect_flood_max <= 0 disables the check entirely */
     sec.connect_flood_max = 0;
     for (int i = 0; i < 10; i++) assert(net_connect_flood_hit(&sec, "203.0.113.11") == 0);
@@ -389,10 +423,25 @@ static void test_spam_filters_and_check(void) {
     assert(spam_check_message(&srv, cl, "#x3", "hello there", 0) == 0);
     assert(spam_check_message(&srv, cl, "#x4", "hello there", 0) == 1);
 
-    /* exempt: identified accounts skip everything */
+    /* exempt: an identified account whose registration predates
+     * new_user_period skips everything (accounts_created_at must actually
+     * find a real account -- a bare cl->account with nothing registered
+     * behind it, or one too fresh, is NOT exempt: see spam_check_message's
+     * trusted_account gate, closing the instant-/REGISTER spam bypass). */
+    accounts_register_hashed(&srv.accounts, "bob", "unused-in-this-test");
     snprintf(cl->account, sizeof cl->account, "bob");
     assert(spam_check_message(&srv, cl, "#chan", "free viagra", 0) == 0);
+
+    /* the "fresh connection can't PM users" gate: "bob" registered moments
+     * ago, not yet trusted -- still blocked, same as an account that was
+     * never registered at all, or no account. */
+    srv.cfg.spam.new_user_period = 3600;
+    assert(spam_check_message(&srv, cl, "somebody", "hi", 0) == 1);
+    snprintf(cl->account, sizeof cl->account, "nosuchaccount");
+    assert(spam_check_message(&srv, cl, "somebody", "hi", 0) == 1);
     cl->account[0] = '\0';
+    assert(spam_check_message(&srv, cl, "somebody", "hi", 0) == 1);
+    srv.cfg.spam.new_user_period = 0;
 
     /* master switch off = inert */
     srv.cfg.spam.enabled = 0;
@@ -685,6 +734,7 @@ int main(void) {
     RUN(test_validators);
     RUN(test_casefold);
     RUN(test_glob_and_masks);
+    RUN(test_channel_ban_matches_realhost_and_ip);
     RUN(test_durations);
     RUN(test_prefix_for);
     RUN(test_add_time_tag);

@@ -186,6 +186,7 @@ static SSL_CTX *tls_setup(server_t *srv) {
 
     SSL_CTX *ctx = SSL_CTX_new(TLS_server_method());
     if (!ctx) { log_error("tls", "SSL_CTX_new failed"); return NULL; }
+    SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION); /* no SSLv3/TLS1.0/1.1 -- OpenSSL's own default floor is lower */
     if (SSL_CTX_use_certificate_chain_file(ctx, cert) != 1 ||
         SSL_CTX_use_PrivateKey_file(ctx, key, SSL_FILETYPE_PEM) != 1) {
         char errbuf[256];
@@ -220,12 +221,21 @@ static void tls_try_handshake(client_t *cl) {
     int rc = SSL_accept(cl->ssl);
     if (rc == 1) {
         cl->tls_handshaking = 0;
+        cl->tls_want_write = 0;
         cl->umodes |= UMODE_Z;
         log_info("net", "TLS handshake complete for %s (fd=%d)", cl->ip, cl->fd);
         return;
     }
     int err = SSL_get_error(cl->ssl, rc);
-    if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) return; /* retry on next poll event */
+    if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
+        /* Ask poll() for POLLOUT only while OpenSSL actually said WANT_WRITE
+         * -- otherwise a client that connects and sends nothing gets POLLOUT
+         * requested (and returned immediately, every iteration) purely
+         * because a client this age always has *something* queued in sbuf
+         * (the AUTH banner), pinning a core until REGISTRATION_TIMEOUT. */
+        cl->tls_want_write = (err == SSL_ERROR_WANT_WRITE);
+        return;
+    }
     char errbuf[256];
     ERR_error_string_n(ERR_get_error(), errbuf, sizeof errbuf);
     log_warn("tls", "handshake failed for %s: err=%d (%s)", cl->ip, err, errbuf);
@@ -278,7 +288,20 @@ int net_connect_flood_hit(const cfg_security_t *sec, const char *ip) {
     for (int i = 0; i < CONNECT_FLOOD_SLOTS; i++) {
         if (strcmp(g_connect_tracks[i].ip, ip) == 0) { slot = i; break; }
     }
-    if (slot < 0) slot = (int)((unsigned long)now % CONNECT_FLOOD_SLOTS);
+    if (slot < 0) {
+        /* No existing slot for this IP: reuse the oldest/expired one instead
+         * of `now % CONNECT_FLOOD_SLOTS` -- that hashed every IP seen in the
+         * same second onto the same slot, so two+ IPs alternating connects
+         * (or a botnet) each got counted as a fresh "count=1" every time and
+         * never tripped the limit. */
+        time_t oldest = now + 1;
+        int oldest_i = 0;
+        for (int i = 0; i < CONNECT_FLOOD_SLOTS; i++) {
+            if (!g_connect_tracks[i].ip[0]) { oldest_i = i; oldest = 0; break; }
+            if (g_connect_tracks[i].window_start < oldest) { oldest = g_connect_tracks[i].window_start; oldest_i = i; }
+        }
+        slot = oldest_i;
+    }
     connect_track_t *t = &g_connect_tracks[slot];
     if (strcmp(t->ip, ip) != 0 || now - t->window_start > sec->connect_flood_window) {
         snprintf(t->ip, sizeof t->ip, "%s", ip);
@@ -603,7 +626,16 @@ static void drain_worker_results(server_t *srv) {
 
             if (r->type == JOB_RDNS) {
                 cl->rdns_pending = 0;
-                if (r->success) snprintf(cl->host, sizeof cl->host, "%s", r->text);
+                if (r->success) {
+                    /* realhost is what K/G-lines, ChanServ's SVCJOIN and
+                     * channel bans match against -- it must be the actual
+                     * resolved name, not stay the bare IP (see cl->realhost's
+                     * comment in client.h). This job only ever runs when
+                     * host_masking is off (see the submit site above), so
+                     * `host` (the displayed one) is safe to update too. */
+                    snprintf(cl->realhost, sizeof cl->realhost, "%s", r->text);
+                    snprintf(cl->host, sizeof cl->host, "%s", r->text);
+                }
                 cmd_send_welcome_if_ready(srv, cl);
             } else if (r->type == JOB_IDENT) {
                 cl->ident_pending = 0;
@@ -645,6 +677,13 @@ static void drain_worker_results(server_t *srv) {
                 }
                 /* not listed: POLLIN resumes next poll() build, nothing else to do */
             } else if (r->type == JOB_SASL || r->type == JOB_HASH) {
+                /* A second SASL/REGISTER/OPER/DIE/RESTART attempt on the same
+                 * connection before this job's scrypt finished bumped
+                 * cl->auth_gen when it submitted its own job -- this result
+                 * belongs to the superseded attempt (possibly a different
+                 * account/password) and must not be applied to whatever
+                 * pending_account/auth_started the newer one set. */
+                if (r->gen != cl->auth_gen) continue;
                 if (r->purpose == AUTH_SASL || r->purpose == AUTH_REGISTER)
                     cmd_finish_auth(srv, cl, r->purpose == AUTH_REGISTER, r->success, r->text);
                 else
@@ -819,7 +858,8 @@ int net_run(server_t *srv) {
             /* A pending DNSBL verdict withholds POLLIN entirely: the client
              * exists (a listed IP might still be disconnected below), but
              * nothing it sends is dispatched until the lookup resolves. */
-            fds[n].events = (cl->dnsbl_pending ? 0 : POLLIN) | ((cl->sbuf_len > 0 || cl->tls_handshaking) ? POLLOUT : 0);
+            fds[n].events = (cl->dnsbl_pending ? 0 : POLLIN) |
+                ((cl->tls_handshaking ? cl->tls_want_write : cl->sbuf_len > 0) ? POLLOUT : 0);
             fds[n].revents = 0;
             fd_client[n] = cl;
             n++;
@@ -829,7 +869,8 @@ int net_run(server_t *srv) {
             if (lc->sbuf_len > 0 && !lc->tls_handshaking) link_handle_writable(srv, lc);
             if (lc->closing) continue;
             fds[n].fd = lc->fd;
-            fds[n].events = POLLIN | ((lc->sbuf_len > 0 || lc->tls_handshaking) ? POLLOUT : 0);
+            fds[n].events = POLLIN |
+                ((lc->tls_handshaking ? lc->tls_want_write : lc->sbuf_len > 0) ? POLLOUT : 0);
             fds[n].revents = 0;
             fd_link[n] = lc;
             n++;

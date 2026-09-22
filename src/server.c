@@ -10,6 +10,7 @@
 #include <string.h>
 #include <strings.h>
 #include <time.h>
+#include <unistd.h>
 
 /* "SekurIRCd-1.0.5(20260921-abc1234)" -- the daemon-name+version+build form wire fields that name
  * the software use (004 MYINFO, 351 VERSION), matching UnrealIRCd/InspIRCd
@@ -583,8 +584,17 @@ static void kline_save(server_t *srv) {
     char tmp[CFG_PATH + 5];
     snprintf(tmp, sizeof tmp, "%s.tmp", path);
     if (text) {
+        /* fsync before rename -- a write that loses a race with a crash or
+         * power loss must not replace a good klines file with a truncated
+         * one (K/G/Z-lines silently vanishing on next boot is worse than
+         * this write failing outright). */
         FILE *fp = fopen(tmp, "wb");
-        if (fp) { fputs(text, fp); fclose(fp); rename(tmp, path); }
+        if (fp) {
+            size_t len = strlen(text);
+            int ok = fwrite(text, 1, len, fp) == len && fflush(fp) == 0 && fsync(fileno(fp)) == 0;
+            if (fclose(fp) != 0) ok = 0;
+            if (ok) rename(tmp, path); else unlink(tmp);
+        }
         free(text);
     }
     cJSON_Delete(arr);

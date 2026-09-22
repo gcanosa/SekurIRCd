@@ -68,12 +68,16 @@ void link_tls_try_handshake(server_t *srv, link_conn_t *lc) {
     int rc = SSL_accept(lc->ssl);
     if (rc == 1) {
         lc->tls_handshaking = 0;
+        lc->tls_want_write = 0;
         log_info("link", "TLS handshake complete for inbound link (fd=%d): %s/%s",
                   lc->fd, SSL_get_version(lc->ssl), SSL_get_cipher_name(lc->ssl));
         return;
     }
     int err = SSL_get_error(lc->ssl, rc);
-    if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) return; /* retry on next poll event */
+    if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
+        lc->tls_want_write = (err == SSL_ERROR_WANT_WRITE); /* see net.c's tls_try_handshake */
+        return;
+    }
     char errbuf[256];
     ERR_error_string_n(ERR_get_error(), errbuf, sizeof errbuf);
     log_warn("link", "inbound TLS handshake failed (fd=%d): err=%d (%s)", lc->fd, err, errbuf);
@@ -290,6 +294,40 @@ void link_leaf_tick(server_t *srv) {
  * unauthenticated peer hold its slot indefinitely by trickling bytes. */
 #define LINK_HANDSHAKE_DEADLINE 30
 
+/* Rate limit on the scrypt verify below (~30ms, run synchronously on the
+ * event loop -- link connections are rare enough in practice that offloading
+ * it to the worker pool the way client SASL/OPER logins are wasn't worth the
+ * added complexity of deferring a link handshake across a job result). Only
+ * a connection whose SERVER name matches a configured peer reaches the
+ * verify at all, but LINK_MAX_UNAUTH_PER_IP bounds *concurrency*, not rate --
+ * a connect/verify/disconnect loop from one IP can otherwise keep the single
+ * event-loop thread pinned in scrypt close to 100% of the time. */
+#define LINK_VERIFY_MAX    3
+#define LINK_VERIFY_WINDOW 10
+typedef struct { char ip[64]; time_t window_start; int count; } link_verify_track_t;
+static link_verify_track_t g_link_verify_tracks[LINK_MAX_UNAUTH_PER_IP * 8];
+#define LINK_VERIFY_SLOTS (int)(sizeof g_link_verify_tracks / sizeof g_link_verify_tracks[0])
+
+static int link_verify_throttled(const char *ip) {
+    time_t now = time(NULL);
+    int slot = -1, oldest_i = 0;
+    time_t oldest = now + 1;
+    for (int i = 0; i < LINK_VERIFY_SLOTS; i++) {
+        if (strcmp(g_link_verify_tracks[i].ip, ip) == 0) { slot = i; break; }
+        time_t ws = g_link_verify_tracks[i].window_start;
+        if (!g_link_verify_tracks[i].ip[0]) { oldest_i = i; oldest = 0; }
+        else if (ws < oldest) { oldest = ws; oldest_i = i; }
+    }
+    if (slot < 0) slot = oldest_i;
+    link_verify_track_t *t = &g_link_verify_tracks[slot];
+    if (strcmp(t->ip, ip) != 0 || now - t->window_start > LINK_VERIFY_WINDOW) {
+        snprintf(t->ip, sizeof t->ip, "%s", ip);
+        t->window_start = now;
+        t->count = 0;
+    }
+    return ++t->count > LINK_VERIFY_MAX;
+}
+
 void link_accept(server_t *srv) {
     struct sockaddr_in peer;
     socklen_t plen = sizeof peer;
@@ -426,7 +464,9 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
                 if (strcmp(p->name, name) == 0) { matched = p; break; }
             }
             int ok = 0;
-            if (matched) {
+            if (matched && matched->password_hash[0] && link_verify_throttled(lc->ip)) {
+                log_warn("link", "rejected link handshake from '%s': too many recent password checks from %s", name, lc->ip);
+            } else if (matched) {
                 ok = matched->password_hash[0]
                     ? crypto_verify_password(lc->pending_pass, matched->password_hash)
                     : crypto_secure_streq(lc->pending_pass, matched->password);
