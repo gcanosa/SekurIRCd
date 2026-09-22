@@ -322,6 +322,56 @@ static void test_config_load_missing_file(void) {
     assert(err[0] != '\0');
 }
 
+static void write_file(const char *dir, const char *name, const char *body) {
+    char path[512];
+    snprintf(path, sizeof path, "%s/%s", dir, name);
+    FILE *f = fopen(path, "w");
+    assert(f);
+    fputs(body, f);
+    fclose(f);
+}
+
+static void test_links_allowed_ips_config(void) {
+    char dir[64];
+    snprintf(dir, sizeof dir, "/tmp/sekurircd-links-%d", (int)getpid());
+    assert(mkdir(dir, 0700) == 0);
+    char path[600], err[512];
+    snprintf(path, sizeof path, "%s/sekurircd.toml", dir);
+    config_t cfg;
+
+    /* Hub peer with allowed_ips parses, in order, glob patterns and all. */
+    write_file(dir, "sekurircd.toml",
+               "[links]\nenabled = true\nmode = \"hub\"\nport = 7000\nping_interval = 60.0\n"
+               "ping_timeout = 180.0\nmax_line_length = 8192\n"
+               "[[links.peers]]\nname = \"leaf1\"\npassword = \"secret\"\n"
+               "allowed_ips = [\"203.0.113.5\", \"10.0.0.*\"]\n");
+    assert(config_load(path, &cfg, err, sizeof err) == 0);
+    assert(cfg.links.n_peers == 1 && cfg.links.peers[0].n_allowed_ips == 2);
+    assert(strcmp(cfg.links.peers[0].allowed_ips[0], "203.0.113.5") == 0);
+    assert(strcmp(cfg.links.peers[0].allowed_ips[1], "10.0.0.*") == 0);
+
+    /* No allowed_ips set anywhere (the default): back-compat, open to any IP. */
+    write_file(dir, "sekurircd.toml",
+               "[links]\nenabled = true\nmode = \"hub\"\nport = 7000\nping_interval = 60.0\n"
+               "ping_timeout = 180.0\nmax_line_length = 8192\n"
+               "[[links.peers]]\nname = \"leaf1\"\npassword = \"secret\"\n");
+    assert(config_load(path, &cfg, err, sizeof err) == 0);
+    assert(cfg.links.peers[0].n_allowed_ips == 0);
+
+    /* A leaf-role peer (host set) can't also carry allowed_ips -- it dials
+     * out, so an incoming-IP allowlist has nothing to apply to. */
+    write_file(dir, "sekurircd.toml",
+               "[links]\nenabled = true\nmode = \"leaf\"\nport = 7000\nping_interval = 60.0\n"
+               "ping_timeout = 180.0\nmax_line_length = 8192\n"
+               "[[links.peers]]\nname = \"hub1\"\nhost = \"hub.example.com\"\nport = 7000\n"
+               "password = \"secret\"\nallowed_ips = [\"10.0.0.1\"]\n");
+    assert(config_load(path, &cfg, err, sizeof err) != 0 && strstr(err, "allowed_ips"));
+
+    /* The glob check link_accept() runs is the same irc_glob_match already
+     * covered by test_glob_and_masks -- nothing link-specific to re-test
+     * beyond confirming the config actually gets there. */
+}
+
 static void test_connect_flood_throttle(void) {
     cfg_security_t sec;
     memset(&sec, 0, sizeof sec);
@@ -638,15 +688,6 @@ static void test_protection_bl_match(void) {
     assert(protection_exempt(&p, "10.1.2.3") && !protection_exempt(&p, "11.1.2.3"));
 }
 
-static void write_file(const char *dir, const char *name, const char *body) {
-    char path[512];
-    snprintf(path, sizeof path, "%s/%s", dir, name);
-    FILE *f = fopen(path, "w");
-    assert(f);
-    fputs(body, f);
-    fclose(f);
-}
-
 static void test_protection_bundle_config(void) {
     char dir[64];
     snprintf(dir, sizeof dir, "/tmp/sekurircd-prot-%d", (int)getpid());
@@ -766,6 +807,7 @@ int main(void) {
     RUN(test_config_defaults);
     RUN(test_config_cloak_format);
     RUN(test_config_load_missing_file);
+    RUN(test_links_allowed_ips_config);
     RUN(test_connect_flood_throttle);
     RUN(test_channel_mode_string_cannot_overflow);
     RUN(test_line_mask_hits);

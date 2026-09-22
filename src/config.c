@@ -775,6 +775,8 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
                 if (cfg_get_str(pe, "host", "", p->host, CFG_STR, errbuf, errbufsz, fn)) return -1;
                 snprintf(fn, sizeof fn, "links.peers[%d].port", i);
                 if (cfg_get_int(pe, "port", 0, &p->port, errbuf, errbufsz, fn)) return -1;
+                snprintf(fn, sizeof fn, "links.peers[%d].allowed_ips", i);
+                if (cfg_get_str_array(pe, "allowed_ips", p->allowed_ips, CFG_MAX_LINK_ALLOWED_IPS, &p->n_allowed_ips, errbuf, errbufsz, fn)) return -1;
 
                 if (!p->name[0] || strpbrk(p->name, " \t\r\n")) {
                     snprintf(errbuf, errbufsz, "links.peers[%d].name must be non-empty with no whitespace", i);
@@ -787,6 +789,10 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
                 if (p->host[0]) {
                     if (!p->password[0] || p->password_hash[0]) {
                         snprintf(errbuf, errbufsz, "links.peers[%d] has host set (leaf-role) and must use a plain password, not password_hash", i);
+                        return -1;
+                    }
+                    if (p->n_allowed_ips) {
+                        snprintf(errbuf, errbufsz, "links.peers[%d] has host set (leaf-role) -- allowed_ips only applies to a hub-role peer it accepts from", i);
                         return -1;
                     }
                 } else if ((p->password[0] != '\0') == (p->password_hash[0] != '\0')) {
