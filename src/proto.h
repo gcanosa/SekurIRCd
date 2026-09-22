@@ -268,6 +268,7 @@ void irc_add_time_tag(char *line, size_t linesz);
 #define N_CANTKILLSERVER   "483"
 #define N_NOTCHANNELOP     "482"
 #define N_SECUREONLYCHAN   "489"
+#define N_NEEDREGGEDNICK   "477" /* +R (registered-only) / +O (oper-only) JOIN refusal */
 
 #define N_NOOPERHOST       "491"
 

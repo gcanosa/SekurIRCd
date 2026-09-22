@@ -414,11 +414,11 @@ void server_send_isupport(server_t *srv, client_t *cl) {
     snprintf(topiclen, sizeof topiclen, "TOPICLEN=%d", CHAN_TOPICLEN - 1);
 
     const char *tokens[] = {
-        netbuf, "CHANTYPES=#", "CHANMODES=beI,k,l,imnprstzCNPQSTV", "PREFIX=(ohv)@%+",
+        netbuf, "CHANTYPES=#", "CHANMODES=beI,k,l,imnprstzCNPQSTVROMc", "PREFIX=(ohv)@%+",
         nicklen, chanlen, topiclen, "CASEMAPPING=ascii", "MODES=6",
         "STATUSMSG=@%+", "AWAYLEN=400", "KICKLEN=400",
         "MAXLIST=beI:100", "EXCEPTS=e", "INVEX=I", "MONITOR=100", "WATCH=128", "SILENCE=15",
-        "EXTBAN=,a", "ELIST=MNU", "WHOX", "MAXCHANNELS=200", "BOT=B",
+        "EXTBAN=~,am", "ELIST=MNU", "WHOX", "MAXCHANNELS=200", "BOT=B",
     };
     int total = (int)(sizeof tokens / sizeof tokens[0]);
     for (int i = 0; i < total; i += 12) {

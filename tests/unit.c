@@ -205,6 +205,27 @@ static void test_channel_ban_matches_realhost_and_ip(void) {
     channel_free(chan2);
 }
 
+/* Regression: the "m:"/"~m:" quiet extban blocks speaking (channel_is_quieted)
+ * but must NOT block JOIN (channel_is_banned skips it); "~a:" is an alias
+ * for the bare "a:" account extban. */
+static void test_quiet_extban_and_tilde_alias(void) {
+    channel_t *chan = channel_new("#q", "#q");
+    assert(masklist_add(&chan->bans, "m:*!*@quiet.example.com") == 0);
+    assert(masklist_add(&chan->bans, "~a:spammer") == 0);
+
+    /* quiet mask: not a JOIN-blocking ban... */
+    assert(!channel_is_banned(chan, "nick", "user", "quiet.example.com", "quiet.example.com", "203.0.113.1", "", 0));
+    /* ...but does block speaking */
+    assert(channel_is_quieted(chan, "nick", "user", "quiet.example.com", "quiet.example.com", "203.0.113.1", "", 0));
+    assert(!channel_is_quieted(chan, "nick", "user", "other.example.com", "other.example.com", "203.0.113.1", "", 0));
+
+    /* ~a: alias for a: -- matches by account, and DOES block JOIN (it's a plain ban) */
+    assert(channel_is_banned(chan, "nick", "user", "host", "host", "203.0.113.1", "spammer", 0));
+    assert(!channel_is_banned(chan, "nick", "user", "host", "host", "203.0.113.1", "someoneelse", 0));
+
+    channel_free(chan);
+}
+
 static void test_durations(void) {
     assert(irc_parse_duration("1d") == 86400);
     assert(irc_parse_duration("12h") == 12 * 3600);
@@ -735,6 +756,7 @@ int main(void) {
     RUN(test_casefold);
     RUN(test_glob_and_masks);
     RUN(test_channel_ban_matches_realhost_and_ip);
+    RUN(test_quiet_extban_and_tilde_alias);
     RUN(test_durations);
     RUN(test_prefix_for);
     RUN(test_add_time_tag);
