@@ -31,6 +31,7 @@
 #define CFG_MAX_AUTO_JOIN        32
 #define CFG_MAX_DNSBL_ZONES      16
 #define CFG_MAX_LINK_PEERS       32
+#define CFG_MAX_LINK_ALLOWED_IPS 16
 #define CFG_MAX_SCAN_PROTOCOLS   32
 #define CFG_MAX_BLACKLISTS       16 /* == WORKER_MAX_ZONES (worker.h) */
 #define CFG_MAX_BL_REPLIES       16
@@ -127,6 +128,9 @@ typedef struct {
     char password_hash[CFG_STR];
     char host[CFG_STR];  /* "" = hub-role (accepts); set = leaf-role (dials out) */
     int port;
+    char allowed_ips[CFG_MAX_LINK_ALLOWED_IPS][CFG_MASK]; /* hub-role only: IP globs this peer may
+                                                             * connect from; empty = any IP (back-compat) */
+    int n_allowed_ips;
 } cfg_link_peer_t;
 
 typedef struct {

@@ -487,6 +487,16 @@ reconnect_delay_max = 300.0
 #password_hash = "scrypt$16384$8$1$<salt-hex>$<digest-hex>"
 ##password = "a-long-shared-secret-unique-to-this-pair"  # legacy plain-text alternative
 
+# hub only, optional: IP globs ('*'/'?') this peer is allowed to connect
+# from. If a firewall in front of the link port isn't an option, this is the
+# same protection Unreal's link{} / InspIRCd's <link> blocks give you: a
+# connection from anywhere else is rejected before the SERVER/PASS handshake
+# even starts, so scanner/bot noise never gets past accept(). Leave unset
+# (the default) for the old open-to-anyone behavior -- password auth still
+# protects the handshake itself either way, this just cuts the noise and the
+# blind-guess attempts.
+##allowed_ips = ["203.0.113.5"]
+
 # --- channel services (ChanServ) example --------------------------------
 # services/chanserv.py is a separate process (see services/services.template.toml)
 # that connects in exactly like a leaf, introducing one user (ChanServ) that
@@ -503,6 +513,8 @@ reconnect_delay_max = 300.0
 #name = "services.sekurircd.local"
 #password_hash = "scrypt$16384$8$1$<salt-hex>$<digest-hex>"
 ##password = "a-long-shared-secret-unique-to-this-pair"  # legacy plain-text alternative
+# chanserv.py usually runs on the same box -- worth locking to it:
+##allowed_ips = ["127.0.0.1"]
 
 # --- leaf example --------------------------------------------------------
 # Exactly one [[links.peers]] entry: the hub to dial. `name` here is the

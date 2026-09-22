@@ -346,6 +346,28 @@ void link_accept(server_t *srv) {
         return;
     }
 
+    /* Peer IP allowlist (like Unreal/InspIRCd's link{}/<link> host match):
+     * if ANY configured peer sets allowed_ips, an incoming connection must
+     * match at least one of them across all peers, checked before the
+     * SERVER/PASS handshake even starts -- the peer name it'll claim to be
+     * isn't known yet. No peer sets allowed_ips (the default) -> unchanged,
+     * open behavior, same as before this existed. */
+    int any_allowlist = 0, ip_allowed = 0;
+    for (int i = 0; i < srv->cfg.links.n_peers; i++) {
+        cfg_link_peer_t *p = &srv->cfg.links.peers[i];
+        if (p->n_allowed_ips == 0) continue;
+        any_allowlist = 1;
+        for (int j = 0; j < p->n_allowed_ips; j++) {
+            if (irc_glob_match(p->allowed_ips[j], ipbuf)) { ip_allowed = 1; break; }
+        }
+        if (ip_allowed) break;
+    }
+    if (any_allowlist && !ip_allowed) {
+        close(fd);
+        log_warn("link", "rejected inbound link from %s: not in any peer's allowed_ips", ipbuf);
+        return;
+    }
+
     int count = 0, total = 0;
     for (link_conn_t *l = srv->links; l; l = l->next) {
         if (l->closing) continue;
