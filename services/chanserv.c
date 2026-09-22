@@ -165,24 +165,45 @@ static void store_load(void) {
         fseek(fp, 0, SEEK_SET);
         if (len <= 0) { fclose(fp); continue; }
         char *buf = malloc((size_t)len + 1);
+        if (!buf) { fclose(fp); continue; }
         size_t rd = fread(buf, 1, (size_t)len, fp);
         fclose(fp);
         buf[rd] = '\0';
         cJSON *parsed = cJSON_Parse(buf);
         free(buf);
-        if (parsed) {
+        /* Must be a JSON object -- cJSON_Parse happily accepts `[]`, `"x"`,
+         * `null`, etc, and later cJSON_AddItemToObject calls on anything
+         * else silently lose every key on the next save, quietly deleting
+         * every registration. */
+        if (parsed && cJSON_IsObject(parsed)) {
             g_store = parsed;
             if (gen > 0) log_warn("chanserv", "live store was missing/corrupt -- loaded backup %s", path);
             return;
         }
-        log_warn("chanserv", "%s was corrupt, trying an older backup", path);
+        cJSON_Delete(parsed);
+        log_warn("chanserv", "%s was corrupt (not a JSON object), trying an older backup", path);
     }
     log_info("chanserv", "no existing store found -- starting with zero registered channels");
     g_store = cJSON_CreateObject();
 }
 
-static void store_write_now(void) {
-    if (g_cfg.backup_count > 0) {
+/* Backups rotate at most this often -- store_save() can be marked dirty
+ * (and store_flush() called) once a second by something as routine as a
+ * single TOPICLOCK channel's /TOPIC, so rotating on every flush only ever
+ * covered a few seconds of history, and any flush that landed right after a
+ * write failure (see below) copied the SAME truncated file into every
+ * backup slot in a matter of seconds. */
+#define BACKUP_ROTATE_MIN_INTERVAL 300
+static time_t g_last_backup_rotate = 0;
+
+/* Returns 1 on a successful write, 0 if it was abandoned (see the comment
+ * above the atomic-rename write below) -- store_flush() uses this so a
+ * failed write leaves g_store_dirty set and gets retried on the next tick,
+ * instead of the failure being silently accepted as "saved". */
+static int store_write_now(void) {
+    time_t now = time(NULL);
+    if (g_cfg.backup_count > 0 && now - g_last_backup_rotate >= BACKUP_ROTATE_MIN_INTERVAL) {
+        g_last_backup_rotate = now;
         char oldest[600];
         snprintf(oldest, sizeof oldest, "%s.bak%d", g_cfg.storage_path, g_cfg.backup_count);
         unlink(oldest);
@@ -196,27 +217,36 @@ static void store_write_now(void) {
         snprintf(to1, sizeof to1, "%s.bak1", g_cfg.storage_path);
         FILE *src = fopen(g_cfg.storage_path, "rb");
         if (src) {
-            FILE *dst = fopen(to1, "wb");
+            int fd1 = open(to1, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+            FILE *dst = fd1 >= 0 ? fdopen(fd1, "wb") : NULL;
             if (dst) {
                 char buf[4096];
                 size_t n;
                 while ((n = fread(buf, 1, sizeof buf, src)) > 0) fwrite(buf, 1, n, dst);
                 fclose(dst);
-            }
+            } else if (fd1 >= 0) close(fd1);
             fclose(src);
         }
     }
     char *text = cJSON_Print(g_store);
-    if (!text) return;
+    if (!text) return 0;
     char tmp[600];
     snprintf(tmp, sizeof tmp, "%s.tmp", g_cfg.storage_path);
-    FILE *fp = fopen(tmp, "wb");
-    if (fp) {
-        fputs(text, fp);
-        fclose(fp);
-        rename(tmp, g_cfg.storage_path);
-    }
+    /* 0600 (this store holds per-channel scrypt password hashes), fsync
+     * before the atomic rename, and the write is abandoned -- keeping the
+     * previous good file on disk -- on any error instead of possibly
+     * renaming a truncated file over it (e.g. a full disk). */
+    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) { free(text); return 0; }
+    FILE *fp = fdopen(fd, "wb");
+    if (!fp) { close(fd); free(text); return 0; }
+    size_t len = strlen(text);
+    int ok = fwrite(text, 1, len, fp) == len && fflush(fp) == 0 && fsync(fd) == 0;
+    if (fclose(fp) != 0) ok = 0;
+    if (ok) rename(tmp, g_cfg.storage_path);
+    else { unlink(tmp); log_error("chanserv", "failed to write %s -- keeping the previous version on disk", g_cfg.storage_path); }
     free(text);
+    return ok;
 }
 
 /* Debounced. Every state-changing command used to trigger the whole of
@@ -230,8 +260,11 @@ static int g_store_dirty = 0;
 static void store_save(void) { g_store_dirty = 1; }
 static void store_flush(void) {
     if (!g_store_dirty) return;
-    g_store_dirty = 0;
-    store_write_now();
+    /* Only clear dirty on a successful write -- a failed one (full disk,
+     * permissions) used to be accepted as "saved" and never retried, so
+     * whatever changes it lost stayed lost until the next unrelated write
+     * happened to succeed and cover them too. */
+    if (store_write_now()) g_store_dirty = 0;
 }
 
 static cJSON *store_get(const char *chan) {
@@ -266,11 +299,19 @@ static void rec_set_str(cJSON *rec, const char *key, const char *val) {
  * (case folded) -- stable across reconnects/host changes, unlike a hostmask,
  * which under host_masking only ever sees a random per-connection cloak
  * (see link.c's SVCJOIN comment). */
-static void normalize_mask(const char *mask, char *out, size_t outsz) {
-    if (mask[0] == '=') { snprintf(out, outsz, "=%s", mask + 1); return; }
-    if (strchr(mask, '!')) { snprintf(out, outsz, "%s", mask); return; }
-    if (strchr(mask, '@')) { snprintf(out, outsz, "*!%s", mask); return; }
+/* Returns 0 and fills `out`, or -1 (out untouched) if the host component is
+ * missing or a bare "*" -- e.g. "Bob!*@*", which HELP already promises never
+ * grants access but which nothing actually enforced: whoever takes the nick
+ * "Bob" matched it (and SUCCESSOR/INFO happily advertise which nick to grab). */
+static int normalize_mask(const char *mask, char *out, size_t outsz) {
+    if (mask[0] == '=') { snprintf(out, outsz, "=%s", mask + 1); return 0; }
+    const char *at = strchr(mask, '@');
+    const char *host = at ? at + 1 : mask; /* bare-host form: the whole mask IS the host */
+    if (!host[0] || strcmp(host, "*") == 0) return -1;
+    if (strchr(mask, '!')) { snprintf(out, outsz, "%s", mask); return 0; }
+    if (at) { snprintf(out, outsz, "*!%s", mask); return 0; }
     snprintf(out, outsz, "*!*@%s", mask);
+    return 0;
 }
 
 static int access_level_rank(const char *level) {
@@ -304,15 +345,26 @@ static const char *access_level_for(cJSON *rec, const char *nick, const char *us
     return best_rank >= 0 ? best : "";
 }
 
-static int akick_matches(cJSON *rec, const char *nick, const char *user,
-                          const char *host, const char *account, int ident_confirmed) {
+/* Returns the matching AKICK entry (valid until the store's next mutation),
+ * or NULL. `out_ban` (if non-NULL, at least 300 bytes) gets that entry
+ * translated into a +b-able mask: "=account" -> "a:account" (the ircd's own
+ * extban syntax, see channel.c's channel_mask_hit), anything else passed
+ * through as-is (already a full nick!user@host glob). */
+static const char *akick_matches(cJSON *rec, const char *nick, const char *user,
+                                  const char *host, const char *account, int ident_confirmed,
+                                  char *out_ban, size_t out_ban_sz) {
     cJSON *akick = cJSON_GetObjectItemCaseSensitive(rec, "akick");
-    if (!akick) return 0;
+    if (!akick) return NULL;
     cJSON *m;
     cJSON_ArrayForEach(m, akick) {
-        if (cJSON_IsString(m) && entry_matches(m->valuestring, nick, user, host, account, ident_confirmed)) return 1;
+        if (!cJSON_IsString(m) || !entry_matches(m->valuestring, nick, user, host, account, ident_confirmed)) continue;
+        if (out_ban) {
+            if (m->valuestring[0] == '=') snprintf(out_ban, out_ban_sz, "a:%s", m->valuestring + 1);
+            else snprintf(out_ban, out_ban_sz, "%s", m->valuestring);
+        }
+        return m->valuestring;
     }
-    return 0;
+    return NULL;
 }
 
 /* --- link connection to the ircd hub -------------------------------------- */
@@ -334,14 +386,20 @@ static void queue_line(const char *line) {
 }
 
 static void flush_sbuf(void) {
-    while (g_sbuf_len > 0) {
+    /* Bounded by wall-clock time, not iteration count: if the hub stops
+     * reading, this used to loop on EAGAIN + poll(1000) forever, ignoring
+     * g_term and the 240s keepalive timeout entirely -- SIGTERM (a normal
+     * `--stop` or service restart) never actually stopped the daemon while
+     * a write was stuck. */
+    time_t deadline = time(NULL) + 5;
+    while (g_sbuf_len > 0 && !g_term && time(NULL) < deadline) {
         ssize_t n = write(g_fd, g_sbuf, g_sbuf_len);
         if (n > 0) {
             memmove(g_sbuf, g_sbuf + n, g_sbuf_len - (size_t)n);
             g_sbuf_len -= (size_t)n;
         } else if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
             struct pollfd pfd = {.fd = g_fd, .events = POLLOUT};
-            poll(&pfd, 1, 1000);
+            poll(&pfd, 1, 200);
         } else {
             break; /* connection is gone; the read side will notice and reconnect */
         }
@@ -403,6 +461,12 @@ static void wire_whoischan(const char *chan, const char *nick) {
     irc_build(line, sizeof line, NULL, 0, NULL, "WHOISCHAN", p, 2, NULL);
     queue_line(line);
 }
+static void wire_whoisuser(const char *nick) {
+    char line[300];
+    const char *p[] = {nick};
+    irc_build(line, sizeof line, NULL, 0, NULL, "WHOISUSER", p, 1, NULL);
+    queue_line(line);
+}
 
 /* --- commands --------------------------------------------------------------- */
 
@@ -460,21 +524,43 @@ static void apply_mlock(cJSON *rec, const char *chan) {
 }
 
 /* Sessions that IDENTIFY'd (or REGISTERed, or SUCCESSOR CLAIMed) successfully
- * this run -- ported from Python's ChanServ.identified: (casefolded chan,
- * casefolded nick) pairs, cleared on QUIT, migrated on NICK. Not persisted
- * to the JSON store -- matches real ChanServ semantics ("repeat IDENTIFY
- * every reconnect"). Only reachable for channels ChanServ is GUARD-joined
- * to (that's the only case QUIT/NICK for a member reaches this daemon at
- * all -- see link.c's `lc->service` doc comment); for a registered-but-
- * never-GUARDed channel this set simply always reads empty, so SUCCESSOR
- * CLAIM there behaves as if nobody is identified (never falsely blocks it).
- * ponytail: capped at MAX_IDENTIFIED, oldest untouched entries are simply
- * forgotten past that -- bump it if a real deployment ever needs more. */
+ * -- ported from Python's ChanServ.identified: (casefolded chan, casefolded
+ * nick) pairs, cleared on QUIT, migrated on NICK. Not persisted to the JSON
+ * store -- matches real ChanServ semantics ("repeat IDENTIFY every
+ * reconnect").
+ *
+ * QUIT/NICK for a member only ever reaches this daemon for a channel it is
+ * GUARD-joined to (see link.c's `lc->service` doc comment) -- but REGISTER,
+ * IDENTIFY and CLAIM itself all mark_identified() unconditionally,
+ * regardless of GUARD. So for a never-GUARDed channel this set is NOT
+ * reliably empty (an earlier version of this comment claimed it was): a
+ * founder who REGISTERs, never GUARDs, and quits leaves a TRUE entry here
+ * forever, since no QUIT ever arrives to clear it -- permanently blocking a
+ * legitimate SUCCESSOR CLAIM. IDENTIFIED_TTL bounds that: an entry older
+ * than the TTL is treated as gone (and opportunistically pruned), same
+ * practical effect as the "have to reidentify eventually" model every real
+ * ChanServ already presents to users, just on a timer instead of only on a
+ * QUIT this daemon happens to observe.
+ * ponytail: capped at MAX_IDENTIFIED, oldest untouched entries are evicted
+ * past that -- bump it if a real deployment ever needs more. */
 #define MAX_IDENTIFIED 256
-static struct { char chan[128]; char nick[64]; } g_identified[MAX_IDENTIFIED];
+#define IDENTIFIED_TTL (6 * 3600) /* 6h */
+static struct { char chan[128]; char nick[64]; time_t at; } g_identified[MAX_IDENTIFIED];
 static int g_n_identified;
 
+/* Drops every entry older than IDENTIFIED_TTL. O(n), called from the few
+ * paths that read the table -- n is capped at MAX_IDENTIFIED (256), so this
+ * is cheap even on every PRIVMSG to ChanServ. */
+static void prune_identified(void) {
+    time_t now = time(NULL);
+    int w = 0;
+    for (int i = 0; i < g_n_identified; i++)
+        if (now - g_identified[i].at < IDENTIFIED_TTL) g_identified[w++] = g_identified[i];
+    g_n_identified = w;
+}
+
 static int is_identified(const char *chan, const char *nick) {
+    prune_identified();
     char cf_c[128], cf_n[64];
     irc_casefold(cf_c, sizeof cf_c, chan);
     irc_casefold(cf_n, sizeof cf_n, nick);
@@ -484,14 +570,40 @@ static int is_identified(const char *chan, const char *nick) {
 }
 
 static void mark_identified(const char *chan, const char *nick) {
-    if (is_identified(chan, nick)) return;
-    if (g_n_identified >= MAX_IDENTIFIED) return;
+    if (is_identified(chan, nick)) return; /* already prunes */
+    if (g_n_identified >= MAX_IDENTIFIED) {
+        /* Table full: evict the oldest entry instead of silently dropping
+         * this one. Without this, once 256 (chan, nick) pairs were live --
+         * easily reached over a long uptime, or by anyone registering ~256
+         * throwaway channels (they're op in each of their own, no per-user
+         * cap) -- no further IDENTIFY was ever remembered, so any_identified()
+         * kept reporting "nobody identified" even while a real founder was
+         * actively in the channel, letting a designated successor CLAIM out
+         * from under them. */
+        memmove(&g_identified[0], &g_identified[1], (size_t)(MAX_IDENTIFIED - 1) * sizeof g_identified[0]);
+        g_n_identified = MAX_IDENTIFIED - 1;
+    }
     irc_casefold(g_identified[g_n_identified].chan, sizeof g_identified[0].chan, chan);
     irc_casefold(g_identified[g_n_identified].nick, sizeof g_identified[0].nick, nick);
+    g_identified[g_n_identified].at = time(NULL);
     g_n_identified++;
 }
 
+/* DROP: nothing should still read as "identified" for a channel that no
+ * longer exists -- a stale entry from before this daemon reset (or simply
+ * never got a QUIT for, see is_identified's doc) would otherwise linger
+ * forever and could confuse a future re-registration of the same name. */
+static void clear_identified_chan(const char *chan) {
+    char cf_c[128];
+    irc_casefold(cf_c, sizeof cf_c, chan);
+    int w = 0;
+    for (int i = 0; i < g_n_identified; i++)
+        if (strcmp(g_identified[i].chan, cf_c) != 0) g_identified[w++] = g_identified[i];
+    g_n_identified = w;
+}
+
 static int any_identified(const char *chan) {
+    prune_identified();
     char cf_c[128];
     irc_casefold(cf_c, sizeof cf_c, chan);
     for (int i = 0; i < g_n_identified; i++)
@@ -529,6 +641,16 @@ static struct {
     char password[128];
     time_t sent_at;
 } g_pending_register;
+
+/* A SUCCESSOR CLAIM awaiting the hub's WHOISUSERREPLY (the claimant's real
+ * identity) -- same one-slot-at-a-time shape as g_pending_register above. */
+static struct {
+    int active;
+    char nick[64];
+    char chan[128];
+    char new_password[128];
+    time_t sent_at;
+} g_pending_claim;
 
 static void cmd_register(const char *from_nick, char *args) {
     char *save = NULL;
@@ -602,6 +724,7 @@ static void cmd_drop(const char *from_nick, char *args) {
     char cf[128];
     irc_casefold(cf, sizeof cf, chan);
     cJSON_DeleteItemFromObjectCaseSensitive(g_store, cf);
+    clear_identified_chan(chan);
     store_save();
     reply(from_nick, "Channel registration dropped.");
     log_info("chanserv", "%s dropped %s", from_nick, chan);
@@ -705,6 +828,7 @@ static void cmd_access(const char *from_nick, char *args) {
         reply(from_nick, header);
         cJSON *entry;
         cJSON_ArrayForEach(entry, access) {
+            if (!cJSON_IsString(entry)) continue; /* a hand-edited/corrupt store: valuestring is NULL for a non-string node */
             char line[300];
             snprintf(line, sizeof line, "  %s -- %s", entry->string, entry->valuestring);
             reply(from_nick, line);
@@ -718,7 +842,7 @@ static void cmd_access(const char *from_nick, char *args) {
         if (access_level_rank(levelbuf) < 0) { reply(from_nick, "Level must be one of: v h o"); return; }
         if (!check_password(from_nick, chan, password)) return;
         char norm[300];
-        normalize_mask(mask, norm, sizeof norm);
+        if (normalize_mask(mask, norm, sizeof norm) != 0) { reply(from_nick, "That mask needs a host (a nick alone never grants access) -- see HELP ACCESS"); return; }
         cJSON *access = cJSON_GetObjectItemCaseSensitive(rec, "access");
         if (!access) { access = cJSON_CreateObject(); cJSON_AddItemToObject(rec, "access", access); }
         cJSON_DeleteItemFromObjectCaseSensitive(access, norm);
@@ -732,10 +856,14 @@ static void cmd_access(const char *from_nick, char *args) {
         if (!mask || !password) { reply(from_nick, "Syntax: ACCESS <#channel> DEL <mask> <password>"); return; }
         if (!check_password(from_nick, chan, password)) return;
         char norm[300];
-        normalize_mask(mask, norm, sizeof norm);
+        if (normalize_mask(mask, norm, sizeof norm) != 0) { reply(from_nick, "That mask needs a host -- see HELP ACCESS"); return; }
         cJSON *access = cJSON_GetObjectItemCaseSensitive(rec, "access");
         int existed = access && cJSON_HasObjectItem(access, norm);
-        if (existed) cJSON_DeleteItemFromObjectCaseSensitive(access, norm);
+        /* Case-insensitive delete to match cJSON_HasObjectItem's own
+         * case-insensitive lookup above -- the CaseSensitive delete used to
+         * report "removed" for an entry whose stored casing didn't exactly
+         * match `norm`, while actually leaving it in place. */
+        if (existed) cJSON_DeleteItemFromObject(access, norm);
         store_save();
         char msg[300];
         snprintf(msg, sizeof msg, existed ? "%s removed from %s's access list" : "%s is not on %s's access list", norm, chan);
@@ -760,6 +888,7 @@ static void cmd_akick(const char *from_nick, char *args) {
         reply(from_nick, header);
         cJSON *m;
         cJSON_ArrayForEach(m, akick) {
+            if (!cJSON_IsString(m)) continue; /* see the ACCESS LIST note above */
             char line[300]; snprintf(line, sizeof line, "  %s", m->valuestring);
             reply(from_nick, line);
         }
@@ -769,7 +898,7 @@ static void cmd_akick(const char *from_nick, char *args) {
         if (!mask || !password) { reply(from_nick, "Syntax: AKICK <#channel> ADD <mask> <password>"); return; }
         if (!check_password(from_nick, chan, password)) return;
         char norm[300];
-        normalize_mask(mask, norm, sizeof norm);
+        if (normalize_mask(mask, norm, sizeof norm) != 0) { reply(from_nick, "That mask needs a host -- see HELP AKICK"); return; }
         cJSON *akick = cJSON_GetObjectItemCaseSensitive(rec, "akick");
         if (!akick) { akick = cJSON_CreateArray(); cJSON_AddItemToObject(rec, "akick", akick); }
         cJSON_AddItemToArray(akick, cJSON_CreateString(norm));
@@ -782,14 +911,14 @@ static void cmd_akick(const char *from_nick, char *args) {
         if (!mask || !password) { reply(from_nick, "Syntax: AKICK <#channel> DEL <mask> <password>"); return; }
         if (!check_password(from_nick, chan, password)) return;
         char norm[300];
-        normalize_mask(mask, norm, sizeof norm);
+        if (normalize_mask(mask, norm, sizeof norm) != 0) { reply(from_nick, "That mask needs a host -- see HELP AKICK"); return; }
         cJSON *akick = cJSON_GetObjectItemCaseSensitive(rec, "akick");
         int removed = 0;
         if (akick) {
             int idx = 0;
             cJSON *m;
             cJSON_ArrayForEach(m, akick) {
-                if (strcasecmp(m->valuestring, norm) == 0) { cJSON_DeleteItemFromArray(akick, idx); removed = 1; break; }
+                if (cJSON_IsString(m) && strcasecmp(m->valuestring, norm) == 0) { cJSON_DeleteItemFromArray(akick, idx); removed = 1; break; }
                 idx++;
             }
         }
@@ -816,7 +945,7 @@ static void cmd_successor(const char *from_nick, const char *prefix, char *args)
         if (!mask || !password) { reply(from_nick, "Syntax: SUCCESSOR <#channel> SET <mask> <password>"); return; }
         if (!check_password(from_nick, chan, password)) return;
         char norm[300];
-        normalize_mask(mask, norm, sizeof norm);
+        if (normalize_mask(mask, norm, sizeof norm) != 0) { reply(from_nick, "That mask needs a host -- see HELP SUCCESSOR"); return; }
         rec_set_str(rec, "successor", norm);
         store_save();
         char msg[300]; snprintf(msg, sizeof msg, "%s may now CLAIM %s if nobody is IDENTIFY'd for it", norm, chan);
@@ -830,31 +959,53 @@ static void cmd_successor(const char *from_nick, const char *prefix, char *args)
             reply(from_nick, "That channel still has an identified founder -- CLAIM refused.");
             return;
         }
-        char user[64] = "", host[256] = "";
-        const char *bang = prefix ? strchr(prefix, '!') : NULL;
-        const char *at = prefix ? strchr(prefix, '@') : NULL;
-        if (bang && at && at > bang) {
-            size_t ul = (size_t)(at - bang - 1);
-            if (ul >= sizeof user) ul = sizeof user - 1;
-            memcpy(user, bang + 1, ul); user[ul] = '\0';
-            snprintf(host, sizeof host, "%s", at + 1);
-        }
-        if (!irc_mask_match(from_nick, user, host, successor, 1)) { /* user came from the wire prefix: already display form */
-            reply(from_nick, "Your current connection doesn't match the designated successor mask.");
-            return;
-        }
-        char hash[256];
-        if (crypto_hash_password(new_password, hash, sizeof hash) != 0) { reply(from_nick, "Internal error -- try again."); return; }
-        rec_set_str(rec, "pw_hash", hash);
-        rec_set_str(rec, "successor", "");
-        store_save();
-        mark_identified(chan, from_nick);
-        wire_mode(chan, "+o", from_nick);
-        char msg[300]; snprintf(msg, sizeof msg, "You are now founder of %s -- SETPASS/ACCESS as needed", chan);
-        reply(from_nick, msg);
+        if (g_pending_claim.active) { reply(from_nick, "Busy processing another CLAIM -- try again shortly."); return; }
+        /* The requester's REAL identity (realhost/account/ident_confirmed),
+         * not `prefix` (the PRIVMSG sender prefix, which is the CLOAKED
+         * display host under host_masking -- a hostmask successor could
+         * then never match at all) -- fetched the same way REGISTER checks
+         * op status: an async WHOISUSER query to the hub, finished in
+         * finish_claim() once WHOISUSERREPLY comes back. See link.c. */
+        g_pending_claim.active = 1;
+        snprintf(g_pending_claim.nick, sizeof g_pending_claim.nick, "%s", from_nick);
+        snprintf(g_pending_claim.chan, sizeof g_pending_claim.chan, "%s", chan);
+        snprintf(g_pending_claim.new_password, sizeof g_pending_claim.new_password, "%s", new_password);
+        g_pending_claim.sent_at = time(NULL);
+        wire_whoisuser(from_nick);
     } else {
         reply(from_nick, "Syntax: SUCCESSOR <#channel> SET <mask> <password> | CLAIM <new-password>");
     }
+}
+
+static void finish_claim(const char *user, const char *host, const char *account, int ident_confirmed) {
+    const char *from_nick = g_pending_claim.nick;
+    const char *chan = g_pending_claim.chan;
+    cJSON *rec = store_get(chan);
+    if (!rec) { reply(from_nick, "That channel isn't registered."); return; } /* DROPped while the query was in flight */
+    const char *successor = rec_str(rec, "successor");
+    if (!successor[0]) { reply(from_nick, "That channel has no designated successor."); return; }
+    if (any_identified(chan)) { reply(from_nick, "That channel still has an identified founder -- CLAIM refused."); return; }
+    /* entry_matches (not irc_mask_match directly): handles both a
+     * nick!user@host glob AND the "=account" form the same way ACCESS/AKICK
+     * do -- a "=account" successor went through irc_mask_match before,
+     * which doesn't know that syntax, so it could never match anything. */
+    if (!entry_matches(successor, from_nick, user, host, account, ident_confirmed)) {
+        reply(from_nick, "Your current connection doesn't match the designated successor mask.");
+        return;
+    }
+    char hash[256];
+    if (crypto_hash_password(g_pending_claim.new_password, hash, sizeof hash) != 0) {
+        reply(from_nick, "Internal error hashing password -- try again.");
+        return;
+    }
+    rec_set_str(rec, "pw_hash", hash);
+    rec_set_str(rec, "successor", "");
+    store_save();
+    mark_identified(chan, from_nick);
+    wire_mode(chan, "+o", from_nick);
+    char msg[300]; snprintf(msg, sizeof msg, "You are now founder of %s -- SETPASS/ACCESS as needed", chan);
+    reply(from_nick, msg);
+    log_info("chanserv", "%s claimed founder of %s via SUCCESSOR", from_nick, chan);
 }
 
 static void cmd_set(const char *from_nick, char *args) {
@@ -1018,7 +1169,12 @@ static void handle_svcjoin(irc_message_t *msg) {
     cJSON *rec = store_get(chan);
     if (!rec) return;
 
-    if (akick_matches(rec, nick, user, host, account, ident_confirmed)) {
+    char ban[300];
+    if (akick_matches(rec, nick, user, host, account, ident_confirmed, ban, sizeof ban)) {
+        /* Set the ban before the KICK, not just the kick alone -- AKICK
+         * with no ban meant a client could JOIN/get-kicked/JOIN again as
+         * fast as the server's flood limits allowed, forever. */
+        wire_mode(chan, "+b", ban);
         wire_kick(chan, nick, "Banned from this channel (AKICK)");
         return;
     }
@@ -1092,28 +1248,33 @@ static int do_handshake(void) {
     return 0;
 }
 
-/* Rejoins every GUARDed channel -- covers both a fresh start and a
- * reconnect after a dropped link (guard_join in upstream's terms). */
+/* Rejoins every GUARDed channel, and reasserts +r/MLOCK for EVERY registered
+ * channel regardless of GUARD -- covers both a fresh start and a reconnect
+ * after a dropped link (guard_join in upstream's terms). Channel state
+ * (including +r and any locked mode) lives only in the ircd's memory, not in
+ * this store, so an ircd restart/rehash wipes it; a MODE for a channel that
+ * doesn't currently exist there (nobody in it right now) is simply ignored
+ * by the hub (see link.c's MODE handler), so this is safe to send broadly --
+ * a non-GUARDed registered channel used to only get +r/MLOCK back if someone
+ * happened to run /SAMODE by hand, since ChanServ was never in it to see
+ * anything reset. */
 static void guard_join_all(void) {
     cJSON *entry;
     cJSON_ArrayForEach(entry, g_store) {
+        const char *chan = rec_str(entry, "name");
         if (rec_bool(entry, "guard")) {
-            const char *chan = rec_str(entry, "name");
             wire_join(chan);
-            /* Channel state (including +r) lives only in the ircd's memory,
-             * not in this store -- reassert it on every (re)join so an ircd
-             * restart/rehash that wiped it (or predates this daemon having
-             * +r at all) gets it back without needing a manual /SAMODE. */
-            wire_mode(chan, "+r", NULL);
-            apply_mlock(entry, chan);
-            /* TOPICLOCK: same reasoning as +r above -- the ircd's live topic
-             * is memory-only too, so a restart/recreate loses it. Ported
-             * from Python's guard_join baseline restore. */
+            /* TOPICLOCK: same reasoning as +r/MLOCK below -- the ircd's live
+             * topic is memory-only too, so a restart/recreate loses it. Only
+             * meaningful once ChanServ has actually (re)joined. Ported from
+             * Python's guard_join baseline restore. */
             if (rec_bool(entry, "topiclock")) {
                 const char *stored_topic = rec_str(entry, "topic");
                 if (stored_topic[0]) wire_topic(chan, stored_topic);
             }
         }
+        wire_mode(chan, "+r", NULL);
+        apply_mlock(entry, chan);
     }
 }
 
@@ -1208,6 +1369,14 @@ static void process_line(char *line) {
         else reply(g_pending_register.nick, "You must be a channel operator there to register it.");
         return;
     }
+    if (strcasecmp(msg.command, "WHOISUSERREPLY") == 0) {
+        if (msg.nparams < 5 || !g_pending_claim.active) return;
+        if (strcasecmp(msg.params[0], g_pending_claim.nick) != 0) return;
+        g_pending_claim.active = 0;
+        if (strcmp(msg.params[1], "*") == 0) { reply(g_pending_claim.nick, "You're not online anymore."); return; }
+        finish_claim(msg.params[1], msg.params[2], msg.params[3], msg.params[4][0] == '1');
+        return;
+    }
 }
 
 static int run_session(void) {
@@ -1217,6 +1386,17 @@ static int run_session(void) {
     int flags = fcntl(g_fd, F_GETFL, 0);
     fcntl(g_fd, F_SETFL, flags | O_NONBLOCK);
     g_rbuf_len = 0;
+    /* A previous session's queued-but-unsent output (e.g. a MODE left in
+     * g_sbuf when the link dropped mid-write) must not bleed into this new
+     * one -- it would be sent before NICK even reintroduces the service
+     * pseudo-client, applying to whatever a nick/channel means on THIS
+     * connection, not the one it was meant for. */
+    g_sbuf_len = 0;
+    /* Likewise, "who's identified" can't survive a lost link: any QUIT/NICK
+     * that happened while disconnected was never seen, so a stale entry
+     * could wrongly block (or, worse, a stale nick given to someone else
+     * could wrongly satisfy) a SUCCESSOR CLAIM after reconnecting. */
+    g_n_identified = 0;
     g_last_activity = time(NULL);
     log_info("chanserv", "session established as '%s'", g_cfg.nick);
     guard_join_all();
@@ -1258,6 +1438,10 @@ static int run_session(void) {
         if (g_pending_register.active && difftime(time(NULL), g_pending_register.sent_at) > 5) {
             g_pending_register.active = 0;
             reply(g_pending_register.nick, "Timed out waiting for the server -- try REGISTER again.");
+        }
+        if (g_pending_claim.active && difftime(time(NULL), g_pending_claim.sent_at) > 5) {
+            g_pending_claim.active = 0;
+            reply(g_pending_claim.nick, "Timed out waiting for the server -- try CLAIM again.");
         }
         if (difftime(time(NULL), g_last_activity) > 240) break; /* link keepalive timeout */
     }
