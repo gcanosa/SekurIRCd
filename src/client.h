@@ -133,6 +133,8 @@ typedef struct client {
     struct client *all_next, *all_prev;
 
     UT_hash_handle hh; /* server->users, keyed by casefold_nick (once NICK is known) */
+    UT_hash_handle hh_conn; /* server->by_conn_id, keyed by conn_id -- O(1) lookup of a
+                              * worker job result's owner instead of walking all_clients */
 } client_t;
 
 client_t *client_new(int fd, struct server *srv);
