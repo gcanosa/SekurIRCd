@@ -483,6 +483,9 @@ def choose_target(cur):
         pick.setdefault("kind", "ref")
         return pick
     out()
+    if opts and all(o["sha"] == cur["sha"] for o in opts):
+        ok("You're already on the latest release and latest commit -- nothing to upgrade to.")
+        opts = []
     for i, o in enumerate(opts, 1):
         if o["kind"] == "release":
             info(f"{bold(f'[{i}]')} Latest {bold('release')}  {bold(o['ref'])} {o['title'] and '— ' + o['title'].split('—')[-1].strip()}"
