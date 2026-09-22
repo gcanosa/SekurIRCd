@@ -162,7 +162,7 @@ static const struct { const char *name; unsigned int bit; } CAP_ATTRS[] = {
 /* Builds the space-separated "CAP LS" token list into `out`. "sasl" (if
  * config-gated on) carries its mechanism list as a value, like upstream's
  * `f"{c}=PLAIN" if c == "sasl" else c`. */
-static void render_supported_caps(server_t *srv, char *out, size_t outsz) {
+static void render_supported_caps(server_t *srv, client_t *cl, char *out, size_t outsz) {
     out[0] = '\0';
     for (int i = 0; i < N_CAP_ATTRS; i++) {
         if (out[0]) strncat(out, " ", outsz - strlen(out) - 1);
@@ -180,6 +180,16 @@ static void render_supported_caps(server_t *srv, char *out, size_t outsz) {
          * custom-account-name because the account needn't match the nick. */
         strncat(out, " draft/account-registration=custom-account-name", outsz - strlen(out) - 1);
     }
+    /* IRCv3 STS: a plaintext connection is told to switch to the TLS port
+     * and pin that for sts_duration seconds; an already-TLS connection just
+     * gets the duration (no port= -- it has nothing to redirect to). */
+    if (srv->cfg.tls.enabled && srv->cfg.tls.sts_duration > 0) {
+        if (out[0]) strncat(out, " ", outsz - strlen(out) - 1);
+        char sts[64];
+        if (cl->umodes & UMODE_Z) snprintf(sts, sizeof sts, "sts=duration=%d", srv->cfg.tls.sts_duration);
+        else snprintf(sts, sizeof sts, "sts=port=%d,duration=%d", srv->cfg.tls.port, srv->cfg.tls.sts_duration);
+        strncat(out, sts, outsz - strlen(out) - 1);
+    }
 }
 
 void cmd_cap(server_t *srv, client_t *cl, irc_message_t *msg) {
@@ -189,7 +199,7 @@ void cmd_cap(server_t *srv, client_t *cl, irc_message_t *msg) {
     if (strcasecmp(sub, "LS") == 0 || strcasecmp(sub, "LIST") == 0) {
         cl->cap_negotiating = 1;
         char caps[512];
-        if (strcasecmp(sub, "LS") == 0) render_supported_caps(srv, caps, sizeof caps);
+        if (strcasecmp(sub, "LS") == 0) render_supported_caps(srv, cl, caps, sizeof caps);
         else caps[0] = '\0'; /* CAP LIST: caps already granted -- rendered below */
         if (strcasecmp(sub, "LIST") == 0) {
             for (int i = 0; i < N_CAP_ATTRS; i++) {

@@ -227,6 +227,13 @@ key_file = ""
 # Off by default -- no effect unless [accounts] below is also enabled.
 request_client_cert = false
 
+# IRCv3 STS (Strict Transport Security): advertised in CAP LS only while
+# [tls] enabled is true. A plaintext-connecting client that understands it
+# switches to the TLS port and remembers to for this many seconds; an
+# already-TLS client just gets told how long to keep trusting it. 0 (the
+# default) means don't advertise it at all.
+sts_duration = 0
+
 
 # -----------------------------------------------------------------------------
 # [accounts] -- self-service accounts (SASL PLAIN/EXTERNAL, /REGISTER, /CERT)

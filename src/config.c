@@ -724,6 +724,13 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
         if (cfg_get_str(t, "cert_file", "", out->tls.cert_file, CFG_PATH, errbuf, errbufsz, "tls.cert_file")) return -1;
         if (cfg_get_str(t, "key_file", "", out->tls.key_file, CFG_PATH, errbuf, errbufsz, "tls.key_file")) return -1;
         if (cfg_get_bool(t, "request_client_cert", 0, &out->tls.request_client_cert, errbuf, errbufsz, "tls.request_client_cert")) return -1;
+        /* IRCv3 STS (Strict Transport Security): tells a plaintext client to
+         * switch to the TLS port and remember to for this many seconds. 0 (the
+         * default) means don't advertise it -- most deployments either only
+         * offer plaintext, or want an explicit opt-in before telling clients
+         * to pin a redirect. */
+        if (cfg_get_int(t, "sts_duration", 0, &out->tls.sts_duration, errbuf, errbufsz, "tls.sts_duration")) return -1;
+        if (out->tls.sts_duration < 0) { snprintf(errbuf, errbufsz, "tls.sts_duration must be >= 0"); return -1; }
         if (out->tls.port < 1 || out->tls.port > 65535) { snprintf(errbuf, errbufsz, "tls.port must be in 1-65535"); return -1; }
         if (out->tls.enabled && !(out->tls.cert_file[0] && out->tls.key_file[0])) {
             snprintf(errbuf, errbufsz, "tls.enabled is true but tls.cert_file/tls.key_file are not both set");
