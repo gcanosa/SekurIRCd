@@ -652,6 +652,52 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
         server_maybe_drop_channel(srv, chan);
         return 0;
     }
+    if (strcasecmp(msg.command, "INVITE") == 0) {
+        /* Trusted: ChanServ's INVITE command. Unlike a real client's
+         * /INVITE (cmd_chan.c's cmd_invite), no membership/op check --
+         * that's the whole point of routing it through the password- or
+         * ACCESS-gated service command instead. */
+        if (msg.nparams < 2) return 0;
+        channel_t *chan = server_find_channel(srv, msg.params[0]);
+        client_t *target = server_find_user(srv, msg.params[1]);
+        if (!chan || !target) return 0;
+        char cf[64];
+        irc_casefold(cf, sizeof cf, target->nick);
+        channel_invite_add(chan, cf);
+        char prefix[320];
+        client_prefix(svc, prefix, sizeof prefix);
+        char line[300];
+        const char *p[] = {target->nick};
+        irc_build(line, sizeof line, NULL, 0, prefix, "INVITE", p, 1, chan->name);
+        client_send(target, line);
+        return 0;
+    }
+    if (strcasecmp(msg.command, "UNBAN") == 0) {
+        /* Trusted: removes every ban mask (structural +b, not a quiet m:/
+         * ~m: -- see channel.c) currently matching `nick`'s real identity
+         * (host, realhost, ip or account) from `chan`, one MODE -b per
+         * removed mask (simplest correct framing; UNBAN is not a hot path). */
+        if (msg.nparams < 2) return 0;
+        channel_t *chan = server_find_channel(srv, msg.params[0]);
+        client_t *target = server_find_user(srv, msg.params[1]);
+        if (!chan || !target) return 0;
+        char prefix[320];
+        client_prefix(svc, prefix, sizeof prefix);
+        for (int i = chan->bans.n - 1; i >= 0; i--) {
+            char mask[256];
+            snprintf(mask, sizeof mask, "%s", chan->bans.masks[i]);
+            int hit = channel_mask_hit(mask, target->nick, target->user, target->host, target->account, target->ident_confirmed) ||
+                      channel_mask_hit(mask, target->nick, target->user, target->realhost, target->account, target->ident_confirmed) ||
+                      channel_mask_hit(mask, target->nick, target->user, target->ip, target->account, target->ident_confirmed);
+            if (!hit) continue;
+            masklist_del(&chan->bans, mask);
+            char line[400];
+            const char *p[] = {chan->name, "-b", mask};
+            irc_build(line, sizeof line, NULL, 0, prefix, "MODE", p, 3, NULL);
+            server_broadcast_channel(chan, line, NULL);
+        }
+        return 0;
+    }
     if (strcasecmp(msg.command, "WHOISUSER") == 0) {
         /* Real (realhost/account/ident_confirmed) identity of a nick, for
          * SUCCESSOR CLAIM -- matching against the PRIVMSG prefix instead

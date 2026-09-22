@@ -467,6 +467,18 @@ static void wire_whoisuser(const char *nick) {
     irc_build(line, sizeof line, NULL, 0, NULL, "WHOISUSER", p, 1, NULL);
     queue_line(line);
 }
+static void wire_invite(const char *chan, const char *nick) {
+    char line[300];
+    const char *p[] = {chan, nick};
+    irc_build(line, sizeof line, NULL, 0, NULL, "INVITE", p, 2, NULL);
+    queue_line(line);
+}
+static void wire_unban(const char *chan, const char *nick) {
+    char line[300];
+    const char *p[] = {chan, nick};
+    irc_build(line, sizeof line, NULL, 0, NULL, "UNBAN", p, 2, NULL);
+    queue_line(line);
+}
 
 /* --- commands --------------------------------------------------------------- */
 
@@ -1056,6 +1068,103 @@ static void cmd_set(const char *from_nick, char *args) {
     reply(from_nick, msg);
 }
 
+/* OP/DEOP/VOICE/DEVOICE/HALFOP/DEHALFOP <#channel> [nick] <password> --
+ * nick defaults to the caller. Password-gated like every other command
+ * here (same as SETPASS/ACCESS/etc); there's no ACCESS-level shortcut,
+ * matching this daemon's existing "always the channel password" design. */
+static void cmd_chanmode_one(const char *from_nick, char *args, const char *name, char sign, char letter) {
+    char *save = NULL;
+    char *chan = strtok_r(args, " ", &save);
+    char *a = strtok_r(NULL, " ", &save);
+    char *b = strtok_r(NULL, " ", &save);
+    if (!chan || !a) {
+        char m[100]; snprintf(m, sizeof m, "Syntax: %s <#channel> [nick] <password>", name);
+        reply(from_nick, m);
+        return;
+    }
+    const char *target = b ? a : from_nick;
+    const char *password = b ? b : a;
+    if (!check_password(from_nick, chan, password)) return;
+    char modestring[3] = {sign, letter, '\0'};
+    wire_mode(chan, modestring, target);
+    char msg[200];
+    snprintf(msg, sizeof msg, "%s: %c%c %s", chan, sign, letter, target);
+    reply(from_nick, msg);
+}
+
+static void cmd_svc_invite(const char *from_nick, char *args) {
+    char *save = NULL;
+    char *chan = strtok_r(args, " ", &save);
+    char *a = strtok_r(NULL, " ", &save);
+    char *b = strtok_r(NULL, " ", &save);
+    if (!chan || !a) { reply(from_nick, "Syntax: INVITE <#channel> [nick] <password>"); return; }
+    const char *target = b ? a : from_nick;
+    const char *password = b ? b : a;
+    if (!check_password(from_nick, chan, password)) return;
+    wire_invite(chan, target);
+    char msg[200]; snprintf(msg, sizeof msg, "Invited %s to %s", target, chan);
+    reply(from_nick, msg);
+}
+
+static void cmd_svc_unban(const char *from_nick, char *args) {
+    char *save = NULL;
+    char *chan = strtok_r(args, " ", &save);
+    char *a = strtok_r(NULL, " ", &save);
+    char *b = strtok_r(NULL, " ", &save);
+    if (!chan || !a) { reply(from_nick, "Syntax: UNBAN <#channel> [nick] <password>"); return; }
+    const char *target = b ? a : from_nick;
+    const char *password = b ? b : a;
+    if (!check_password(from_nick, chan, password)) return;
+    wire_unban(chan, target);
+    char msg[200]; snprintf(msg, sizeof msg, "Removed any ban matching %s on %s", target, chan);
+    reply(from_nick, msg);
+}
+
+static void cmd_svc_kick(const char *from_nick, char *args) {
+    char *save = NULL;
+    char *chan = strtok_r(args, " ", &save);
+    char *target = strtok_r(NULL, " ", &save);
+    if (!chan || !target || !save || !*save) { reply(from_nick, "Syntax: KICK <#channel> <nick> [reason] <password>"); return; }
+    /* Remainder is "[reason ]password" -- split on the LAST space, same as
+     * cmd_set's value/password split, so a reason may itself contain spaces. */
+    char *rest = save;
+    char *last_space = strrchr(rest, ' ');
+    char reason[300] = "", password[128];
+    if (last_space) {
+        size_t rl = (size_t)(last_space - rest);
+        if (rl >= sizeof reason) rl = sizeof reason - 1;
+        memcpy(reason, rest, rl); reason[rl] = '\0';
+        snprintf(password, sizeof password, "%s", last_space + 1);
+    } else {
+        snprintf(password, sizeof password, "%s", rest);
+    }
+    if (!check_password(from_nick, chan, password)) return;
+    wire_kick(chan, target, reason[0] ? reason : "Kicked");
+    char msg[300]; snprintf(msg, sizeof msg, "Kicked %s from %s", target, chan);
+    reply(from_nick, msg);
+}
+
+static void cmd_svc_topic(const char *from_nick, char *args) {
+    char *save = NULL;
+    char *chan = strtok_r(args, " ", &save);
+    if (!chan || !save || !*save) { reply(from_nick, "Syntax: TOPIC <#channel> <text> <password>"); return; }
+    char *rest = save;
+    char *last_space = strrchr(rest, ' ');
+    char topic[300] = "", password[128];
+    if (last_space) {
+        size_t tl = (size_t)(last_space - rest);
+        if (tl >= sizeof topic) tl = sizeof topic - 1;
+        memcpy(topic, rest, tl); topic[tl] = '\0';
+        snprintf(password, sizeof password, "%s", last_space + 1);
+    } else {
+        snprintf(password, sizeof password, "%s", rest);
+    }
+    if (!check_password(from_nick, chan, password)) return;
+    wire_topic(chan, topic);
+    char msg[300]; snprintf(msg, sizeof msg, "Topic set on %s", chan);
+    reply(from_nick, msg);
+}
+
 static void cmd_help(const char *from_nick, char *args) {
     (void)args;
     reply(from_nick, "ChanServ commands:");
@@ -1103,6 +1212,12 @@ static void cmd_help(const char *from_nick, char *args) {
     reply(from_nick, "  SET #channel DESC|URL|ENTRYMSG <text> <password>");
     reply(from_nick, "                                -- free-text metadata (DESC/URL shown by INFO,");
     reply(from_nick, "                                   ENTRYMSG sent to whoever JOINs); empty clears");
+    reply(from_nick, "  OP|DEOP|VOICE|DEVOICE|HALFOP|DEHALFOP #channel [nick] <password>");
+    reply(from_nick, "                                -- set/remove that rank; nick defaults to yourself");
+    reply(from_nick, "  INVITE #channel [nick] <password>  -- invite yourself or someone else in");
+    reply(from_nick, "  UNBAN #channel [nick] <password>   -- remove any ban matching yourself/someone");
+    reply(from_nick, "  KICK #channel <nick> [reason] <password>  -- kick someone out");
+    reply(from_nick, "  TOPIC #channel <text> <password>          -- set the topic");
 }
 
 #define CTCP_DELIM '\x01'
@@ -1152,6 +1267,16 @@ static void dispatch_privmsg(const char *from_nick, const char *from_prefix, con
     else if (strcasecmp(verb, "AKICK") == 0) cmd_akick(from_nick, rest);
     else if (strcasecmp(verb, "SUCCESSOR") == 0) cmd_successor(from_nick, from_prefix, rest);
     else if (strcasecmp(verb, "SET") == 0) cmd_set(from_nick, rest);
+    else if (strcasecmp(verb, "OP") == 0) cmd_chanmode_one(from_nick, rest, "OP", '+', 'o');
+    else if (strcasecmp(verb, "DEOP") == 0) cmd_chanmode_one(from_nick, rest, "DEOP", '-', 'o');
+    else if (strcasecmp(verb, "VOICE") == 0) cmd_chanmode_one(from_nick, rest, "VOICE", '+', 'v');
+    else if (strcasecmp(verb, "DEVOICE") == 0) cmd_chanmode_one(from_nick, rest, "DEVOICE", '-', 'v');
+    else if (strcasecmp(verb, "HALFOP") == 0) cmd_chanmode_one(from_nick, rest, "HALFOP", '+', 'h');
+    else if (strcasecmp(verb, "DEHALFOP") == 0) cmd_chanmode_one(from_nick, rest, "DEHALFOP", '-', 'h');
+    else if (strcasecmp(verb, "INVITE") == 0) cmd_svc_invite(from_nick, rest);
+    else if (strcasecmp(verb, "UNBAN") == 0) cmd_svc_unban(from_nick, rest);
+    else if (strcasecmp(verb, "KICK") == 0) cmd_svc_kick(from_nick, rest);
+    else if (strcasecmp(verb, "TOPIC") == 0) cmd_svc_topic(from_nick, rest);
     else if (strcasecmp(verb, "HELP") == 0) cmd_help(from_nick, rest);
     else reply(from_nick, "Unknown command. Try HELP.");
 }
