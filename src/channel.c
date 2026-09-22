@@ -73,11 +73,21 @@ int channel_is_voice(channel_t *chan, struct client *cl) {
 
 int channel_mask_hit(const char *mask, const char *nick, const char *user,
                       const char *host, const char *account, int ident_confirmed) {
+    if (mask[0] == '~') mask++; /* EXTBAN=~,am -- the "~" prefix form is an alias for the bare one below */
     if (strncasecmp(mask, "a:", 2) == 0) {
         if (!account || !account[0]) return 0; /* EXTBAN a: never matches a logged-out user */
         return irc_glob_match(mask + 2, account);
     }
     return irc_mask_match(nick, user, host, mask, ident_confirmed);
+}
+
+/* True if `mask` is the quiet extban (m:/~m:) rather than a structural ban --
+ * channel_is_banned skips these (they don't block JOIN, only speaking; see
+ * channel_is_quieted), and MODE +b/-b still adds/removes them normally
+ * since they share the same list and MAXLIST cap as an ordinary ban. */
+static int is_quiet_mask(const char *mask) {
+    if (mask[0] == '~') mask++;
+    return strncasecmp(mask, "m:", 2) == 0;
 }
 
 /* True if `mask` hits any of host/realhost/ip (see channel_is_banned's doc). */
@@ -90,12 +100,26 @@ static int mask_hit_any_host(const char *mask, const char *nick, const char *use
     return 0;
 }
 
+int channel_is_quieted(channel_t *chan, const char *nick, const char *user,
+                        const char *host, const char *realhost, const char *ip,
+                        const char *account, int ident_confirmed) {
+    for (int i = 0; i < chan->bans.n; i++) {
+        const char *mask = chan->bans.masks[i];
+        if (!is_quiet_mask(mask)) continue;
+        const char *m = mask[0] == '~' ? mask + 3 : mask + 2; /* skip "m:"/"~m:" */
+        if (mask_hit_any_host(m, nick, user, host, realhost, ip, account, ident_confirmed)) return 1;
+    }
+    return 0;
+}
+
 int channel_is_banned(channel_t *chan, const char *nick, const char *user,
                        const char *host, const char *realhost, const char *ip,
                        const char *account, int ident_confirmed) {
     int banned = 0;
-    for (int i = 0; i < chan->bans.n && !banned; i++)
+    for (int i = 0; i < chan->bans.n && !banned; i++) {
+        if (is_quiet_mask(chan->bans.masks[i])) continue; /* quiet, not a JOIN-blocking ban */
         if (mask_hit_any_host(chan->bans.masks[i], nick, user, host, realhost, ip, account, ident_confirmed)) banned = 1;
+    }
     if (!banned) return 0;
     for (int i = 0; i < chan->exceptions.n; i++)
         if (mask_hit_any_host(chan->exceptions.masks[i], nick, user, host, realhost, ip, account, ident_confirmed)) return 0;
@@ -171,6 +195,10 @@ void channel_modes_string(channel_t *chan, char *out, size_t outsz) {
     if (chan->modes & CMODE_NOINVITE) flags[fp++] = 'V';
     if (chan->modes & CMODE_NOKICK) flags[fp++] = 'Q';
     if (chan->modes & CMODE_NONICK) flags[fp++] = 'N';
+    if (chan->modes & CMODE_REGONLY) flags[fp++] = 'R';
+    if (chan->modes & CMODE_OPERONLY) flags[fp++] = 'O';
+    if (chan->modes & CMODE_MODREG) flags[fp++] = 'M';
+    if (chan->modes & CMODE_NOCOLOR) flags[fp++] = 'c';
     if ((chan->modes & CMODE_K) && chan->key[0]) {
         flags[fp++] = 'k';
         snprintf(args, sizeof args, " %s", chan->key);

@@ -61,6 +61,18 @@ static int is_blocked_ctcp(const char *text) {
     return text[0] == '\x01' && strncmp(text + 1, "ACTION", 6) != 0;
 }
 
+/* +c: any of the same bytes strip_formatting above removes. Unlike +S
+ * (which silently strips and still delivers), +c rejects the message
+ * outright -- same distinction real ircds draw between "block colour" and
+ * "strip colour". */
+static int has_formatting(const char *text) {
+    for (const unsigned char *p = (const unsigned char *)text; *p; p++) {
+        if (*p == 0x02 || *p == 0x0F || *p == 0x11 || *p == 0x16 || *p == 0x1D || *p == 0x1E || *p == 0x1F || *p == 0x03)
+            return 1;
+    }
+    return 0;
+}
+
 static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char *verb, int is_notice) {
     const char *target = msg->params[0];
     if (msg->nparams < 2) {
@@ -113,9 +125,22 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
             if (!is_notice) { const char *pe[] = {target}; client_reply(cl, N_CANNOTSENDTOCHAN, pe, 1, "Cannot send to channel (+m)"); }
             return;
         }
+        if ((chan->modes & CMODE_MODREG) && !privileged && !cl->account[0]) {
+            if (!is_notice) { const char *pe[] = {target}; client_reply(cl, N_CANNOTSENDTOCHAN, pe, 1, "Cannot send to channel (+M, registered users only)"); }
+            return;
+        }
+        if ((chan->modes & CMODE_NOCOLOR) && !privileged && has_formatting(textbuf)) {
+            if (!is_notice) { const char *pe[] = {target}; client_reply(cl, N_CANNOTSENDTOCHAN, pe, 1, "Cannot send to channel (+c, no colour/formatting)"); }
+            return;
+        }
         if (!(m && (m->rank & RANK_OP)) && !(cl->umodes & UMODE_O) &&
             channel_is_banned(chan, cl->nick, cl->user, cl->host, cl->realhost, cl->ip, cl->account, cl->ident_confirmed)) {
             if (!is_notice) { const char *pe[] = {target}; client_reply(cl, N_CANNOTSENDTOCHAN, pe, 1, "Cannot send to channel (+b)"); }
+            return;
+        }
+        if (!privileged &&
+            channel_is_quieted(chan, cl->nick, cl->user, cl->host, cl->realhost, cl->ip, cl->account, cl->ident_confirmed)) {
+            if (!is_notice) { const char *pe[] = {target}; client_reply(cl, N_CANNOTSENDTOCHAN, pe, 1, "Cannot send to channel (quieted)"); }
             return;
         }
         char stripbuf[420];

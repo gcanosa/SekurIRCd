@@ -190,6 +190,16 @@ static void do_join_one(server_t *srv, client_t *cl, const char *chan_name, cons
             client_reply(cl, N_SECUREONLYCHAN, p, 1, "Cannot join channel (+z, requires a secure connection)");
             return;
         }
+        if ((chan->modes & CMODE_REGONLY) && !cl->account[0]) {
+            const char *p[] = {chan->name};
+            client_reply(cl, N_NEEDREGGEDNICK, p, 1, "Cannot join channel (+R, requires a registered account)");
+            return;
+        }
+        if (chan->modes & CMODE_OPERONLY) { /* already past the UMODE_O bypass above, so this branch means not-oper */
+            const char *p[] = {chan->name};
+            client_reply(cl, N_NEEDREGGEDNICK, p, 1, "Cannot join channel (+O, IRC operators only)");
+            return;
+        }
     }
 
     member_t *m = channel_add_member(chan, cl);
@@ -393,6 +403,8 @@ void cmd_list(server_t *srv, client_t *cl, irc_message_t *msg) {
     int n_wanted = 0;
     char masks[32][CHAN_NAMELEN];
     int n_masks = 0;
+    char neg_masks[32][CHAN_NAMELEN]; /* ELIST 'N': !mask excludes a match */
+    int n_neg = 0;
     int min_users = -1, max_users = -1;
 
     if (msg->nparams > 0 && msg->params[0][0]) {
@@ -401,10 +413,17 @@ void cmd_list(server_t *srv, client_t *cl, irc_message_t *msg) {
         char *save = NULL;
         for (char *tok = strtok_r(buf, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
             if (!tok[0]) continue;
-            if (tok[0] == '>' && isdigit((unsigned char)tok[1])) min_users = atoi(tok + 1);
-            else if (tok[0] == '<' && isdigit((unsigned char)tok[1])) max_users = atoi(tok + 1);
-            else if (tok[0] == '#') { if (n_wanted < 32) { irc_casefold(wanted[n_wanted], CHAN_NAMELEN, tok); n_wanted++; have_wanted = 1; } }
-            else { if (n_masks < 32) { irc_casefold(masks[n_masks], CHAN_NAMELEN, tok); n_masks++; } }
+            int negate = tok[0] == '!' && tok[1];
+            const char *body = negate ? tok + 1 : tok;
+            /* A '#'-led token is only an exact channel name if it has no
+             * glob characters -- "#*linux*" is a pattern (ELIST 'M'), not a
+             * request for a literal channel named "#*linux*". */
+            int is_pattern = strchr(body, '*') || strchr(body, '?');
+            if (!negate && tok[0] == '>' && isdigit((unsigned char)tok[1])) min_users = atoi(tok + 1);
+            else if (!negate && tok[0] == '<' && isdigit((unsigned char)tok[1])) max_users = atoi(tok + 1);
+            else if (negate) { if (n_neg < 32) { irc_casefold(neg_masks[n_neg], CHAN_NAMELEN, body); n_neg++; } }
+            else if (body[0] == '#' && !is_pattern) { if (n_wanted < 32) { irc_casefold(wanted[n_wanted], CHAN_NAMELEN, body); n_wanted++; have_wanted = 1; } }
+            else { if (n_masks < 32) { irc_casefold(masks[n_masks], CHAN_NAMELEN, body); n_masks++; } }
         }
     }
 
@@ -419,6 +438,11 @@ void cmd_list(server_t *srv, client_t *cl, irc_message_t *msg) {
             int hit = 0;
             for (int i = 0; i < n_masks; i++) if (irc_glob_match(masks[i], c->casefold_name)) { hit = 1; break; }
             if (!hit) continue;
+        }
+        if (n_neg > 0) {
+            int excluded = 0;
+            for (int i = 0; i < n_neg; i++) if (irc_glob_match(neg_masks[i], c->casefold_name)) { excluded = 1; break; }
+            if (excluded) continue;
         }
         int count = channel_member_count(c);
         if (min_users >= 0 && count <= min_users) continue;
@@ -718,6 +742,10 @@ void cmd_apply_channel_mode(server_t *srv, client_t *cl, channel_t *chan,
             case 'V': flagbit = CMODE_NOINVITE; break;
             case 'Q': flagbit = CMODE_NOKICK; break;
             case 'N': flagbit = CMODE_NONICK; break;
+            case 'R': flagbit = CMODE_REGONLY; break;
+            case 'O': flagbit = CMODE_OPERONLY; break;
+            case 'M': flagbit = CMODE_MODREG; break;
+            case 'c': flagbit = CMODE_NOCOLOR; break;
             default: break;
         }
         if (flagbit) {

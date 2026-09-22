@@ -43,6 +43,10 @@ struct client;
 #define CMODE_NOINVITE   0x4000 /* V: /INVITE disabled */
 #define CMODE_NOKICK     0x8000 /* Q: /KICK disabled except for IRCOps */
 #define CMODE_NONICK     0x10000 /* N: members may not change nickname */
+#define CMODE_REGONLY    0x20000 /* R: only users with an account (+r) may JOIN */
+#define CMODE_OPERONLY   0x40000 /* O: only IRC operators may JOIN */
+#define CMODE_MODREG     0x80000 /* M: only voice+/an account/an oper may speak */
+#define CMODE_NOCOLOR    0x100000 /* c: reject (not just strip) a message containing colour/formatting codes */
 
 typedef struct member {
     struct client *client;
@@ -92,6 +96,12 @@ int channel_is_voice(channel_t *chan, struct client *cl);
  * anything else is a plain nick!user@host glob (irc_mask_match). */
 int channel_mask_hit(const char *mask, const char *nick, const char *user,
                       const char *host, const char *account, int ident_confirmed);
+/* True if the m:/~m: quiet extban hits (see channel.c) -- blocks speaking,
+ * not JOIN, unlike a structural +b. Not affected by +e (exceptions are for
+ * structural bans; a chanop removes a specific quiet with -b instead). */
+int channel_is_quieted(channel_t *chan, const char *nick, const char *user,
+                        const char *host, const char *realhost, const char *ip,
+                        const char *account, int ident_confirmed);
 /* True if banned (+b hit) and not exempted (+e hit). Checked against `host`
  * (the displayed/possibly-cloaked host) AND `realhost`/`ip` -- a mask
  * written against the real hostname or bare IP must still catch a client
