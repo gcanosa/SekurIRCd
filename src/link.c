@@ -652,6 +652,28 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
         server_maybe_drop_channel(srv, chan);
         return 0;
     }
+    if (strcasecmp(msg.command, "WHOISUSER") == 0) {
+        /* Real (realhost/account/ident_confirmed) identity of a nick, for
+         * SUCCESSOR CLAIM -- matching against the PRIVMSG prefix instead
+         * (the cloaked display host under host_masking) meant a hostmask
+         * successor could never claim, and an "=account" successor never
+         * matched at all (it went through irc_mask_match, which doesn't
+         * know about the "=" account syntax). "*" fields mean not found. */
+        if (msg.nparams < 1) return 0;
+        client_t *target = server_find_user(srv, msg.params[0]);
+        char reply[400];
+        if (target) {
+            const char *rp[] = {msg.params[0], target->user, target->realhost,
+                                 target->account[0] ? target->account : "*",
+                                 target->ident_confirmed ? "1" : "0"};
+            irc_build(reply, sizeof reply, NULL, 0, NULL, "WHOISUSERREPLY", rp, 5, NULL);
+        } else {
+            const char *rp[] = {msg.params[0], "*", "*", "*", "0"};
+            irc_build(reply, sizeof reply, NULL, 0, NULL, "WHOISUSERREPLY", rp, 5, NULL);
+        }
+        link_forward_line(lc, reply);
+        return 0;
+    }
     if (strcasecmp(msg.command, "WHOISCHAN") == 0) {
         /* Synchronous-ish rank query -- lets chanserv check "is this nick
          * an op in that channel" (REGISTER's requirement) without needing
