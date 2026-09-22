@@ -54,6 +54,8 @@ typedef struct server {
     channel_t *channels;    /* uthash, keyed by casefold_name */
     account_store_t accounts;
     client_t *all_clients;  /* doubly-linked list, EVERY live connection (net.c's poll set) */
+    client_t *by_conn_id;   /* uthash (hh_conn), keyed by conn_id -- real (fd >= 0) connections
+                              * only, see server_add_connection; O(1) worker-result lookup */
     int n_clients;          /* includes not-yet-registered connections */
     uint64_t next_conn_id;  /* monotonic; see client_t.conn_id / worker.h */
     int max_users_seen;     /* peak of HASH_COUNT(users), for LOCALUSERS/GLOBALUSERS/STATSCONN */
@@ -111,6 +113,9 @@ void server_load_motd(server_t *srv);
 int server_rehash(server_t *srv, char *errbuf, size_t errbufsz);
 
 client_t *server_find_user(server_t *srv, const char *nick);
+/* O(1) lookup by client_t.conn_id (server_add_connection's hh_conn hash),
+ * used by net.c to apply a worker.c job result to its owning connection. */
+client_t *server_find_by_conn_id(server_t *srv, uint64_t conn_id);
 channel_t *server_find_channel(server_t *srv, const char *name);
 channel_t *server_get_or_create_channel(server_t *srv, const char *name); /* NULL on allocation failure */
 

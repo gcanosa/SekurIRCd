@@ -163,6 +163,13 @@ void server_add_connection(server_t *srv, client_t *cl) {
     srv->all_clients = cl;
     srv->n_clients++;
     ip_count_inc(srv, cl->ip);
+    HASH_ADD(hh_conn, srv->by_conn_id, conn_id, sizeof cl->conn_id, cl);
+}
+
+client_t *server_find_by_conn_id(server_t *srv, uint64_t conn_id) {
+    client_t *cl;
+    HASH_FIND(hh_conn, srv->by_conn_id, &conn_id, sizeof conn_id, cl);
+    return cl;
 }
 
 static void unlink_connection(server_t *srv, client_t *cl) {
@@ -179,6 +186,7 @@ static void unlink_connection(server_t *srv, client_t *cl) {
     if (cl->all_next) cl->all_next->all_prev = cl->all_prev;
     srv->n_clients--;
     ip_count_dec(srv, cl->ip);
+    HASH_DELETE(hh_conn, srv->by_conn_id, cl);
 }
 
 void server_add_user(server_t *srv, client_t *cl) {

@@ -592,12 +592,33 @@ static void read_client(server_t *srv, client_t *cl) {
            SSL_pending(cl->ssl) > 0) {}
 }
 
+/* Below this, a drained sbuf is shrunk back down rather than left at
+ * whatever peak it grew to -- client.c's default/starting capacity. */
+#define SBUF_SHRINK_THRESHOLD (4096 * 4)
+
 static void write_client(client_t *cl) {
     if (cl->sbuf_len == 0) return;
     ssize_t n = io_write(cl, cl->sbuf, cl->sbuf_len);
     if (n > 0) {
+        /* memmove of the unsent remainder -- on the common path a write()
+         * to a non-backed-up socket sends the whole buffer in one call, so
+         * n == sbuf_len and this is a memmove of 0 bytes (returns
+         * immediately in every real libc). It only does real work while a
+         * slow reader is actually applying backpressure, which SENDQ_MAX
+         * already bounds to 1 MiB. */
         memmove(cl->sbuf, cl->sbuf + n, cl->sbuf_len - (size_t)n);
         cl->sbuf_len -= (size_t)n;
+        /* A burst (e.g. a large WHO/NAMES reply, or backpressure while one
+         * was queued) can grow sbuf_cap well past what any client needs in
+         * steady state -- without this it never comes back down, so every
+         * connection that ever had one large reply keeps that peak capacity
+         * (up to SENDQ_MAX) for its entire lifetime. Once it's fully
+         * drained, shrink back to the default. realloc failure here just
+         * means the oversized buffer is kept -- never fatal. */
+        if (cl->sbuf_len == 0 && cl->sbuf_cap > SBUF_SHRINK_THRESHOLD) {
+            char *nb = realloc(cl->sbuf, SBUF_SHRINK_THRESHOLD);
+            if (nb) { cl->sbuf = nb; cl->sbuf_cap = SBUF_SHRINK_THRESHOLD; }
+        }
     } else if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
         cl->quitting = 1;
         snprintf(cl->quit_reason, sizeof cl->quit_reason, "Write error");
@@ -605,9 +626,11 @@ static void write_client(client_t *cl) {
 }
 
 static client_t *find_by_conn_id(server_t *srv, uint64_t conn_id) {
-    for (client_t *c = srv->all_clients; c; c = c->all_next)
-        if (c->conn_id == conn_id) return c;
-    return NULL; /* the connection is already gone -- drop the result */
+    /* O(1) via server->by_conn_id instead of walking every client -- a
+     * connect burst (each connection generates up to 3 worker jobs: rDNS,
+     * ident, DNSBL) made the old walk O(n^2) across a burst. Returns NULL
+     * if the connection is already gone -- the caller drops the result. */
+    return server_find_by_conn_id(srv, conn_id);
 }
 
 /* Drains worker.c's completed rDNS/ident/DNSBL jobs and applies each to the
@@ -992,6 +1015,7 @@ int net_run(server_t *srv) {
      * `srv->users = NULL` would leak that. HASH_CLEAR frees it and nulls
      * the head; it never touches the (already-freed) entries themselves. */
     HASH_CLEAR(hh, srv->users);
+    HASH_CLEAR(hh_conn, srv->by_conn_id); /* same bucket-array leak as above, different hash handle */
     server_free_tables(srv);
 
     if (srv->listen_fd >= 0) close(srv->listen_fd);
