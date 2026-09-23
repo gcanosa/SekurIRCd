@@ -55,7 +55,7 @@ static void finish_oper(server_t *srv, client_t *cl, const char *op_name, int pw
         irc_casefold(network, sizeof network, srv->cfg.server.network);
         for (char *p = network; *p; p++) if (*p == ' ') *p = '-';
         char masked[CFG_STR];
-        if (config_format_cloak(srv->cfg.security.oper_host_format, "", network, masked, sizeof masked) == 0) {
+        if (config_format_cloak(srv->cfg.security.oper_host_format, "", network, "", masked, sizeof masked) == 0) {
             snprintf(cl->host, sizeof cl->host, "%s", masked);
             broadcast_chghost(srv, cl, prefix);
             client_prefix(cl, prefix, sizeof prefix);

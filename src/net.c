@@ -318,6 +318,36 @@ int net_connect_flood_hit(const cfg_security_t *sec, const char *ip) {
  * the work accept_common does after a successful accept would clobber it. */
 static int g_accept_errno;
 
+/* Sets cl->host to the configured cloak. `basis` keys the token (the client's
+ * IP at accept time, or its resolved real hostname once rDNS lands) via
+ * srv->cloak_secret, so the same real host/IP always gets the same cloak
+ * (stable across reconnects and, with a shared host_masking_secret, across
+ * linked servers) without being guessable from the outside.
+ *
+ * `resolved_host` is NULL until rDNS actually resolves something -- until
+ * then (or if it never does) {suffix} falls back to "users.<network>",
+ * revealing nothing about the real host. Once a real hostname is known and
+ * host_masking_keep_labels > 0, {suffix} becomes that hostname's trailing
+ * labels instead (e.g. "orange.es"), matching the opt-in "partial cloak"
+ * documented in config/sekurircd.template.toml. */
+static void apply_masked_host(server_t *srv, client_t *cl, const char *basis, const char *resolved_host) {
+    char network[CFG_STR];
+    irc_casefold(network, sizeof network, srv->cfg.server.network);
+    for (char *p = network; *p; p++) if (*p == ' ') *p = '-';
+
+    char token[80];
+    crypto_hmac_hex(srv->cloak_secret, basis, token, sizeof token, srv->cfg.security.host_masking_token_bytes);
+
+    char suffix[CFG_STR];
+    if (resolved_host && srv->cfg.security.host_masking_keep_labels > 0) {
+        irc_host_tail(resolved_host, srv->cfg.security.host_masking_keep_labels, suffix, sizeof suffix);
+    } else {
+        snprintf(suffix, sizeof suffix, "users.%s", network);
+    }
+
+    config_format_cloak(srv->cfg.security.host_masking_format, token, network, suffix, cl->host, sizeof cl->host);
+}
+
 static client_t *accept_common(server_t *srv, int listen_fd) {
     struct sockaddr_in peer;
     socklen_t plen = sizeof peer;
@@ -397,12 +427,7 @@ static client_t *accept_common(server_t *srv, int listen_fd) {
     }
 
     if (srv->cfg.security.host_masking) {
-        char token[64];
-        crypto_random_hex(token, sizeof token, srv->cfg.security.host_masking_token_bytes);
-        char network[CFG_STR];
-        irc_casefold(network, sizeof network, srv->cfg.server.network);
-        for (char *p = network; *p; p++) if (*p == ' ') *p = '-';
-        config_format_cloak(srv->cfg.security.host_masking_format, token, network, cl->host, sizeof cl->host);
+        apply_masked_host(srv, cl, ipbuf, NULL); /* rDNS hasn't run yet -- IP-keyed token, network-only suffix */
     } else {
         snprintf(cl->host, sizeof cl->host, "%s", ipbuf);
     }
@@ -425,7 +450,12 @@ static client_t *accept_common(server_t *srv, int listen_fd) {
          * withheld until the 30-second rescue tick. */
         if (worker_submit(&j) != 0) cl->dnsbl_pending = 0;
     }
-    if (srv->cfg.security.rdns_enabled && !srv->cfg.security.host_masking) {
+    if (srv->cfg.security.rdns_enabled) {
+        /* Runs under masking too now: cl->realhost must be the real resolved
+         * name -- it's what K/G-lines, ChanServ and channel bans match
+         * against, and what WHOIS's oper-only 338 line reveals to opers (see
+         * cmd_user.c) -- and, if host_masking_keep_labels > 0, it's also the
+         * source for the cloak's {suffix}. See drain_worker_results. */
         job_t j; memset(&j, 0, sizeof j);
         j.type = JOB_RDNS;
         j.conn_id = cl->conn_id;
@@ -651,13 +681,16 @@ static void drain_worker_results(server_t *srv) {
                 cl->rdns_pending = 0;
                 if (r->success) {
                     /* realhost is what K/G-lines, ChanServ's SVCJOIN and
-                     * channel bans match against -- it must be the actual
-                     * resolved name, not stay the bare IP (see cl->realhost's
-                     * comment in client.h). This job only ever runs when
-                     * host_masking is off (see the submit site above), so
-                     * `host` (the displayed one) is safe to update too. */
+                     * channel bans match against, and what WHOIS's oper-only
+                     * 338 line reveals -- always update it to the resolved
+                     * name (see cl->realhost's comment in client.h), even
+                     * under masking now that this job runs either way. The
+                     * *displayed* host only follows it verbatim when masking
+                     * is off; under masking, recloak from the real hostname
+                     * instead of the accept-time IP-keyed fallback. */
                     snprintf(cl->realhost, sizeof cl->realhost, "%s", r->text);
-                    snprintf(cl->host, sizeof cl->host, "%s", r->text);
+                    if (srv->cfg.security.host_masking) apply_masked_host(srv, cl, r->text, r->text);
+                    else snprintf(cl->host, sizeof cl->host, "%s", r->text);
                 }
                 cmd_send_welcome_if_ready(srv, cl);
             } else if (r->type == JOB_IDENT) {

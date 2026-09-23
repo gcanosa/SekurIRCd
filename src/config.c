@@ -235,7 +235,7 @@ void config_tls_key_path(const config_t *cfg, char *out, size_t outsz) {
 }
 
 int config_format_cloak(const char *fmt, const char *token, const char *network,
-                         char *out, size_t outsz) {
+                         const char *suffix, char *out, size_t outsz) {
     size_t o = 0;
     for (const char *p = fmt; *p; p++) {
         if (*p == '{') {
@@ -247,6 +247,10 @@ int config_format_cloak(const char *fmt, const char *token, const char *network,
                 size_t l = strlen(network);
                 if (o + l >= outsz) return -1;
                 memcpy(out + o, network, l); o += l; p += 8;
+            } else if (strncmp(p, "{suffix}", 8) == 0) {
+                size_t l = strlen(suffix);
+                if (o + l >= outsz) return -1;
+                memcpy(out + o, suffix, l); o += l; p += 7;
             } else if (p[1] == '{') {
                 if (o + 1 >= outsz) return -1;
                 out[o++] = '{'; p += 1;
@@ -459,6 +463,8 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
     if (cfg_get_bool(sec, "host_masking", 0, &out->security.host_masking, errbuf, errbufsz, "security.host_masking")) return -1;
     if (cfg_get_str(sec, "host_masking_format", "{token}.users.{network}", out->security.host_masking_format, CFG_STR, errbuf, errbufsz, "security.host_masking_format")) return -1;
     if (cfg_get_int(sec, "host_masking_token_bytes", 4, &out->security.host_masking_token_bytes, errbuf, errbufsz, "security.host_masking_token_bytes")) return -1;
+    if (cfg_get_int(sec, "host_masking_keep_labels", 0, &out->security.host_masking_keep_labels, errbuf, errbufsz, "security.host_masking_keep_labels")) return -1;
+    if (cfg_get_str(sec, "host_masking_secret", "", out->security.host_masking_secret, CFG_STR, errbuf, errbufsz, "security.host_masking_secret")) return -1;
     if (cfg_get_bool(sec, "oper_host_masking", 0, &out->security.oper_host_masking, errbuf, errbufsz, "security.oper_host_masking")) return -1;
     if (cfg_get_str(sec, "oper_host_format", "netadmin.{network}", out->security.oper_host_format, CFG_STR, errbuf, errbufsz, "security.oper_host_format")) return -1;
     if (cfg_get_str(sec, "klines_file", "", out->security.klines_file, CFG_PATH, errbuf, errbufsz, "security.klines_file")) return -1;
@@ -488,18 +494,22 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
         snprintf(errbuf, errbufsz, "security.host_masking_token_bytes must be in 1-32");
         return -1;
     }
+    if (out->security.host_masking_keep_labels < 0 || out->security.host_masking_keep_labels > 10) {
+        snprintf(errbuf, errbufsz, "security.host_masking_keep_labels must be in 0-10");
+        return -1;
+    }
     {
         char probe[CFG_STR];
         char token0[64]; memset(token0, '0', (size_t)out->security.host_masking_token_bytes * 2);
         token0[(size_t)out->security.host_masking_token_bytes * 2] = '\0';
-        if (config_format_cloak(out->security.host_masking_format, token0, "example", probe, sizeof probe)) {
+        if (config_format_cloak(out->security.host_masking_format, token0, "example", "example.com", probe, sizeof probe)) {
             snprintf(errbuf, errbufsz, "security.host_masking_format: invalid template");
             return -1;
         }
     }
     {
         char probe[CFG_STR];
-        if (config_format_cloak(out->security.oper_host_format, "x", "example", probe, sizeof probe)) {
+        if (config_format_cloak(out->security.oper_host_format, "x", "example", "", probe, sizeof probe)) {
             snprintf(errbuf, errbufsz, "security.oper_host_format: invalid template");
             return -1;
         }

@@ -1,5 +1,6 @@
 #include "server.h"
 #include "cmd.h"
+#include "crypto.h"
 #include "log.h"
 #include "proto.h"
 #include "spam.h"
@@ -20,9 +21,23 @@ void server_software_version(const server_t *srv, char *buf, size_t bufsz) {
     snprintf(buf, bufsz, "SekurIRCd-%s(%s)", srv->cfg.server.version, sekurircd_build);
 }
 
+/* Sets srv->cloak_secret from cfg.security.host_masking_secret if given;
+ * otherwise leaves an already-generated secret alone (see server_t's doc
+ * comment), or generates a fresh random one if there isn't one yet. */
+static void server_apply_cloak_secret(server_t *srv) {
+    if (srv->cfg.security.host_masking_secret[0]) {
+        snprintf(srv->cloak_secret, sizeof srv->cloak_secret, "%s", srv->cfg.security.host_masking_secret);
+    } else if (!srv->cloak_secret[0]) {
+        crypto_random_hex(srv->cloak_secret, sizeof srv->cloak_secret, 32);
+        log_warn("net", "security.host_masking_secret is not set -- using a random cloak key for this run; "
+                         "cloaks will change on restart and won't match across linked servers");
+    }
+}
+
 int server_init(server_t *srv, const config_t *cfg) {
     memset(srv, 0, sizeof *srv);
     srv->cfg = *cfg;
+    server_apply_cloak_secret(srv);
     srv->listen_fd = -1;
     srv->tls_listen_fd = -1;
     srv->link_listen_fd = -1;
@@ -72,6 +87,7 @@ int server_rehash(server_t *srv, char *errbuf, size_t errbufsz) {
     /* bind/port/TLS listeners are not re-bound on rehash (same as Python) --
      * only the config values themselves swap in. */
     srv->cfg = tmp;
+    server_apply_cloak_secret(srv);
     server_load_motd(srv);
     spam_reload(srv);
     protection_reload(srv);

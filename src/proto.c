@@ -263,6 +263,23 @@ void irc_casefold(char *out, size_t outsz, const char *in) {
     out[i] = '\0';
 }
 
+void irc_host_tail(const char *host, int keep_labels, char *out, size_t outsz) {
+    if (!host) host = "";
+    const char *cut = host;
+    if (keep_labels > 0) {
+        int dots = 0;
+        size_t len = strlen(host);
+        for (size_t i = len; i > 0; i--) {
+            if (host[i - 1] == '.') {
+                dots++;
+                if (dots == keep_labels) { cut = host + i; break; }
+            }
+        }
+        if (dots < keep_labels) cut = host; /* fewer labels than requested -- keep it all */
+    }
+    snprintf(out, outsz, "%s", cut);
+}
+
 /* --- masks ------------------------------------------------------------------ */
 
 int irc_glob_match(const char *pattern, const char *text) {
