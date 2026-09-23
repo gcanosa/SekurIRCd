@@ -60,6 +60,15 @@ cmd_stop() {
     true # stopping an already-stopped daemon exits non-zero upstream; that's not a script failure
 }
 
+cmd_restart() {
+    cmd_stop
+    for _ in $(seq 1 20); do
+        pid_running "$CHANSERV_PIDFILE" || pid_running "$IRCD_PIDFILE" || break
+        sleep 0.5
+    done
+    cmd_start
+}
+
 cmd_status() {
     if pid_running "$IRCD_PIDFILE"; then
         echo "sekurircd: running (pid $(cat "$IRCD_PIDFILE"))"
@@ -82,8 +91,9 @@ cmd_status() {
 }
 
 case "${1:-}" in
-    start)  cmd_start ;;
-    stop)   cmd_stop ;;
-    status) cmd_status ;;
-    *) echo "usage: $0 {start|stop|status}" >&2; exit 1 ;;
+    start)   cmd_start ;;
+    stop)    cmd_stop ;;
+    restart) cmd_restart ;;
+    status)  cmd_status ;;
+    *) echo "usage: $0 {start|stop|restart|status}" >&2; exit 1 ;;
 esac

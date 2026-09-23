@@ -297,12 +297,20 @@ def restart_daemons():
         die("A daemon didn't stop (pidfile/process mismatch?). Not killing anything automatically -- "
             "use /restart-services, then run ./sekurircd start.")
     ok("stopped")
-    run(["./sekurircd", "start"], check=False)
+    r = run(["./sekurircd", "start"], check=False)
     time.sleep(2)
     st = daemon_status()
     for name, up in st.items():
         (ok if up else fail)(f"{name}: {'running' if up else 'NOT running'}")
     if not st.get("sekurircd"):
+        # A config error (e.g. a bad .toml) is printed by the binary and it exits
+        # before logging even starts, so it never reaches logs/sekurircd.log --
+        # only "./sekurircd start"'s own output has it.
+        startup_out = (r.stdout + r.stderr).strip()
+        if startup_out:
+            info(dim("output from './sekurircd start':"))
+            for l in startup_out.splitlines():
+                info(dim("  " + l))
         info(dim("tail of logs/sekurircd.log:"))
         if os.path.exists("logs/sekurircd.log"):
             for l in open("logs/sekurircd.log", errors="replace").read().splitlines()[-8:]:
