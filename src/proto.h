@@ -64,6 +64,15 @@ int irc_valid_host(const char *host);
  * ponytail: ascii-only, matches upstream's own documented intent. */
 void irc_casefold(char *out, size_t outsz, const char *in);
 
+/* Last `keep_labels` dot-separated labels of `host` (e.g. keep_labels=2 on
+ * "dsl-host.dyn.orange.es" gives "orange.es") -- the visible remainder of a
+ * partially-masked cloak. If `host` has fewer labels than `keep_labels`, or
+ * keep_labels <= 0, the whole `host` is copied through unchanged. No public-
+ * suffix-list awareness (ponytail: a config knob covers ccTLD domains like
+ * "orange.es" or "co.uk" that need 2 vs 3 labels kept -- see
+ * security.host_masking_keep_labels). */
+void irc_host_tail(const char *host, int keep_labels, char *out, size_t outsz);
+
 /* Case-insensitive glob match, '*'/'?' wildcards only -- every other
  * character (including '[' ']') is literal, which is the *result* of
  * protocol.py's fnmatch-bracket-escaping trick, done directly instead. */

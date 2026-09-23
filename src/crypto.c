@@ -2,6 +2,7 @@
 
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
+#include <openssl/hmac.h>
 #include <openssl/rand.h>
 
 #include <stdint.h>
@@ -118,6 +119,17 @@ void crypto_random_hex(char *out, size_t outsz, int count) {
     if ((size_t)(2 * count + 1) > outsz) count = (int)((outsz - 1) / 2);
     if (count > 0 && RAND_bytes(buf, count) != 1) abort();     /* no sane fallback for a broken CSPRNG */
     hex_encode(buf, (size_t)count, out);
+}
+
+void crypto_hmac_hex(const char *key, const char *msg, char *out, size_t outsz, int bytes) {
+    unsigned char digest[EVP_MAX_MD_SIZE];
+    unsigned int dlen = 0;
+    HMAC(EVP_sha256(), key, (int)strlen(key), (const unsigned char *)msg, strlen(msg), digest, &dlen);
+    if (bytes < 0) bytes = 0;
+    if ((size_t)bytes > dlen) bytes = (int)dlen;
+    if (outsz < 3) { if (outsz) out[0] = '\0'; return; }
+    if ((size_t)(2 * bytes + 1) > outsz) bytes = (int)((outsz - 1) / 2);
+    hex_encode(digest, (size_t)bytes, out);
 }
 
 int crypto_secure_streq(const char *a, const char *b) {

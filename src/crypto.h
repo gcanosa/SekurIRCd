@@ -35,4 +35,11 @@ int crypto_secure_streq(const char *a, const char *b);
  * RAND_bytes failure (this daemon has no sane fallback for a broken CSPRNG). */
 void crypto_random_hex(char *out, size_t outsz, int count);
 
+/* HMAC-SHA256(key, msg), truncated to `bytes` and hex-encoded (lowercase)
+ * into `out` (needs at least 2*bytes + 1). Used for deterministic host-cloak
+ * tokens -- same key+msg always yields the same cloak, unlike
+ * crypto_random_hex, so a real hostname/IP can be turned into a stable,
+ * non-reversible token (see server_t.cloak_secret). */
+void crypto_hmac_hex(const char *key, const char *msg, char *out, size_t outsz, int bytes);
+
 #endif /* SEKURIRCD_CRYPTO_H */

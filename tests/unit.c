@@ -156,6 +156,16 @@ static void test_casefold(void) {
     assert(strcmp(out, "screwedcase_nick") == 0);
 }
 
+static void test_host_tail(void) {
+    char out[64];
+    irc_host_tail("dsl-host.dyn.orange.es", 2, out, sizeof out);
+    assert(strcmp(out, "orange.es") == 0);
+    irc_host_tail("localhost", 2, out, sizeof out); /* fewer labels than requested -- keep it all */
+    assert(strcmp(out, "localhost") == 0);
+    irc_host_tail("dsl-host.dyn.orange.es", 0, out, sizeof out); /* disabled -- passthrough */
+    assert(strcmp(out, "dsl-host.dyn.orange.es") == 0);
+}
+
 static void test_glob_and_masks(void) {
     assert(irc_glob_match("*!*@*.example.com", "nick!user@host.example.com"));
     assert(!irc_glob_match("*!*@*.example.com", "nick!user@other.com"));
@@ -296,6 +306,16 @@ static void test_random_hex(void) {
     assert(strcmp(a, b) != 0); /* astronomically unlikely to collide */
 }
 
+static void test_hmac_hex(void) {
+    char a[32], b[32], c[32];
+    crypto_hmac_hex("secret1", "host.example.com", a, sizeof a, 4);
+    crypto_hmac_hex("secret1", "host.example.com", b, sizeof b, 4);
+    crypto_hmac_hex("secret2", "host.example.com", c, sizeof c, 4);
+    assert(strlen(a) == 8);
+    assert(strcmp(a, b) == 0); /* same key+msg -> same cloak token, every time */
+    assert(strcmp(a, c) != 0); /* different key -> different token (not guessable without it) */
+}
+
 /* --- config ------------------------------------------------------------------ */
 
 static void test_config_defaults(void) {
@@ -310,9 +330,11 @@ static void test_config_defaults(void) {
 
 static void test_config_cloak_format(void) {
     char out[128];
-    assert(config_format_cloak("{token}.users.{network}", "abcd1234", "sekurnet", out, sizeof out) == 0);
+    assert(config_format_cloak("{token}.users.{network}", "abcd1234", "sekurnet", "", out, sizeof out) == 0);
     assert(strcmp(out, "abcd1234.users.sekurnet") == 0);
-    assert(config_format_cloak("{bogus}", "tok", "net", out, sizeof out) == -1);
+    assert(config_format_cloak("{token}.{suffix}", "abcd1234", "sekurnet", "orange.es", out, sizeof out) == 0);
+    assert(strcmp(out, "abcd1234.orange.es") == 0);
+    assert(config_format_cloak("{bogus}", "tok", "net", "suf", out, sizeof out) == -1);
 }
 
 static void test_config_load_missing_file(void) {
@@ -795,6 +817,7 @@ int main(void) {
     RUN(test_build_truncation_detected);
     RUN(test_validators);
     RUN(test_casefold);
+    RUN(test_host_tail);
     RUN(test_glob_and_masks);
     RUN(test_channel_ban_matches_realhost_and_ip);
     RUN(test_quiet_extban_and_tilde_alias);
@@ -804,6 +827,7 @@ int main(void) {
     RUN(test_scrypt_roundtrip);
     RUN(test_scrypt_cross_compat_vector);
     RUN(test_random_hex);
+    RUN(test_hmac_hex);
     RUN(test_config_defaults);
     RUN(test_config_cloak_format);
     RUN(test_config_load_missing_file);

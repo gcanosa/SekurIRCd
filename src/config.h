@@ -57,6 +57,8 @@ typedef struct {
     int host_masking;
     char host_masking_format[CFG_STR];
     int host_masking_token_bytes;
+    int host_masking_keep_labels; /* trailing real-hostname labels kept verbatim in {suffix}; 0 = never use the real host (old fully-opaque cloak) */
+    char host_masking_secret[CFG_STR]; /* HMAC key for the cloak token; "" = a random one is generated at startup (see server_t.cloak_secret) */
     int oper_host_masking;
     char oper_host_format[CFG_STR];
     char klines_file[CFG_PATH];
@@ -303,13 +305,16 @@ int config_accounts_path(const config_t *cfg, char *out, size_t outsz);
 void config_tls_cert_path(const config_t *cfg, char *out, size_t outsz);
 void config_tls_key_path(const config_t *cfg, char *out, size_t outsz);
 
-/* {token}/{network} template substitution for security.host_masking_format
- * (validated at load time in config_load, reused at runtime for the actual
- * per-connection cloak). Supports only {token}, {network}, {{, }} -- an
- * unknown placeholder or unbalanced brace returns -1.
- * ponytail: two placeholders is all this format ever needed; not a general
- * str.format clone. */
+/* {token}/{network}/{suffix} template substitution for
+ * security.host_masking_format (validated at load time in config_load,
+ * reused at runtime for the actual per-connection cloak). `suffix` is the
+ * visible tail kept from a resolved real hostname (irc_host_tail), or a
+ * "users.{network}"-style fallback when none was resolved -- see net.c's
+ * apply_masked_host. Supports only {token}, {network}, {suffix}, {{, }} --
+ * an unknown placeholder or unbalanced brace returns -1.
+ * ponytail: three placeholders is all this format ever needed; not a
+ * general str.format clone. */
 int config_format_cloak(const char *fmt, const char *token, const char *network,
-                         char *out, size_t outsz);
+                         const char *suffix, char *out, size_t outsz);
 
 #endif /* SEKURIRCD_CONFIG_H */

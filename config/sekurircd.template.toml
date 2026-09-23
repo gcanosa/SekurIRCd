@@ -83,26 +83,61 @@ ping_timeout = 300
 
 # --- host cloaking ----------------------------------------------------------
 
-# Hide every client's real IP/hostname behind a random per-connection cloak.
-# The real address is still kept internally (logs, and visible via /WHOIS to
-# an oper or to the user themselves) -- this only hides it from other users
+# Hide every client's real IP/hostname behind a cloak. The real address is
+# still kept internally (logs, K/G/Z-line and channel-ban matching, and
+# visible via /WHOIS to an oper or to the user themselves, RPL_WHOISHOST/378
+# "is actually connecting from ...") -- this only hides it from other users
 # on the wire.
 host_masking = false
 
-# str.format template for the cloak: {token} is a random hex string,
-# {network} is [server] network above, lowercased and made hostname-safe.
+# str.format template for the cloak. Placeholders:
+#   {token}   deterministic hex string, HMAC'd from the client's resolved
+#             real hostname (or IP, before/without a resolved hostname) with
+#             host_masking_secret below -- same real host always gets the
+#             same cloak (stable across reconnects), but it can't be reversed
+#             or guessed without that secret.
+#   {network} [server] network above, lowercased and made hostname-safe.
+#   {suffix}  "users.{network}" until rDNS resolves a real hostname; from
+#             then on, if host_masking_keep_labels > 0, the trailing labels
+#             kept from that real hostname instead (see below). Ignore it
+#             (the default template does) for a fully opaque cloak.
+#
+# Default: fully opaque, e.g. "a1b2c3d4.users.SekurNet". To instead show a
+# partial cloak that keeps the ISP/domain visible, UnrealIRCd-style (e.g.
+# "a1b2c3d4.orange.es"), use "{token}.{suffix}" and set
+# host_masking_keep_labels to a nonzero value below.
 host_masking_format = "{token}.users.{network}"
 
-# Number of random bytes hex-encoded into {token} (2 hex chars each).
+# Number of HMAC bytes hex-encoded into {token} (2 hex chars each).
 host_masking_token_bytes = 4
+
+# How many trailing dot-labels of a client's RESOLVED real hostname are kept
+# verbatim in {suffix} once rDNS confirms one (e.g. 2 keeps "orange.es" off
+# "dsl-host.dyn.orange.es"). 0 (the default) means {suffix} never reflects
+# the real host -- always the "users.{network}" fallback, i.e. a fully
+# opaque cloak. No public-suffix-list awareness: a ccTLD like "co.uk" needs 3
+# here, not 2, to keep the whole registrable domain. Has no effect unless
+# host_masking_format above actually references {suffix}.
+host_masking_keep_labels = 0
+
+# HMAC key behind {token}. Required reading before you rely on this cloak
+# for privacy: leave it empty and the daemon generates a random one at
+# startup (logged as a warning) -- fine for a single standalone server, but
+# it means every cloak changes on restart, and on a linked network each
+# server would cloak the same real host differently. Set an explicit secret
+# (any string; keep it out of version control) if you want cloaks stable
+# across restarts, or if this server links to others and they must all
+# cloak the same real host identically -- then every linked server needs
+# this SAME secret.
+host_masking_secret = ""
 
 # Give every successful /OPER a distinct, recognizable vhost (e.g.
 # netadmin.SekurNet) instead of leaving their prior host/cloak in place.
 oper_host_masking = false
 
 # str.format template for the oper vhost: {network} is [server] network
-# above, lowercased and made hostname-safe. No {token} (same host for every
-# oper -- it's meant to be recognizable, not private).
+# above, lowercased and made hostname-safe. No {token}/{suffix} (same host
+# for every oper -- it's meant to be recognizable, not private).
 oper_host_format = "netadmin.{network}"
 
 # --- bans ---------------------------------------------------------------
@@ -182,10 +217,17 @@ reserved_nicks = ["nickserv", "chanserv", "operserv", "memoserv", "hostserv", "b
 ident_enabled = false
 ident_timeout = 3.0
 
-# Reverse-DNS resolution of the connecting IP, to display a hostname
-# instead of a bare address. ON by default (standard ircd behavior) --
-# set to false if you'd rather avoid the extra connect latency, or just
-# prefer bare IPs. Skipped entirely when host_masking above is also on.
+# Reverse-DNS resolution of the connecting IP. ON by default (standard ircd
+# behavior) -- set to false if you'd rather avoid the extra connect latency,
+# or just prefer bare IPs/opaque cloaks. Still runs even when host_masking
+# above is on: the daemon needs the real hostname for K/G-line and ban
+# matching and for the oper-only /WHOIS field regardless, and, if
+# host_masking_keep_labels is set, it's also where {suffix} comes from.
+# Without it (or when it fails/times out), a masked client keeps the
+# IP-keyed fallback cloak from connect time; an unmasked client just shows
+# the bare IP as before. A masked client's welcome burst waits for this
+# lookup (or rdns_timeout) same as an unmasked one now, where before it was
+# skipped and the client got cloaked and welcomed immediately.
 rdns_enabled = true
 rdns_timeout = 3.0
 

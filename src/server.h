@@ -41,6 +41,14 @@ typedef struct kline_entry {
 
 typedef struct server {
     config_t cfg;
+    /* HMAC key behind every deterministic host-cloak token (net.c's
+     * apply_masked_host). Copied from [security] host_masking_secret if set
+     * (share it across linked servers so the same real host cloaks the same
+     * way network-wide); otherwise a random one is generated once in
+     * server_init and left untouched by later rehashes, so an unset secret
+     * doesn't recloak every connected user on every SIGHUP -- it's just not
+     * stable across a full restart. */
+    char cloak_secret[65];
     int listen_fd;
     int tls_listen_fd;  /* -1 unless [tls] enabled (see net.c's TLS listener) */
     SSL_CTX *tls_ctx;
