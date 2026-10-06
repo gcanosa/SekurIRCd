@@ -15,6 +15,7 @@
 #include "log.h"
 #include "server.h"
 #include "worker.h"
+#include "ws.h"
 
 #include <openssl/err.h>
 #include <openssl/ssl.h>
@@ -270,6 +271,156 @@ static ssize_t io_write(client_t *cl, const void *buf, size_t len) {
     return -1;
 }
 
+/* --- WebSocket transport ---------------------------------------------------
+ * A ws client's bytes on the wire are HTTP + frames, but everything above
+ * io_read/write_client still sees plain IRC lines: ws_read() turns frames into
+ * "line\n" bytes, and write_client() turns queued lines into frames. */
+
+static int ws_out_append(client_t *cl, const unsigned char *data, size_t len) {
+    if (cl->ws_out_len + len > SENDQ_MAX) { /* a reader that never drains: same policy as sbuf */
+        cl->quitting = 1;
+        snprintf(cl->quit_reason, sizeof cl->quit_reason, "SendQ exceeded");
+        return -1;
+    }
+    if (cl->ws_out_len + len > cl->ws_out_cap) {
+        size_t cap = cl->ws_out_cap ? cl->ws_out_cap : 1024;
+        while (cap < cl->ws_out_len + len) cap *= 2;
+        unsigned char *nb = realloc(cl->ws_out, cap);
+        if (!nb) { cl->quitting = 1; return -1; }
+        cl->ws_out = nb;
+        cl->ws_out_cap = cap;
+    }
+    memcpy(cl->ws_out + cl->ws_out_len, data, len);
+    cl->ws_out_len += len;
+    return 0;
+}
+
+static void ws_send_frame(client_t *cl, int opcode, const unsigned char *payload, size_t len) {
+    unsigned char *tmp = malloc(len + 10);
+    if (!tmp) { cl->quitting = 1; return; }
+    size_t n = ws_encode_frame(tmp, opcode, payload, len);
+    ws_out_append(cl, tmp, n);
+    free(tmp);
+}
+
+static int ws_origin_ok(const server_t *srv, const char *origin) {
+    if (srv->cfg.websocket.n_allowed_origins == 0) return 1;
+    for (int i = 0; i < srv->cfg.websocket.n_allowed_origins; i++)
+        if (irc_glob_match(srv->cfg.websocket.allowed_origins[i], origin)) return 1;
+    return 0;
+}
+
+static void ws_reject(client_t *cl, const char *status) {
+    char r[128];
+    int n = snprintf(r, sizeof r, "HTTP/1.1 %s\r\nConnection: close\r\nContent-Length: 0\r\n\r\n", status);
+    ws_out_append(cl, (const unsigned char *)r, (size_t)n);
+    cl->quitting = 1;
+    snprintf(cl->quit_reason, sizeof cl->quit_reason, "WebSocket handshake refused");
+}
+
+/* Same contract as io_read: bytes of IRC text, 0 = closed, -1 + EAGAIN = nothing yet. */
+static ssize_t ws_read(client_t *cl, void *buf, size_t len) {
+    unsigned char raw[4096];
+    ssize_t n = io_read(cl, raw, sizeof raw);
+    if (n == 0) return 0;
+    if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) return -1;
+    if (n > 0) {
+        if (cl->ws_in_len + (size_t)n > 2 * WS_MAX_PAYLOAD) { errno = EIO; return -1; }
+        unsigned char *nb = realloc(cl->ws_in, cl->ws_in_len + (size_t)n);
+        if (!nb) { errno = ENOMEM; return -1; }
+        cl->ws_in = nb;
+        memcpy(cl->ws_in + cl->ws_in_len, raw, (size_t)n);
+        cl->ws_in_len += (size_t)n;
+    }
+    server_t *srv = cl->srv;
+
+    if (cl->ws == 1) { /* waiting for the HTTP upgrade request */
+        unsigned char *end = NULL;
+        for (size_t i = 0; i + 3 < cl->ws_in_len; i++)
+            if (memcmp(cl->ws_in + i, "\r\n\r\n", 4) == 0) { end = cl->ws_in + i; break; }
+        if (!end) {
+            if (cl->ws_in_len > 8192) ws_reject(cl, "431 Request Header Fields Too Large");
+            errno = EAGAIN;
+            return -1;
+        }
+        size_t head = (size_t)(end - cl->ws_in);
+        char *req = malloc(head + 1);
+        if (!req) { errno = ENOMEM; return -1; }
+        memcpy(req, cl->ws_in, head);
+        req[head] = '\0';
+        size_t used = head + 4;
+        memmove(cl->ws_in, cl->ws_in + used, cl->ws_in_len - used);
+        cl->ws_in_len -= used;
+        ws_request_t wr;
+        char resp[256];
+        if (ws_parse_request(req, &wr) != 0) ws_reject(cl, "400 Bad Request");
+        else if (!ws_origin_ok(srv, wr.origin)) ws_reject(cl, "403 Forbidden");
+        else if (ws_build_response(wr.key, resp, sizeof resp) < 0) ws_reject(cl, "500 Internal Server Error");
+        else {
+            ws_out_append(cl, (const unsigned char *)resp, strlen(resp));
+            cl->ws = 2;
+            /* Behind a trusted reverse proxy the socket peer is the proxy: believe its forwarded client address. */
+            if (wr.forwarded[0]) {
+                for (int i = 0; i < srv->cfg.websocket.n_trusted_proxies; i++) {
+                    if (irc_glob_match(srv->cfg.websocket.trusted_proxies[i], cl->ip)) {
+                        client_apply_real_address(srv, cl, wr.forwarded, NULL);
+                        break;
+                    }
+                }
+            }
+        }
+        free(req);
+        if (cl->quitting) { errno = EAGAIN; return -1; }
+    }
+
+    size_t out = 0;
+    unsigned char *dst = buf;
+    while (cl->ws == 2 && cl->ws_in_len > 0 && !cl->quitting) {
+        int opcode, fin;
+        unsigned char *payload;
+        size_t plen, consumed;
+        int r = ws_decode_frame(cl->ws_in, cl->ws_in_len, &opcode, &fin, &payload, &plen, &consumed);
+        if (r < 0) { errno = EIO; return -1; }
+        if (r == 0) break;
+        if (opcode == 8) { /* close */
+            ws_send_frame(cl, 8, payload, plen >= 2 ? 2 : 0);
+            cl->quitting = 1;
+            snprintf(cl->quit_reason, sizeof cl->quit_reason, "WebSocket closed");
+            break;
+        }
+        if (opcode == 9) ws_send_frame(cl, 10, payload, plen); /* ping -> pong */
+        else if (opcode == 0 || opcode == 1 || opcode == 2) {
+            if (out + plen + 1 > len) break; /* not enough room: leave this frame for the next call */
+            memcpy(dst + out, payload, plen);
+            out += plen;
+            if (fin && (out == 0 || dst[out - 1] != '\n')) dst[out++] = '\n'; /* one IRC line per message, CRLF optional */
+        }
+        memmove(cl->ws_in, cl->ws_in + consumed, cl->ws_in_len - consumed);
+        cl->ws_in_len -= consumed;
+    }
+    if (out > 0) return (ssize_t)out;
+    errno = EAGAIN;
+    return -1;
+}
+
+/* Moves the complete lines queued in sbuf into ws_out as text frames. */
+static void ws_encode_pending(client_t *cl) {
+    size_t pos = 0;
+    while (pos < cl->sbuf_len) {
+        char *nl = memchr(cl->sbuf + pos, '\n', cl->sbuf_len - pos);
+        if (!nl) break;
+        size_t end = (size_t)(nl - cl->sbuf);
+        size_t l = end - pos;
+        if (l > 0 && cl->sbuf[end - 1] == '\r') l--;
+        ws_send_frame(cl, 1, (const unsigned char *)cl->sbuf + pos, l);
+        pos = end + 1;
+    }
+    if (pos > 0) {
+        memmove(cl->sbuf, cl->sbuf + pos, cl->sbuf_len - pos);
+        cl->sbuf_len -= pos;
+    }
+}
+
 /* --- accept ----------------------------------------------------------------- */
 
 /* Per-IP connect-rate tracking: max_connections_per_ip only bounds
@@ -509,7 +660,9 @@ static client_t *accept_common(server_t *srv, int listen_fd) {
  * starve existing clients) instead of taking one connection per poll(). */
 #define ACCEPT_BURST 64
 
-static void accept_clients(server_t *srv, int listen_fd, int tls) {
+/* mode: 0 plain IRC, 1 TLS, 2 WebSocket, 3 WebSocket over TLS (wss). */
+static void accept_clients(server_t *srv, int listen_fd, int mode) {
+    int tls = (mode == 1 || mode == 3);
     for (int i = 0; i < ACCEPT_BURST; i++) {
         long before = srv->total_connections;
         client_t *cl = accept_common(srv, listen_fd);
@@ -530,6 +683,7 @@ static void accept_clients(server_t *srv, int listen_fd, int tls) {
             }
             continue; /* refused (limit/K-line) -- keep draining */
         }
+        if (mode >= 2) cl->ws = 1;
         if (!tls) {
             log_debug("net", "connection from %s:%d (fd=%d)", cl->ip, cl->port, cl->fd);
             continue;
@@ -565,7 +719,7 @@ static void close_client(server_t *srv, client_t *cl) {
  * server._read_loop's per-line validation before commands.handle. */
 static int read_client_once(server_t *srv, client_t *cl) {
     char tmp[4096];
-    ssize_t n = io_read(cl, tmp, sizeof tmp);
+    ssize_t n = cl->ws ? ws_read(cl, tmp, sizeof tmp) : io_read(cl, tmp, sizeof tmp);
     if (n == 0) { cl->quitting = 1; snprintf(cl->quit_reason, sizeof cl->quit_reason, "Remote host closed the connection"); return 0; }
     if (n < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) return 0;
@@ -660,8 +814,8 @@ static int read_client_once(server_t *srv, client_t *cl) {
  * SSL_pending says so -- otherwise those lines stall until the peer happens
  * to send more bytes. */
 static void read_client(server_t *srv, client_t *cl) {
-    while (read_client_once(srv, cl) && cl->ssl && !cl->quitting && !cl->dnsbl_pending &&
-           SSL_pending(cl->ssl) > 0) {}
+    while (read_client_once(srv, cl) && !cl->quitting && !cl->dnsbl_pending &&
+           ((cl->ssl && SSL_pending(cl->ssl) > 0) || (cl->ws == 2 && cl->ws_in_len > 0))) {}
 }
 
 /* Below this, a drained sbuf is shrunk back down rather than left at
@@ -669,6 +823,19 @@ static void read_client(server_t *srv, client_t *cl) {
 #define SBUF_SHRINK_THRESHOLD (4096 * 4)
 
 static void write_client(client_t *cl) {
+    if (cl->ws) { /* WebSocket: lines -> frames, then push the frame buffer (handshake reply included) */
+        if (cl->ws == 2) ws_encode_pending(cl);
+        if (cl->ws_out_len == 0) return;
+        ssize_t w = io_write(cl, cl->ws_out, cl->ws_out_len);
+        if (w > 0) {
+            memmove(cl->ws_out, cl->ws_out + w, cl->ws_out_len - (size_t)w);
+            cl->ws_out_len -= (size_t)w;
+        } else if (w < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+            cl->quitting = 1;
+            snprintf(cl->quit_reason, sizeof cl->quit_reason, "Write error");
+        }
+        return;
+    }
     if (cl->sbuf_len == 0) return;
     ssize_t n = io_write(cl, cl->sbuf, cl->sbuf_len);
     if (n > 0) {
@@ -883,6 +1050,13 @@ int net_run(server_t *srv) {
             }
         }
     }
+    if (srv->cfg.websocket.enabled && (!srv->cfg.websocket.tls || srv->tls_ctx)) {
+        srv->ws_listen_fd = net_listen(srv->cfg.server.bind, srv->cfg.websocket.port);
+        if (srv->ws_listen_fd < 0)
+            log_error("net", "could not bind %s:%d -- WebSocket listener disabled", srv->cfg.server.bind, srv->cfg.websocket.port);
+        else
+            log_info("net", "WebSocket%s listening on %s:%d", srv->cfg.websocket.tls ? " (wss)" : "", srv->cfg.server.bind, srv->cfg.websocket.port);
+    }
     link_start_hub(srv);
     if (srv->cfg.links.enabled && strcmp(srv->cfg.links.mode, "leaf") == 0) {
         if (link_connect_leaf(srv) == 0) {
@@ -914,7 +1088,7 @@ int net_run(server_t *srv) {
             else log_error("net", "rehash failed: %s", err);
         }
 
-        size_t nfds = 4 + (size_t)srv->n_clients;
+        size_t nfds = 5 + (size_t)srv->n_clients;
         for (link_conn_t *lc = srv->links; lc; lc = lc->next) nfds++;
         nfds += (size_t)srv->prot.n_scans;
         if (nfds > fds_cap) {
@@ -950,6 +1124,11 @@ int net_run(server_t *srv) {
             link_listen_idx = n;
             fds[n].fd = srv->link_listen_fd; fds[n].events = listen_events; fds[n].revents = 0; n++;
         }
+        int ws_listen_idx = -1;
+        if (srv->ws_listen_fd >= 0) {
+            ws_listen_idx = n;
+            fds[n].fd = srv->ws_listen_fd; fds[n].events = listen_events; fds[n].revents = 0; n++;
+        }
         int tls_listen_idx = -1;
         if (srv->tls_listen_fd >= 0) {
             tls_listen_idx = n;
@@ -959,14 +1138,14 @@ int net_run(server_t *srv) {
             if (cl->fd < 0 || cl->quitting) continue;
             /* Flush now rather than waiting a whole extra poll() round for
              * POLLOUT: most replies fit the socket buffer immediately. */
-            if (cl->sbuf_len > 0 && !cl->tls_handshaking) write_client(cl);
+            if ((cl->sbuf_len > 0 || cl->ws_out_len > 0) && !cl->tls_handshaking) write_client(cl);
             if (cl->quitting) continue;
             fds[n].fd = cl->fd;
             /* A pending DNSBL verdict withholds POLLIN entirely: the client
              * exists (a listed IP might still be disconnected below), but
              * nothing it sends is dispatched until the lookup resolves. */
             fds[n].events = (cl->dnsbl_pending ? 0 : POLLIN) |
-                ((cl->tls_handshaking ? cl->tls_want_write : cl->sbuf_len > 0) ? POLLOUT : 0);
+                ((cl->tls_handshaking ? cl->tls_want_write : (cl->sbuf_len > 0 || cl->ws_out_len > 0)) ? POLLOUT : 0);
             fds[n].revents = 0;
             fd_client[n] = cl;
             n++;
@@ -1002,6 +1181,7 @@ int net_run(server_t *srv) {
             if (fds[0].revents & POLLIN) accept_clients(srv, srv->listen_fd, 0);
             if (link_listen_idx >= 0 && (fds[link_listen_idx].revents & POLLIN)) link_accept(srv);
             if (tls_listen_idx >= 0 && (fds[tls_listen_idx].revents & POLLIN)) accept_clients(srv, srv->tls_listen_fd, 1);
+            if (ws_listen_idx >= 0 && (fds[ws_listen_idx].revents & POLLIN)) accept_clients(srv, srv->ws_listen_fd, srv->cfg.websocket.tls ? 3 : 2);
 
             for (int i = 0; i < n; i++) {
                 if (fd_client[i]) {
@@ -1105,6 +1285,7 @@ int net_run(server_t *srv) {
     if (srv->listen_fd >= 0) close(srv->listen_fd);
     if (srv->link_listen_fd >= 0) close(srv->link_listen_fd);
     if (srv->tls_listen_fd >= 0) close(srv->tls_listen_fd);
+    if (srv->ws_listen_fd >= 0) close(srv->ws_listen_fd);
     if (srv->tls_ctx) SSL_CTX_free(srv->tls_ctx);
     link_tls_cleanup();
     accounts_free(&srv->accounts);

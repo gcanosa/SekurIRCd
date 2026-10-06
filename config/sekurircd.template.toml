@@ -241,6 +241,30 @@ rdns_timeout = 3.0
 
 
 # -----------------------------------------------------------------------------
+# [websocket] -- IRC over WebSocket, for browser clients (KiwiIRC, The Lounge's
+# web UI talks to the server it's hosted on, but standalone web clients connect
+# straight here). Runs alongside the other listeners on its own port.
+# -----------------------------------------------------------------------------
+[websocket]
+enabled = false
+port = 8080
+
+# wss://: serve this port over TLS using the [tls] certificate (needs [tls]
+# enabled). Alternatively leave this off and terminate TLS in a reverse proxy.
+tls = false
+
+# Reverse proxies (nginx, Caddy, ...) whose X-Forwarded-For / X-Real-IP header
+# is believed for the real client address. Connections from any other IP keep
+# their own address -- the header is ignored, so it can't be spoofed.
+#trusted_proxies = ["127.0.0.1"]
+
+# Origin header globs a browser must present (e.g. ["https://chat.example.com"]).
+# Empty = any origin. Note a non-browser client sends no Origin at all, so it
+# is refused whenever this list is set -- leave it empty if you serve those too.
+#allowed_origins = []
+
+
+# -----------------------------------------------------------------------------
 # [tls] -- TLS/SSL listener
 # -----------------------------------------------------------------------------
 # Runs ALONGSIDE the plaintext [server] listener above (never replaces it) on
