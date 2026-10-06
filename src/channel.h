@@ -47,6 +47,8 @@ struct client;
 #define CMODE_REGONLY    0x20000 /* R: only users with an account (+r) may JOIN */
 #define CMODE_OPERONLY   0x40000 /* O: only IRC operators may JOIN */
 #define CMODE_MODREG     0x80000 /* M: only voice+/an account/an oper may speak */
+#define CMODE_FLOOD      0x200000 /* f <lines>:<secs>: kick a non-privileged member who exceeds the message rate */
+#define CMODE_JTHROT     0x400000 /* j <joins>:<secs>: refuse JOINs once the channel-wide join rate is exceeded */
 #define CMODE_NOCOLOR    0x100000 /* c: reject (not just strip) a message containing colour/formatting codes */
 
 typedef struct member {
@@ -54,6 +56,8 @@ typedef struct member {
     int rank; /* RANK_OP | RANK_HALFOP | RANK_VOICE */
     /* channel_ban_state() cache: the verdict holds while the channel's ban/
      * exception lists and the client's identity are unchanged. */
+    time_t fl_start;                  /* +f window start for this member */
+    int fl_count;
     unsigned cache_lists_gen, cache_ident_hash;
     unsigned char cache_valid, cache_banned, cache_quieted;
     UT_hash_handle hh; /* keyed by the client pointer itself */
@@ -76,6 +80,10 @@ typedef struct channel {
     unsigned int modes;               /* CMODE_* bitmask */
     char key[CHAN_KEYLEN];            /* +k value, "" if unset */
     int limit;                        /* +l value, 0 if unset */
+    int flood_lines, flood_secs;      /* +f */
+    int jt_joins, jt_secs;            /* +j */
+    int jt_count;                     /* joins seen in the current +j window */
+    time_t jt_start;
     masklist_t bans;                  /* +b */
     masklist_t exceptions;            /* +e */
     masklist_t invex;                 /* +I */

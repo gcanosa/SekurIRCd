@@ -81,6 +81,17 @@ static int has_formatting(const char *text) {
     return 0;
 }
 
+/* +f: remove `victim` from `chan` with a server-sourced KICK. */
+static void flood_kick(server_t *srv, channel_t *chan, client_t *victim) {
+    char line[400];
+    const char *p[] = {chan->name, victim->nick};
+    irc_build(line, sizeof line, NULL, 0, srv->cfg.server.name, "KICK", p, 2, "Channel flood (+f)");
+    server_broadcast_channel(chan, line, NULL); /* the victim is still a member, so they see it too */
+    channel_remove_member(chan, victim);
+    server_detach_membership(victim, chan);
+    server_maybe_drop_channel(srv, chan); /* chan may be freed -- don't touch it after this */
+}
+
 static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char *verb, int is_notice) {
     const char *target = msg->params[0];
     if (msg->nparams < 2) {
@@ -152,6 +163,14 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
         if (!privileged && is_quieted) {
             if (!is_notice) { const char *pe[] = {target}; client_reply(cl, N_CANNOTSENDTOCHAN, pe, 1, "Cannot send to channel (quieted)"); }
             return;
+        }
+        if ((chan->modes & CMODE_FLOOD) && chan->flood_lines > 0 && m && !privileged) {
+            time_t now = time(NULL);
+            if (now - m->fl_start >= chan->flood_secs) { m->fl_start = now; m->fl_count = 0; }
+            if (++m->fl_count > chan->flood_lines) { /* +f: kick the flooder; ops/halfops/voice/opers are exempt */
+                flood_kick(srv, chan, cl);
+                return;
+            }
         }
         char stripbuf[420];
         const char *outtext = textbuf;

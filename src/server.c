@@ -432,7 +432,7 @@ void server_send_isupport(server_t *srv, client_t *cl) {
     snprintf(topiclen, sizeof topiclen, "TOPICLEN=%d", TOPIC_MAX_LEN);
 
     const char *tokens[] = {
-        netbuf, "CHANTYPES=#", "CHANMODES=beI,k,l,imnprstzCNPQSTVROMc", "PREFIX=(ohv)@%+",
+        netbuf, "CHANTYPES=#", "CHANMODES=beI,k,lfj,imnprstzCNPQSTVROMc", "PREFIX=(ohv)@%+",
         nicklen, chanlen, topiclen, "CASEMAPPING=ascii", "MODES=6",
         "STATUSMSG=@%+", "AWAYLEN=390", "KICKLEN=300",
         "MAXLIST=b:100,e:100,I:100", "EXCEPTS=e", "INVEX=I", "MONITOR=100", "WATCH=128", "SILENCE=15",
@@ -565,7 +565,7 @@ void server_send_welcome(server_t *srv, client_t *cl) {
 
     char swver[CFG_STR + 16];
     server_software_version(srv, swver, sizeof swver);
-    const char *myinfo[] = {srv->cfg.server.name, swver, "diwsoZrpIHqRDB", "beIklnimpstzrovhPCTSVQNROMc"};
+    const char *myinfo[] = {srv->cfg.server.name, swver, "diwsoZrpIHqRDB", "beIklfjnimpstzrovhPCTSVQNROMc"};
     client_reply(cl, N_MYINFO, myinfo, 4, NULL);
 
     if (cl->ssl) {
