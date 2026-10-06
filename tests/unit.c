@@ -830,6 +830,23 @@ static void test_modes_string_flood_throttle_and_lazy_masklist(void) {
     channel_free(c);
 }
 
+static void test_history_ring_and_timestamps(void) {
+    char ts[40];
+    irc_iso8601_from_ms(ts, sizeof ts, 1700000000123LL);
+    assert(strcmp(ts, "2023-11-14T22:13:20.123Z") == 0);
+    assert(irc_parse_iso8601_ms("2023-11-14T22:13:20.123Z") == 1700000000123LL);
+    assert(irc_parse_iso8601_ms("2023-11-14T22:13:20Z") == 1700000000000LL);
+    assert(irc_parse_iso8601_ms("garbage") == -1 && irc_parse_iso8601_ms("2023-13-01T00:00:00.000Z") == -1);
+    channel_t *c = channel_new("#h", "#h");
+    for (int i = 0; i < 5; i++) {
+        char id[16]; snprintf(id, sizeof id, "m%d", i);
+        channel_history_add(c, 3, id, 1000 + i, "n!u@h", "", "PRIVMSG", "x");
+    }
+    assert(c->hist_n == 3 && strcmp(channel_history_at(c, 0)->msgid, "m2") == 0 && strcmp(channel_history_at(c, 2)->msgid, "m4") == 0);
+    assert(channel_history_at(c, 3) == NULL);
+    channel_free(c);
+}
+
 static void test_parse_duration_overflow(void) {
     assert(irc_parse_duration("99999999999999999999999999d") > 0); /* clamps, no signed overflow */
     assert(irc_parse_duration("90m") == 5400 && irc_parse_duration("x") == -1);
@@ -886,6 +903,7 @@ int main(void) {
     RUN(test_build_truncates_and_defangs);
     RUN(test_parse_token_cap_and_names);
     RUN(test_parse_duration_overflow);
+    RUN(test_history_ring_and_timestamps);
     RUN(test_modes_string_flood_throttle_and_lazy_masklist);
     RUN(test_protection_pure_helpers);
     RUN(test_protection_bl_match);

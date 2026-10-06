@@ -203,6 +203,8 @@ static const struct { const char *name; unsigned int bit; } CAP_ATTRS[] = {
     {"invite-notify", CAP_INVITE_NOTIFY},
     {"standard-replies", CAP_STANDARD_REPLIES},
     {"cap-notify", CAP_CAP_NOTIFY},
+    {"batch", CAP_BATCH},
+    {"draft/chathistory", CAP_CHATHISTORY},
 };
 #define N_CAP_ATTRS (int)(sizeof CAP_ATTRS / sizeof CAP_ATTRS[0])
 
@@ -215,7 +217,10 @@ static const struct { const char *name; unsigned int bit; } CAP_ATTRS[] = {
  * mechanism list as a value, like upstream's `f"{c}=PLAIN" if c == "sasl"`. */
 static int supported_cap_tokens(server_t *srv, client_t *cl, char tok[][CAP_TOKEN_LEN]) {
     int n = 0, v302 = cl->cap_version >= 302;
-    for (int i = 0; i < N_CAP_ATTRS && n < MAX_CAP_TOKENS; i++) snprintf(tok[n++], CAP_TOKEN_LEN, "%s", CAP_ATTRS[i].name);
+    for (int i = 0; i < N_CAP_ATTRS && n < MAX_CAP_TOKENS; i++) {
+        if (CAP_ATTRS[i].bit == CAP_CHATHISTORY && srv->cfg.messages.history_size <= 0) continue; /* history off */
+        snprintf(tok[n++], CAP_TOKEN_LEN, "%s", CAP_ATTRS[i].name);
+    }
     if (srv->cfg.accounts.enabled && n + 2 <= MAX_CAP_TOKENS) {
         /* EXTERNAL only ever succeeds if the TLS listener actually asks
          * clients for a certificate -- otherwise cl->ssl never has a peer
@@ -302,7 +307,7 @@ void cmd_cap(server_t *srv, client_t *cl, irc_message_t *msg) {
                 int known = ((strcasecmp(name, "sasl") == 0 || strcasecmp(name, "draft/account-registration") == 0) &&
                              srv->cfg.accounts.enabled);
                 for (int i = 0; !known && i < N_CAP_ATTRS; i++)
-                    if (strcasecmp(name, CAP_ATTRS[i].name) == 0) known = 1;
+                    if (strcasecmp(name, CAP_ATTRS[i].name) == 0 && !(CAP_ATTRS[i].bit == CAP_CHATHISTORY && srv->cfg.messages.history_size <= 0)) known = 1;
                 if (!known) { ok = 0; break; }
             }
         }

@@ -394,6 +394,31 @@ void irc_prefix_for(char *out, size_t outsz, const char *nick, const char *user,
     }
 }
 
+void irc_iso8601_from_ms(char *out, size_t outsz, long long ms) {
+    time_t sec = (time_t)(ms / 1000);
+    struct tm tmv;
+    gmtime_r(&sec, &tmv);
+    snprintf(out, outsz, "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ", tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
+             tmv.tm_hour, tmv.tm_min, tmv.tm_sec, (int)(ms % 1000));
+}
+
+long long irc_parse_iso8601_ms(const char *s) {
+    int Y, M, D, h, m, sec, msec = 0;
+    char z;
+    int n = sscanf(s, "%d-%d-%dT%d:%d:%d.%d%c", &Y, &M, &D, &h, &m, &sec, &msec, &z);
+    if (n == 7 && s[strlen(s) - 1] != 'Z') return -1;
+    if (n < 7 && sscanf(s, "%d-%d-%dT%d:%d:%d%c", &Y, &M, &D, &h, &m, &sec, &z) != 7) return -1;
+    if (M < 1 || M > 12 || D < 1 || D > 31 || h > 23 || m > 59 || sec > 60 || msec < 0 || msec > 999) return -1;
+    /* days since 1970-01-01 (Howard Hinnant's civil-days algorithm) -- timegm() is hidden by glibc under -std=c11 */
+    long long y = Y - (M <= 2);
+    long long era = (y >= 0 ? y : y - 399) / 400;
+    long long yoe = y - era * 400;
+    long long doy = (153 * (M + (M > 2 ? -3 : 9)) + 2) / 5 + D - 1;
+    long long doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    long long days = era * 146097 + doe - 719468;
+    return ((days * 24 + h) * 60 + m) * 60000LL + (long long)sec * 1000 + msec;
+}
+
 void irc_iso8601_now(char *out, size_t outsz) {
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);

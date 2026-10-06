@@ -104,6 +104,10 @@ void irc_prefix_for(char *out, size_t outsz, const char *nick, const char *user,
 
 /* Millisecond-precision UTC ISO8601 "2024-01-02T03:04:05.678Z" into out
  * (needs at least 25 bytes). */
+/* Epoch milliseconds <-> "YYYY-MM-DDThh:mm:ss.sssZ" (the server-time/CHATHISTORY
+ * timestamp form). The parser returns -1 on anything malformed. */
+void irc_iso8601_from_ms(char *out, size_t outsz, long long ms);
+long long irc_parse_iso8601_ms(const char *s);
 void irc_iso8601_now(char *out, size_t outsz);
 
 /* Insert a "time=<now>" tag into an already-built wire `line`, in place
@@ -127,6 +131,8 @@ void irc_add_time_tag(char *line, size_t linesz);
 #define CAP_INVITE_NOTIFY     0x0800u
 #define CAP_STANDARD_REPLIES  0x1000u
 #define CAP_CAP_NOTIFY        0x2000u
+#define CAP_BATCH             0x4000u
+#define CAP_CHATHISTORY       0x8000u
 
 /* --- numeric reply codes (protocol.N) ------------------------------------ */
 #define N_WELCOME          "001"

@@ -104,6 +104,7 @@ typedef struct {
     char oper_motd[CFG_PATH];
     char rules[CFG_PATH];
     int max_message_length;
+    int history_size; /* PRIVMSG/NOTICE lines kept per channel for CHATHISTORY; 0 = off */
 } cfg_messages_t;
 
 typedef struct {
