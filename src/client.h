@@ -74,6 +74,7 @@ typedef struct client {
     int got_nick, got_user;
     unsigned shun_gen;    /* server_is_shunned cache: kline_gen + 1 when `shunned` is current */
     int shunned;
+    int expect_proxy;     /* accepted from a [server] proxy_protocol_hosts peer: first line must be "PROXY ..." */
     int webirc;           /* a trusted gateway already set ip/realhost via WEBIRC */
     int cap_version;      /* 0, or the version from "CAP LS <n>" (302 enables multi-line LS, values, cap-notify) */
     int cap_negotiating;  /* true between "CAP LS" and "CAP END" */

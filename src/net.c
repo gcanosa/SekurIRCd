@@ -442,6 +442,9 @@ static client_t *accept_common(server_t *srv, int listen_fd) {
         snprintf(cl->host, sizeof cl->host, "%s", ipbuf);
     }
 
+    for (int i = 0; i < srv->cfg.server.n_proxy_hosts; i++)
+        if (irc_glob_match(srv->cfg.server.proxy_hosts[i], ipbuf)) { cl->expect_proxy = 1; break; }
+
     cl->conn_id = ++srv->next_conn_id;
     crypto_random_hex(cl->your_id, sizeof cl->your_id, 8);
 
@@ -601,6 +604,27 @@ static int read_client_once(server_t *srv, client_t *cl) {
         start = i + 1;
 
         if (cl->quitting) continue; /* a prior line this same read already ended the connection */
+        if (cl->expect_proxy) { /* PROXY protocol v1: the very first line, before anything the client says */
+            cl->expect_proxy = 0;
+            char *tok[6];
+            int nt = 0;
+            char *sv = NULL;
+            if (strncmp(line, "PROXY ", 6) == 0 && linelen <= 107) {
+                for (char *t = strtok_r(line, " ", &sv); t && nt < 6; t = strtok_r(NULL, " ", &sv)) tok[nt++] = t;
+                if (nt == 6 && (strcmp(tok[1], "TCP4") == 0 || strcmp(tok[1], "TCP6") == 0)) {
+                    if (client_apply_real_address(srv, cl, tok[2], NULL) == 0) {
+                        int port = atoi(tok[4]);
+                        if (port > 0 && port < 65536) cl->port = port;
+                    }
+                    continue;
+                }
+                if (nt >= 2 && strcmp(tok[1], "UNKNOWN") == 0) continue; /* LB health check / unknown family: keep the peer address */
+            }
+            log_warn("net", "%s is a proxy_protocol_hosts peer but sent no valid PROXY line -- dropping", cl->ip);
+            cl->quitting = 1;
+            snprintf(cl->quit_reason, sizeof cl->quit_reason, "PROXY protocol required");
+            continue;
+        }
         /* IRCv3 message-tags: the "@tags " section has its own 8191-byte budget and
          * doesn't count against the 512-byte limit on the rest of the line. */
         if (line[0] == '@') {

@@ -55,6 +55,9 @@ void cmd_unshun(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_eline(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_uneline(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_userip(server_t *srv, client_t *cl, irc_message_t *msg);
+/* After a rehash flipped sasl / chathistory on or off: tell cap-notify clients with CAP NEW / CAP DEL. */
+void cmd_cap_notify_changes(server_t *srv, int old_accounts, int old_history);
+int client_apply_real_address(server_t *srv, client_t *cl, const char *ip, const char *hostname);
 void cmd_webirc(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_cap(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_ping(server_t *srv, client_t *cl, irc_message_t *msg);

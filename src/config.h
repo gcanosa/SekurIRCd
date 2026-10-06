@@ -46,6 +46,8 @@ typedef struct {
     char version[CFG_STR];
     char bind[CFG_STR];
     int port;
+    char proxy_hosts[CFG_MAX_HOSTS_PER_WEBIRC][CFG_MASK]; /* IP globs of trusted PROXY-protocol load balancers */
+    int n_proxy_hosts;
 } cfg_server_t;
 
 typedef struct {
