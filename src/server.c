@@ -92,8 +92,10 @@ int server_rehash(server_t *srv, char *errbuf, size_t errbufsz) {
     if (config_load(srv->cfg.path, &tmp, errbuf, errbufsz) != 0) return -1;
     /* bind/port/TLS listeners are not re-bound on rehash (same as Python) --
      * only the config values themselves swap in. */
+    int old_accounts = srv->cfg.accounts.enabled, old_history = srv->cfg.messages.history_size > 0;
     srv->cfg = tmp;
     server_apply_cloak_secret(srv);
+    cmd_cap_notify_changes(srv, old_accounts, old_history);
     server_load_motd(srv);
     spam_reload(srv);
     protection_reload(srv);
@@ -727,12 +729,19 @@ void server_kline_add(server_t *srv, const char *mask, const char *reason,
     server_notify_opers(srv, snote);
 }
 
+static int server_client_eline_exempt(server_t *srv, client_t *c) {
+    for (kline_entry_t *e = srv->klines; e; e = e->next)
+        if (e->line_type[0] == 'E' && server_line_mask_hits(e->mask, "K", c->ip, c->user, c->realhost, c->ident_confirmed)) return 1;
+    return 0;
+}
+
 int server_kline_enforce(server_t *srv, const char *mask, const char *line_type,
                           const char *quit_reason, client_t *except) {
     int matched = 0;
     for (client_t *c = srv->all_clients; c; c = c->all_next) {
         if (c == except || c->fd < 0 || c->quitting) continue;
         if (!server_line_mask_hits(mask, line_type, c->ip, c->user, c->realhost, c->ident_confirmed)) continue;
+        if (line_type[0] != 'Z' && server_client_eline_exempt(srv, c)) continue; /* ELINE protects an already-connected user too */
         snprintf(c->quit_reason, sizeof c->quit_reason, "%s", quit_reason);
         c->quitting = 1;
         matched++;
@@ -774,6 +783,8 @@ int server_line_mask_hits(const char *mask, const char *line_type, const char *i
      * they matched the IP and nothing else, making K, G and Z three names for
      * exactly the same ban. */
     if (line_type && line_type[0] == 'Z') return 0;
+    /* user@IP masks ("*@203.0.113.7") must bite even once rDNS replaced the host with a name. */
+    if (ip && ip[0] && strchr(mask, '@') && irc_host_mask_match(user, ip, mask)) return 1;
     if (!host || !host[0]) return 0;
     if (irc_host_mask_match(user, host, mask)) return 1;
     /* Try the tilde form too, so an oper needn't know whether the target's

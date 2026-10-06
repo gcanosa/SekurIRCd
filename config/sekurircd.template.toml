@@ -53,6 +53,14 @@ network = "SekuriIRC Network"
 # Address to bind. 0.0.0.0 = reachable across the LAN; 127.0.0.1 = local only.
 bind = "0.0.0.0"
 
+# Load balancers (HAProxy, nginx stream, a cloud LB) that speak the PROXY
+# protocol v1: connections from these IPs (globs) MUST start with a
+# "PROXY TCP4|TCP6 <src> <dst> <sport> <dport>" line, which gives the real
+# client address (K-lines, flood limits and cloaking then use it). A
+# connection from a listed IP that doesn't send one is dropped; a PROXY line
+# from any other IP is ignored as a plain command, so it can't be spoofed.
+#proxy_protocol_hosts = ["10.0.0.5"]
+
 # TCP port to listen on.
 port = 6667
 

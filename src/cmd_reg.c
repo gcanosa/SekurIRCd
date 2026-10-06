@@ -145,6 +145,56 @@ void cmd_pass(server_t *srv, client_t *cl, irc_message_t *msg) {
     (void)srv; (void)cl; (void)msg;
 }
 
+static void cap_notify_send(server_t *srv, const char *verb, const char *tokens, unsigned drop_bit) {
+    for (client_t *c = srv->all_clients; c; c = c->all_next) {
+        if (c->fd < 0 || c->quitting || !(c->caps & CAP_CAP_NOTIFY)) continue;
+        char line[500];
+        const char *p[] = {c->nick[0] ? c->nick : "*", verb};
+        irc_build(line, sizeof line, NULL, 0, srv->cfg.server.name, "CAP", p, 2, tokens);
+        client_send(c, line);
+        if (drop_bit) c->caps &= ~drop_bit; /* a removed cap is no longer in effect */
+    }
+}
+
+void cmd_cap_notify_changes(server_t *srv, int old_accounts, int old_history) {
+    int accounts = srv->cfg.accounts.enabled, history = srv->cfg.messages.history_size > 0;
+    if (accounts != old_accounts) {
+        if (accounts) cap_notify_send(srv, "NEW", "sasl=PLAIN draft/account-registration=custom-account-name", 0);
+        else cap_notify_send(srv, "DEL", "sasl draft/account-registration", 0);
+    }
+    if (history != old_history) {
+        if (history) cap_notify_send(srv, "NEW", "draft/chathistory", 0);
+        else cap_notify_send(srv, "DEL", "draft/chathistory", CAP_CHATHISTORY);
+    }
+}
+
+/* A trusted intermediary (WEBIRC gateway or PROXY-protocol load balancer)
+ * says the connection's real address is `ip`. Rewrites ip/realhost/host,
+ * drops the lookups already started against the intermediary's address, and
+ * re-checks K-lines. Returns -1 (and queues a disconnect) on junk. */
+int client_apply_real_address(server_t *srv, client_t *cl, const char *ip, const char *hostname) {
+    struct in_addr a4; struct in6_addr a6;
+    if (strlen(ip) >= sizeof cl->ip || (inet_pton(AF_INET, ip, &a4) != 1 && inet_pton(AF_INET6, ip, &a6) != 1)) {
+        log_warn("net", "trusted intermediary sent an invalid IP '%s'", ip);
+        snprintf(cl->quit_reason, sizeof cl->quit_reason, "Invalid forwarded address");
+        cl->quitting = 1;
+        return -1;
+    }
+    snprintf(cl->ip, sizeof cl->ip, "%s", ip);
+    /* The intermediary vouches for the hostname; fall back to the IP if it's junk or just the IP again. */
+    snprintf(cl->realhost, sizeof cl->realhost, "%s", (hostname && irc_valid_host(hostname) && strcmp(hostname, ip) != 0) ? hostname : ip);
+    net_reset_host(srv, cl);
+    cl->webirc = 1; /* "address supplied by a trusted intermediary": also makes net.c ignore the DNSBL result for the old address */
+    cl->rdns_pending = cl->ident_pending = cl->dnsbl_pending = 0;
+    const char *kl = server_kline_match(srv, cl->ip, NULL, cl->realhost, 0);
+    if (kl) {
+        snprintf(cl->quit_reason, sizeof cl->quit_reason, "%s", kl);
+        cl->quitting = 1;
+        return -1;
+    }
+    return 0;
+}
+
 /* WEBIRC <password> <gateway> <hostname> <ip> [:flags] -- a trusted web
  * gateway (matched by source IP *and* password, see [[webirc]]) tells us the
  * real client's address. Only valid before registration. */
@@ -163,27 +213,8 @@ void cmd_webirc(server_t *srv, client_t *cl, irc_message_t *msg) {
         cl->quitting = 1;
         return;
     }
-    const char *hostname = msg->params[2], *ip = msg->params[3];
-    struct in_addr a4; struct in6_addr a6;
-    if (strlen(ip) >= sizeof cl->ip || (inet_pton(AF_INET, ip, &a4) != 1 && inet_pton(AF_INET6, ip, &a6) != 1)) {
-        log_warn("webirc", "gateway %s sent an invalid IP '%s'", match->name, ip);
-        snprintf(cl->quit_reason, sizeof cl->quit_reason, "WEBIRC: invalid address");
-        cl->quitting = 1;
-        return;
-    }
-    snprintf(cl->ip, sizeof cl->ip, "%s", ip);
-    /* The gateway vouches for the hostname; fall back to the IP if it's junk or just the IP again. */
-    snprintf(cl->realhost, sizeof cl->realhost, "%s", (irc_valid_host(hostname) && strcmp(hostname, ip) != 0) ? hostname : ip);
-    net_reset_host(srv, cl);
-    cl->webirc = 1;
-    cl->rdns_pending = cl->ident_pending = cl->dnsbl_pending = 0; /* those probed the gateway's address -- drop their results (net.c ignores them once the flag is clear) */
-    const char *kl = server_kline_match(srv, cl->ip, NULL, cl->realhost, 0);
-    if (kl) {
-        snprintf(cl->quit_reason, sizeof cl->quit_reason, "%s", kl);
-        cl->quitting = 1;
-        return;
-    }
-    log_info("webirc", "gateway %s: client is %s (%s)", match->name[0] ? match->name : "?", cl->ip, cl->realhost);
+    if (client_apply_real_address(srv, cl, msg->params[3], msg->params[2]) == 0)
+        log_info("webirc", "gateway %s: client is %s (%s)", match->name[0] ? match->name : "?", cl->ip, cl->realhost);
 }
 
 /* Mirrors commands._CAP_ATTRS -- every cap this server can grant via CAP

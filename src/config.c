@@ -443,6 +443,7 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
     if (cfg_get_str(srv, "network", "SekuriIRC Network", out->server.network, CFG_STR, errbuf, errbufsz, "server.network")) return -1;
     if (cfg_get_str(srv, "version", SEKURIRCD_VERSION, out->server.version, CFG_STR, errbuf, errbufsz, "server.version")) return -1;
     if (cfg_get_str(srv, "bind", "0.0.0.0", out->server.bind, CFG_STR, errbuf, errbufsz, "server.bind")) return -1;
+    if (cfg_get_str_array(srv, "proxy_protocol_hosts", out->server.proxy_hosts, CFG_MAX_HOSTS_PER_WEBIRC, &out->server.n_proxy_hosts, errbuf, errbufsz, "server.proxy_protocol_hosts")) return -1;
     if (cfg_get_int(srv, "port", 6667, &out->server.port, errbuf, errbufsz, "server.port")) return -1;
     if (out->server.port < 1 || out->server.port > 65535) {
         snprintf(errbuf, errbufsz, "server.port must be in 1-65535");
