@@ -84,6 +84,11 @@ typedef struct client {
     time_t enforce_deadline; /* nick-ownership enforcement: rename at this time unless identified (0 = none) */
     int class_idx;        /* [[classes]] index this connection is counted in, -1 = none */
     size_t sendq_max;     /* 0 = the global SENDQ_MAX */
+    int label_capture;    /* labeled-response: client_send is collecting this client's replies into label_buf */
+    char label[72];
+    char *label_buf;      /* captured lines, '\n'-separated */
+    size_t label_len, label_cap;
+    int label_lines;
     int is_watcher;       /* counted in server_t.n_watchers (non-empty MONITOR/WATCH list) */
     int webirc;           /* a trusted gateway already set ip/realhost via WEBIRC */
     int cap_version;      /* 0, or the version from "CAP LS <n>" (302 enables multi-line LS, values, cap-notify) */
@@ -166,6 +171,11 @@ void client_free(client_t *cl);
 
 /* Compute the display prefix "nick!~user@host" (or "nick@host" pre-USER). */
 void client_prefix(const client_t *cl, char *out, size_t outsz);
+/* IRCv3 labeled-response: between begin and end, every line sent to `cl` is held;
+ * end releases them tagged with the label (one line), inside a labeled-response
+ * batch (several), or as a bare ACK (none). */
+void client_label_begin(client_t *cl, const char *label);
+void client_label_end(client_t *cl);
 /* Key under which /INVITE remembers this connection (channel_t.invited) -- the
  * connection, not the nick, so quitting or renaming can't hand the invite on. */
 const char *client_invite_key(client_t *cl);

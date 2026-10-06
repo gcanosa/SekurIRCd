@@ -227,7 +227,21 @@ static int find_dispatch(const char *cmd) {
     return hit ? *hit : -1;
 }
 
+static void dispatch_inner(server_t *srv, client_t *cl, irc_message_t *msg);
+
+/* labeled-response wrapper: a message carrying @label=... from a client that negotiated labeled-response
+ * (+batch) gets its replies labeled -- see client_label_begin/end. */
 void cmd_dispatch(server_t *srv, client_t *cl, irc_message_t *msg) {
+    const char *label = NULL;
+    if ((cl->caps & CAP_LABELED_RESPONSE) && (cl->caps & CAP_BATCH))
+        for (int i = 0; i < msg->ntags; i++)
+            if (strcmp(msg->tags[i].key, "label") == 0 && msg->tags[i].val[0] && strlen(msg->tags[i].val) < 64) { label = msg->tags[i].val; break; }
+    if (label) client_label_begin(cl, label);
+    dispatch_inner(srv, cl, msg);
+    if (label) client_label_end(cl);
+}
+
+static void dispatch_inner(server_t *srv, client_t *cl, irc_message_t *msg) {
     if (!cl->registered && !is_registration_command(msg->command)) {
         err_not_registered(cl);
         return;
