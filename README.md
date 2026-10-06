@@ -70,6 +70,21 @@ Website & docs: <https://gcanosa.github.io/SekurIRCd/> (source in [`web/`](web/)
   bypassing every normal gate (`+i`/`+k`/`+l`/`+b`/`+z`, ops); `/SAMODE
   <#chan> <modestring> [args...]` forces a channel-mode change without
   needing membership or ops first (still refuses `+r`, services-only).
+- More oper tools: `/SANICK`, `/CHGIDENT`, `/GLOBOPS`, `/USERIP`, `/SHUN`
+  (connection stays, messaging is silently dropped) and `/ELINE` (exempts a
+  mask from K/G-lines), plus `UN`-forms. Each `[[operators]]` login may carry
+  `privileges = ["kill", "kline", "sa", "host", "wallops", "rehash", "die",
+  "link"]` to restrict which of those it can use (no key = everything).
+- Channel modes `+f <lines>:<secs>` (kicks a non-privileged flooder) and
+  `+j <joins>:<secs>` (refuses joins once the rate is exceeded).
+- Connecting through something: `WEBIRC` (`[[webirc]]`), the PROXY protocol
+  v1 (`[server] proxy_protocol_hosts`) and a WebSocket listener (`[websocket]`,
+  `ws://` or `wss://`, trusted-proxy `X-Forwarded-For`) all let the real client
+  address reach K-lines, flood limits and cloaking.
+- IRCv3 beyond the basics: `CAP 302` (multi-line `LS`, `cap-notify`, with
+  `CAP NEW`/`DEL` on rehash), `msgid`, `TAGMSG` with client-only `+tags`,
+  `batch` and `draft/chathistory` (`CHATHISTORY LATEST|BEFORE|AFTER|AROUND|
+  BETWEEN`, in-memory per-channel history sized by `[messages] history_size`).
 - IRCv3 capabilities: `away-notify` (live `AWAY` updates for channel-mates
   who request it), `multi-prefix` (all rank prefixes in `NAMES`/`WHO`, not
   just the highest), `userhost-in-names` (full `nick!user@host` in
