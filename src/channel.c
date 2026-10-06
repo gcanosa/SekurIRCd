@@ -75,12 +75,42 @@ int channel_is_voice(channel_t *chan, struct client *cl) {
     return m && (m->rank & RANK_VOICE);
 }
 
+static const ban_extra_t *g_extra;
+static ban_extra_t g_extra_copy;
+static char g_extra_realname[256];
+
+/* Copies `x` (the caller's is usually on its stack); NULL clears. The copied
+ * `cl` pointer is dropped by server_remove_client so it can't dangle. */
+void channel_set_ban_extra(const ban_extra_t *x) {
+    if (!x) { g_extra = NULL; return; }
+    snprintf(g_extra_realname, sizeof g_extra_realname, "%s", x->realname ? x->realname : "");
+    g_extra_copy = *x;
+    g_extra_copy.realname = g_extra_realname;
+    g_extra = &g_extra_copy;
+}
+
+void channel_forget_ban_extra_for(const struct client *cl) {
+    if (g_extra && g_extra->cl == cl) g_extra = NULL;
+}
+
 int channel_mask_hit(const char *mask, const char *nick, const char *user,
                       const char *host, const char *account, int ident_confirmed) {
     if (mask[0] == '~') mask++; /* EXTBAN=~,am -- the "~" prefix form is an alias for the bare one below */
     if (strncasecmp(mask, "a:", 2) == 0) {
         if (!account || !account[0]) return 0; /* EXTBAN a: never matches a logged-out user */
         return irc_glob_match(mask + 2, account);
+    }
+    if (strncasecmp(mask, "r:", 2) == 0) { /* realname glob */
+        return g_extra && g_extra->realname && irc_glob_match(mask + 2, g_extra->realname);
+    }
+    if (strcasecmp(mask, "z") == 0) return g_extra && g_extra->secure; /* anyone on a TLS connection */
+    if (strncasecmp(mask, "j:", 2) == 0) { /* member of the named channel */
+        if (!g_extra || !g_extra->cl) return 0;
+        char cf[CHAN_NAMELEN];
+        irc_casefold(cf, sizeof cf, mask + 2);
+        for (const chan_node_t *n = g_extra->cl->channels; n; n = n->next)
+            if (strcmp(n->chan->casefold_name, cf) == 0) return 1;
+        return 0;
     }
     return irc_mask_match(nick, user, host, mask, ident_confirmed);
 }
@@ -150,6 +180,7 @@ int masklist_add(masklist_t *ml, const char *mask) {
     snprintf(ml->masks[ml->n], sizeof ml->masks[0], "%s", mask);
     ml->n++;
     ml->gen++;
+    if (strncasecmp(mask[0] == '~' ? mask + 1 : mask, "j:", 2) == 0) ml->dynamic = 1;
     return 0;
 }
 
@@ -197,14 +228,19 @@ void channel_ban_state(channel_t *chan, member_t *m, const char *nick, const cha
         h = (h ^ 0xffu) * 16777619u; /* field separator */
     }
     h = (h ^ (unsigned)ident_confirmed) * 16777619u;
+    if (g_extra) { /* ~r / ~z depend on these too */
+        for (const unsigned char *p = (const unsigned char *)(g_extra->realname ? g_extra->realname : ""); *p; p++) h = (h ^ *p) * 16777619u;
+        h = (h ^ (unsigned)g_extra->secure) * 16777619u;
+    }
     unsigned lists_gen = chan->bans.gen + chan->exceptions.gen;
-    if (m && m->cache_valid && m->cache_lists_gen == lists_gen && m->cache_ident_hash == h) {
+    int dynamic = chan->bans.dynamic || chan->exceptions.dynamic; /* ~j: verdicts can change with no list/identity change */
+    if (m && !dynamic && m->cache_valid && m->cache_lists_gen == lists_gen && m->cache_ident_hash == h) {
         *banned = m->cache_banned; *quieted = m->cache_quieted;
         return;
     }
     *banned = channel_is_banned(chan, nick, user, host, realhost, ip, account, ident_confirmed);
     *quieted = channel_is_quieted(chan, nick, user, host, realhost, ip, account, ident_confirmed);
-    if (m) {
+    if (m && !dynamic) {
         m->cache_valid = 1; m->cache_lists_gen = lists_gen; m->cache_ident_hash = h;
         m->cache_banned = (unsigned char)*banned; m->cache_quieted = (unsigned char)*quieted;
     }
@@ -216,6 +252,7 @@ int masklist_del(masklist_t *ml, const char *mask) {
             memmove(ml->masks[i], ml->masks[i + 1], (size_t)(ml->n - i - 1) * sizeof ml->masks[0]);
             ml->n--;
             ml->gen++;
+            if (ml->n == 0) ml->dynamic = 0;
             return 0;
         }
     }

@@ -399,6 +399,7 @@ void server_remove_client(server_t *srv, client_t *cl, const char *quit_reason) 
     irc_build(line, sizeof line, NULL, 0, prefix, "QUIT", NULL, 0, quit_reason ? quit_reason : "");
     if (cl->conn_id) worker_cancel(cl->conn_id); /* skip its still-queued lookups */
     if (cl->is_watcher) { srv->n_watchers--; cl->is_watcher = 0; }
+    channel_forget_ban_extra_for(cl);
 
     if (cl->registered && !cl->is_service) {
         server_whowas_record(srv, cl->nick, cl->user, cl->host, cl->realname);
@@ -447,7 +448,7 @@ void server_send_isupport(server_t *srv, client_t *cl) {
         nicklen, chanlen, topiclen, "CASEMAPPING=ascii", "MODES=6",
         "STATUSMSG=@%+", "AWAYLEN=390", "KICKLEN=300",
         "MAXLIST=b:100,e:100,I:100", "EXCEPTS=e", "INVEX=I", "MONITOR=100", "WATCH=128", "SILENCE=15",
-        "EXTBAN=~,am", "ELIST=MNU", "WHOX", "CHANLIMIT=#:200", "BOT=B", "CALLERID=g", "LINELEN=512",
+        "EXTBAN=~,amrzj", "ELIST=MNU", "WHOX", "CHANLIMIT=#:200", "BOT=B", "CALLERID=g", "LINELEN=512",
         "TARGMAX=PRIVMSG:1,NOTICE:1,KICK:1,JOIN:1,PART:1,WHOIS:1", srv->cfg.messages.history_size > 0 ? histtok : NULL, srv->cfg.messages.history_size > 0 ? "MSGREFTYPES=msgid,timestamp" : NULL,
     };
     int total = 0;

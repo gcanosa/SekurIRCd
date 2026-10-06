@@ -870,6 +870,24 @@ static void test_websocket_helpers(void) {
     assert(n == 7 && out[0] == 0x81 && out[1] == 5 && memcmp(out + 2, "hello", 5) == 0);
 }
 
+static void test_extbans_r_z(void) {
+    channel_t *c = channel_new("#x", "#x");
+    masklist_add(&c->bans, "~r:*bot*");
+    ban_extra_t e = {"a Botty real name", 0, NULL};
+    channel_set_ban_extra(&e);
+    assert(channel_is_banned(c, "n", "u", "h", "h", "203.0.113.1", "", 0));
+    ban_extra_t e2 = {"someone else", 0, NULL};
+    channel_set_ban_extra(&e2);
+    assert(!channel_is_banned(c, "n", "u", "h", "h", "203.0.113.1", "", 0));
+    masklist_add(&c->bans, "~z");
+    ban_extra_t e3 = {"someone else", 1, NULL};
+    channel_set_ban_extra(&e3);
+    assert(channel_is_banned(c, "n", "u", "h", "h", "203.0.113.1", "", 0)); /* TLS user hit by ~z */
+    channel_set_ban_extra(NULL);
+    assert(!channel_is_banned(c, "n", "u", "h", "h", "203.0.113.1", "", 0)); /* no context: r/z never match */
+    channel_free(c);
+}
+
 static void test_parse_duration_overflow(void) {
     assert(irc_parse_duration("99999999999999999999999999d") > 0); /* clamps, no signed overflow */
     assert(irc_parse_duration("90m") == 5400 && irc_parse_duration("x") == -1);
@@ -926,6 +944,7 @@ int main(void) {
     RUN(test_build_truncates_and_defangs);
     RUN(test_parse_token_cap_and_names);
     RUN(test_parse_duration_overflow);
+    RUN(test_extbans_r_z);
     RUN(test_websocket_helpers);
     RUN(test_history_ring_and_timestamps);
     RUN(test_modes_string_flood_throttle_and_lazy_masklist);
