@@ -676,6 +676,10 @@ static void cmd_mode_user(client_t *cl, irc_message_t *msg, const char *target) 
         else if (c == 'H') { if (cl->umodes & UMODE_O) bit = UMODE_H; else continue; }
         else continue;
         if (sign == '+') cl->umodes |= bit; else cl->umodes &= ~bit;
+        if (c == 'o' && sign == '-') { /* de-opered: drop the oper-only modes too */
+            cl->umodes &= ~(UMODE_Q | UMODE_H);
+            cl->oper_name[0] = '\0';
+        }
         if (cursign != sign) { applied[ap++] = sign; cursign = sign; }
         applied[ap++] = c;
     }
@@ -717,6 +721,13 @@ void cmd_apply_channel_mode(server_t *srv, client_t *cl, channel_t *chan,
         if (c == 'r' && !cl->is_service) {
             const char *p[] = {chan->name};
             client_reply(cl, N_NOTCHANNELOP, p, 1, "Mode +r is set by services only");
+            continue;
+        }
+        if (c == 'P' && sign == '+' && !cl->is_service && !(cl->umodes & UMODE_O)) {
+            /* +P keeps an empty channel alive forever; for anyone who can create
+             * a channel that is an unbounded memory sink. */
+            const char *p[] = {chan->name};
+            client_reply(cl, N_NOTCHANNELOP, p, 1, "Mode +P is set by operators only");
             continue;
         }
         int is_halfop_mode = (c == 'v' || c == 'b' || c == 'e' || c == 'I');

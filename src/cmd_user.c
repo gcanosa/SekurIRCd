@@ -22,6 +22,14 @@ int client_is_silencing(client_t *cl, client_t *from) {
 /* One rendering of a message per tag combination: [0] plain, [1] +account,
  * [2] +bot, [3] both. Only the ones the sender needs are built. */
 #define LINE_SZ 760
+
+/* The '*' oper flag in WHO/WHOX/USERHOST/GLOB: honours +H (hidden oper) the
+ * same way WHOIS does -- shown only to opers and to the user themself. */
+static int visible_oper(const client_t *u, const client_t *viewer) {
+    if (!(u->umodes & UMODE_O)) return 0;
+    return !(u->umodes & UMODE_H) || u == viewer || (viewer->umodes & UMODE_O);
+}
+
 static void build_lines(char lines[4][LINE_SZ], client_t *from, const char *prefix, const char *verb,
                         const char **p, const char *text) {
     irc_build(lines[0], LINE_SZ, NULL, 0, prefix, verb, p, 1, text);
@@ -189,12 +197,12 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
         if ((dst->umodes & UMODE_D) && is_blocked_ctcp(textbuf)) return; /* +d: suppress CTCP */
         if ((dst->umodes & UMODE_NOPM) && !(cl->umodes & UMODE_O) && cl != dst) {
             const char *pe[] = {dst->nick};
-            client_reply(cl, N_NONONREG, pe, 1, "is not accepting private messages");
+            if (!is_notice) client_reply(cl, N_NONONREG, pe, 1, "is not accepting private messages");
             return;
         }
         if ((dst->umodes & UMODE_REGONLY) && !cl->account[0] && !(cl->umodes & UMODE_O) && cl != dst) {
             const char *pe[] = {dst->nick};
-            client_reply(cl, N_NONONREG, pe, 1, "is only accepting messages from registered users");
+            if (!is_notice) client_reply(cl, N_NONONREG, pe, 1, "is only accepting messages from registered users");
             return;
         }
         if (!is_notice && dst->is_away) {
@@ -321,7 +329,7 @@ static const char *whox_value(char letter, client_t *u, channel_t *chan, client_
         member_t *m = chan ? channel_find_member(chan, u) : NULL;
         char rankch[4];
         who_rank_flags(m ? m->rank : 0, multi, rankch);
-        snprintf(scratch, scratchsz, "%s%s%s%s", u->is_away ? "G" : "H", (u->umodes & UMODE_O) ? "*" : "", (u->umodes & UMODE_B) ? "B" : "", rankch);
+        snprintf(scratch, scratchsz, "%s%s%s%s", u->is_away ? "G" : "H", visible_oper(u, cl) ? "*" : "", (u->umodes & UMODE_B) ? "B" : "", rankch);
         return scratch;
     }
     case 'd': return "0";
@@ -355,7 +363,7 @@ static void send_who_classic(client_t *cl, client_t *u, channel_t *chan, int mul
     member_t *m = chan ? channel_find_member(chan, u) : NULL;
     who_rank_flags(m ? m->rank : 0, multi, rankch);
     char flags[10];
-    snprintf(flags, sizeof flags, "%s%s%s%s", u->is_away ? "G" : "H", (u->umodes & UMODE_O) ? "*" : "", (u->umodes & UMODE_B) ? "B" : "", rankch);
+    snprintf(flags, sizeof flags, "%s%s%s%s", u->is_away ? "G" : "H", visible_oper(u, cl) ? "*" : "", (u->umodes & UMODE_B) ? "B" : "", rankch);
     const char *p[] = {chan ? chan->name : "*", u->user, u->host, cl->srv->cfg.server.name, u->nick, flags};
     char trailing[600];
     snprintf(trailing, sizeof trailing, "0 %s", u->realname);
@@ -488,7 +496,7 @@ void cmd_userhost(server_t *srv, client_t *cl, irc_message_t *msg) {
         if (!u) continue;
         char entry[300];
         snprintf(entry, sizeof entry, "%s%s%s=%c%s@%s", out[0] ? " " : "", u->nick,
-                 (u->umodes & UMODE_O) ? "*" : "", u->is_away ? '-' : '+', u->user, u->host);
+                 visible_oper(u, cl) ? "*" : "", u->is_away ? '-' : '+', u->user, u->host);
         strncat(out, entry, sizeof out - strlen(out) - 1);
     }
     client_reply(cl, N_USERHOST, NULL, 0, out);
@@ -708,7 +716,7 @@ void cmd_glob(server_t *srv, client_t *cl, irc_message_t *msg) {
             if (!shared) continue;
         }
         char flags[8];
-        snprintf(flags, sizeof flags, "%s%s%s", u->is_away ? "G" : "H", (u->umodes & UMODE_O) ? "*" : "", (u->umodes & UMODE_B) ? "B" : "");
+        snprintf(flags, sizeof flags, "%s%s%s", u->is_away ? "G" : "H", visible_oper(u, cl) ? "*" : "", (u->umodes & UMODE_B) ? "B" : "");
         const char *p[] = {"*", u->user, u->host, srv->cfg.server.name, u->nick, flags};
         char trailing[600];
         snprintf(trailing, sizeof trailing, "0 %s", u->realname);
