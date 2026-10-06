@@ -35,10 +35,15 @@ static void server_apply_cloak_secret(server_t *srv) {
     }
 }
 
+void server_next_msgid(server_t *srv, char *out, size_t outsz) {
+    snprintf(out, outsz, "%s-%llu", srv->msgid_prefix, (unsigned long long)++srv->msgid_counter);
+}
+
 int server_init(server_t *srv, const config_t *cfg) {
     memset(srv, 0, sizeof *srv);
     srv->cfg = *cfg;
     server_apply_cloak_secret(srv);
+    crypto_random_hex(srv->msgid_prefix, sizeof srv->msgid_prefix, 8);
     srv->listen_fd = -1;
     srv->tls_listen_fd = -1;
     srv->link_listen_fd = -1;
