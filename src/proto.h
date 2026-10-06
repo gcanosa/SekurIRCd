@@ -126,6 +126,7 @@ void irc_add_time_tag(char *line, size_t linesz);
 #define CAP_ACCOUNT_TAG       0x0400u
 #define CAP_INVITE_NOTIFY     0x0800u
 #define CAP_STANDARD_REPLIES  0x1000u
+#define CAP_CAP_NOTIFY        0x2000u
 
 /* --- numeric reply codes (protocol.N) ------------------------------------ */
 #define N_WELCOME          "001"
