@@ -216,7 +216,8 @@ void cmd_cap(server_t *srv, client_t *cl, irc_message_t *msg) {
         /* All-or-nothing (IRCv3): ACK only if every requested token (minus
          * an optional leading '-') names a cap we grant. */
         const char *requested = msg->nparams > 1 ? msg->params[msg->nparams - 1] : "";
-        int ok = requested[0] != '\0';
+        int ok = requested[0] != '\0' && strlen(requested) < 256; /* longer would be truncated yet ACKed in full */
+        if (!cl->registered) cl->cap_negotiating = 1; /* IRCv3: a REQ also holds registration until CAP END */
         char buf[256];
         snprintf(buf, sizeof buf, "%s", requested);
         if (ok) {

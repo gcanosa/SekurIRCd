@@ -31,6 +31,7 @@
 
 static ssize_t link_io_read(link_conn_t *lc, void *buf, size_t len) {
     if (!lc->ssl) return read(lc->fd, buf, len);
+    ERR_clear_error();
     int n = SSL_read(lc->ssl, buf, (int)len);
     if (n > 0) return n;
     int err = SSL_get_error(lc->ssl, n);
@@ -42,6 +43,7 @@ static ssize_t link_io_read(link_conn_t *lc, void *buf, size_t len) {
 
 static ssize_t link_io_write(link_conn_t *lc, const void *buf, size_t len) {
     if (!lc->ssl) return write(lc->fd, buf, len);
+    ERR_clear_error();
     int n = SSL_write(lc->ssl, buf, (int)len);
     if (n > 0) return n;
     int err = SSL_get_error(lc->ssl, n);
@@ -65,6 +67,7 @@ void link_tls_cleanup(void) {
 }
 
 void link_tls_try_handshake(server_t *srv, link_conn_t *lc) {
+    ERR_clear_error();
     int rc = SSL_accept(lc->ssl);
     if (rc == 1) {
         lc->tls_handshaking = 0;
@@ -162,6 +165,11 @@ static int connect_bounded(int fd, const struct sockaddr *sa, socklen_t slen, in
         if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &elen) != 0 || err != 0) return -1;
     }
     fcntl(fd, F_SETFL, flags); /* the handshake below wants blocking semantics */
+    /* ...but bounded: without these a hub that accepts TCP and then stalls
+     * (or never finishes TLS) would freeze the whole leaf event loop. */
+    struct timeval tv = {.tv_sec = LINK_HANDSHAKE_TIMEOUT_MS / 1000, .tv_usec = 0};
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
     return 0;
 }
 
@@ -208,6 +216,7 @@ int link_connect_leaf(server_t *srv) {
             SSL_set_verify(lc->ssl, SSL_VERIFY_PEER, NULL);
             SSL_set1_host(lc->ssl, up->host); /* checked against the cert's SAN/CN, not just chain trust */
         }
+        ERR_clear_error();
         if (SSL_connect(lc->ssl) != 1) {
             char errbuf[256];
             ERR_error_string_n(ERR_get_error(), errbuf, sizeof errbuf);
@@ -328,6 +337,14 @@ static int link_verify_throttled(const char *ip) {
     return ++t->count > LINK_VERIFY_MAX;
 }
 
+/* 1 if `ip` matches one of the peer's allowed_ips globs (or it has none). */
+static int peer_ip_allowed(const cfg_link_peer_t *p, const char *ip) {
+    if (p->n_allowed_ips == 0) return 1;
+    for (int j = 0; j < p->n_allowed_ips; j++)
+        if (irc_glob_match(p->allowed_ips[j], ip)) return 1;
+    return 0;
+}
+
 void link_accept(server_t *srv) {
     struct sockaddr_in peer;
     socklen_t plen = sizeof peer;
@@ -352,17 +369,16 @@ void link_accept(server_t *srv) {
      * SERVER/PASS handshake even starts -- the peer name it'll claim to be
      * isn't known yet. No peer sets allowed_ips (the default) -> unchanged,
      * open behavior, same as before this existed. */
-    int any_allowlist = 0, ip_allowed = 0;
+    int all_listed = srv->cfg.links.n_peers > 0, ip_allowed = 0;
     for (int i = 0; i < srv->cfg.links.n_peers; i++) {
         cfg_link_peer_t *p = &srv->cfg.links.peers[i];
-        if (p->n_allowed_ips == 0) continue;
-        any_allowlist = 1;
-        for (int j = 0; j < p->n_allowed_ips; j++) {
-            if (irc_glob_match(p->allowed_ips[j], ipbuf)) { ip_allowed = 1; break; }
-        }
-        if (ip_allowed) break;
+        if (p->n_allowed_ips == 0) { all_listed = 0; continue; }
+        if (peer_ip_allowed(p, ipbuf)) ip_allowed = 1;
     }
-    if (any_allowlist && !ip_allowed) {
+    /* A peer without a list stays reachable from anywhere (back-compat), so
+     * the pre-handshake gate only closes when every peer is restricted and
+     * none matches. The claimed peer's own list is enforced at SERVER time. */
+    if (all_listed && !ip_allowed) {
         close(fd);
         log_warn("link", "rejected inbound link from %s: not in any peer's allowed_ips", ipbuf);
         return;
@@ -492,6 +508,10 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
                 ok = matched->password_hash[0]
                     ? crypto_verify_password(lc->pending_pass, matched->password_hash)
                     : crypto_secure_streq(lc->pending_pass, matched->password);
+            }
+            if (ok && !peer_ip_allowed(matched, lc->ip)) {
+                log_warn("link", "rejected link handshake from '%s': %s is not in that peer's allowed_ips", name, lc->ip);
+                ok = 0;
             }
             /* Reject outright if this name is already linked -- matches the
              * Python original's "bad credentials or already linked" check.

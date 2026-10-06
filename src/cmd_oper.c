@@ -11,6 +11,7 @@
 #include "crypto.h"
 #include "link.h"
 #include "log.h"
+#include "net.h"
 #include "worker.h"
 
 #include <openssl/crypto.h>
@@ -309,7 +310,7 @@ void cmd_vhost(server_t *srv, client_t *cl, irc_message_t *msg) {
     if (strcasecmp(requested, "off") == 0 || strcasecmp(requested, "none") == 0) {
         char old_prefix[320];
         client_prefix(cl, old_prefix, sizeof old_prefix);
-        snprintf(cl->host, sizeof cl->host, "%s", cl->realhost);
+        net_reset_host(srv, cl);
         broadcast_chghost(srv, cl, old_prefix);
         char m[300]; snprintf(m, sizeof m, "vhost cleared; host is now %s", cl->host);
         notice_self(srv, cl, m);
@@ -358,7 +359,7 @@ void cmd_sethost(server_t *srv, client_t *cl, irc_message_t *msg) {
     char old_prefix[320];
     client_prefix(cl, old_prefix, sizeof old_prefix);
     if (strcasecmp(requested, "off") == 0 || strcasecmp(requested, "none") == 0) {
-        snprintf(cl->host, sizeof cl->host, "%s", cl->realhost);
+        net_reset_host(srv, cl);
         broadcast_chghost(srv, cl, old_prefix);
         char m[300]; snprintf(m, sizeof m, "host cleared; host is now %s", cl->host);
         notice_self(srv, cl, m);

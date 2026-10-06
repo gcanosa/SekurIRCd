@@ -218,6 +218,7 @@ static SSL_CTX *tls_setup(server_t *srv) {
 /* Drives (or re-drives) SSL_accept() until it completes or genuinely needs
  * to wait for more I/O. On success, grants +Z (see client.h's UMODE_Z). */
 static void tls_try_handshake(client_t *cl) {
+    ERR_clear_error();
     int rc = SSL_accept(cl->ssl);
     if (rc == 1) {
         cl->tls_handshaking = 0;
@@ -248,6 +249,7 @@ static void tls_try_handshake(client_t *cl) {
  * expect from a plain read(2)/write(2). */
 static ssize_t io_read(client_t *cl, void *buf, size_t len) {
     if (!cl->ssl) return read(cl->fd, buf, len);
+    ERR_clear_error();
     int n = SSL_read(cl->ssl, buf, (int)len);
     if (n > 0) return n;
     int err = SSL_get_error(cl->ssl, n);
@@ -259,6 +261,7 @@ static ssize_t io_read(client_t *cl, void *buf, size_t len) {
 
 static ssize_t io_write(client_t *cl, const void *buf, size_t len) {
     if (!cl->ssl) return write(cl->fd, buf, len);
+    ERR_clear_error();
     int n = SSL_write(cl->ssl, buf, (int)len);
     if (n > 0) return n;
     int err = SSL_get_error(cl->ssl, n);
@@ -345,7 +348,14 @@ static void apply_masked_host(server_t *srv, client_t *cl, const char *basis, co
         snprintf(suffix, sizeof suffix, "users.%s", network);
     }
 
-    config_format_cloak(srv->cfg.security.host_masking_format, token, network, suffix, cl->host, sizeof cl->host);
+    if (config_format_cloak(srv->cfg.security.host_masking_format, token, network, suffix, cl->host, sizeof cl->host) != 0)
+        snprintf(cl->host, sizeof cl->host, "%s.users.%s", token, network); /* template overflowed -- never leave a half-written/real host */
+}
+
+void net_reset_host(server_t *srv, client_t *cl) {
+    if (!srv->cfg.security.host_masking) { snprintf(cl->host, sizeof cl->host, "%s", cl->realhost); return; }
+    int resolved = strcmp(cl->realhost, cl->ip) != 0;
+    apply_masked_host(srv, cl, resolved ? cl->realhost : cl->ip, resolved ? cl->realhost : NULL);
 }
 
 static client_t *accept_common(server_t *srv, int listen_fd) {
@@ -677,6 +687,12 @@ static void drain_worker_results(server_t *srv) {
             client_t *cl = find_by_conn_id(srv, r->conn_id);
             if (!cl) continue;
 
+            /* A lookup that outlived the 30s rescue (or a registered client):
+             * dropping it keeps a late result from silently swapping the host
+             * after 001 -- no CHGHOST, no K-line re-check, clobbering opers' cloaks. */
+            if (r->type == JOB_RDNS && (cl->registered || !cl->rdns_pending)) continue;
+            if (r->type == JOB_IDENT && (cl->registered || !cl->ident_pending)) continue;
+
             if (r->type == JOB_RDNS) {
                 cl->rdns_pending = 0;
                 if (r->success) {
@@ -744,6 +760,7 @@ static void drain_worker_results(server_t *srv) {
                     cmd_finish_auth(srv, cl, r->purpose == AUTH_REGISTER, r->success, r->text);
                 else
                     cmd_finish_privileged_auth(srv, cl, r->purpose, r->success);
+                cmd_send_welcome_if_ready(srv, cl); /* held back while auth_pending (SASL before 001) */
             }
         }
     }
@@ -776,6 +793,7 @@ static void tick(server_t *srv) {
         if (cl->auth_pending && difftime(now, cl->auth_started) > 30) {
             log_warn("net", "auth job for %s never finished -- releasing the connection", cl->ip);
             cl->auth_pending = 0;
+            cl->auth_gen++; /* the late result must not log in / oper-up a user told it failed */
             notice_self(srv, cl, "Your login timed out on the server side -- please try again.");
         }
         double idle = difftime(now, cl->last_activity);

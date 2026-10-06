@@ -132,7 +132,7 @@ void notice_self(server_t *srv, client_t *cl, const char *text) {
 
 void cmd_send_welcome_if_ready(server_t *srv, client_t *cl) {
     if (cl->registered || !cl->got_nick || !cl->got_user || cl->cap_negotiating) return;
-    if (cl->rdns_pending || cl->ident_pending) return; /* net.c's worker-result tick retries this once they clear */
+    if (cl->rdns_pending || cl->ident_pending || cl->auth_pending) return; /* net.c's worker-result tick retries this once they clear */
 
     /* Only now are user/host final (USER, identd and rDNS have all landed),
      * so this is the first point a hostname K/G-line can be evaluated at all

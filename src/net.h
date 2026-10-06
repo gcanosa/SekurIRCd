@@ -7,6 +7,7 @@
 #include <sys/types.h>
 
 struct server;
+struct client;
 
 /* CPU%/RSS(KB) for `pid` via `ps` -- see net.c for why not /proc.
  * Returns 0 on success, -1 if `pid` doesn't exist. */
@@ -24,6 +25,9 @@ int net_set_nonblocking(int fd);
 int net_connect_flood_hit(const cfg_security_t *sec, const char *ip);
 
 /* Runs until srv->shutdown_requested. Returns 0 normally. */
+/* Restores the client's default displayed host (cloak if host_masking, else
+ * realhost) -- for VHOST/SETHOST "off". Caller broadcasts the CHGHOST. */
+void net_reset_host(struct server *srv, struct client *cl);
 int net_run(struct server *srv);
 
 #endif /* SEKURIRCD_NET_H */
