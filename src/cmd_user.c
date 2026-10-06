@@ -255,6 +255,10 @@ static void whois_one(server_t *srv, client_t *cl, const char *nick) {
         const char *p3a[] = {target->nick, target->account};
         client_reply(cl, N_WHOISACCOUNT, p3a, 2, "is logged in as");
     }
+    if (target->is_away) {
+        const char *pa[] = {target->nick};
+        client_reply(cl, N_AWAY, pa, 1, target->away);
+    }
     if (strcmp(target->host, target->realhost) != 0 && ((cl->umodes & UMODE_O) || cl == target)) {
         char m[300];
         snprintf(m, sizeof m, "is actually connecting from %s", target->realhost);
@@ -333,6 +337,7 @@ static const char *whox_value(char letter, client_t *u, channel_t *chan, client_
         return scratch;
     }
     case 'd': return "0";
+    case 'o': return "0"; /* oplevel: not tracked */
     case 'l': {
         long idle = (long)difftime(time(NULL), u->last_activity);
         snprintf(scratch, scratchsz, "%ld", idle);
@@ -350,7 +355,10 @@ static void send_whox_reply(client_t *cl, const char *fields, const char *token,
     int nscratch = 0, np = 0;
     const char *trailing = NULL;
     p[np++] = cl->nick;
-    for (const char *f = fields; *f && np < 16 && nscratch < 16; f++) {
+    /* WHOX replies always carry the fields in this fixed order, whatever
+     * order the client listed them in the request. */
+    for (const char *f = "tcuihsnfdlaor"; *f && np < 16 && nscratch < 16; f++) {
+        if (!strchr(fields, *f)) continue;
         if (*f == 'r') { trailing = u->realname; continue; }
         p[np++] = whox_value(*f, u, chan, cl, token, scratch[nscratch], sizeof scratch[nscratch]);
         nscratch++;
@@ -418,14 +426,19 @@ void cmd_who(server_t *srv, client_t *cl, irc_message_t *msg) {
         if (!u) {
             const char *p[] = {target};
             client_reply(cl, N_NOSUCHNICK, p, 1, "No such nick/channel");
+            client_reply(cl, N_ENDOFWHO, p, 1, "End of /WHO list.");
             return;
         }
+        /* Exactly one reply per user: the first channel the asker can see them in, else "*". */
+        channel_t *shown = NULL;
         for (chan_node_t *n = u->channels; n; n = n->next) {
             channel_t *chan = n->chan;
             if ((chan->modes & (CMODE_S | CMODE_P)) && !channel_find_member(chan, cl)) continue;
-            if (whox_fields) send_whox_reply(cl, whox_fields, whox_token, u, chan);
-            else send_who_classic(cl, u, chan, multi);
+            shown = chan;
+            break;
         }
+        if (whox_fields) send_whox_reply(cl, whox_fields, whox_token, u, shown);
+        else send_who_classic(cl, u, shown, multi);
     }
     const char *pe[] = {target};
     client_reply(cl, N_ENDOFWHO, pe, 1, "End of /WHO list.");
@@ -489,27 +502,58 @@ void cmd_setname(server_t *srv, client_t *cl, irc_message_t *msg) {
     server_send_common_channels(srv, cl, line, CAP_SETNAME);
 }
 
-void cmd_userhost(server_t *srv, client_t *cl, irc_message_t *msg) {
-    char out[500] = "";
-    for (int i = 0; i < msg->nparams && i < 5; i++) {
-        client_t *u = server_find_user(srv, msg->params[i]);
-        if (!u) continue;
-        char entry[300];
-        snprintf(entry, sizeof entry, "%s%s%s=%c%s@%s", out[0] ? " " : "", u->nick,
-                 visible_oper(u, cl) ? "*" : "", u->is_away ? '-' : '+', u->user, u->host);
-        strncat(out, entry, sizeof out - strlen(out) - 1);
+/* Registered user by nick -- a connection that has only sent NICK must not
+ * show up as online (PRIVMSG/WHOIS already filter these out). */
+static client_t *find_registered(server_t *srv, const char *nick) {
+    client_t *u = server_find_user(srv, nick);
+    return (u && u->registered) ? u : NULL;
+}
+
+/* Calls fn for every space-separated nick across all parameters, so both
+ * "ISON a b c" and "ISON :a b c" work. */
+static void each_nick(irc_message_t *msg, int max, void (*fn)(const char *nick, void *ctx), void *ctx) {
+    int n = 0;
+    for (int i = 0; i < msg->nparams; i++) {
+        char buf[600];
+        snprintf(buf, sizeof buf, "%s", msg->params[i]);
+        char *save = NULL;
+        for (char *t = strtok_r(buf, " ", &save); t; t = strtok_r(NULL, " ", &save)) {
+            if (max && n >= max) return;
+            n++;
+            fn(t, ctx);
+        }
     }
-    client_reply(cl, N_USERHOST, NULL, 0, out);
+}
+
+typedef struct { server_t *srv; client_t *cl; char out[500]; } nick_scan_t;
+
+static void userhost_one(const char *nick, void *ctx) {
+    nick_scan_t *sc = ctx;
+    client_t *u = find_registered(sc->srv, nick);
+    if (!u) return;
+    char entry[300];
+    snprintf(entry, sizeof entry, "%s%s%s=%c%s@%s", sc->out[0] ? " " : "", u->nick,
+             visible_oper(u, sc->cl) ? "*" : "", u->is_away ? '-' : '+', u->user, u->host);
+    strncat(sc->out, entry, sizeof sc->out - strlen(sc->out) - 1);
+}
+
+void cmd_userhost(server_t *srv, client_t *cl, irc_message_t *msg) {
+    nick_scan_t sc = {.srv = srv, .cl = cl};
+    each_nick(msg, 5, userhost_one, &sc);
+    client_reply(cl, N_USERHOST, NULL, 0, sc.out);
+}
+
+static void ison_one(const char *nick, void *ctx) {
+    nick_scan_t *sc = ctx;
+    if (!find_registered(sc->srv, nick)) return;
+    if (sc->out[0]) strncat(sc->out, " ", sizeof sc->out - strlen(sc->out) - 1);
+    strncat(sc->out, nick, sizeof sc->out - strlen(sc->out) - 1);
 }
 
 void cmd_ison(server_t *srv, client_t *cl, irc_message_t *msg) {
-    char out[500] = "";
-    for (int i = 0; i < msg->nparams; i++) {
-        if (!server_find_user(srv, msg->params[i])) continue;
-        if (out[0]) strncat(out, " ", sizeof out - strlen(out) - 1);
-        strncat(out, msg->params[i], sizeof out - strlen(out) - 1);
-    }
-    client_reply(cl, N_ISON, NULL, 0, out);
+    nick_scan_t sc = {.srv = srv, .cl = cl};
+    each_nick(msg, 0, ison_one, &sc);
+    client_reply(cl, N_ISON, NULL, 0, sc.out);
 }
 
 #define MAX_MONITOR 100

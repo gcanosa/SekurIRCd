@@ -703,9 +703,7 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
         channel_t *chan = server_find_channel(srv, msg.params[0]);
         client_t *target = server_find_user(srv, msg.params[1]);
         if (!chan || !target) return 0;
-        char cf[64];
-        irc_casefold(cf, sizeof cf, target->nick);
-        channel_invite_add(chan, cf);
+        channel_invite_add(chan, client_invite_key(target));
         char prefix[320];
         client_prefix(svc, prefix, sizeof prefix);
         char line[300];

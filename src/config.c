@@ -516,7 +516,7 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
     }
     for (const char *c = out->security.default_user_modes; *c; c++) {
         if (!strchr(USER_MODE_SELF, *c)) {
-            snprintf(errbuf, errbufsz, "security.default_user_modes: '%c' is not a valid default user mode (allowed: disw)", *c);
+            snprintf(errbuf, errbufsz, "security.default_user_modes: '%c' is not a valid default user mode (allowed: iwdsB)", *c);
             return -1;
         }
     }

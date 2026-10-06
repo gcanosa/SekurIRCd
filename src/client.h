@@ -90,6 +90,7 @@ typedef struct client {
 
     unsigned int caps; /* CAP_* bitmask -- see cmd_reg.c's CAP_ATTRS table */
 
+    char invite_key[24];   /* "c<conn_id>", built lazily by client_invite_key() */
     uint64_t conn_id;      /* stable identity for a worker.c job result, immune to fd reuse */
     char your_id[18];      /* random hex shown as 042 RPL_YOURID -- conn_id is sequential, would leak connection count/order */
     int rdns_pending;       /* reverse-DNS lookup in flight -- gates welcome */
@@ -142,6 +143,9 @@ void client_free(client_t *cl);
 
 /* Compute the display prefix "nick!~user@host" (or "nick@host" pre-USER). */
 void client_prefix(const client_t *cl, char *out, size_t outsz);
+/* Key under which /INVITE remembers this connection (channel_t.invited) -- the
+ * connection, not the nick, so quitting or renaming can't hand the invite on. */
+const char *client_invite_key(client_t *cl);
 /* "+iwZ" etc -- the self-togglable/server-set umode letters currently on
  * cl, same set cmd_mode_user's bare query and the post-MOTD RPL_UMODEIS
  * (server_send_welcome) both report. */

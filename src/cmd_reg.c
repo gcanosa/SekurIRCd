@@ -65,6 +65,8 @@ void cmd_nick(server_t *srv, client_t *cl, irc_message_t *msg) {
         return;
     }
 
+    if (strcmp(cl->nick, newnick) == 0) return; /* identical nick: nothing to announce */
+
     if (strcmp(cl->casefold_nick, cf) == 0) {
         /* case-only change: no collision, no re-key needed by identity (the
          * hash key is the casefold form, unchanged) -- but it must still be
@@ -725,6 +727,7 @@ void cmd_finish_auth(server_t *srv, client_t *cl, int is_register, int success, 
     const char *account = cl->pending_account;
     if (!is_register) {
         if (success) {
+            account = accounts_display_name(&srv->accounts, account); /* stored case, not whatever was typed */
             server_login(srv, cl, account);
             if (style == AUTH_STYLE_NICKSERV) {
                 char m[200];

@@ -16,6 +16,7 @@ struct client;
 
 #define CHAN_NAMELEN 64
 #define CHAN_TOPICLEN 512
+#define TOPIC_MAX_LEN 307 /* advertised TOPICLEN, enforced in cmd_topic: prefix (<=~125) + TOPIC cmd + channel + topic must fit one 512-byte line */
 #define CHAN_KEYLEN 64
 #define CHAN_MAX_MASKLIST 100  /* matches the ballpark real ircds advertise */
 #define CHAN_MAX_INVITED 64    /* ponytail: capped, unlike upstream's unbounded set;
@@ -72,7 +73,7 @@ typedef struct channel {
     masklist_t bans;                  /* +b */
     masklist_t exceptions;            /* +e */
     masklist_t invex;                 /* +I */
-    char invited[CHAN_MAX_INVITED][64]; /* casefolded nicks /INVITE has admitted past +i */
+    char invited[CHAN_MAX_INVITED][64]; /* client_invite_key()s /INVITE has admitted past +i */
     int n_invited;
     member_t *members;                /* uthash, keyed by client ptr */
     UT_hash_handle hh;                /* server->channels, keyed by casefold_name */
@@ -110,8 +111,10 @@ int channel_is_quieted(channel_t *chan, const char *nick, const char *user,
 int channel_is_banned(channel_t *chan, const char *nick, const char *user,
                        const char *host, const char *realhost, const char *ip,
                        const char *account, int ident_confirmed);
-/* True if past +i via an exact INVITE (channel_invite_add) or an +I mask hit. */
-int channel_is_invited(channel_t *chan, const char *nick, const char *user,
+/* `invite_key` is client_invite_key(): invites are keyed by connection, not nick,
+ * so a quit invitee's nick can't be taken over to use the invite.
+ * True if past +i via an exact INVITE (channel_invite_add) or an +I mask hit. */
+int channel_is_invited(channel_t *chan, const char *invite_key, const char *nick, const char *user,
                         const char *host, const char *account, int ident_confirmed);
 
 int masklist_add(masklist_t *ml, const char *mask); /* 0 ok, -1 dup/full */

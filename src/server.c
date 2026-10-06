@@ -427,14 +427,15 @@ void server_send_isupport(server_t *srv, client_t *cl) {
     char nicklen[32], chanlen[32], topiclen[32];
     snprintf(nicklen, sizeof nicklen, "NICKLEN=%d", srv->cfg.security.max_nick_length);
     snprintf(chanlen, sizeof chanlen, "CHANNELLEN=%d", 50);
-    snprintf(topiclen, sizeof topiclen, "TOPICLEN=%d", CHAN_TOPICLEN - 1);
+    snprintf(topiclen, sizeof topiclen, "TOPICLEN=%d", TOPIC_MAX_LEN);
 
     const char *tokens[] = {
         netbuf, "CHANTYPES=#", "CHANMODES=beI,k,l,imnprstzCNPQSTVROMc", "PREFIX=(ohv)@%+",
         nicklen, chanlen, topiclen, "CASEMAPPING=ascii", "MODES=6",
-        "STATUSMSG=@%+", "AWAYLEN=400", "KICKLEN=400",
-        "MAXLIST=beI:100", "EXCEPTS=e", "INVEX=I", "MONITOR=100", "WATCH=128", "SILENCE=15",
-        "EXTBAN=~,am", "ELIST=MNU", "WHOX", "MAXCHANNELS=200", "BOT=B",
+        "STATUSMSG=@%+", "AWAYLEN=390", "KICKLEN=300",
+        "MAXLIST=b:100,e:100,I:100", "EXCEPTS=e", "INVEX=I", "MONITOR=100", "WATCH=128", "SILENCE=15",
+        "EXTBAN=~,am", "ELIST=MNU", "WHOX", "CHANLIMIT=#:200", "BOT=B", "LINELEN=512",
+        "TARGMAX=PRIVMSG:1,NOTICE:1,KICK:1,JOIN:1,PART:1,WHOIS:1",
     };
     int total = (int)(sizeof tokens / sizeof tokens[0]);
     for (int i = 0; i < total; i += 12) {
@@ -562,7 +563,7 @@ void server_send_welcome(server_t *srv, client_t *cl) {
 
     char swver[CFG_STR + 16];
     server_software_version(srv, swver, sizeof swver);
-    const char *myinfo[] = {srv->cfg.server.name, swver, "diwsoZrpIHqRD", "beIklnimpstzrovhPCTSVQN"};
+    const char *myinfo[] = {srv->cfg.server.name, swver, "diwsoZrpIHqRDB", "beIklnimpstzrovhPCTSVQNROMc"};
     client_reply(cl, N_MYINFO, myinfo, 4, NULL);
 
     if (cl->ssl) {

@@ -93,6 +93,11 @@ const char *accounts_hash(account_store_t *st, const char *name) {
     return cJSON_IsString(hash) ? hash->valuestring : NULL;
 }
 
+const char *accounts_display_name(account_store_t *st, const char *name) {
+    cJSON *n = cJSON_GetObjectItemCaseSensitive(find(st, name), "name");
+    return cJSON_IsString(n) ? n->valuestring : name;
+}
+
 long accounts_created_at(account_store_t *st, const char *name) {
     cJSON *v = cJSON_GetObjectItemCaseSensitive(find(st, name), "created_at");
     return cJSON_IsNumber(v) ? (long)v->valuedouble : 0;
