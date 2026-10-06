@@ -25,6 +25,8 @@ struct client;
 #define RANK_VOICE  0x1
 #define RANK_HALFOP 0x2
 #define RANK_OP     0x4
+#define RANK_ADMIN  0x8  /* a: protected -- implies op (RANK_OP is always set alongside) */
+#define RANK_OWNER  0x10 /* q: channel owner -- implies op, outranks admin */
 
 #define CMODE_N 0x001 /* no external messages */
 #define CMODE_I 0x002 /* invite-only */
@@ -161,6 +163,11 @@ void channel_forget_ban_extra_for(const struct client *cl); /* call when a clien
 void channel_ban_state(channel_t *chan, member_t *m, const char *nick, const char *user,
                        const char *host, const char *realhost, const char *ip,
                        const char *account, int ident_confirmed, int *banned, int *quieted);
+/* The status prefix characters for `rank` (all of them, "~&@%+" order, when `multi`; else only the highest). `out` needs 6 bytes. */
+void channel_rank_prefix(int rank, int multi, char *out);
+/* 0 none, 1 voice, 2 halfop, 3 op, 4 admin, 5 owner -- who may act on whom. */
+int channel_rank_level(int rank);
+
 /* Remember a message (no-op when cap <= 0). Oldest entries fall off. */
 void channel_history_add(channel_t *chan, int cap, const char *msgid, long long ms, const char *sender,
                          const char *account, const char *verb, const char *text);

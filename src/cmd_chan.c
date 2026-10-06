@@ -32,18 +32,8 @@ static void send_names(client_t *cl, channel_t *chan) {
     member_t *m, *tmp;
     HASH_ITER(hh, chan->members, m, tmp) {
         char nickbuf[NICKLEN + HOSTLEN + 8];
-        char rankch[4] = "";
-        size_t rp = 0;
-        if (multi) {
-            if (m->rank & RANK_OP) rankch[rp++] = '@';
-            if (m->rank & RANK_HALFOP) rankch[rp++] = '%';
-            if (m->rank & RANK_VOICE) rankch[rp++] = '+';
-        } else {
-            if (m->rank & RANK_OP) rankch[rp++] = '@';
-            else if (m->rank & RANK_HALFOP) rankch[rp++] = '%';
-            else if (m->rank & RANK_VOICE) rankch[rp++] = '+';
-        }
-        rankch[rp] = '\0';
+        char rankch[8];
+        channel_rank_prefix(m->rank, multi, rankch);
         if (userhost) snprintf(nickbuf, sizeof nickbuf, "%s%s!%s@%s", rankch, m->client->nick, m->client->user, m->client->host);
         else snprintf(nickbuf, sizeof nickbuf, "%s%s", rankch, m->client->nick);
         size_t nl = strlen(nickbuf);
@@ -629,6 +619,11 @@ void cmd_kick(server_t *srv, client_t *cl, irc_message_t *msg) {
         err_not_channel_op(cl, chan->name);
         return;
     }
+    /* owners and admins can't be kicked by someone more junior */
+    if (!(cl->umodes & UMODE_O) && channel_rank_level(tm->rank) > channel_rank_level(me->rank)) {
+        err_not_channel_op(cl, chan->name);
+        return;
+    }
 
     char prefix[320];
     client_prefix(cl, prefix, sizeof prefix);
@@ -849,7 +844,7 @@ void cmd_apply_channel_mode(server_t *srv, client_t *cl, channel_t *chan,
                 if (cursign != sign) { outflags[of++] = sign; cursign = sign; }
                 outflags[of++] = 'l';
             }
-        } else if (c == 'o' || c == 'h' || c == 'v') {
+        } else if (c == 'o' || c == 'h' || c == 'v' || c == 'q' || c == 'a') {
             if (argi >= nargs) continue;
             client_t *target = server_find_user(srv, args[argi]);
             member_t *tm = target ? channel_find_member(chan, target) : NULL;
@@ -859,8 +854,27 @@ void cmd_apply_channel_mode(server_t *srv, client_t *cl, channel_t *chan,
                 client_reply(cl, N_USERNOTINCHANNEL, pe, 2, "They aren't on that channel");
                 argi++; continue;
             }
-            int rank = (c == 'o') ? RANK_OP : (c == 'h') ? RANK_HALFOP : RANK_VOICE;
-            if (sign == '+') tm->rank |= rank; else tm->rank &= ~rank;
+            /* Who may touch whom: owners/admins are protected -- the setter must be at least as senior as the
+             * target (opers and services always are), and only an owner may grant +q, only owner/admin +a.
+             * A user may always drop their own prefix. */
+            member_t *setter = channel_find_member(chan, cl);
+            int setter_lvl = ((cl->umodes & UMODE_O) || cl->is_service) ? 99 : setter ? channel_rank_level(setter->rank) : 0;
+            int need = (c == 'q') ? 5 : (c == 'a') ? 4 : 0;
+            int target_lvl = channel_rank_level(tm->rank);
+            int self_drop = (target == cl && sign == '-');
+            if (!self_drop && (setter_lvl < need || (sign == '-' && target_lvl > setter_lvl))) {
+                const char *pe[] = {chan->name};
+                client_reply(cl, N_NOTCHANNELOP, pe, 1, "You are not senior enough to change that user's status");
+                argi++; continue;
+            }
+            int rank = (c == 'o') ? RANK_OP : (c == 'h') ? RANK_HALFOP : (c == 'v') ? RANK_VOICE : (c == 'q') ? RANK_OWNER : RANK_ADMIN;
+            if (sign == '+') {
+                tm->rank |= rank;
+                if (c == 'q' || c == 'a') tm->rank |= RANK_OP; /* owner/admin are ops too -- every op check keeps working */
+            } else {
+                tm->rank &= ~rank;
+                if (c == 'o') tm->rank &= ~(RANK_ADMIN | RANK_OWNER); /* -o is a full demotion */
+            }
             if (cursign != sign) { outflags[of++] = sign; cursign = sign; }
             outflags[of++] = c;
             snprintf(outparams[n_outparams++], sizeof outparams[0], "%s", target->nick);

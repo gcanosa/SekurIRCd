@@ -366,7 +366,8 @@ static void whois_one(server_t *srv, client_t *cl, const char *nick) {
         for (chan_node_t *n = target->channels; n; n = n->next) {
             if ((n->chan->modes & (CMODE_S | CMODE_P)) && !channel_find_member(n->chan, cl)) continue;
             member_t *m = channel_find_member(n->chan, target);
-            const char *rankch = (m && (m->rank & RANK_OP)) ? "@" : (m && (m->rank & RANK_HALFOP)) ? "%" : (m && (m->rank & RANK_VOICE)) ? "+" : "";
+            char rankch[8];
+            channel_rank_prefix(m ? m->rank : 0, 0, rankch);
             char entry[80];
             snprintf(entry, sizeof entry, "%s%s%s", cp ? " " : "", rankch, n->chan->name);
             size_t el = strlen(entry);
@@ -399,16 +400,7 @@ void cmd_whois(server_t *srv, client_t *cl, irc_message_t *msg) {
     while (tok) { whois_one(srv, cl, tok); tok = strtok_r(NULL, ",", &save); }
 }
 
-static void who_rank_flags(int rank, int multi, char *out) {
-    if (multi) {
-        if (rank & RANK_OP) *out++ = '@';
-        if (rank & RANK_HALFOP) *out++ = '%';
-        if (rank & RANK_VOICE) *out++ = '+';
-    } else if (rank & RANK_OP) *out++ = '@';
-    else if (rank & RANK_HALFOP) *out++ = '%';
-    else if (rank & RANK_VOICE) *out++ = '+';
-    *out = '\0';
-}
+static void who_rank_flags(int rank, int multi, char *out) { channel_rank_prefix(rank, multi, out); }
 
 /* WHOX (ISUPPORT WHOX) field value for one letter -- matches commands.py's
  * _whox_value. `chan` is NULL for a bare-nick WHO with no channel context. */
@@ -425,7 +417,7 @@ static const char *whox_value(char letter, client_t *u, channel_t *chan, client_
     case 'f': {
         int multi = cl->caps & CAP_MULTI_PREFIX;
         member_t *m = chan ? channel_find_member(chan, u) : NULL;
-        char rankch[4];
+        char rankch[8];
         who_rank_flags(m ? m->rank : 0, multi, rankch);
         snprintf(scratch, scratchsz, "%s%s%s%s", u->is_away ? "G" : "H", visible_oper(u, cl) ? "*" : "", (u->umodes & UMODE_B) ? "B" : "", rankch);
         return scratch;
@@ -461,7 +453,7 @@ static void send_whox_reply(client_t *cl, const char *fields, const char *token,
 }
 
 static void send_who_classic(client_t *cl, client_t *u, channel_t *chan, int multi) {
-    char rankch[4];
+    char rankch[8];
     member_t *m = chan ? channel_find_member(chan, u) : NULL;
     who_rank_flags(m ? m->rank : 0, multi, rankch);
     char flags[10];
