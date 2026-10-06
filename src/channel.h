@@ -68,6 +68,7 @@ typedef struct {
                          * three inline 100x256 lists made every channel ~80 KB */
     int n;
     unsigned gen;       /* bumped on every add/del; invalidates member_t's cached ban verdict */
+    int dynamic;        /* holds a ~j: extban, whose verdict depends on other channels -> never cached */
 } masklist_t;
 
 /* One remembered PRIVMSG/NOTICE (CHATHISTORY). Fixed-size so a ring of them is one allocation. */
@@ -142,6 +143,18 @@ int channel_is_banned(channel_t *chan, const char *nick, const char *user,
  * True if past +i via an exact INVITE (channel_invite_add) or an +I mask hit. */
 int channel_is_invited(channel_t *chan, const char *invite_key, const char *nick, const char *user,
                         const char *host, const char *account, int ident_confirmed);
+
+/* Extra facts the ~r (realname), ~z (secure connection) and ~j:#chan (member of
+ * another channel) extbans match on. Set by the caller around a ban/exception/
+ * invex check (single-threaded -- a plain global is enough); NULL = those
+ * extbans simply don't match. */
+typedef struct {
+    const char *realname;
+    int secure;
+    const struct client *cl; /* for ~j: its channel list */
+} ban_extra_t;
+void channel_set_ban_extra(const ban_extra_t *x);
+void channel_forget_ban_extra_for(const struct client *cl); /* call when a client is freed */
 
 /* Banned (JOIN-blocking, after exceptions) and quieted verdicts for a member,
  * cached on `m` -- PRIVMSG used to walk every mask three times per message. */

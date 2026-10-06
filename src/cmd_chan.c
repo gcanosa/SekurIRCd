@@ -168,6 +168,8 @@ static void do_join_one(server_t *srv, client_t *cl, const char *chan_name, cons
         chan = server_get_or_create_channel(srv, chan_name);
         if (!chan) { err_no_such_channel(cl, chan_name); return; }
     } else if (!(cl->umodes & UMODE_O)) {
+        ban_extra_t bx = {cl->realname, (cl->umodes & UMODE_Z) != 0, cl};
+        channel_set_ban_extra(&bx); /* for ~r/~z/~j in +b/+e/+I */
         if ((chan->modes & CMODE_I) && !channel_is_invited(chan, invite_key_of(cl), cl->nick, cl->user, cl->host, cl->account, cl->ident_confirmed)) {
             const char *p[] = {chan->name};
             client_reply(cl, N_INVITEONLYCHAN, p, 1, "Cannot join channel (+i)");

@@ -732,6 +732,7 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
         for (int i = chan->bans.n - 1; i >= 0; i--) {
             char mask[256];
             snprintf(mask, sizeof mask, "%s", chan->bans.masks[i]);
+            channel_set_ban_extra(NULL); /* AKICK cleanup: no stale client context for ~r/~z/~j */
             int hit = channel_mask_hit(mask, target->nick, target->user, target->host, target->account, target->ident_confirmed) ||
                       channel_mask_hit(mask, target->nick, target->user, target->realhost, target->account, target->ident_confirmed) ||
                       channel_mask_hit(mask, target->nick, target->user, target->ip, target->account, target->ident_confirmed);

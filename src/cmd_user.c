@@ -195,6 +195,8 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
             return;
         }
         int is_banned = 0, is_quieted = 0;
+        ban_extra_t bx = {cl->realname, (cl->umodes & UMODE_Z) != 0, cl};
+        channel_set_ban_extra(&bx);
         if (chan->bans.n > 0)
             channel_ban_state(chan, m, cl->nick, cl->user, cl->host, cl->realhost, cl->ip, cl->account, cl->ident_confirmed,
                               &is_banned, &is_quieted);
