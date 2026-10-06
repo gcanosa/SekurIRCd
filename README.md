@@ -85,6 +85,15 @@ Website & docs: <https://gcanosa.github.io/SekurIRCd/> (source in [`web/`](web/)
   `CAP NEW`/`DEL` on rehash), `msgid`, `TAGMSG` with client-only `+tags`,
   `batch` and `draft/chathistory` (`CHATHISTORY LATEST|BEFORE|AFTER|AROUND|
   BETWEEN`, in-memory per-channel history sized by `[messages] history_size`).
+  `labeled-response` (replies carry the client's `@label`, wrapped in a batch
+  when there are several, or a bare `ACK`), and SASL `SCRAM-SHA-256` alongside
+  PLAIN/EXTERNAL (verifiers are stored at `/REGISTER`, or at an account's next
+  PLAIN login for older accounts).
+- More channel/user features: owner (`+q`, `~`) and admin (`+a`, `&`) ranks that
+  junior ops can't kick or deop; extbans `~r:<realname>`, `~z` (TLS users) and
+  `~j:#chan`; caller-ID (`+g` with `/ACCEPT`); `[[classes]]` connection classes
+  (per-IP-range client caps, sendq and flood limits); NickServ `GHOST` and optional
+  nick-ownership enforcement (`[accounts] enforce_nicks`).
 - IRCv3 capabilities: `away-notify` (live `AWAY` updates for channel-mates
   who request it), `multi-prefix` (all rank prefixes in `NAMES`/`WHO`, not
   just the highest), `userhost-in-names` (full `nick!user@host` in

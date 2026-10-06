@@ -132,6 +132,7 @@ void irc_add_time_tag(char *line, size_t linesz);
 #define CAP_STANDARD_REPLIES  0x1000u
 #define CAP_CAP_NOTIFY        0x2000u
 #define CAP_BATCH             0x4000u
+#define CAP_LABELED_RESPONSE  0x10000u
 #define CAP_CHATHISTORY       0x8000u
 
 /* --- numeric reply codes (protocol.N) ------------------------------------ */

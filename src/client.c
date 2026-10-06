@@ -32,6 +32,7 @@ void client_free(client_t *cl) {
     if (cl->ssl) SSL_free(cl->ssl); /* abrupt close, no SSL_shutdown close_notify -- fine for a teardown path */
     free(cl->sbuf);
     free(cl->rbuf);
+    free(cl->label_buf);
     free(cl->scram);
     free(cl->ws_in);
     free(cl->ws_out);
@@ -81,6 +82,30 @@ void client_send(client_t *cl, const char *line) {
          * link peer verbatim -- no separate wire encoding needed. */
         if (cl->link_conn) link_forward_line(cl->link_conn, line);
         return;
+    }
+    if (cl->label_capture) { /* held until client_label_end decides how to label it */
+        size_t l = strlen(line);
+        if (cl->label_len + l + 1 > 65536) { /* absurd reply volume: stop labeling, release what we hold unlabeled */
+            cl->label_capture = 0;
+            if (cl->label_buf) {
+                char *p = cl->label_buf, *end = cl->label_buf + cl->label_len;
+                while (p < end) { char *nl = memchr(p, '\n', (size_t)(end - p)); if (!nl) break; *nl = '\0'; client_send(cl, p); p = nl + 1; }
+            }
+            cl->label_len = 0; cl->label_lines = 0;
+        } else {
+            if (cl->label_len + l + 1 > cl->label_cap) {
+                size_t cap = cl->label_cap ? cl->label_cap : 1024;
+                while (cap < cl->label_len + l + 1) cap *= 2;
+                char *nb = realloc(cl->label_buf, cap);
+                if (!nb) { cl->quitting = 1; return; }
+                cl->label_buf = nb; cl->label_cap = cap;
+            }
+            memcpy(cl->label_buf + cl->label_len, line, l);
+            cl->label_len += l;
+            cl->label_buf[cl->label_len++] = '\n';
+            cl->label_lines++;
+            return;
+        }
     }
     /* IRCv3 server-time: every outgoing line gets a time= tag once negotiated
      * -- same single choke point as Client.send in the Python daemon. */
@@ -138,4 +163,71 @@ int client_flood_ok(client_t *cl, int max_msgs, double window_seconds) {
 const char *client_invite_key(client_t *cl) {
     if (!cl->invite_key[0]) snprintf(cl->invite_key, sizeof cl->invite_key, "c%llu", (unsigned long long)cl->conn_id);
     return cl->invite_key;
+}
+
+void client_label_begin(client_t *cl, const char *label) {
+    snprintf(cl->label, sizeof cl->label, "%s", label);
+    cl->label_capture = 1;
+    cl->label_len = 0;
+    cl->label_lines = 0;
+}
+
+/* Prefixes `line` with one extra message tag ("k=v"), merging into any existing tag section. */
+static void line_add_tag(const char *tag, const char *line, char *out, size_t outsz) {
+    if (line[0] == '@') snprintf(out, outsz, "@%s;%s", tag, line + 1);
+    else snprintf(out, outsz, "@%s %s", tag, line);
+}
+
+void client_label_end(client_t *cl) {
+    if (!cl->label_capture) return; /* overflowed and already released */
+    cl->label_capture = 0;
+    const char *srvname = (cl->srv && cl->srv->cfg.server.name[0]) ? cl->srv->cfg.server.name : "server";
+    /* Render "label=<escaped>" once, using irc_build's tag escaping. */
+    irc_tag_t lt = {"label", cl->label};
+    char tmp[200];
+    irc_build(tmp, sizeof tmp, &lt, 1, NULL, "X", NULL, 0, NULL);
+    char *sp = strchr(tmp, ' ');
+    if (sp) *sp = '\0';
+    const char *labeltag = tmp + 1; /* skip '@' */
+    char out[1700];
+    if (cl->label_lines == 0) {
+        const char *p[1] = {NULL};
+        char bare[200];
+        irc_build(bare, sizeof bare, NULL, 0, srvname, "ACK", p, 0, NULL);
+        line_add_tag(labeltag, bare, out, sizeof out);
+        client_send(cl, out);
+    } else if (cl->label_lines == 1) {
+        char *nl = memchr(cl->label_buf, '\n', cl->label_len);
+        if (nl) *nl = '\0';
+        line_add_tag(labeltag, cl->label_buf, out, sizeof out);
+        client_send(cl, out);
+    } else {
+        static unsigned long seq = 0;
+        char bid[24], tagb[40], start[300];
+        snprintf(bid, sizeof bid, "lr%lu", ++seq);
+        const char *bp[] = {"+", "labeled-response"};
+        char plus[40];
+        snprintf(plus, sizeof plus, "+%s", bid);
+        bp[0] = plus;
+        irc_build(start, sizeof start, NULL, 0, srvname, "BATCH", bp, 2, NULL);
+        line_add_tag(labeltag, start, out, sizeof out);
+        client_send(cl, out);
+        snprintf(tagb, sizeof tagb, "batch=%s", bid);
+        char *p = cl->label_buf, *end = cl->label_buf + cl->label_len;
+        while (p < end) {
+            char *nl = memchr(p, '\n', (size_t)(end - p));
+            if (!nl) break;
+            *nl = '\0';
+            line_add_tag(tagb, p, out, sizeof out);
+            client_send(cl, out);
+            p = nl + 1;
+        }
+        char minus[40], endl[300];
+        snprintf(minus, sizeof minus, "-%s", bid);
+        const char *ep[] = {minus};
+        irc_build(endl, sizeof endl, NULL, 0, srvname, "BATCH", ep, 1, NULL);
+        client_send(cl, endl);
+    }
+    cl->label_len = 0;
+    cl->label_lines = 0;
 }
