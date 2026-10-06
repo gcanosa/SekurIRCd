@@ -220,26 +220,15 @@ void cmd_chgident(server_t *srv, client_t *cl, irc_message_t *msg) {
     server_notify_opers(srv, snote);
 }
 
-/* SANICK <nick> <newnick>: force a nick change, bypassing +N and reserved nicks. */
-void cmd_sanick(server_t *srv, client_t *cl, irc_message_t *msg) {
-    client_t *target = server_find_user(srv, msg->params[0]);
-    if (!target || !target->registered || target->is_service) { err_no_such_nick(cl, msg->params[0]); return; }
-    const char *newnick = msg->params[1];
-    if (!irc_valid_nick(newnick, srv->cfg.security.max_nick_length)) {
-        const char *p[] = {newnick};
-        client_reply(cl, N_ERRONEUSNICKNAME, p, 1, "Erroneous nickname");
-        return;
-    }
+/* Changes `target`'s nick with the usual announcements, bypassing +N and reserved nicks.
+ * Returns 0, or -1 if `newnick` is invalid or taken (nothing changed). */
+int force_nick_change(server_t *srv, client_t *target, const char *newnick) {
+    if (!irc_valid_nick(newnick, srv->cfg.security.max_nick_length)) return -1;
+    client_t *existing = server_find_user(srv, newnick);
+    if (existing && existing != target) return -1;
     char cf[NICKLEN];
     irc_casefold(cf, sizeof cf, newnick);
-    client_t *existing = server_find_user(srv, newnick);
-    if (existing && existing != target) {
-        const char *p[] = {newnick};
-        client_reply(cl, N_NICKNAMEINUSE, p, 1, "Nickname is already in use");
-        return;
-    }
-    char old_nick[NICKLEN], prefix[320], line[400];
-    snprintf(old_nick, sizeof old_nick, "%s", target->nick);
+    char prefix[320], line[400];
     client_prefix(target, prefix, sizeof prefix);
     irc_build(line, sizeof line, NULL, 0, prefix, "NICK", NULL, 0, newnick);
     client_send(target, line);
@@ -252,6 +241,22 @@ void cmd_sanick(server_t *srv, client_t *cl, irc_message_t *msg) {
     server_add_user(srv, target);
     server_monitor_notify(srv, target, 1);
     server_watch_notify(srv, target, 1);
+    return 0;
+}
+
+/* SANICK <nick> <newnick>: force a nick change, bypassing +N and reserved nicks. */
+void cmd_sanick(server_t *srv, client_t *cl, irc_message_t *msg) {
+    client_t *target = server_find_user(srv, msg->params[0]);
+    if (!target || !target->registered || target->is_service) { err_no_such_nick(cl, msg->params[0]); return; }
+    const char *newnick = msg->params[1];
+    char old_nick[NICKLEN];
+    snprintf(old_nick, sizeof old_nick, "%s", target->nick);
+    if (force_nick_change(srv, target, newnick) != 0) {
+        const char *p[] = {newnick};
+        client_reply(cl, irc_valid_nick(newnick, srv->cfg.security.max_nick_length) ? N_NICKNAMEINUSE : N_ERRONEUSNICKNAME, p, 1,
+                     irc_valid_nick(newnick, srv->cfg.security.max_nick_length) ? "Nickname is already in use" : "Erroneous nickname");
+        return;
+    }
     char snote[400];
     snprintf(snote, sizeof snote, "%s used SANICK on %s -> %s", cl->nick, old_nick, newnick);
     log_info("oper", "%s", snote);

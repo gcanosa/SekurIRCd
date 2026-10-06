@@ -45,6 +45,12 @@ int client_is_silencing(client_t *cl, client_t *from);
 void cmd_nick(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_user(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_pass(server_t *srv, client_t *cl, irc_message_t *msg);
+/* Force `target` to `newnick` (announced like a NICK). 0 ok, -1 invalid/taken. */
+int force_nick_change(server_t *srv, client_t *target, const char *newnick);
+/* [accounts] enforce_nicks: call after a registered client's nick is set. */
+void nick_enforce_check(server_t *srv, client_t *cl);
+void nick_enforce_tick(server_t *srv, time_t now);
+void cmd_accept(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_chathistory(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_tagmsg(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_globops(server_t *srv, client_t *cl, irc_message_t *msg);

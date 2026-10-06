@@ -226,6 +226,7 @@ static const help_entry_t HELP_TABLE[] = {
     {"SANICK", {"SANICK <nick> <newnick>", "IRC operators only: force a nick change."}},
     {"SHUN", {"SHUN [<mask> [duration] [reason]]", "IRC operators only: silently drop a connected user's messages (no disconnect). Needs UNSHUN to lift."}},
     {"ELINE", {"ELINE [<mask> [duration] [reason]]", "IRC operators only: exempt a mask from K/G-lines."}},
+    {"ACCEPT", {"ACCEPT [nick[,-nick,...]]", "Caller-ID (+g): allow/remove nicks that may message you; no argument lists them."}},
     {"USERIP", {"USERIP <nick> [nick...]", "IRC operators only: like USERHOST but shows the real IP address."}},
     {"ISON", {"ISON <nick> [nick...]", "Check which of the given nicks are currently online."}},
     {"MONITOR", {"MONITOR + nick[,nick...] | - nick[,...] | C | L | S",

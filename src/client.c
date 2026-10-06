@@ -53,6 +53,7 @@ void client_mode_string(const client_t *cl, char *out, size_t outsz) {
     if (cl->umodes & UMODE_REGONLY) modestr[p++] = 'R';
     if (cl->umodes & UMODE_NOPM) modestr[p++] = 'D';
     if (cl->umodes & UMODE_B) modestr[p++] = 'B';
+    if (cl->umodes & UMODE_G) modestr[p++] = 'g';
     modestr[p] = '\0';
     snprintf(out, outsz, "%s", modestr);
 }

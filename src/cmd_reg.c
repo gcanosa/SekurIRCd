@@ -114,6 +114,7 @@ void cmd_nick(server_t *srv, client_t *cl, irc_message_t *msg) {
     server_add_user(srv, cl);
     server_monitor_notify(srv, cl, 1);
     server_watch_notify(srv, cl, 1);
+    nick_enforce_check(srv, cl);
 }
 
 void cmd_user(server_t *srv, client_t *cl, irc_message_t *msg) {
@@ -776,8 +777,23 @@ void nickserv_message(server_t *srv, client_t *cl, const char *text) {
         else if (cl->account[0]) ns_say(srv, cl, "You are already identified");
         else if (start_plain_login(srv, cl, account, password, AUTH_STYLE_NICKSERV) != 0)
             ns_say(srv, cl, "Invalid account or password");
+    } else if (cmd && strcasecmp(cmd, "GHOST") == 0) {
+        /* GHOST <nick>: you must be identified as the account that owns <nick> (the account named
+         * <nick>, or the same account as that session) -- then that session is disconnected. */
+        client_t *t = a ? server_find_user(srv, a) : NULL;
+        if (!a) ns_say(srv, cl, "Syntax: GHOST <nick>");
+        else if (!cl->account[0]) ns_say(srv, cl, "You must IDENTIFY first");
+        else if (!t || !t->registered || t == cl) ns_say(srv, cl, "No such nick (or that is you)");
+        else if (strcasecmp(cl->account, a) != 0 && strcasecmp(cl->account, t->account) != 0)
+            ns_say(srv, cl, "You do not own that nickname");
+        else {
+            snprintf(t->quit_reason, sizeof t->quit_reason, "Killed (GHOST command used by %s)", cl->nick);
+            t->quitting = 1;
+            ns_say(srv, cl, "Ghost session disconnected");
+            log_info("nickserv", "%s ghosted %s", cl->nick, a);
+        }
     } else {
-        ns_say(srv, cl, "Commands: REGISTER <password> [email], IDENTIFY [account] <password>");
+        ns_say(srv, cl, "Commands: REGISTER <password> [email], IDENTIFY [account] <password>, GHOST <nick>");
     }
     OPENSSL_cleanse(buf, sizeof buf);
 }
@@ -873,4 +889,38 @@ void cmd_finish_auth(server_t *srv, client_t *cl, int is_register, int success, 
         notice_self(srv, cl, m);
     }
     log_info("main", "%s registered account %s", cl->nick, account);
+}
+
+/* --- nick ownership enforcement ([accounts] enforce_nicks) ------------------ */
+
+/* Called when a registered client's nick has just been set (welcome, NICK): starts the identify countdown if the nick is a registered account. */
+void nick_enforce_check(server_t *srv, client_t *cl) {
+    cl->enforce_deadline = 0;
+    if (!srv->cfg.accounts.enabled || !srv->cfg.accounts.enforce_nicks || cl->is_service || !cl->registered) return;
+    if (!accounts_exists(&srv->accounts, cl->nick)) return;
+    if (cl->account[0] && strcasecmp(cl->account, cl->nick) == 0) return; /* already logged in as the owner */
+    cl->enforce_deadline = time(NULL) + srv->cfg.accounts.enforce_grace;
+    char m[300];
+    snprintf(m, sizeof m, "This nickname is registered. Log in (SASL, or /msg NickServ IDENTIFY <password>) within %d seconds "
+                          "or you will be renamed.", srv->cfg.accounts.enforce_grace);
+    ns_say(srv, cl, m);
+}
+
+/* Once a second from net.c's tick: rename anyone whose grace ran out. */
+void nick_enforce_tick(server_t *srv, time_t now) {
+    for (client_t *cl = srv->all_clients; cl; cl = cl->all_next) {
+        if (!cl->enforce_deadline || cl->quitting) continue;
+        if (cl->account[0] && strcasecmp(cl->account, cl->nick) == 0) { cl->enforce_deadline = 0; continue; }
+        if (now < cl->enforce_deadline) continue;
+        cl->enforce_deadline = 0;
+        char guest[NICKLEN];
+        for (int tries = 0; tries < 20; tries++) {
+            char rh[9];
+            crypto_random_hex(rh, sizeof rh, 4);
+            snprintf(guest, sizeof guest, "Guest%u", 10000 + (unsigned)(strtoul(rh, NULL, 16) % 90000));
+            if (!server_find_user(srv, guest)) break;
+        }
+        ns_say(srv, cl, "You did not identify in time -- changing your nickname.");
+        force_nick_change(srv, cl, guest);
+    }
 }

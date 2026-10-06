@@ -90,6 +90,8 @@ typedef struct {
     int enabled;
     char store_file[CFG_PATH];
     int max_accounts;   /* 0 = unlimited; caps self-service /REGISTER growth */
+    int enforce_nicks;  /* a nick equal to a registered account must IDENTIFY within enforce_grace secs or be renamed Guest#### */
+    int enforce_grace;
 } cfg_accounts_t;
 
 typedef struct {

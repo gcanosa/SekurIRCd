@@ -331,6 +331,15 @@ store_file = "accounts.json"
 # rewritten on every registration) without limit. 0 = unlimited.
 max_accounts = 10000
 
+# Nick ownership: an account is named after the nick it was registered with.
+# With enforce_nicks on, someone using a nick that is a registered account name
+# must log in to it (SASL, or /msg NickServ IDENTIFY <password>) within
+# enforce_grace seconds, or they are renamed to Guest<number>. Off by default.
+# Either way, `/msg NickServ GHOST <nick>` (while identified as that account)
+# disconnects a session squatting on your nick.
+#enforce_nicks = false
+#enforce_grace = 30
+
 
 # -----------------------------------------------------------------------------
 # [debug_channel] -- live in-IRC view of the daemon's own log
