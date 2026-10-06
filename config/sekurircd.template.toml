@@ -490,6 +490,26 @@ backup_count = 5
 
 
 # -----------------------------------------------------------------------------
+# [[classes]] -- per-connection-class limits
+# -----------------------------------------------------------------------------
+# A client is put in the FIRST class whose `hosts` (IP globs) match its address
+# (after WEBIRC / PROXY / X-Forwarded-For rewrote it). Every limit is optional;
+# 0 or absent = use the global setting. Classes are for things like "let the
+# office network connect 200 clients, flood-guard the rest tighter".
+#   max_clients     simultaneous connections in this class
+#   max_per_ip      replaces [security] max_connections_per_ip for these clients
+#   sendq_max       bytes queued for a slow reader before "SendQ exceeded"
+#   flood_max_msgs / flood_window   replace the global per-client flood guard
+#[[classes]]
+#name = "office"
+#hosts = ["192.0.2.*"]
+#max_clients = 200
+#max_per_ip = 50
+#flood_max_msgs = 40
+#flood_window = 10.0
+
+
+# -----------------------------------------------------------------------------
 # [[webirc]] -- trusted web gateways (KiwiIRC, The Lounge, ...) that may send
 # `WEBIRC <password> <gateway> <hostname> <ip>` before registration to tell
 # the server the real client's address. Both must match: the gateway's source

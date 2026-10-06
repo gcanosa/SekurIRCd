@@ -503,6 +503,38 @@ static void apply_masked_host(server_t *srv, client_t *cl, const char *basis, co
         snprintf(cl->host, sizeof cl->host, "%s.users.%s", token, network); /* template overflowed -- never leave a half-written/real host */
 }
 
+int net_assign_class(server_t *srv, client_t *cl) {
+    net_release_class(srv, cl);
+    for (int i = 0; i < srv->cfg.n_classes; i++) {
+        const cfg_class_t *cc = &srv->cfg.classes[i];
+        int hit = 0;
+        for (int j = 0; j < cc->n_hosts && !hit; j++) hit = irc_glob_match(cc->hosts[j], cl->ip);
+        if (!hit) continue;
+        if (cc->max_clients > 0 && srv->class_count[i] >= cc->max_clients) return -1;
+        srv->class_count[i]++;
+        cl->class_idx = i;
+        cl->sendq_max = (size_t)cc->sendq_max;
+        return 0;
+    }
+    cl->sendq_max = 0;
+    return 0;
+}
+
+void net_release_class(server_t *srv, client_t *cl) {
+    if (cl->class_idx >= 0 && cl->class_idx < CFG_MAX_CLASSES && srv->class_count[cl->class_idx] > 0)
+        srv->class_count[cl->class_idx]--;
+    cl->class_idx = -1;
+    cl->sendq_max = 0;
+}
+
+void net_reclass_all(server_t *srv) {
+    memset(srv->class_count, 0, sizeof srv->class_count);
+    for (client_t *c = srv->all_clients; c; c = c->all_next) {
+        c->class_idx = -1;
+        if (c->fd >= 0) net_assign_class(srv, c); /* a class that is now over its cap just stops admitting new ones */
+    }
+}
+
 void net_reset_host(server_t *srv, client_t *cl) {
     if (!srv->cfg.security.host_masking) { snprintf(cl->host, sizeof cl->host, "%s", cl->realhost); return; }
     int resolved = strcmp(cl->realhost, cl->ip) != 0;
@@ -570,12 +602,25 @@ static client_t *accept_common(server_t *srv, int listen_fd) {
     cl->port = ntohs(peer.sin_port);
     snprintf(cl->realhost, sizeof cl->realhost, "%s", ipbuf);
 
-    if (!scan_related && srv->cfg.security.max_connections_per_ip > 0) {
+    cl->class_idx = -1;
+    if (net_assign_class(srv, cl) != 0) {
+        const char *msg = "ERROR :Too many connections in your class\r\n";
+        if (write(fd, msg, strlen(msg)) < 0) { /* best effort; peer may already be gone */ }
+        close(fd);
+        client_free(cl);
+        char snote[200];
+        snprintf(snote, sizeof snote, "Rejected connection from %s: its connection class is full", ipbuf);
+        server_notify_opers(srv, snote);
+        return NULL;
+    }
+    int per_ip_cap = srv->cfg.security.max_connections_per_ip;
+    if (cl->class_idx >= 0 && srv->cfg.classes[cl->class_idx].max_per_ip > 0) per_ip_cap = srv->cfg.classes[cl->class_idx].max_per_ip;
+    if (!scan_related && per_ip_cap > 0) {
         /* O(1): server_add_connection/unlink_connection keep this exact.
          * Walking all_clients here cost O(connections) on every accept(),
          * times ACCEPT_BURST per poll wakeup, exactly when under a flood. */
         int count = server_ip_count(srv, cl->ip);
-        if (count >= srv->cfg.security.max_connections_per_ip) {
+        if (count >= per_ip_cap) {
             const char *msg = "ERROR :Too many connections from your host\r\n";
             if (write(fd, msg, strlen(msg)) < 0) { /* best effort; peer may already be gone */ }
             close(fd);
@@ -791,7 +836,14 @@ static int read_client_once(server_t *srv, client_t *cl) {
             client_reply(cl, N_INPUTTOOLONG, NULL, 0, "Input line was too long");
             continue;
         }
-        if (!client_flood_ok(cl, srv->cfg.security.flood_max_msgs, srv->cfg.security.flood_window)) {
+        int fl_msgs = srv->cfg.security.flood_max_msgs;
+        double fl_win = srv->cfg.security.flood_window;
+        if (cl->class_idx >= 0 && cl->class_idx < srv->cfg.n_classes) { /* a class may tighten or relax the flood guard */
+            const cfg_class_t *cc = &srv->cfg.classes[cl->class_idx];
+            if (cc->flood_max_msgs > 0) fl_msgs = cc->flood_max_msgs;
+            if (cc->flood_window > 0) fl_win = cc->flood_window;
+        }
+        if (!client_flood_ok(cl, fl_msgs, fl_win)) {
             client_reply(cl, N_UNKNOWNERROR, NULL, 0, "flood; disconnecting");
             cl->quitting = 1;
             snprintf(cl->quit_reason, sizeof cl->quit_reason, "Excess Flood");

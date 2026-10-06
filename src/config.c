@@ -706,6 +706,44 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
         }
     }
 
+    /* [[classes]] */
+    if (toml_key_exists(raw, "classes")) {
+        toml_array_t *arr = toml_array_in(raw, "classes");
+        if (!arr) { snprintf(errbuf, errbufsz, "[[classes]] must be an array of tables"); return -1; }
+        int cnt = toml_array_nelem(arr);
+        for (int i = 0; i < cnt; i++) {
+            toml_table_t *t = toml_table_at(arr, i);
+            if (!t) { snprintf(errbuf, errbufsz, "classes[%d] must be a table", i); return -1; }
+            if (i >= CFG_MAX_CLASSES) { snprintf(errbuf, errbufsz, "too many [[classes]] entries (max %d)", CFG_MAX_CLASSES); return -1; }
+            cfg_class_t *cc = &out->classes[i];
+            char fn[64];
+            snprintf(fn, sizeof fn, "classes[%d].name", i);
+            if (cfg_get_str(t, "name", "", cc->name, CFG_STR, errbuf, errbufsz, fn)) return -1;
+            snprintf(fn, sizeof fn, "classes[%d].hosts", i);
+            if (cfg_get_str_array(t, "hosts", cc->hosts, CFG_MAX_HOSTS_PER_WEBIRC, &cc->n_hosts, errbuf, errbufsz, fn)) return -1;
+            snprintf(fn, sizeof fn, "classes[%d].max_clients", i);
+            if (cfg_get_int(t, "max_clients", 0, &cc->max_clients, errbuf, errbufsz, fn)) return -1;
+            snprintf(fn, sizeof fn, "classes[%d].max_per_ip", i);
+            if (cfg_get_int(t, "max_per_ip", 0, &cc->max_per_ip, errbuf, errbufsz, fn)) return -1;
+            snprintf(fn, sizeof fn, "classes[%d].sendq_max", i);
+            if (cfg_get_int(t, "sendq_max", 0, &cc->sendq_max, errbuf, errbufsz, fn)) return -1;
+            snprintf(fn, sizeof fn, "classes[%d].flood_max_msgs", i);
+            if (cfg_get_int(t, "flood_max_msgs", 0, &cc->flood_max_msgs, errbuf, errbufsz, fn)) return -1;
+            snprintf(fn, sizeof fn, "classes[%d].flood_window", i);
+            if (cfg_get_double(t, "flood_window", 0, &cc->flood_window, errbuf, errbufsz, fn)) return -1;
+            if (!cc->name[0] || cc->n_hosts < 1) {
+                snprintf(errbuf, errbufsz, "classes[%d] needs a name and at least one hosts glob", i);
+                return -1;
+            }
+            if (cc->max_clients < 0 || cc->max_per_ip < 0 || cc->flood_max_msgs < 0 || cc->flood_window < 0 ||
+                cc->sendq_max < 0 || (cc->sendq_max > 0 && (cc->sendq_max < 4096 || cc->sendq_max > (16 << 20)))) {
+                snprintf(errbuf, errbufsz, "classes[%d]: limits must be >= 0 (sendq_max 4096-16777216)", i);
+                return -1;
+            }
+            out->n_classes++;
+        }
+    }
+
     /* [[webirc]] */
     if (toml_key_exists(raw, "webirc")) {
         toml_array_t *arr = toml_array_in(raw, "webirc");

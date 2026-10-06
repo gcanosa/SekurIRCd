@@ -2,6 +2,7 @@
 #include "cmd.h"
 #include "crypto.h"
 #include "log.h"
+#include "net.h"
 #include "proto.h"
 #include "spam.h"
 #include "worker.h"
@@ -97,6 +98,7 @@ int server_rehash(server_t *srv, char *errbuf, size_t errbufsz) {
     srv->cfg = tmp;
     server_apply_cloak_secret(srv);
     cmd_cap_notify_changes(srv, old_accounts, old_history);
+    net_reclass_all(srv);
     server_load_motd(srv);
     spam_reload(srv);
     protection_reload(srv);
@@ -400,6 +402,7 @@ void server_remove_client(server_t *srv, client_t *cl, const char *quit_reason) 
     if (cl->conn_id) worker_cancel(cl->conn_id); /* skip its still-queued lookups */
     if (cl->is_watcher) { srv->n_watchers--; cl->is_watcher = 0; }
     channel_forget_ban_extra_for(cl);
+    net_release_class(srv, cl);
 
     if (cl->registered && !cl->is_service) {
         server_whowas_record(srv, cl->nick, cl->user, cl->host, cl->realname);
