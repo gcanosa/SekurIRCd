@@ -692,6 +692,7 @@ static void drain_worker_results(server_t *srv) {
              * after 001 -- no CHGHOST, no K-line re-check, clobbering opers' cloaks. */
             if (r->type == JOB_RDNS && (cl->registered || !cl->rdns_pending)) continue;
             if (r->type == JOB_IDENT && (cl->registered || !cl->ident_pending)) continue;
+            if (r->type == JOB_DNSBL && cl->webirc) continue; /* looked up the gateway's address, not the client's */
 
             if (r->type == JOB_RDNS) {
                 cl->rdns_pending = 0;

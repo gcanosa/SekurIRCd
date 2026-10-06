@@ -545,6 +545,23 @@ void cmd_userhost(server_t *srv, client_t *cl, irc_message_t *msg) {
     client_reply(cl, N_USERHOST, NULL, 0, sc.out);
 }
 
+/* USERIP (oper-only): like USERHOST but with the real IP -- for abuse handling. */
+static void userip_one(const char *nick, void *ctx) {
+    nick_scan_t *sc = ctx;
+    client_t *u = find_registered(sc->srv, nick);
+    if (!u) return;
+    char entry[300];
+    snprintf(entry, sizeof entry, "%s%s%s=%c%s@%s", sc->out[0] ? " " : "", u->nick,
+             (u->umodes & UMODE_O) ? "*" : "", u->is_away ? '-' : '+', u->user, u->ip);
+    strncat(sc->out, entry, sizeof sc->out - strlen(sc->out) - 1);
+}
+
+void cmd_userip(server_t *srv, client_t *cl, irc_message_t *msg) {
+    nick_scan_t sc = {.srv = srv, .cl = cl};
+    each_nick(msg, 5, userip_one, &sc);
+    client_reply(cl, N_USERIP, NULL, 0, sc.out);
+}
+
 static void ison_one(const char *nick, void *ctx) {
     nick_scan_t *sc = ctx;
     if (!find_registered(sc->srv, nick)) return;

@@ -8,7 +8,7 @@
 /* Commands an unregistered connection may send (matches commands.py's
  * _REGISTRATION_COMMANDS). Everything else gets 451 ERR_NOTREGISTERED. */
 static const char *REGISTRATION_COMMANDS[] = {
-    "NICK", "USER", "PASS", "CAP", "PING", "PONG", "QUIT", "AUTHENTICATE",
+    "NICK", "USER", "PASS", "CAP", "PING", "PONG", "QUIT", "AUTHENTICATE", "WEBIRC",
 };
 
 static int is_registration_command(const char *cmd) {
@@ -21,6 +21,8 @@ static const cmd_entry_t DISPATCH[] = {
     {"NICK", cmd_nick, 0, 0, 0},
     {"USER", cmd_user, 4, 0, 0},
     {"PASS", cmd_pass, 0, 0, 0},
+    {"WEBIRC", cmd_webirc, 4, 0, 0},
+    {"USERIP", cmd_userip, 1, 1, 1},
     {"CAP", cmd_cap, 1, 0, 0},
     {"PING", cmd_ping, 0, 0, 0},
     {"PONG", cmd_pong, 0, 0, 0},

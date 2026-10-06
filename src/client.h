@@ -72,6 +72,7 @@ typedef struct client {
     unsigned int umodes;
 
     int got_nick, got_user;
+    int webirc;           /* a trusted gateway already set ip/realhost via WEBIRC */
     int cap_version;      /* 0, or the version from "CAP LS <n>" (302 enables multi-line LS, values, cap-notify) */
     int cap_negotiating;  /* true between "CAP LS" and "CAP END" */
     int registered;       /* welcome burst already sent */

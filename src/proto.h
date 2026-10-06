@@ -260,6 +260,7 @@ void irc_add_time_tag(char *line, size_t linesz);
 #define N_NICKNAMEINUSE    "433"
 #define N_UNAVAILRESOURCE  "437"
 #define N_USERNOTINCHANNEL "441"
+#define N_USERIP           "340"
 #define N_BANLISTFULL      "478"
 #define N_NOTONCHANNEL     "442"
 #define N_USERONCHANNEL    "443"

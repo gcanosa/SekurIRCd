@@ -676,6 +676,35 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
         }
     }
 
+    /* [[webirc]] */
+    if (toml_key_exists(raw, "webirc")) {
+        toml_array_t *arr = toml_array_in(raw, "webirc");
+        if (!arr) { snprintf(errbuf, errbufsz, "[[webirc]] must be an array of tables"); return -1; }
+        int cnt = toml_array_nelem(arr);
+        for (int i = 0; i < cnt; i++) {
+            toml_table_t *w = toml_table_at(arr, i);
+            if (!w) { snprintf(errbuf, errbufsz, "webirc[%d] must be a table", i); return -1; }
+            if (i >= CFG_MAX_WEBIRC) { snprintf(errbuf, errbufsz, "too many [[webirc]] entries (max %d)", CFG_MAX_WEBIRC); return -1; }
+            cfg_webirc_t *wi = &out->webirc[i];
+            char fn[64];
+            snprintf(fn, sizeof fn, "webirc[%d].name", i);
+            if (cfg_get_str(w, "name", "", wi->name, CFG_STR, errbuf, errbufsz, fn)) return -1;
+            snprintf(fn, sizeof fn, "webirc[%d].password", i);
+            if (cfg_get_str(w, "password", "", wi->password, CFG_STR, errbuf, errbufsz, fn)) return -1;
+            snprintf(fn, sizeof fn, "webirc[%d].hosts", i);
+            if (cfg_get_str_array(w, "hosts", wi->hosts, CFG_MAX_HOSTS_PER_WEBIRC, &wi->n_hosts, errbuf, errbufsz, fn)) return -1;
+            if (!wi->password[0] || strpbrk(wi->password, " \t\r\n")) {
+                snprintf(errbuf, errbufsz, "webirc[%d].password must be non-empty with no whitespace", i);
+                return -1;
+            }
+            if (wi->n_hosts < 1) { /* a gateway with no source restriction would let anyone who learns the password spoof IPs */
+                snprintf(errbuf, errbufsz, "webirc[%d].hosts is required (the gateway's IP globs)", i);
+                return -1;
+            }
+            out->n_webirc++;
+        }
+    }
+
     /* [channels] */
     {
         int e;

@@ -433,6 +433,20 @@ backup_count = 5
 
 
 # -----------------------------------------------------------------------------
+# [[webirc]] -- trusted web gateways (KiwiIRC, The Lounge, ...) that may send
+# `WEBIRC <password> <gateway> <hostname> <ip>` before registration to tell
+# the server the real client's address. Both must match: the gateway's source
+# IP against `hosts` (IP globs, required) AND the password. Without this a
+# web client shows up as the gateway's own IP, so one K-line/flood limit hits
+# every web user at once. IPv4/IPv6 text is accepted; the hostname is
+# trusted as given (it is the gateway's claim), falling back to the IP.
+#[[webirc]]
+#name = "kiwi"
+#password = "change-me"
+#hosts = ["203.0.113.10"]
+
+
+# -----------------------------------------------------------------------------
 # [[vhosts]] -- virtual hosts activated with /VHOST
 # -----------------------------------------------------------------------------
 # `allowed_hosts` is a list of ident@host/IP masks (NOT nicks -- a nick can
