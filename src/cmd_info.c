@@ -221,6 +221,7 @@ static const help_entry_t HELP_TABLE[] = {
     {"WALLOPS", {"WALLOPS :<text>", "Message every user with mode +w set. Server-oper only."}},
     {"SILENCE", {"SILENCE [(+|-)mask ...]", "Manage your ignore list for private messages; no argument lists it."}},
     {"USERHOST", {"USERHOST <nick> [nick...]", "Show host/away/oper info for up to 5 nicks."}},
+    {"USERIP", {"USERIP <nick> [nick...]", "IRC operators only: like USERHOST but shows the real IP address."}},
     {"ISON", {"ISON <nick> [nick...]", "Check which of the given nicks are currently online."}},
     {"MONITOR", {"MONITOR + nick[,nick...] | - nick[,...] | C | L | S",
                  "IRCv3 efficient online/offline watch list -- the modern alternative to polling ISON."}},

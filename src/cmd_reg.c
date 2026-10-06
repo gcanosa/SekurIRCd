@@ -5,8 +5,11 @@
 #include "cmd.h"
 #include "crypto.h"
 #include "log.h"
+#include "net.h"
 #include "worker.h"
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
 #include <openssl/x509.h>
@@ -140,6 +143,47 @@ void cmd_pass(server_t *srv, client_t *cl, irc_message_t *msg) {
      * -- accepted and ignored, same as most ircds do for a client that sends
      * one unprompted. */
     (void)srv; (void)cl; (void)msg;
+}
+
+/* WEBIRC <password> <gateway> <hostname> <ip> [:flags] -- a trusted web
+ * gateway (matched by source IP *and* password, see [[webirc]]) tells us the
+ * real client's address. Only valid before registration. */
+void cmd_webirc(server_t *srv, client_t *cl, irc_message_t *msg) {
+    if (cl->registered || cl->webirc || cl->got_user) return;
+    const cfg_webirc_t *match = NULL;
+    for (int i = 0; i < srv->cfg.n_webirc && !match; i++) {
+        const cfg_webirc_t *w = &srv->cfg.webirc[i];
+        int host_ok = 0;
+        for (int j = 0; j < w->n_hosts; j++) if (irc_glob_match(w->hosts[j], cl->ip)) { host_ok = 1; break; }
+        if (host_ok && crypto_secure_streq(msg->params[0], w->password)) match = w;
+    }
+    if (!match) {
+        log_warn("webirc", "rejected WEBIRC from %s (no matching [[webirc]] host+password)", cl->ip);
+        snprintf(cl->quit_reason, sizeof cl->quit_reason, "WEBIRC: not authorized");
+        cl->quitting = 1;
+        return;
+    }
+    const char *hostname = msg->params[2], *ip = msg->params[3];
+    struct in_addr a4; struct in6_addr a6;
+    if (strlen(ip) >= sizeof cl->ip || (inet_pton(AF_INET, ip, &a4) != 1 && inet_pton(AF_INET6, ip, &a6) != 1)) {
+        log_warn("webirc", "gateway %s sent an invalid IP '%s'", match->name, ip);
+        snprintf(cl->quit_reason, sizeof cl->quit_reason, "WEBIRC: invalid address");
+        cl->quitting = 1;
+        return;
+    }
+    snprintf(cl->ip, sizeof cl->ip, "%s", ip);
+    /* The gateway vouches for the hostname; fall back to the IP if it's junk or just the IP again. */
+    snprintf(cl->realhost, sizeof cl->realhost, "%s", (irc_valid_host(hostname) && strcmp(hostname, ip) != 0) ? hostname : ip);
+    net_reset_host(srv, cl);
+    cl->webirc = 1;
+    cl->rdns_pending = cl->ident_pending = cl->dnsbl_pending = 0; /* those probed the gateway's address -- drop their results (net.c ignores them once the flag is clear) */
+    const char *kl = server_kline_match(srv, cl->ip, NULL, cl->realhost, 0);
+    if (kl) {
+        snprintf(cl->quit_reason, sizeof cl->quit_reason, "%s", kl);
+        cl->quitting = 1;
+        return;
+    }
+    log_info("webirc", "gateway %s: client is %s (%s)", match->name[0] ? match->name : "?", cl->ip, cl->realhost);
 }
 
 /* Mirrors commands._CAP_ATTRS -- every cap this server can grant via CAP

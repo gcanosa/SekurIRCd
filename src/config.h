@@ -26,6 +26,8 @@
 #define CFG_MAX_OPERATORS        64
 #define CFG_MAX_HOSTS_PER_OPER   16
 #define CFG_MAX_VHOSTS           64
+#define CFG_MAX_WEBIRC           16
+#define CFG_MAX_HOSTS_PER_WEBIRC 16
 #define CFG_MAX_HOSTS_PER_VHOST  16
 #define CFG_MAX_ALLOWED_CHANNELS 64
 #define CFG_MAX_AUTO_JOIN        32
@@ -117,6 +119,15 @@ typedef struct {
     char location2[CFG_STR];
     char email[CFG_STR];
 } cfg_admin_t;
+
+/* [[webirc]]: a trusted web gateway that may send WEBIRC to override a
+ * client's IP/hostname. */
+typedef struct {
+    char name[CFG_STR];     /* for logs only */
+    char password[CFG_STR];
+    char hosts[CFG_MAX_HOSTS_PER_WEBIRC][CFG_MASK]; /* IP globs the gateway connects from */
+    int n_hosts;
+} cfg_webirc_t;
 
 typedef struct {
     char host[CFG_STR];
@@ -268,6 +279,8 @@ typedef struct {
     cfg_admin_t admin;
     cfg_vhost_t vhosts[CFG_MAX_VHOSTS];
     int n_vhosts;
+    cfg_webirc_t webirc[CFG_MAX_WEBIRC];
+    int n_webirc;
     cfg_channels_t channels;
     cfg_dnsbl_t dnsbl;
     cfg_spam_t spam;

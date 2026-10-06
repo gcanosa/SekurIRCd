@@ -45,6 +45,8 @@ int client_is_silencing(client_t *cl, client_t *from);
 void cmd_nick(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_user(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_pass(server_t *srv, client_t *cl, irc_message_t *msg);
+void cmd_userip(server_t *srv, client_t *cl, irc_message_t *msg);
+void cmd_webirc(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_cap(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_ping(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_pong(server_t *srv, client_t *cl, irc_message_t *msg);
