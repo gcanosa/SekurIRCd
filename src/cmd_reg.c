@@ -158,40 +158,68 @@ static const struct { const char *name; unsigned int bit; } CAP_ATTRS[] = {
     {"account-tag", CAP_ACCOUNT_TAG},
     {"invite-notify", CAP_INVITE_NOTIFY},
     {"standard-replies", CAP_STANDARD_REPLIES},
+    {"cap-notify", CAP_CAP_NOTIFY},
 };
 #define N_CAP_ATTRS (int)(sizeof CAP_ATTRS / sizeof CAP_ATTRS[0])
 
-/* Builds the space-separated "CAP LS" token list into `out`. "sasl" (if
- * config-gated on) carries its mechanism list as a value, like upstream's
- * `f"{c}=PLAIN" if c == "sasl" else c`. */
-static void render_supported_caps(server_t *srv, client_t *cl, char *out, size_t outsz) {
-    out[0] = '\0';
-    for (int i = 0; i < N_CAP_ATTRS; i++) {
-        if (out[0]) strncat(out, " ", outsz - strlen(out) - 1);
-        strncat(out, CAP_ATTRS[i].name, outsz - strlen(out) - 1);
-    }
-    if (srv->cfg.accounts.enabled) {
-        if (out[0]) strncat(out, " ", outsz - strlen(out) - 1);
+#define MAX_CAP_TOKENS 40
+#define CAP_TOKEN_LEN 96
+
+/* The tokens a CAP LS shows `cl`. Values ("sasl=PLAIN", sts=...) and `sts`
+ * itself are only sent to clients that asked for version 302 -- an older
+ * client must see bare names. "sasl" (if config-gated on) carries its
+ * mechanism list as a value, like upstream's `f"{c}=PLAIN" if c == "sasl"`. */
+static int supported_cap_tokens(server_t *srv, client_t *cl, char tok[][CAP_TOKEN_LEN]) {
+    int n = 0, v302 = cl->cap_version >= 302;
+    for (int i = 0; i < N_CAP_ATTRS && n < MAX_CAP_TOKENS; i++) snprintf(tok[n++], CAP_TOKEN_LEN, "%s", CAP_ATTRS[i].name);
+    if (srv->cfg.accounts.enabled && n + 2 <= MAX_CAP_TOKENS) {
         /* EXTERNAL only ever succeeds if the TLS listener actually asks
          * clients for a certificate -- otherwise cl->ssl never has a peer
          * cert to match, so don't advertise a mechanism that can't work. */
         int external_possible = srv->cfg.tls.enabled && srv->cfg.tls.request_client_cert;
-        strncat(out, external_possible ? "sasl=PLAIN,EXTERNAL" : "sasl=PLAIN", outsz - strlen(out) - 1);
+        if (v302) snprintf(tok[n++], CAP_TOKEN_LEN, "%s", external_possible ? "sasl=PLAIN,EXTERNAL" : "sasl=PLAIN");
+        else snprintf(tok[n++], CAP_TOKEN_LEN, "sasl");
         /* No before-connect (REGISTER needs a registered connection) and no
          * email-required (email is accepted but not stored/verified);
          * custom-account-name because the account needn't match the nick. */
-        strncat(out, " draft/account-registration=custom-account-name", outsz - strlen(out) - 1);
+        snprintf(tok[n++], CAP_TOKEN_LEN, "%s", v302 ? "draft/account-registration=custom-account-name" : "draft/account-registration");
     }
     /* IRCv3 STS: a plaintext connection is told to switch to the TLS port
      * and pin that for sts_duration seconds; an already-TLS connection just
      * gets the duration (no port= -- it has nothing to redirect to). */
-    if (srv->cfg.tls.enabled && srv->cfg.tls.sts_duration > 0) {
-        if (out[0]) strncat(out, " ", outsz - strlen(out) - 1);
-        char sts[64];
-        if (cl->umodes & UMODE_Z) snprintf(sts, sizeof sts, "sts=duration=%d", srv->cfg.tls.sts_duration);
-        else snprintf(sts, sizeof sts, "sts=port=%d,duration=%d", srv->cfg.tls.port, srv->cfg.tls.sts_duration);
-        strncat(out, sts, outsz - strlen(out) - 1);
+    if (v302 && srv->cfg.tls.enabled && srv->cfg.tls.sts_duration > 0 && n < MAX_CAP_TOKENS) {
+        if (cl->umodes & UMODE_Z) snprintf(tok[n++], CAP_TOKEN_LEN, "sts=duration=%d", srv->cfg.tls.sts_duration);
+        else snprintf(tok[n++], CAP_TOKEN_LEN, "sts=port=%d,duration=%d", srv->cfg.tls.port, srv->cfg.tls.sts_duration);
     }
+    return n;
+}
+
+/* Sends "CAP <nick> <sub> [*] :tokens", splitting across lines so none can
+ * overflow 512 bytes; every line but the last carries the "*" continuation
+ * marker (IRCv3 multi-line LS/LIST). */
+static void send_cap_lines(server_t *srv, client_t *cl, const char *sub, char tok[][CAP_TOKEN_LEN], int n) {
+    const char *target = cl->nick[0] ? cl->nick : "*";
+    int i = 0;
+    do {
+        char caps[420];
+        caps[0] = '\0';
+        size_t len = 0;
+        while (i < n) {
+            size_t tl = strlen(tok[i]);
+            if (len && len + 1 + tl >= sizeof caps) break;
+            if (len) caps[len++] = ' ';
+            memcpy(caps + len, tok[i], tl);
+            len += tl;
+            caps[len] = '\0';
+            i++;
+        }
+        char line[600];
+        const char *p3[] = {target, sub, "*"};
+        const char *p2[] = {target, sub};
+        int more = i < n;
+        irc_build(line, sizeof line, NULL, 0, srv->cfg.server.name, "CAP", more ? p3 : p2, more ? 3 : 2, caps);
+        client_send(cl, line);
+    } while (i < n);
 }
 
 void cmd_cap(server_t *srv, client_t *cl, irc_message_t *msg) {
@@ -200,20 +228,19 @@ void cmd_cap(server_t *srv, client_t *cl, irc_message_t *msg) {
 
     if (strcasecmp(sub, "LS") == 0 || strcasecmp(sub, "LIST") == 0) {
         cl->cap_negotiating = 1;
-        char caps[512];
-        if (strcasecmp(sub, "LS") == 0) render_supported_caps(srv, cl, caps, sizeof caps);
-        else caps[0] = '\0'; /* CAP LIST: caps already granted -- rendered below */
-        if (strcasecmp(sub, "LIST") == 0) {
-            for (int i = 0; i < N_CAP_ATTRS; i++) {
-                if (!(cl->caps & CAP_ATTRS[i].bit)) continue;
-                if (caps[0]) strncat(caps, " ", sizeof caps - strlen(caps) - 1);
-                strncat(caps, CAP_ATTRS[i].name, sizeof caps - strlen(caps) - 1);
+        char tok[MAX_CAP_TOKENS][CAP_TOKEN_LEN];
+        int n = 0;
+        if (strcasecmp(sub, "LS") == 0) {
+            if (msg->nparams > 1 && atoi(msg->params[1]) >= 302) {
+                if (cl->cap_version < 302) cl->cap_version = atoi(msg->params[1]);
+                cl->caps |= CAP_CAP_NOTIFY; /* 302 implicitly enables cap-notify */
             }
+            n = supported_cap_tokens(srv, cl, tok);
+        } else {
+            for (int i = 0; i < N_CAP_ATTRS && n < MAX_CAP_TOKENS; i++)
+                if (cl->caps & CAP_ATTRS[i].bit) snprintf(tok[n++], CAP_TOKEN_LEN, "%s", CAP_ATTRS[i].name);
         }
-        char line[600];
-        const char *p[] = {target, strcasecmp(sub, "LS") == 0 ? "LS" : "LIST"};
-        irc_build(line, sizeof line, NULL, 0, srv->cfg.server.name, "CAP", p, 2, caps);
-        client_send(cl, line);
+        send_cap_lines(srv, cl, strcasecmp(sub, "LS") == 0 ? "LS" : "LIST", tok, n);
     } else if (strcasecmp(sub, "REQ") == 0) {
         /* All-or-nothing (IRCv3): ACK only if every requested token (minus
          * an optional leading '-') names a cap we grant. */
