@@ -655,7 +655,7 @@ static void monitor_discard(client_t *cl, const char *cf) {
     }
 }
 
-void cmd_monitor(server_t *srv, client_t *cl, irc_message_t *msg) {
+static void monitor_impl(server_t *srv, client_t *cl, irc_message_t *msg) {
     char sub[8];
     snprintf(sub, sizeof sub, "%s", msg->params[0]);
     for (char *c = sub; *c; c++) *c = (char)toupper((unsigned char)*c);
@@ -737,7 +737,7 @@ static void watch_discard(client_t *cl, const char *cf) {
 /* Legacy pre-MONITOR watch list: unlike MONITOR's single comma-separated
  * argument, each WATCH parameter is its own +nick/-nick token (or a bare
  * C/L/S letter), and a single command line may mix several of these. */
-void cmd_watch(server_t *srv, client_t *cl, irc_message_t *msg) {
+static void watch_impl(server_t *srv, client_t *cl, irc_message_t *msg) {
     for (int pi = 0; pi < msg->nparams; pi++) {
         const char *tok = msg->params[pi];
         if (tok[0] == '+' || tok[0] == '-') {
@@ -968,3 +968,14 @@ void cmd_chathistory(server_t *srv, client_t *cl, irc_message_t *msg) {
     irc_build(line, sizeof line, NULL, 0, srv->cfg.server.name, "BATCH", ep, 1, NULL);
     client_send(cl, line);
 }
+
+/* srv->n_watchers counts clients with a non-empty MONITOR/WATCH list, so
+ * server_monitor_notify/server_watch_notify can return at once (they otherwise
+ * walk every connection on every connect, quit and nick change). */
+static void refresh_watcher_flag(server_t *srv, client_t *cl) {
+    int now = cl->n_monitor > 0 || cl->n_watch > 0;
+    if (now != cl->is_watcher) { srv->n_watchers += now ? 1 : -1; cl->is_watcher = now; }
+}
+
+void cmd_monitor(server_t *srv, client_t *cl, irc_message_t *msg) { monitor_impl(srv, cl, msg); refresh_watcher_flag(srv, cl); }
+void cmd_watch(server_t *srv, client_t *cl, irc_message_t *msg) { watch_impl(srv, cl, msg); refresh_watcher_flag(srv, cl); }

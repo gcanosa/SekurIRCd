@@ -80,6 +80,7 @@ typedef struct client {
     unsigned char *ws_out; /* encoded frames / handshake reply waiting for the socket */
     size_t ws_out_len, ws_out_cap;
     int expect_proxy;     /* accepted from a [server] proxy_protocol_hosts peer: first line must be "PROXY ..." */
+    int is_watcher;       /* counted in server_t.n_watchers (non-empty MONITOR/WATCH list) */
     int webirc;           /* a trusted gateway already set ip/realhost via WEBIRC */
     int cap_version;      /* 0, or the version from "CAP LS <n>" (302 enables multi-line LS, values, cap-notify) */
     int cap_negotiating;  /* true between "CAP LS" and "CAP END" */

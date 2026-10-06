@@ -203,6 +203,28 @@ void cmd_send_welcome_if_ready(server_t *srv, client_t *cl) {
         cmd_force_join(srv, cl, srv->cfg.channels.auto_join[i]);
 }
 
+/* DISPATCH indices sorted by command name, so lookup is a bsearch instead of ~90 strcasecmps per line. */
+static int g_sorted[N_DISPATCH];
+static int g_sorted_ready;
+
+static int cmp_dispatch_idx(const void *a, const void *b) {
+    return strcasecmp(DISPATCH[*(const int *)a].name, DISPATCH[*(const int *)b].name);
+}
+
+static int cmp_key_idx(const void *key, const void *elem) {
+    return strcasecmp((const char *)key, DISPATCH[*(const int *)elem].name);
+}
+
+static int find_dispatch(const char *cmd) {
+    if (!g_sorted_ready) {
+        for (int i = 0; i < N_DISPATCH; i++) g_sorted[i] = i;
+        qsort(g_sorted, N_DISPATCH, sizeof g_sorted[0], cmp_dispatch_idx);
+        g_sorted_ready = 1;
+    }
+    int *hit = bsearch(cmd, g_sorted, N_DISPATCH, sizeof g_sorted[0], cmp_key_idx);
+    return hit ? *hit : -1;
+}
+
 void cmd_dispatch(server_t *srv, client_t *cl, irc_message_t *msg) {
     if (!cl->registered && !is_registration_command(msg->command)) {
         err_not_registered(cl);
@@ -215,8 +237,8 @@ void cmd_dispatch(server_t *srv, client_t *cl, irc_message_t *msg) {
         for (size_t a = 0; a < sizeof ALLOWED / sizeof ALLOWED[0]; a++) if (strcasecmp(msg->command, ALLOWED[a]) == 0) { ok = 1; break; }
         if (!ok) return;
     }
-    for (int i = 0; i < N_DISPATCH; i++) {
-        if (strcasecmp(DISPATCH[i].name, msg->command) != 0) continue;
+    int i = find_dispatch(msg->command);
+    if (i >= 0) {
         if (msg->nparams < DISPATCH[i].min_params) {
             err_need_more_params(cl, msg->command);
             return;
@@ -230,19 +252,23 @@ void cmd_dispatch(server_t *srv, client_t *cl, irc_message_t *msg) {
             err_no_privileges(cl);
             return;
         }
-        for (int c = 0; c < srv->n_command_counts; c++) {
-            if (strcasecmp(srv->command_counts[c].name, msg->command) == 0) {
-                srv->command_counts[c].count++;
-                goto counted;
+        /* STATS m counters: slot per dispatch entry (revalidated, since a slot index from another server instance can be stale). */
+        static int count_slot[N_DISPATCH];
+        static int slots_init;
+        if (!slots_init) { for (int k = 0; k < N_DISPATCH; k++) count_slot[k] = -1; slots_init = 1; }
+        int cs = count_slot[i];
+        if (cs < 0 || cs >= srv->n_command_counts || strcmp(srv->command_counts[cs].name, DISPATCH[i].name) != 0) {
+            cs = -1;
+            for (int c = 0; c < srv->n_command_counts; c++)
+                if (strcmp(srv->command_counts[c].name, DISPATCH[i].name) == 0) { cs = c; break; }
+            if (cs < 0 && srv->n_command_counts < 64) {
+                cs = srv->n_command_counts++;
+                snprintf(srv->command_counts[cs].name, sizeof srv->command_counts[0].name, "%s", DISPATCH[i].name);
+                srv->command_counts[cs].count = 0;
             }
+            count_slot[i] = cs;
         }
-        if (srv->n_command_counts < 64) {
-            snprintf(srv->command_counts[srv->n_command_counts].name,
-                     sizeof srv->command_counts[0].name, "%s", msg->command);
-            srv->command_counts[srv->n_command_counts].count = 1;
-            srv->n_command_counts++;
-        }
-counted:
+        if (cs >= 0) srv->command_counts[cs].count++;
         DISPATCH[i].handler(srv, cl, msg);
         return;
     }
