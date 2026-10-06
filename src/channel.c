@@ -93,6 +93,21 @@ void channel_forget_ban_extra_for(const struct client *cl) {
     if (g_extra && g_extra->cl == cl) g_extra = NULL;
 }
 
+void channel_rank_prefix(int rank, int multi, char *out) {
+    static const struct { int bit; char ch; } P[] = {{RANK_OWNER, '~'}, {RANK_ADMIN, '&'}, {RANK_OP, '@'}, {RANK_HALFOP, '%'}, {RANK_VOICE, '+'}};
+    size_t n = 0;
+    for (size_t i = 0; i < sizeof P / sizeof P[0]; i++) {
+        if (!(rank & P[i].bit)) continue;
+        out[n++] = P[i].ch;
+        if (!multi) break;
+    }
+    out[n] = '\0';
+}
+
+int channel_rank_level(int rank) {
+    return (rank & RANK_OWNER) ? 5 : (rank & RANK_ADMIN) ? 4 : (rank & RANK_OP) ? 3 : (rank & RANK_HALFOP) ? 2 : (rank & RANK_VOICE) ? 1 : 0;
+}
+
 int channel_mask_hit(const char *mask, const char *nick, const char *user,
                       const char *host, const char *account, int ident_confirmed) {
     if (mask[0] == '~') mask++; /* EXTBAN=~,am -- the "~" prefix form is an alias for the bare one below */
