@@ -54,6 +54,7 @@ typedef struct {
     char realname[256];
     char storage_path[512];
     int backup_count;
+    int expire_days; /* drop a registration unused this long (0 = never) */
 } app_cfg_t;
 
 static volatile sig_atomic_t g_term = 0;
@@ -129,6 +130,9 @@ static int load_app_config(const char *path, app_cfg_t *cfg, char *errbuf, size_
     toml_str(cs, "user", cfg->user, cfg->user, sizeof cfg->user);
     toml_str(cs, "host", cfg->host, cfg->host, sizeof cfg->host);
     toml_str(cs, "realname", cfg->realname, cfg->realname, sizeof cfg->realname);
+    cfg->expire_days = toml_int(cs, "expire_days", 0);
+    if (cfg->expire_days < 0) cfg->expire_days = 0;
+    if (cfg->expire_days > 3650) cfg->expire_days = 3650;
 
     toml_table_t *st = toml_table_in(raw, "storage");
     toml_str(st, "path", cfg->storage_path, cfg->storage_path, sizeof cfg->storage_path);
@@ -540,6 +544,15 @@ static cJSON *check_password(const char *from_nick, const char *chan, const char
         log_warn("chanserv", "failed password for %s from %s", chan, from_nick);
         return NULL;
     }
+    /* A successful password check is "the channel is still in use" for expiry
+     * purposes. Refreshed at most hourly so routine commands don't dirty the store. */
+    cJSON *lu = cJSON_GetObjectItemCaseSensitive(rec, "last_used");
+    time_t now = time(NULL);
+    if (!cJSON_IsNumber(lu) || now - (time_t)lu->valuedouble > 3600) {
+        cJSON_DeleteItemFromObjectCaseSensitive(rec, "last_used");
+        cJSON_AddNumberToObject(rec, "last_used", (double)now);
+        store_save();
+    }
     return rec;
 }
 
@@ -739,6 +752,45 @@ static void cmd_identify(const char *from_nick, char *args) {
      * ChanServ itself isn't sitting in the channel (no GUARD needed). */
     wire_mode(chan, "+o", from_nick);
     reply(from_nick, "Password correct -- you have been re-opped.");
+}
+
+/* Drops registrations nobody has authenticated against for [chanserv] expire_days.
+ * A record with no timestamp yet (older store) is stamped now, so upgrading
+ * can't mass-expire everything. */
+#define EXPIRE_SWEEP_INTERVAL 3600
+static void expire_sweep(void) {
+    static time_t last = 0;
+    time_t now = time(NULL);
+    if (g_cfg.expire_days <= 0 || now - last < EXPIRE_SWEEP_INTERVAL) return;
+    last = now;
+    char dead[32][128];
+    int n_dead = 0;
+    cJSON *rec;
+    cJSON_ArrayForEach(rec, g_store) {
+        if (!cJSON_IsObject(rec)) continue;
+        cJSON *lu = cJSON_GetObjectItemCaseSensitive(rec, "last_used");
+        if (!cJSON_IsNumber(lu)) { /* never seen by this feature: start its clock now (not at registered_at, which could be years ago) */
+            cJSON_AddNumberToObject(rec, "last_used", (double)now);
+            store_save();
+            continue;
+        }
+        double ts = lu->valuedouble;
+        if (now - (time_t)ts > (time_t)g_cfg.expire_days * 86400 && n_dead < 32 && rec->string)
+            snprintf(dead[n_dead++], sizeof dead[0], "%s", rec->string);
+    }
+    for (int i = 0; i < n_dead; i++) { /* deleted after the walk -- never mutate the object mid-iteration */
+        cJSON *r = cJSON_GetObjectItemCaseSensitive(g_store, dead[i]);
+        if (!r) continue;
+        const char *name = rec_str(r, "name");
+        char chan[128];
+        snprintf(chan, sizeof chan, "%s", name[0] ? name : dead[i]);
+        wire_mode(chan, "-r", NULL);
+        if (rec_bool(r, "guard")) wire_part(chan);
+        clear_identified_chan(chan);
+        cJSON_DeleteItemFromObjectCaseSensitive(g_store, dead[i]);
+        store_save();
+        log_info("chanserv", "%s expired after %d days without use", chan, g_cfg.expire_days);
+    }
 }
 
 static void cmd_drop(const char *from_nick, char *args) {
@@ -1597,6 +1649,7 @@ static int run_session(void) {
             if (pfd.revents & POLLOUT) flush_sbuf();
         }
         if (g_sbuf_len > 0) flush_sbuf();
+        expire_sweep();
         store_flush();
         if (g_pending_register.active && difftime(time(NULL), g_pending_register.sent_at) > 5) {
             g_pending_register.active = 0;

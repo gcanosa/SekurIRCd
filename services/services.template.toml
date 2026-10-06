@@ -31,6 +31,12 @@ user = "ChanServ"
 host = "services.sekurircd.local"
 realname = "Channel Registration Service"
 
+# Drop a channel registration nobody has authenticated against (IDENTIFY or any
+# password-gated command) for this many days. 0 (the default) = never expire.
+# Registrations from before this feature are stamped on first sweep, so turning
+# it on can't expire anything immediately.
+#expire_days = 0
+
 [storage]
 # Where channel registrations are persisted (JSON, rewritten on every
 # REGISTER/DROP). Relative to the current working directory chanserv is run
