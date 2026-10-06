@@ -573,7 +573,7 @@ static int read_client_once(server_t *srv, client_t *cl) {
     cl->last_activity = time(NULL);
     cl->ping_sent = 0;
 
-    size_t maxlen = (size_t)srv->cfg.security.max_line_length + 2; /* +CRLF slack */
+    size_t maxlen = srv->cfg.security.max_line_length > 2 ? (size_t)srv->cfg.security.max_line_length - 2 : 0; /* limit includes the CRLF; linelen doesn't */
     if (cl->rbuf_len + (size_t)n + 1 > cl->rbuf_cap) {
         size_t newcap = cl->rbuf_cap;
         while (newcap < cl->rbuf_len + (size_t)n + 1) newcap *= 2;

@@ -349,7 +349,13 @@ void link_accept(server_t *srv) {
     struct sockaddr_in peer;
     socklen_t plen = sizeof peer;
     int fd = accept(srv->link_listen_fd, (struct sockaddr *)&peer, &plen);
-    if (fd < 0) return;
+    if (fd < 0) {
+        if (errno == EMFILE || errno == ENFILE) { /* listener stays readable -- don't spin poll() */
+            log_error("link", "accept failed: %s -- pausing the listeners for 1s", strerror(errno));
+            srv->accept_paused_until = time(NULL) + 1;
+        }
+        return;
+    }
 
     char ipbuf[64];
     inet_ntop(AF_INET, &peer.sin_addr, ipbuf, sizeof ipbuf);
@@ -812,7 +818,7 @@ static int link_handle_readable_once(server_t *srv, link_conn_t *lc) {
      * time to be <= LINK_BUF, see config.c), not just the raw buffer
      * capacity -- a smaller configured value now actually cuts lines
      * shorter instead of being silently ignored. */
-    if (lc->rbuf_len + (size_t)n >= (size_t)srv->cfg.links.max_line_length) {
+    if (lc->rbuf_len + (size_t)n >= (size_t)LINK_BUF) { /* raw capacity; the per-line limit is checked below */
         log_warn("link", "link '%s' line too long, dropping connection", lc->peer_name);
         link_close(srv, lc);
         return 0;
@@ -825,12 +831,22 @@ static int link_handle_readable_once(server_t *srv, link_conn_t *lc) {
         if (lc->rbuf[i] != '\n') continue;
         size_t end = i;
         if (end > start && lc->rbuf[end - 1] == '\r') end--;
+        if (end - start >= (size_t)srv->cfg.links.max_line_length) { /* one line, not the whole read -- several short lines may arrive together */
+            log_warn("link", "link '%s' line too long, dropping connection", lc->peer_name);
+            link_close(srv, lc);
+            return 0;
+        }
         lc->rbuf[end] = '\0';
         if (link_process_line(srv, lc, lc->rbuf + start) < 0) return 0; /* closing -- drop the rest */
         start = i + 1;
     }
     memmove(lc->rbuf, lc->rbuf + start, lc->rbuf_len - start);
     lc->rbuf_len -= start;
+    if (lc->rbuf_len >= (size_t)srv->cfg.links.max_line_length) { /* unterminated partial line already too long */
+        log_warn("link", "link '%s' line too long, dropping connection", lc->peer_name);
+        link_close(srv, lc);
+        return 0;
+    }
     return 1;
 }
 
@@ -860,7 +876,8 @@ void link_tick(server_t *srv) {
         } else if (idle > srv->cfg.links.ping_timeout) {
             log_warn("link", "link '%s' timed out", lc->peer_name);
             link_close(srv, lc);
-        } else if (idle > srv->cfg.links.ping_interval) {
+        } else if (idle > srv->cfg.links.ping_interval && difftime(now, lc->last_ping) >= srv->cfg.links.ping_interval) {
+            lc->last_ping = now; /* one PING per interval, not one per tick */
             link_forward_line(lc, "PING");
         }
     }

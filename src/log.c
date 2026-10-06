@@ -1,6 +1,7 @@
 #include "log.h"
 
 #include <stdarg.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -65,6 +66,7 @@ static void open_log_file(void) {
         g_file_size = 0;
         return;
     }
+    fcntl(fileno(g_file), F_SETFD, FD_CLOEXEC); /* don't leak the log fd across /RESTART's exec */
     g_file_size = ftell(g_file);
     if (g_file_size < 0) g_file_size = 0;
 }

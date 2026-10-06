@@ -18,9 +18,31 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <stdint.h>
 #include <termios.h>
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
 #include <time.h>
 #include <unistd.h>
+
+/* Absolute path of the running binary, or 0 if it can't be determined. */
+static int exe_path(char *out, size_t outsz) {
+#ifdef __APPLE__
+    uint32_t sz = (uint32_t)outsz;
+    if (_NSGetExecutablePath(out, &sz) != 0) return 0;
+    char *rp = realpath(out, NULL);
+    if (!rp) return 0;
+    snprintf(out, outsz, "%s", rp);
+    free(rp);
+    return 1;
+#else
+    ssize_t n = readlink("/proc/self/exe", out, outsz - 1);
+    if (n <= 0) return 0;
+    out[n] = '\0';
+    return 1;
+#endif
+}
 
 static void usage(const char *prog) {
     printf("usage: %s [-c|--config PATH] [-v|--verbose] [--hash-password] [--version]\n"
@@ -181,7 +203,18 @@ int main(int argc, char **argv) {
         return 2;
     }
 
-    if (do_daemon) daemonize();
+    /* Daemonizing forks away before net_run binds, so a port clash would
+     * otherwise look like a successful start (parent exits 0, child dies in
+     * the log). Probe the main listeners first, while stderr is still ours. */
+    if (do_daemon) {
+        int probe = net_listen(cfg.server.bind, cfg.server.port);
+        if (probe < 0) {
+            fprintf(stderr, "sekurircd: cannot bind %s:%d (already in use?)\n", cfg.server.bind, cfg.server.port);
+            return 2;
+        }
+        close(probe);
+        daemonize();
+    }
 
     if (pidfile[0]) {
         FILE *fp = fopen(pidfile, "w");
@@ -213,8 +246,10 @@ int main(int argc, char **argv) {
     if (pidfile[0] && !restart) unlink(pidfile);
 
     if (restart) {
-        log_info("main", "restarting: re-executing %s", argv[0]);
-        execv(argv[0], argv);
+        char exe[1024];
+        const char *path = exe_path(exe, sizeof exe) ? exe : argv[0]; /* argv[0] alone fails if we were started via $PATH */
+        log_info("main", "restarting: re-executing %s", path);
+        execv(path, argv);
         log_error("main", "execv failed: %s -- exiting instead", strerror(errno));
         return 1;
     }

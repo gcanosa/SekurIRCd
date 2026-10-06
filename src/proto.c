@@ -363,7 +363,7 @@ long irc_parse_duration(const char *token) {
     if (!isdigit((unsigned char)*p)) return -1;
     long n = 0;
     while (isdigit((unsigned char)*p)) {
-        if (n > LONG_MAX / 10) n = LONG_MAX / 10; /* clamp: defensive, not a real limit */
+        if (n > (LONG_MAX - 9) / 10) n = (LONG_MAX - 9) / 10; /* clamp so n*10+digit can't overflow */
         n = n * 10 + (*p - '0');
         p++;
     }

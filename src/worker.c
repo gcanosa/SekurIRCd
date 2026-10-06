@@ -17,6 +17,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <stdatomic.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -41,6 +42,26 @@ static int g_qlen = 0;
 static volatile int g_running = 0;
 static pthread_t g_threads[N_WORKERS];
 static int g_nthreads = 0;
+
+/* conn_ids of clients that disconnected: queued jobs for them are skipped at
+ * dequeue instead of burning a worker for a full resolver/ident timeout whose
+ * result nobody will read. Small ring -- a miss only costs the wasted work. */
+#define CANCEL_RING 512
+static uint64_t g_cancelled[CANCEL_RING];
+static int g_cancel_next = 0;
+
+void worker_cancel(uint64_t conn_id) {
+    pthread_mutex_lock(&g_qmutex);
+    g_cancelled[g_cancel_next] = conn_id;
+    g_cancel_next = (g_cancel_next + 1) % CANCEL_RING;
+    pthread_mutex_unlock(&g_qmutex);
+}
+
+/* Caller holds g_qmutex. */
+static int is_cancelled(uint64_t conn_id) {
+    for (int i = 0; i < CANCEL_RING; i++) if (g_cancelled[i] == conn_id) return 1;
+    return 0;
+}
 
 static pthread_mutex_t g_rmutex = PTHREAD_MUTEX_INITIALIZER;
 static job_result_t g_results[RESULT_RING];
@@ -165,6 +186,12 @@ static void dns_call_release(dns_call_t *c) {
     }
 }
 
+/* Resolver helpers that outlive their worker's deadline stay blocked inside
+ * libc for as long as the resolver takes; cap them so a hostile or dead
+ * resolver can't pile up threads (and their stacks). */
+#define MAX_DNS_HELPERS 32
+static atomic_int g_dns_helpers = 0;
+
 static void *dns_call_main(void *arg) {
     dns_call_t *c = (dns_call_t *)arg;
     char text[256] = "";
@@ -179,6 +206,7 @@ static void *dns_call_main(void *arg) {
     c->done = 1;
     pthread_cond_signal(&c->cv);
     pthread_mutex_unlock(&c->mu);
+    atomic_fetch_sub(&g_dns_helpers, 1);
     dns_call_release(c);
     return NULL;
 }
@@ -188,8 +216,9 @@ static void *dns_call_main(void *arg) {
  * helper thread couldn't be started. */
 static int dns_with_timeout(const job_t *job, char *out, size_t outsz, int *codes) {
     double timeout = job->timeout > 0 ? job->timeout : 5.0;
+    if (atomic_fetch_add(&g_dns_helpers, 1) >= MAX_DNS_HELPERS) { atomic_fetch_sub(&g_dns_helpers, 1); return 0; }
     dns_call_t *c = calloc(1, sizeof *c);
-    if (!c) return 0;
+    if (!c) { atomic_fetch_sub(&g_dns_helpers, 1); return 0; }
     pthread_mutex_init(&c->mu, NULL);
     pthread_cond_init(&c->cv, NULL);
     c->job = *job;
@@ -202,6 +231,7 @@ static int dns_with_timeout(const job_t *job, char *out, size_t outsz, int *code
     int rc = pthread_create(&th, &attr, dns_call_main, c);
     pthread_attr_destroy(&attr);
     if (rc != 0) {
+        atomic_fetch_sub(&g_dns_helpers, 1);
         c->refs = 1; /* no helper to hold the second reference */
         dns_call_release(c);
         return 0;
@@ -309,8 +339,10 @@ static void *worker_main(void *arg) {
             if (!g_qhead) g_qtail = NULL;
             g_qlen--;
         }
+        int skip = node && node->job.conn_id != 0 && is_cancelled(node->job.conn_id);
         pthread_mutex_unlock(&g_qmutex);
         if (!node) continue;
+        if (skip) { OPENSSL_cleanse(node->job.secret, sizeof node->job.secret); free(node); continue; }
 
         job_result_t r;
         memset(&r, 0, sizeof r);

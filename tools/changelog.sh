@@ -24,6 +24,7 @@ show() {
   git --no-pager log --no-merges '--date=format:%Y-%m-%d %H:%M' --format='%h%x09%ad%x09%s' "$1" |
   while IFS=$'\t' read -r h d s; do
     room=$(( W - ${#d} - ${#h} - 5 ))
+    [ $room -ge 10 ] || room=10 # narrow terminal: a negative substring length aborts under set -e
     [ ${#s} -le $room ] || s="${s:0:room-1}…"
     printf '  %s%s%s %s%*s%s%s\n' "$Y" "$h" "$N" "$s" $(( room - ${#s} + 2 )) "" "$D" "$d$N"
   done

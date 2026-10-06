@@ -815,6 +815,11 @@ static void test_build_truncates_and_defangs(void) {
     assert(strcmp(out, "CMD a_b * _x :t") == 0);
 }
 
+static void test_parse_duration_overflow(void) {
+    assert(irc_parse_duration("99999999999999999999999999d") > 0); /* clamps, no signed overflow */
+    assert(irc_parse_duration("90m") == 5400 && irc_parse_duration("x") == -1);
+}
+
 static void test_parse_token_cap_and_names(void) {
     char line[512];
     int n = snprintf(line, sizeof line, "MODE #c +k");
@@ -865,6 +870,7 @@ int main(void) {
     RUN(test_proc_stats);
     RUN(test_build_truncates_and_defangs);
     RUN(test_parse_token_cap_and_names);
+    RUN(test_parse_duration_overflow);
     RUN(test_protection_pure_helpers);
     RUN(test_protection_bl_match);
     RUN(test_protection_bundle_config);

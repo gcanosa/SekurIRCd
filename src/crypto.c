@@ -124,7 +124,8 @@ void crypto_random_hex(char *out, size_t outsz, int count) {
 void crypto_hmac_hex(const char *key, const char *msg, char *out, size_t outsz, int bytes) {
     unsigned char digest[EVP_MAX_MD_SIZE];
     unsigned int dlen = 0;
-    HMAC(EVP_sha256(), key, (int)strlen(key), (const unsigned char *)msg, strlen(msg), digest, &dlen);
+    if (!HMAC(EVP_sha256(), key, (int)strlen(key), (const unsigned char *)msg, strlen(msg), digest, &dlen))
+        abort(); /* an empty token would give every user the same cloak -- same stance as crypto_random_hex */
     if (bytes < 0) bytes = 0;
     if ((size_t)bytes > dlen) bytes = (int)dlen;
     if (outsz < 3) { if (outsz) out[0] = '\0'; return; }
