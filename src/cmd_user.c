@@ -141,13 +141,15 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
             if (!is_notice) { const char *pe[] = {target}; client_reply(cl, N_CANNOTSENDTOCHAN, pe, 1, "Cannot send to channel (+c, no colour/formatting)"); }
             return;
         }
-        if (!(m && (m->rank & RANK_OP)) && !(cl->umodes & UMODE_O) &&
-            channel_is_banned(chan, cl->nick, cl->user, cl->host, cl->realhost, cl->ip, cl->account, cl->ident_confirmed)) {
+        int is_banned = 0, is_quieted = 0;
+        if (chan->bans.n > 0)
+            channel_ban_state(chan, m, cl->nick, cl->user, cl->host, cl->realhost, cl->ip, cl->account, cl->ident_confirmed,
+                              &is_banned, &is_quieted);
+        if (!(m && (m->rank & RANK_OP)) && !(cl->umodes & UMODE_O) && is_banned) {
             if (!is_notice) { const char *pe[] = {target}; client_reply(cl, N_CANNOTSENDTOCHAN, pe, 1, "Cannot send to channel (+b)"); }
             return;
         }
-        if (!privileged &&
-            channel_is_quieted(chan, cl->nick, cl->user, cl->host, cl->realhost, cl->ip, cl->account, cl->ident_confirmed)) {
+        if (!privileged && is_quieted) {
             if (!is_notice) { const char *pe[] = {target}; client_reply(cl, N_CANNOTSENDTOCHAN, pe, 1, "Cannot send to channel (quieted)"); }
             return;
         }

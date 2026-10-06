@@ -23,6 +23,9 @@ void channel_free(channel_t *chan) {
         HASH_DEL(chan->members, m);
         free(m);
     }
+    masklist_free(&chan->bans);
+    masklist_free(&chan->exceptions);
+    masklist_free(&chan->invex);
     free(chan);
 }
 
@@ -139,9 +142,45 @@ int masklist_add(masklist_t *ml, const char *mask) {
     for (int i = 0; i < ml->n; i++)
         if (strcasecmp(ml->masks[i], mask) == 0) return -1;
     if (ml->n >= CHAN_MAX_MASKLIST) return -1;
+    if (!ml->masks) {
+        ml->masks = calloc(CHAN_MAX_MASKLIST, sizeof ml->masks[0]);
+        if (!ml->masks) return -1;
+    }
     snprintf(ml->masks[ml->n], sizeof ml->masks[0], "%s", mask);
     ml->n++;
+    ml->gen++;
     return 0;
+}
+
+void masklist_free(masklist_t *ml) {
+    free(ml->masks);
+    ml->masks = NULL;
+    ml->n = 0;
+}
+
+void channel_ban_state(channel_t *chan, member_t *m, const char *nick, const char *user,
+                       const char *host, const char *realhost, const char *ip,
+                       const char *account, int ident_confirmed, int *banned, int *quieted) {
+    /* FNV-1a over everything the mask matchers look at: a few dozen bytes,
+     * versus up to ~100 globs x 3 hosts per ban list. */
+    unsigned h = 2166136261u;
+    const char *parts[] = {nick, user, host, realhost, ip, account};
+    for (size_t i = 0; i < sizeof parts / sizeof parts[0]; i++) {
+        for (const unsigned char *p = (const unsigned char *)parts[i]; *p; p++) h = (h ^ *p) * 16777619u;
+        h = (h ^ 0xffu) * 16777619u; /* field separator */
+    }
+    h = (h ^ (unsigned)ident_confirmed) * 16777619u;
+    unsigned lists_gen = chan->bans.gen + chan->exceptions.gen;
+    if (m && m->cache_valid && m->cache_lists_gen == lists_gen && m->cache_ident_hash == h) {
+        *banned = m->cache_banned; *quieted = m->cache_quieted;
+        return;
+    }
+    *banned = channel_is_banned(chan, nick, user, host, realhost, ip, account, ident_confirmed);
+    *quieted = channel_is_quieted(chan, nick, user, host, realhost, ip, account, ident_confirmed);
+    if (m) {
+        m->cache_valid = 1; m->cache_lists_gen = lists_gen; m->cache_ident_hash = h;
+        m->cache_banned = (unsigned char)*banned; m->cache_quieted = (unsigned char)*quieted;
+    }
 }
 
 int masklist_del(masklist_t *ml, const char *mask) {
@@ -149,6 +188,7 @@ int masklist_del(masklist_t *ml, const char *mask) {
         if (strcasecmp(ml->masks[i], mask) == 0) {
             memmove(ml->masks[i], ml->masks[i + 1], (size_t)(ml->n - i - 1) * sizeof ml->masks[0]);
             ml->n--;
+            ml->gen++;
             return 0;
         }
     }
