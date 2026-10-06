@@ -397,12 +397,23 @@ void irc_prefix_for(char *out, size_t outsz, const char *nick, const char *user,
 void irc_iso8601_now(char *out, size_t outsz) {
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
-    struct tm tmv;
-    gmtime_r(&ts.tv_sec, &tmv);
+    /* A channel broadcast stamps every recipient's copy: reuse the formatted
+     * string while the millisecond hasn't changed instead of redoing
+     * gmtime_r + snprintf per recipient (and all copies share one time). */
+    static _Thread_local time_t last_sec = -1;
+    static _Thread_local long last_ms = -1;
+    static _Thread_local char cached[32];
     long ms = ts.tv_nsec / 1000000;
-    snprintf(out, outsz, "%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
-             tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
-             tmv.tm_hour, tmv.tm_min, tmv.tm_sec, ms);
+    if (ts.tv_sec != last_sec || ms != last_ms) {
+        struct tm tmv;
+        gmtime_r(&ts.tv_sec, &tmv);
+        snprintf(cached, sizeof cached, "%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
+                 tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
+                 tmv.tm_hour, tmv.tm_min, tmv.tm_sec, ms);
+        last_sec = ts.tv_sec;
+        last_ms = ms;
+    }
+    snprintf(out, outsz, "%s", cached);
 }
 
 void irc_add_time_tag(char *line, size_t linesz) {
@@ -434,9 +445,12 @@ void irc_add_time_tag(char *line, size_t linesz) {
         rest[rest_len] = '\0';
         snprintf(line, linesz, "@%s;time=%s%s", tagbuf, ts, rest);
     } else {
-        char restbuf[1536];
-        if (len >= sizeof restbuf) return;
-        memcpy(restbuf, line, len + 1);
-        snprintf(line, linesz, "@time=%s %s", ts, restbuf);
+        /* No existing tags (the hot path): shift in place, no scratch copies. */
+        size_t tl = strlen(ts), plen = 6 + tl + 1; /* "@time=" + ts + " " */
+        if (len + plen >= linesz) return;
+        memmove(line + plen, line, len + 1);
+        memcpy(line, "@time=", 6);
+        memcpy(line + 6, ts, tl);
+        line[6 + tl] = ' ';
     }
 }

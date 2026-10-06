@@ -78,6 +78,8 @@ typedef struct client {
     char oper_name[64];   /* "" if not opered */
     int is_service;       /* introduced by a trusted link as a service bot (chanserv) */
     char account[64];     /* "" if not logged in (SASL or /REGISTER) -- see accounts.h */
+    char acct_created_for[64]; /* spam.c cache: account name whose created_at is in acct_created */
+    long acct_created;
     char sasl_mech[16];   /* "" outside an AUTHENTICATE exchange; "PLAIN" mid-exchange */
     int oper_fails;       /* consecutive failed /OPER attempts -- see cmd_oper.c _MAX_OPER_FAILS */
 

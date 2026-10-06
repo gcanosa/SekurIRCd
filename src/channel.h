@@ -52,12 +52,18 @@ struct client;
 typedef struct member {
     struct client *client;
     int rank; /* RANK_OP | RANK_HALFOP | RANK_VOICE */
+    /* channel_ban_state() cache: the verdict holds while the channel's ban/
+     * exception lists and the client's identity are unchanged. */
+    unsigned cache_lists_gen, cache_ident_hash;
+    unsigned char cache_valid, cache_banned, cache_quieted;
     UT_hash_handle hh; /* keyed by the client pointer itself */
 } member_t;
 
 typedef struct {
-    char masks[CHAN_MAX_MASKLIST][256];
+    char (*masks)[256]; /* allocated on the first add -- most channels never have a ban, and
+                         * three inline 100x256 lists made every channel ~80 KB */
     int n;
+    unsigned gen;       /* bumped on every add/del; invalidates member_t's cached ban verdict */
 } masklist_t;
 
 typedef struct channel {
@@ -117,6 +123,12 @@ int channel_is_banned(channel_t *chan, const char *nick, const char *user,
 int channel_is_invited(channel_t *chan, const char *invite_key, const char *nick, const char *user,
                         const char *host, const char *account, int ident_confirmed);
 
+/* Banned (JOIN-blocking, after exceptions) and quieted verdicts for a member,
+ * cached on `m` -- PRIVMSG used to walk every mask three times per message. */
+void channel_ban_state(channel_t *chan, member_t *m, const char *nick, const char *user,
+                       const char *host, const char *realhost, const char *ip,
+                       const char *account, int ident_confirmed, int *banned, int *quieted);
+void masklist_free(masklist_t *ml);
 int masklist_add(masklist_t *ml, const char *mask); /* 0 ok, -1 dup/full */
 int masklist_del(masklist_t *ml, const char *mask); /* 0 removed, -1 not found */
 

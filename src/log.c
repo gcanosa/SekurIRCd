@@ -115,6 +115,7 @@ static void vformat(char *out, size_t outsz, const char *fmt, va_list ap) {
 }
 
 void log_write(log_level_t level, const char *tag, const char *fmt, ...) {
+    if (!g_hook && level < g_min_level) return; /* nothing would consume it -- skip the format */
     char msg[2048];
     va_list ap;
     va_start(ap, fmt);

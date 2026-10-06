@@ -358,7 +358,12 @@ int spam_check_message(server_t *srv, client_t *cl, const char *target, const ch
      * the old unconditional exemption. */
     int trusted_account = 0;
     if (sp->exempt_identified && cl->account[0]) {
-        long created = accounts_created_at(&srv->accounts, cl->account);
+        /* accounts_created_at is a linear cJSON lookup -- cache it on the client per account name. */
+        if (strcmp(cl->acct_created_for, cl->account) != 0) {
+            cl->acct_created = accounts_created_at(&srv->accounts, cl->account);
+            snprintf(cl->acct_created_for, sizeof cl->acct_created_for, "%s", cl->account);
+        }
+        long created = cl->acct_created;
         trusted_account = created > 0 && now - created >= sp->new_user_period;
     }
     if (trusted_account) return 0;
