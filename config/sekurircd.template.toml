@@ -348,6 +348,13 @@ rules = "ircd.rules"
 # Maximum number of bytes per PRIVMSG/NOTICE payload before truncation.
 max_message_length = 400
 
+# How many recent PRIVMSG/NOTICE lines each channel remembers (in memory only,
+# lost on restart) for IRCv3 CHATHISTORY -- clients with the draft/chathistory
+# and batch caps can scroll back / catch up after a reconnect. Memory is
+# allocated per channel on its first message (about 0.7 KB per line kept).
+# 0 turns history off (the cap is then not advertised). Max 500.
+history_size = 50
+
 
 # -----------------------------------------------------------------------------
 # [logging] -- file + console logging

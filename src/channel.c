@@ -23,6 +23,7 @@ void channel_free(channel_t *chan) {
         HASH_DEL(chan->members, m);
         free(m);
     }
+    free(chan->hist);
     masklist_free(&chan->bans);
     masklist_free(&chan->exceptions);
     masklist_free(&chan->invex);
@@ -150,6 +151,32 @@ int masklist_add(masklist_t *ml, const char *mask) {
     ml->n++;
     ml->gen++;
     return 0;
+}
+
+void channel_history_add(channel_t *chan, int cap, const char *msgid, long long ms, const char *sender,
+                         const char *account, const char *verb, const char *text) {
+    if (cap <= 0) return;
+    if (!chan->hist || chan->hist_cap != cap) { /* first message, or history_size changed on rehash: start over */
+        free(chan->hist);
+        chan->hist = calloc((size_t)cap, sizeof *chan->hist);
+        chan->hist_cap = chan->hist ? cap : 0;
+        chan->hist_head = chan->hist_n = 0;
+        if (!chan->hist) return;
+    }
+    int idx = (chan->hist_head + chan->hist_n) % chan->hist_cap;
+    if (chan->hist_n == chan->hist_cap) { chan->hist_head = (chan->hist_head + 1) % chan->hist_cap; } else chan->hist_n++;
+    hist_entry_t *e = &chan->hist[idx];
+    snprintf(e->msgid, sizeof e->msgid, "%s", msgid);
+    e->ms = ms;
+    snprintf(e->sender, sizeof e->sender, "%s", sender);
+    snprintf(e->account, sizeof e->account, "%s", account);
+    snprintf(e->verb, sizeof e->verb, "%s", verb);
+    snprintf(e->text, sizeof e->text, "%s", text);
+}
+
+const hist_entry_t *channel_history_at(const channel_t *chan, int i) {
+    if (!chan->hist || i < 0 || i >= chan->hist_n) return NULL;
+    return &chan->hist[(chan->hist_head + i) % chan->hist_cap];
 }
 
 void masklist_free(masklist_t *ml) {

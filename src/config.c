@@ -333,6 +333,7 @@ void config_defaults(config_t *out) {
     snprintf(out->messages.oper_motd, CFG_PATH, "oper.motd");
     snprintf(out->messages.rules, CFG_PATH, "ircd.rules");
     out->messages.max_message_length = 400;
+    out->messages.history_size = 50;
 
     out->logging.enabled = 1;
     snprintf(out->logging.directory, CFG_PATH, "logs");
@@ -574,6 +575,11 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
     if (cfg_get_str(msg, "oper_motd", "oper.motd", out->messages.oper_motd, CFG_PATH, errbuf, errbufsz, "messages.oper_motd")) return -1;
     if (cfg_get_str(msg, "rules", "ircd.rules", out->messages.rules, CFG_PATH, errbuf, errbufsz, "messages.rules")) return -1;
     if (cfg_get_int(msg, "max_message_length", 400, &out->messages.max_message_length, errbuf, errbufsz, "messages.max_message_length")) return -1;
+    if (cfg_get_int(msg, "history_size", 50, &out->messages.history_size, errbuf, errbufsz, "messages.history_size")) return -1;
+    if (out->messages.history_size < 0 || out->messages.history_size > 500) {
+        snprintf(errbuf, errbufsz, "messages.history_size must be in 0-500");
+        return -1;
+    }
     /* Upper bound is the send_msg/cmd_squery text buffer (420) less its NUL.
      * A negative value made the "%.*s" truncation a no-op. */
     if (out->messages.max_message_length < 1 || out->messages.max_message_length > 419) {

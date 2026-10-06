@@ -238,6 +238,12 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
             if (mm->client == cl) continue;
             deliver(mm->client, cl, lines, &x);
         }
+        if (!is_tagmsg && srv->cfg.messages.history_size > 0) {
+            struct timespec ts;
+            clock_gettime(CLOCK_REALTIME, &ts);
+            channel_history_add(chan, srv->cfg.messages.history_size, x.msgid,
+                                (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000, prefix, cl->account, verb, outtext);
+        }
         delivered = 1;
     } else {
         client_t *dst = server_find_user(srv, target);
@@ -849,4 +855,116 @@ void cmd_glob(server_t *srv, client_t *cl, irc_message_t *msg) {
     }
     const char *pe[] = {msg->params[0]};
     client_reply(cl, N_ENDOFWHO, pe, 1, "End of /GLOB list.");
+}
+
+/* --- CHATHISTORY (draft/chathistory) -------------------------------------- */
+
+static void chathistory_fail(server_t *srv, client_t *cl, const char *code, const char *ctx, const char *desc) {
+    char line[400];
+    const char *p[] = {"CHATHISTORY", code, ctx};
+    irc_build(line, sizeof line, NULL, 0, srv->cfg.server.name, "FAIL", p, 3, desc);
+    client_send(cl, line);
+}
+
+/* Positions of a reference in the channel's history: `before` = index of the
+ * first entry not strictly older than it, `after` = index of the first entry
+ * strictly newer. "msgid=X" pins both to that entry; "timestamp=T" counts by
+ * time. Returns 0 on a malformed/unknown reference. */
+static int history_ref(const channel_t *chan, const char *ref, int *before, int *after) {
+    if (strncmp(ref, "msgid=", 6) == 0) {
+        for (int i = 0; i < chan->hist_n; i++) {
+            if (strcmp(channel_history_at(chan, i)->msgid, ref + 6) == 0) { *before = i; *after = i + 1; return 1; }
+        }
+        return 0;
+    }
+    if (strncmp(ref, "timestamp=", 10) == 0) {
+        long long ms = irc_parse_iso8601_ms(ref + 10);
+        if (ms < 0) return 0;
+        int b = 0, a = 0;
+        for (int i = 0; i < chan->hist_n; i++) {
+            long long e = channel_history_at(chan, i)->ms;
+            if (e < ms) b++;
+            if (e <= ms) a++;
+        }
+        *before = b; *after = a;
+        return 1;
+    }
+    return 0;
+}
+
+#define CHATHISTORY_MAX 100
+
+void cmd_chathistory(server_t *srv, client_t *cl, irc_message_t *msg) {
+    if (!(cl->caps & CAP_CHATHISTORY) || !(cl->caps & CAP_BATCH) || srv->cfg.messages.history_size <= 0) return;
+    const char *sub = msg->params[0];
+    int nneed = strcasecmp(sub, "BETWEEN") == 0 ? 5 : 4; /* sub target ref [ref2] limit */
+    if (msg->nparams < nneed) { chathistory_fail(srv, cl, "NEED_MORE_PARAMS", sub, "Missing parameters"); return; }
+    const char *target = msg->params[1];
+    channel_t *chan = target[0] == '#' ? server_find_channel(srv, target) : NULL;
+    if (!chan || !(channel_find_member(chan, cl) || (cl->umodes & UMODE_O))) {
+        chathistory_fail(srv, cl, "INVALID_TARGET", target, "Messages could not be retrieved"); /* same answer for "no such" and "not on it" */
+        return;
+    }
+    int limit = atoi(msg->params[nneed - 1]);
+    if (limit < 1) { chathistory_fail(srv, cl, "INVALID_PARAMS", sub, "Invalid limit"); return; }
+    if (limit > CHATHISTORY_MAX) limit = CHATHISTORY_MAX;
+    int n = chan->hist_n, lo = 0, hi = n;
+    int b1 = 0, a1 = 0, b2 = 0, a2 = 0;
+    const char *ref = msg->params[2];
+    int is_star = strcmp(ref, "*") == 0;
+    if (strcasecmp(sub, "LATEST") == 0) {
+        if (!is_star && !history_ref(chan, ref, &b1, &a1)) { chathistory_fail(srv, cl, "INVALID_PARAMS", ref, "Invalid reference"); return; }
+        lo = is_star ? 0 : a1;
+        if (n - lo > limit) lo = n - limit;
+    } else if (strcasecmp(sub, "BEFORE") == 0) {
+        if (!history_ref(chan, ref, &b1, &a1)) { chathistory_fail(srv, cl, "INVALID_PARAMS", ref, "Invalid reference"); return; }
+        hi = b1; lo = hi - limit < 0 ? 0 : hi - limit;
+    } else if (strcasecmp(sub, "AFTER") == 0) {
+        if (!history_ref(chan, ref, &b1, &a1)) { chathistory_fail(srv, cl, "INVALID_PARAMS", ref, "Invalid reference"); return; }
+        lo = a1; hi = lo + limit > n ? n : lo + limit;
+    } else if (strcasecmp(sub, "AROUND") == 0) {
+        if (!history_ref(chan, ref, &b1, &a1)) { chathistory_fail(srv, cl, "INVALID_PARAMS", ref, "Invalid reference"); return; }
+        int half = limit / 2;
+        lo = b1 - half < 0 ? 0 : b1 - half;
+        hi = b1 + (limit - half) > n ? n : b1 + (limit - half);
+    } else if (strcasecmp(sub, "BETWEEN") == 0) {
+        if (!history_ref(chan, ref, &b1, &a1) || !history_ref(chan, msg->params[3], &b2, &a2)) {
+            chathistory_fail(srv, cl, "INVALID_PARAMS", sub, "Invalid reference"); return;
+        }
+        if (b1 > b2) { int t = a1; a1 = a2; a2 = t; t = b1; b1 = b2; b2 = t; } /* either order */
+        lo = a1; hi = b2;
+        if (hi - lo > limit) hi = lo + limit;
+    } else {
+        chathistory_fail(srv, cl, "INVALID_PARAMS", sub, "Unknown subcommand");
+        return;
+    }
+    if (hi < lo) hi = lo;
+
+    static unsigned long batch_seq = 0;
+    char bid[24], line[1100];
+    snprintf(bid, sizeof bid, "ch%lu", ++batch_seq);
+    char start[40];
+    snprintf(start, sizeof start, "+%s", bid);
+    const char *bp[] = {start, "chathistory", chan->name};
+    irc_build(line, sizeof line, NULL, 0, srv->cfg.server.name, "BATCH", bp, 3, NULL);
+    client_send(cl, line);
+    for (int i = lo; i < hi; i++) {
+        const hist_entry_t *e = channel_history_at(chan, i);
+        char ts[40];
+        irc_iso8601_from_ms(ts, sizeof ts, e->ms);
+        irc_tag_t tags[4];
+        int nt = 0;
+        tags[nt++] = (irc_tag_t){"batch", bid};
+        tags[nt++] = (irc_tag_t){"time", ts};
+        tags[nt++] = (irc_tag_t){"msgid", e->msgid};
+        if (e->account[0] && (cl->caps & CAP_ACCOUNT_TAG)) tags[nt++] = (irc_tag_t){"account", e->account};
+        const char *mp[] = {chan->name};
+        irc_build(line, sizeof line, tags, nt, e->sender, e->verb, mp, 1, e->text);
+        client_send(cl, line);
+    }
+    char end[40];
+    snprintf(end, sizeof end, "-%s", bid);
+    const char *ep[] = {end};
+    irc_build(line, sizeof line, NULL, 0, srv->cfg.server.name, "BATCH", ep, 1, NULL);
+    client_send(cl, line);
 }

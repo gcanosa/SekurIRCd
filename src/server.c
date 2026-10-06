@@ -436,15 +436,18 @@ void server_send_isupport(server_t *srv, client_t *cl) {
     snprintf(chanlen, sizeof chanlen, "CHANNELLEN=%d", 50);
     snprintf(topiclen, sizeof topiclen, "TOPICLEN=%d", TOPIC_MAX_LEN);
 
+    char histtok[32];
+    snprintf(histtok, sizeof histtok, "CHATHISTORY=%d", srv->cfg.messages.history_size > 100 ? 100 : srv->cfg.messages.history_size);
     const char *tokens[] = {
         netbuf, "CHANTYPES=#", "CHANMODES=beI,k,lfj,imnprstzCNPQSTVROMc", "PREFIX=(ohv)@%+",
         nicklen, chanlen, topiclen, "CASEMAPPING=ascii", "MODES=6",
         "STATUSMSG=@%+", "AWAYLEN=390", "KICKLEN=300",
         "MAXLIST=b:100,e:100,I:100", "EXCEPTS=e", "INVEX=I", "MONITOR=100", "WATCH=128", "SILENCE=15",
         "EXTBAN=~,am", "ELIST=MNU", "WHOX", "CHANLIMIT=#:200", "BOT=B", "LINELEN=512",
-        "TARGMAX=PRIVMSG:1,NOTICE:1,KICK:1,JOIN:1,PART:1,WHOIS:1",
+        "TARGMAX=PRIVMSG:1,NOTICE:1,KICK:1,JOIN:1,PART:1,WHOIS:1", srv->cfg.messages.history_size > 0 ? histtok : NULL, srv->cfg.messages.history_size > 0 ? "MSGREFTYPES=msgid,timestamp" : NULL,
     };
-    int total = (int)(sizeof tokens / sizeof tokens[0]);
+    int total = 0;
+    for (size_t i = 0; i < sizeof tokens / sizeof tokens[0]; i++) if (tokens[i]) tokens[total++] = tokens[i]; /* drop the NULLs of disabled features */
     for (int i = 0; i < total; i += 12) {
         int chunk = total - i < 12 ? total - i : 12;
         client_reply(cl, N_ISUPPORT, tokens + i, chunk, "are supported by this server");
