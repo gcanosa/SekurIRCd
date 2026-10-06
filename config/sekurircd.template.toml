@@ -386,6 +386,15 @@ backup_count = 5
 
 # -----------------------------------------------------------------------------
 # [[operators]] -- IRC operator (/OPER) logins
+#
+# Optional per-login `privileges` limit which oper commands that login may use
+# (an oper without the key can use everything, as before):
+#   kill     KILL                          kline    KLINE/GLINE/ZLINE (+UN*), SPAMFILTER, PROTECT
+#   sa       SAJOIN/SAPART/SAMODE/SANICK   host     CHGHOST/SETHOST/CHGIDENT/USERIP
+#   wallops  WALLOPS/GLOBOPS               rehash   REHASH
+#   die      DIE/RESTART                   link     SQUIT/CONNECT
+#   all      everything. `privileges = []` grants none of the above (a "helper" oper).
+#   e.g.  privileges = ["kill", "kline", "wallops"]
 # -----------------------------------------------------------------------------
 # None by default -- no one can /OPER until you add at least one table here.
 # Each requires exactly ONE of `password` or `password_hash`:

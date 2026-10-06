@@ -113,7 +113,21 @@ typedef struct {
     char password_hash[CFG_STR];
     char hosts[CFG_MAX_HOSTS_PER_OPER][CFG_MASK];
     int n_hosts;
+    unsigned privs;      /* OPER_PRIV_* bits from `privileges`; 0 = key absent = everything (back-compat) */
 } cfg_operator_t;
+
+/* Oper privilege classes -- which groups of oper-only commands a given
+ * [[operators]] login may use. See config.c's OPER_PRIV_NAMES and cmd.c's
+ * command_priv() for the mapping. */
+#define OPER_PRIV_KILL    0x01u /* KILL */
+#define OPER_PRIV_KLINE   0x02u /* KLINE/GLINE/ZLINE + UN*, SPAMFILTER, PROTECT */
+#define OPER_PRIV_SA      0x04u /* SAJOIN/SAPART/SAMODE/SANICK */
+#define OPER_PRIV_HOST    0x08u /* CHGHOST/SETHOST/CHGIDENT/USERIP */
+#define OPER_PRIV_WALLOPS 0x10u /* WALLOPS/GLOBOPS */
+#define OPER_PRIV_REHASH  0x20u /* REHASH */
+#define OPER_PRIV_DIE     0x40u /* DIE/RESTART */
+#define OPER_PRIV_LINK    0x80u /* SQUIT/CONNECT */
+#define OPER_PRIV_ALL     0xFFu
 
 typedef struct {
     char location1[CFG_STR];

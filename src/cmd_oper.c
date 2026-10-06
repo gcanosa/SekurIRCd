@@ -47,6 +47,9 @@ static void finish_oper(server_t *srv, client_t *cl, const char *op_name, int pw
     cl->oper_fails = 0;
     cl->umodes |= UMODE_O | UMODE_S | UMODE_W;
     snprintf(cl->oper_name, sizeof cl->oper_name, "%s", op_name);
+    cl->oper_privs = OPER_PRIV_ALL; /* a login without `privileges` keeps today's all-powerful behaviour */
+    for (int i = 0; i < srv->cfg.n_operators; i++)
+        if (strcmp(srv->cfg.operators[i].name, op_name) == 0 && srv->cfg.operators[i].privs) cl->oper_privs = srv->cfg.operators[i].privs;
 
     char prefix[320];
     client_prefix(cl, prefix, sizeof prefix);
@@ -180,6 +183,79 @@ void cmd_wallops(server_t *srv, client_t *cl, irc_message_t *msg) {
     HASH_ITER(hh, srv->users, u, tmp) {
         if (u->umodes & UMODE_W) client_send(u, line);
     }
+}
+
+/* GLOBOPS: like WALLOPS but only operators receive it. */
+void cmd_globops(server_t *srv, client_t *cl, irc_message_t *msg) {
+    const char *text = msg->params[msg->nparams - 1];
+    char prefix[320];
+    client_prefix(cl, prefix, sizeof prefix);
+    char line[600];
+    irc_build(line, sizeof line, NULL, 0, prefix, "GLOBOPS", NULL, 0, text);
+    client_t *u, *tmp;
+    HASH_ITER(hh, srv->users, u, tmp) {
+        if (u->umodes & UMODE_O) client_send(u, line);
+    }
+}
+
+/* CHGIDENT <nick> <ident>: change a user's ident (the user part of nick!user@host),
+ * announced with IRCv3 CHGHOST like CHGHOST/SETHOST. */
+void cmd_chgident(server_t *srv, client_t *cl, irc_message_t *msg) {
+    client_t *target = server_find_user(srv, msg->params[0]);
+    if (!target || !target->registered) { err_no_such_nick(cl, msg->params[0]); return; }
+    const char *ident = msg->params[1];
+    if (!irc_valid_user(ident, USERLEN - 1)) {
+        char m[300]; snprintf(m, sizeof m, "Invalid ident: %s", ident);
+        notice_self(srv, cl, m);
+        return;
+    }
+    char old_prefix[320];
+    client_prefix(target, old_prefix, sizeof old_prefix);
+    snprintf(target->user, sizeof target->user, "%s", ident);
+    target->ident_confirmed = 1; /* an oper-set ident is authoritative -- no "~" self-provided marker */
+    broadcast_chghost(srv, target, old_prefix);
+    char snote[400];
+    snprintf(snote, sizeof snote, "%s used CHGIDENT on %s -> %s", cl->nick, target->nick, ident);
+    log_info("oper", "%s", snote);
+    server_notify_opers(srv, snote);
+}
+
+/* SANICK <nick> <newnick>: force a nick change, bypassing +N and reserved nicks. */
+void cmd_sanick(server_t *srv, client_t *cl, irc_message_t *msg) {
+    client_t *target = server_find_user(srv, msg->params[0]);
+    if (!target || !target->registered || target->is_service) { err_no_such_nick(cl, msg->params[0]); return; }
+    const char *newnick = msg->params[1];
+    if (!irc_valid_nick(newnick, srv->cfg.security.max_nick_length)) {
+        const char *p[] = {newnick};
+        client_reply(cl, N_ERRONEUSNICKNAME, p, 1, "Erroneous nickname");
+        return;
+    }
+    char cf[NICKLEN];
+    irc_casefold(cf, sizeof cf, newnick);
+    client_t *existing = server_find_user(srv, newnick);
+    if (existing && existing != target) {
+        const char *p[] = {newnick};
+        client_reply(cl, N_NICKNAMEINUSE, p, 1, "Nickname is already in use");
+        return;
+    }
+    char old_nick[NICKLEN], prefix[320], line[400];
+    snprintf(old_nick, sizeof old_nick, "%s", target->nick);
+    client_prefix(target, prefix, sizeof prefix);
+    irc_build(line, sizeof line, NULL, 0, prefix, "NICK", NULL, 0, newnick);
+    client_send(target, line);
+    server_send_common_channels(srv, target, line, 0);
+    server_monitor_notify(srv, target, 0);
+    server_watch_notify(srv, target, 0);
+    HASH_DEL(srv->users, target);
+    snprintf(target->nick, sizeof target->nick, "%s", newnick);
+    snprintf(target->casefold_nick, sizeof target->casefold_nick, "%s", cf);
+    server_add_user(srv, target);
+    server_monitor_notify(srv, target, 1);
+    server_watch_notify(srv, target, 1);
+    char snote[400];
+    snprintf(snote, sizeof snote, "%s used SANICK on %s -> %s", cl->nick, old_nick, newnick);
+    log_info("oper", "%s", snote);
+    server_notify_opers(srv, snote);
 }
 
 void cmd_rehash(server_t *srv, client_t *cl, irc_message_t *msg) {
@@ -444,20 +520,24 @@ static void line_common(server_t *srv, client_t *cl, irc_message_t *msg, const c
         snprintf(m, sizeof m, "%s-line added: %s (%s) [expires %s]", line_type, maskbuf, reason, exp);
     } else snprintf(m, sizeof m, "%s-line added: %s (%s) [permanent]", line_type, maskbuf, reason);
     notice_self(srv, cl, m);
-    if (server_line_mask_hits(maskbuf, line_type, cl->ip, cl->user, cl->realhost, cl->ident_confirmed))
+    int is_ban = line_type[0] != 'S' && line_type[0] != 'E'; /* SHUN/ELINE disconnect nobody */
+    if (is_ban && server_line_mask_hits(maskbuf, line_type, cl->ip, cl->user, cl->realhost, cl->ident_confirmed))
         notice_self(srv, cl, "Warning: this mask matches your own address -- you won't be able to reconnect from it while it's active");
 
     /* enforce: disconnect anyone already connected who matches, except the
      * oper setting the line (even if their own address matches). */
     char reasonbuf[300];
     snprintf(reasonbuf, sizeof reasonbuf, "%s-Lined: %s", line_type, reason);
-    int matched = server_kline_enforce(srv, maskbuf, line_type, reasonbuf, cl);
+    int matched = is_ban ? server_kline_enforce(srv, maskbuf, line_type, reasonbuf, cl) : 0;
     if (matched) log_info("oper", "%s %sLINE disconnected %d client(s) matching %s", cl->nick, line_type, matched, maskbuf);
 }
 
 void cmd_kline(server_t *srv, client_t *cl, irc_message_t *msg) { line_common(srv, cl, msg, "K"); }
 void cmd_gline(server_t *srv, client_t *cl, irc_message_t *msg) { line_common(srv, cl, msg, "G"); }
 void cmd_zline(server_t *srv, client_t *cl, irc_message_t *msg) { line_common(srv, cl, msg, "Z"); }
+/* SHUN: keep the connection but silently drop the user's messaging commands. ELINE: exempt a mask from K/G-lines. */
+void cmd_shun(server_t *srv, client_t *cl, irc_message_t *msg) { line_common(srv, cl, msg, "S"); }
+void cmd_eline(server_t *srv, client_t *cl, irc_message_t *msg) { line_common(srv, cl, msg, "E"); }
 
 static void unline_common(server_t *srv, client_t *cl, const char *mask) {
     if (server_kline_remove(srv, mask)) {
@@ -468,6 +548,13 @@ static void unline_common(server_t *srv, client_t *cl, const char *mask) {
         notice_self(srv, cl, m);
     }
 }
+static void unline_typed(server_t *srv, client_t *cl, const char *mask, char type) {
+    char m[300];
+    snprintf(m, sizeof m, server_kline_remove_typed(srv, mask, type) ? "Removed line: %s" : "No such line: %s", mask);
+    notice_self(srv, cl, m);
+}
+void cmd_unshun(server_t *srv, client_t *cl, irc_message_t *msg) { unline_typed(srv, cl, msg->params[0], 'S'); }
+void cmd_uneline(server_t *srv, client_t *cl, irc_message_t *msg) { unline_typed(srv, cl, msg->params[0], 'E'); }
 void cmd_unkline(server_t *srv, client_t *cl, irc_message_t *msg) { unline_common(srv, cl, msg->params[0]); }
 void cmd_ungline(server_t *srv, client_t *cl, irc_message_t *msg) { unline_common(srv, cl, msg->params[0]); }
 void cmd_unzline(server_t *srv, client_t *cl, irc_message_t *msg) { unline_common(srv, cl, msg->params[0]); }
