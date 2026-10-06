@@ -12,6 +12,7 @@
 #include "proto.h"
 #include "protection.h"
 #include "server.h"
+#include "scram.h"
 #include "spam.h"
 #include "ws.h"
 
@@ -888,6 +889,27 @@ static void test_extbans_r_z(void) {
     channel_free(c);
 }
 
+static void test_scram_sha256_rfc7677(void) {
+    /* RFC 7677 section 3: user "user", password "pencil", salt W22ZaJ0SNY7soEsUEjb6gQ==, i=4096 */
+    unsigned char salt[32];
+    assert(scram_b64_decode("W22ZaJ0SNY7soEsUEjb6gQ==", salt, sizeof salt) == 16);
+    scram_verifier_t v;
+    assert(scram_derive("pencil", salt, 16, 4096, &v) == 0);
+    const char *am = "n=user,r=rOprNGfwEbeRWgbNEkqO,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,"
+                     "s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096,c=biws,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0";
+    unsigned char proof[48], sig[32], expect_sig[48];
+    assert(scram_b64_decode("dHzbZapWIk4jUhN+Ute9ytag9zjfMHgsqmmiz7AndVQ=", proof, sizeof proof) == 32);
+    assert(scram_check_proof(&v, am, proof, sig) == 1);
+    assert(scram_b64_decode("6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4=", expect_sig, sizeof expect_sig) == 32);
+    assert(memcmp(sig, expect_sig, 32) == 0); /* ServerSignature from the RFC */
+    proof[0] ^= 1;
+    assert(scram_check_proof(&v, am, proof, sig) == 0);
+    char str[300];
+    scram_verifier_to_string(&v, str, sizeof str);
+    scram_verifier_t v2;
+    assert(scram_verifier_from_string(str, &v2) == 0 && v2.iter == 4096 && memcmp(v2.stored_key, v.stored_key, 32) == 0);
+}
+
 static void test_parse_duration_overflow(void) {
     assert(irc_parse_duration("99999999999999999999999999d") > 0); /* clamps, no signed overflow */
     assert(irc_parse_duration("90m") == 5400 && irc_parse_duration("x") == -1);
@@ -944,6 +966,7 @@ int main(void) {
     RUN(test_build_truncates_and_defangs);
     RUN(test_parse_token_cap_and_names);
     RUN(test_parse_duration_overflow);
+    RUN(test_scram_sha256_rfc7677);
     RUN(test_extbans_r_z);
     RUN(test_websocket_helpers);
     RUN(test_history_ring_and_timestamps);

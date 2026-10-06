@@ -6,6 +6,7 @@
 #include "crypto.h"
 #include "log.h"
 #include "net.h"
+#include "scram.h"
 #include "worker.h"
 
 #include <arpa/inet.h>
@@ -160,7 +161,7 @@ static void cap_notify_send(server_t *srv, const char *verb, const char *tokens,
 void cmd_cap_notify_changes(server_t *srv, int old_accounts, int old_history) {
     int accounts = srv->cfg.accounts.enabled, history = srv->cfg.messages.history_size > 0;
     if (accounts != old_accounts) {
-        if (accounts) cap_notify_send(srv, "NEW", "sasl=PLAIN draft/account-registration=custom-account-name", 0);
+        if (accounts) cap_notify_send(srv, "NEW", "sasl=PLAIN,SCRAM-SHA-256 draft/account-registration=custom-account-name", 0);
         else cap_notify_send(srv, "DEL", "sasl draft/account-registration", 0);
     }
     if (history != old_history) {
@@ -263,7 +264,7 @@ static int supported_cap_tokens(server_t *srv, client_t *cl, char tok[][CAP_TOKE
          * clients for a certificate -- otherwise cl->ssl never has a peer
          * cert to match, so don't advertise a mechanism that can't work. */
         int external_possible = srv->cfg.tls.enabled && srv->cfg.tls.request_client_cert;
-        if (v302) snprintf(tok[n++], CAP_TOKEN_LEN, "%s", external_possible ? "sasl=PLAIN,EXTERNAL" : "sasl=PLAIN");
+        if (v302) snprintf(tok[n++], CAP_TOKEN_LEN, "%s", external_possible ? "sasl=PLAIN,SCRAM-SHA-256,EXTERNAL" : "sasl=PLAIN,SCRAM-SHA-256");
         else snprintf(tok[n++], CAP_TOKEN_LEN, "sasl");
         /* No before-connect (REGISTER needs a registered connection) and no
          * email-required (email is accepted but not stored/verified);
@@ -514,6 +515,12 @@ static int start_plain_login(server_t *srv, client_t *cl, const char *authcid, c
      * would otherwise log in as it in the (cryptographically negligible, but
      * not worth relying on) case the decoy hash ever matched. */
     snprintf(cl->pending_account, sizeof cl->pending_account, "%s", unknown ? "" : authcid);
+    /* An account made before SCRAM existed has no verifier; the password is in hand now, so derive one (stored only if this login succeeds). */
+    cl->pending_scram[0] = '\0';
+    if (!unknown && !accounts_scram(&srv->accounts, authcid)) {
+        scram_verifier_t sv;
+        if (scram_make_verifier(passwd, &sv) == 0) scram_verifier_to_string(&sv, cl->pending_scram, sizeof cl->pending_scram);
+    }
     cl->auth_style = style;
     cl->auth_pending = 1;
     cl->auth_started = time(NULL);
@@ -522,6 +529,119 @@ static int start_plain_login(server_t *srv, client_t *cl, const char *authcid, c
     OPENSSL_cleanse(j.secret, sizeof j.secret);
     if (rc != 0) { cl->auth_pending = 0; return -1; }
     return 0;
+}
+
+/* --- SASL SCRAM-SHA-256 ------------------------------------------------------
+ * Three client messages: client-first, client-final, then an empty "+" after
+ * the server-final. The password never reaches the server (and no scrypt job is
+ * needed): the stored verifier is enough to check the proof. */
+struct scram_sess {
+    char account[64];
+    char first_bare[300];   /* client-first-message-bare */
+    char server_first[300];
+    scram_verifier_t v;
+    int step;               /* 0 = expecting client-first, 1 = client-final, 2 = expecting the final "+" */
+};
+
+static void authenticate_send(client_t *cl, const char *data) {
+    char line[500];
+    const char *p[] = {data};
+    irc_build(line, sizeof line, NULL, 0, NULL, "AUTHENTICATE", p, 1, NULL);
+    client_send(cl, line);
+}
+
+static void scram_fail(client_t *cl) {
+    auth_fail_record(cl->ip);
+    free(cl->scram);
+    cl->scram = NULL;
+    cl->sasl_mech[0] = '\0';
+    client_reply(cl, N_SASLFAIL, NULL, 0, "SASL authentication failed");
+}
+
+/* Pulls "k=value" out of a comma-separated SCRAM attribute list. */
+static int scram_attr(const char *msg, char key, char *out, size_t outsz) {
+    for (const char *p = msg; *p; ) {
+        const char *end = strchr(p, ',');
+        size_t len = end ? (size_t)(end - p) : strlen(p);
+        if (len >= 2 && p[0] == key && p[1] == '=') {
+            if (len - 2 >= outsz) return 0;
+            memcpy(out, p + 2, len - 2);
+            out[len - 2] = '\0';
+            return 1;
+        }
+        p = end ? end + 1 : p + len;
+    }
+    return 0;
+}
+
+static void scram_step(server_t *srv, client_t *cl, const char *token) {
+    struct scram_sess *s = cl->scram;
+    if (!s) { /* first client message arrives with a fresh session */
+        if (auth_fail_throttled(cl->ip)) { scram_fail(cl); return; }
+        s = cl->scram = calloc(1, sizeof *s);
+        if (!s) { cl->sasl_mech[0] = '\0'; return; }
+    }
+    if (strlen(token) > 400) { scram_fail(cl); return; }
+    unsigned char raw[320];
+    char msg[320];
+    if (strcmp(token, "+") == 0) { raw[0] = '\0'; msg[0] = '\0'; }
+    else {
+        int n = scram_b64_decode(token, raw, sizeof raw - 1);
+        if (n < 0) { scram_fail(cl); return; }
+        memcpy(msg, raw, (size_t)n);
+        msg[n] = '\0';
+    }
+
+    if (s->step == 0) { /* client-first: "n,,n=<user>,r=<cnonce>" */
+        if (strncmp(msg, "n,,", 3) != 0 && strncmp(msg, "y,,", 3) != 0) { scram_fail(cl); return; } /* no channel binding */
+        const char *bare = msg + 3;
+        char user[64], cnonce[96];
+        if (!scram_attr(bare, 'n', user, sizeof user) || !scram_attr(bare, 'r', cnonce, sizeof cnonce) || strchr(user, '=')) { scram_fail(cl); return; }
+        const char *stored = accounts_scram(&srv->accounts, user);
+        if (!stored || scram_verifier_from_string(stored, &s->v) != 0) { scram_fail(cl); return; } /* unknown account, or no verifier yet (log in with PLAIN once) */
+        snprintf(s->account, sizeof s->account, "%s", accounts_display_name(&srv->accounts, user));
+        snprintf(s->first_bare, sizeof s->first_bare, "%s", bare);
+        char snonce[24], saltb[64];
+        crypto_random_hex(snonce, sizeof snonce, 11);
+        scram_b64_encode(s->v.salt, (size_t)s->v.saltlen, saltb, sizeof saltb);
+        snprintf(s->server_first, sizeof s->server_first, "r=%s%s,s=%s,i=%d", cnonce, snonce, saltb, s->v.iter);
+        char out[500];
+        if (scram_b64_encode((const unsigned char *)s->server_first, strlen(s->server_first), out, sizeof out) < 0) { scram_fail(cl); return; }
+        s->step = 1;
+        snprintf(cl->sasl_mech, sizeof cl->sasl_mech, "SCRAM-SHA-256"); /* exchange continues */
+        authenticate_send(cl, out);
+        return;
+    }
+    if (s->step == 1) { /* client-final: "c=biws,r=<nonce>,p=<proof>" */
+        char chan[16], nonce[200], proofb[64];
+        if (!scram_attr(msg, 'c', chan, sizeof chan) || (strcmp(chan, "biws") != 0 && strcmp(chan, "eSws") != 0) ||
+            !scram_attr(msg, 'r', nonce, sizeof nonce) || !scram_attr(msg, 'p', proofb, sizeof proofb)) { scram_fail(cl); return; }
+        char expect_nonce[200];
+        if (!scram_attr(s->server_first, 'r', expect_nonce, sizeof expect_nonce) || strcmp(nonce, expect_nonce) != 0) { scram_fail(cl); return; }
+        const char *pp = strstr(msg, ",p=");
+        unsigned char proof[64];
+        if (!pp || scram_b64_decode(proofb, proof, sizeof proof) != SCRAM_KEYLEN) { scram_fail(cl); return; }
+        char authmsg[900];
+        snprintf(authmsg, sizeof authmsg, "%s,%s,%.*s", s->first_bare, s->server_first, (int)(pp - msg), msg);
+        unsigned char sig[SCRAM_KEYLEN];
+        if (!scram_check_proof(&s->v, authmsg, proof, sig)) { scram_fail(cl); return; }
+        char sigb[64], final[100], out[200];
+        scram_b64_encode(sig, SCRAM_KEYLEN, sigb, sizeof sigb);
+        snprintf(final, sizeof final, "v=%s", sigb);
+        scram_b64_encode((const unsigned char *)final, strlen(final), out, sizeof out);
+        s->step = 2;
+        snprintf(cl->sasl_mech, sizeof cl->sasl_mech, "SCRAM-SHA-256");
+        authenticate_send(cl, out);
+        return;
+    }
+    /* step 2: the client's empty "+" acknowledging the server signature */
+    char account[64];
+    snprintf(account, sizeof account, "%s", s->account);
+    free(cl->scram);
+    cl->scram = NULL;
+    server_login(srv, cl, account);
+    client_reply(cl, N_SASLSUCCESS, NULL, 0, "SASL authentication successful");
+    log_info("sasl", "%s authenticated as %s via SCRAM-SHA-256", cl->nick, account);
 }
 
 /* SASL PLAIN and EXTERNAL -- the universal minimum every SASL-capable client
@@ -540,20 +660,23 @@ void cmd_authenticate(server_t *srv, client_t *cl, irc_message_t *msg) {
         }
         int is_plain = strcasecmp(token, "PLAIN") == 0;
         int is_external = strcasecmp(token, "EXTERNAL") == 0;
+        int is_scram = strcasecmp(token, "SCRAM-SHA-256") == 0;
         if (!srv->cfg.accounts.enabled) {
             client_reply(cl, N_SASLFAIL, NULL, 0, "SASL authentication failed");
             return;
         }
-        if (!is_plain && !is_external) {
+        if (!is_plain && !is_external && !is_scram) {
             /* 908 before 904: a bare "failed" gives a client that guessed the
              * wrong mechanism no way to discover which ones exist. */
             int external_possible = srv->cfg.tls.enabled && srv->cfg.tls.request_client_cert;
-            const char *mechs[] = {external_possible ? "PLAIN,EXTERNAL" : "PLAIN"};
+            const char *mechs[] = {external_possible ? "PLAIN,SCRAM-SHA-256,EXTERNAL" : "PLAIN,SCRAM-SHA-256"};
             client_reply(cl, N_SASLMECHS, mechs, 1, "are available SASL mechanisms");
             client_reply(cl, N_SASLFAIL, NULL, 0, "SASL authentication failed");
             return;
         }
-        snprintf(cl->sasl_mech, sizeof cl->sasl_mech, "%s", is_plain ? "PLAIN" : "EXTERNAL");
+        snprintf(cl->sasl_mech, sizeof cl->sasl_mech, "%s", is_plain ? "PLAIN" : is_scram ? "SCRAM-SHA-256" : "EXTERNAL");
+        free(cl->scram); /* a fresh attempt starts a fresh exchange */
+        cl->scram = NULL;
         const char *p[] = {"+"};
         char line[64];
         irc_build(line, sizeof line, NULL, 0, NULL, "AUTHENTICATE", p, 1, NULL);
@@ -566,7 +689,14 @@ void cmd_authenticate(server_t *srv, client_t *cl, irc_message_t *msg) {
     cl->sasl_mech[0] = '\0';
 
     if (strcmp(token, "*") == 0) {
+        free(cl->scram);
+        cl->scram = NULL;
         client_reply(cl, N_SASLABORTED, NULL, 0, "SASL authentication aborted");
+        return;
+    }
+
+    if (strcmp(mech, "SCRAM-SHA-256") == 0) {
+        scram_step(srv, cl, token);
         return;
     }
 
@@ -726,6 +856,8 @@ static void start_register(server_t *srv, client_t *cl, const char *account, con
     j.conn_id = cl->conn_id;
     snprintf(j.secret, sizeof j.secret, "%s", password);
     snprintf(cl->pending_account, sizeof cl->pending_account, "%s", account);
+    cl->pending_scram[0] = '\0';
+    { scram_verifier_t sv; if (scram_make_verifier(password, &sv) == 0) scram_verifier_to_string(&sv, cl->pending_scram, sizeof cl->pending_scram); }
     cl->auth_style = style;
     cl->auth_pending = 1;
     cl->auth_started = time(NULL);
@@ -856,6 +988,8 @@ void cmd_finish_auth(server_t *srv, client_t *cl, int is_register, int success, 
     if (!is_register) {
         if (success) {
             account = accounts_display_name(&srv->accounts, account); /* stored case, not whatever was typed */
+            if (cl->pending_scram[0] && !accounts_scram(&srv->accounts, account)) accounts_set_scram(&srv->accounts, account, cl->pending_scram);
+            cl->pending_scram[0] = '\0';
             server_login(srv, cl, account);
             if (style == AUTH_STYLE_NICKSERV) {
                 char m[200];
@@ -880,6 +1014,8 @@ void cmd_finish_auth(server_t *srv, client_t *cl, int is_register, int success, 
         return;
     }
     accounts_register_hashed(&srv->accounts, account, hash);
+    if (cl->pending_scram[0]) accounts_set_scram(&srv->accounts, account, cl->pending_scram);
+    cl->pending_scram[0] = '\0';
     server_login(srv, cl, account);
     char m[200];
     snprintf(m, sizeof m, "Account %s registered -- you are now logged in as it", account);

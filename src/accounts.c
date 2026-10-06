@@ -98,6 +98,19 @@ const char *accounts_display_name(account_store_t *st, const char *name) {
     return cJSON_IsString(n) ? n->valuestring : name;
 }
 
+const char *accounts_scram(account_store_t *st, const char *name) {
+    cJSON *v = cJSON_GetObjectItemCaseSensitive(find(st, name), "scram");
+    return cJSON_IsString(v) ? v->valuestring : NULL;
+}
+
+void accounts_set_scram(account_store_t *st, const char *name, const char *verifier) {
+    cJSON *rec = find(st, name);
+    if (!rec || !verifier || !verifier[0]) return;
+    cJSON_DeleteItemFromObjectCaseSensitive(rec, "scram");
+    cJSON_AddStringToObject(rec, "scram", verifier);
+    save(st);
+}
+
 long accounts_created_at(account_store_t *st, const char *name) {
     cJSON *v = cJSON_GetObjectItemCaseSensitive(find(st, name), "created_at");
     return cJSON_IsNumber(v) ? (long)v->valuedouble : 0;
