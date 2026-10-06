@@ -27,6 +27,11 @@ int net_connect_flood_hit(const cfg_security_t *sec, const char *ip);
 /* Runs until srv->shutdown_requested. Returns 0 normally. */
 /* Restores the client's default displayed host (cloak if host_masking, else
  * realhost) -- for VHOST/SETHOST "off". Caller broadcasts the CHGHOST. */
+/* [[classes]]: put `cl` in the first class whose hosts match its IP (releasing any earlier one).
+ * Returns -1, leaving it in no class, if that class is already full. */
+int net_assign_class(struct server *srv, struct client *cl);
+void net_release_class(struct server *srv, struct client *cl);
+void net_reclass_all(struct server *srv); /* after a rehash changed the class list */
 void net_reset_host(struct server *srv, struct client *cl);
 int net_run(struct server *srv);
 

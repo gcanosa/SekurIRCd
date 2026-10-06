@@ -27,6 +27,7 @@
 #define CFG_MAX_HOSTS_PER_OPER   16
 #define CFG_MAX_VHOSTS           64
 #define CFG_MAX_WEBIRC           16
+#define CFG_MAX_CLASSES          16
 #define CFG_MAX_HOSTS_PER_WEBIRC 16
 #define CFG_MAX_HOSTS_PER_VHOST  16
 #define CFG_MAX_ALLOWED_CHANNELS 64
@@ -149,6 +150,19 @@ typedef struct {
     char location2[CFG_STR];
     char email[CFG_STR];
 } cfg_admin_t;
+
+/* [[classes]]: per-connection-class limits, chosen by the client's source IP
+ * (first matching class wins). A value of 0 means "inherit the global setting". */
+typedef struct {
+    char name[CFG_STR];
+    char hosts[CFG_MAX_HOSTS_PER_WEBIRC][CFG_MASK]; /* IP globs */
+    int n_hosts;
+    int max_clients;     /* simultaneous connections in this class */
+    int max_per_ip;
+    int sendq_max;       /* bytes queued for a slow reader before "SendQ exceeded" */
+    int flood_max_msgs;
+    double flood_window;
+} cfg_class_t;
 
 /* [[webirc]]: a trusted web gateway that may send WEBIRC to override a
  * client's IP/hostname. */
@@ -311,6 +325,8 @@ typedef struct {
     int n_vhosts;
     cfg_webirc_t webirc[CFG_MAX_WEBIRC];
     int n_webirc;
+    cfg_class_t classes[CFG_MAX_CLASSES];
+    int n_classes;
     cfg_channels_t channels;
     cfg_dnsbl_t dnsbl;
     cfg_spam_t spam;

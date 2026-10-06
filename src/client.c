@@ -15,6 +15,7 @@ client_t *client_new(int fd, struct server *srv) {
     if (!cl) return NULL;
     cl->fd = fd;
     cl->srv = srv;
+    cl->class_idx = -1; /* calloc's 0 would mean "class 0" */
     cl->signon_time = cl->last_activity = time(NULL);
     cl->sbuf_cap = 4096;
     cl->sbuf = malloc(cl->sbuf_cap);
@@ -91,7 +92,7 @@ void client_send(client_t *cl, const char *line) {
 
     size_t len = strlen(line);
     size_t need = cl->sbuf_len + len + 2;
-    if (need > SENDQ_MAX) {
+    if (need > (cl->sendq_max ? cl->sendq_max : (size_t)SENDQ_MAX)) {
         cl->quitting = 1;
         snprintf(cl->quit_reason, sizeof cl->quit_reason, "SendQ exceeded");
         return;

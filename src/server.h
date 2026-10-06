@@ -49,6 +49,7 @@ typedef struct server {
      * doesn't recloak every connected user on every SIGHUP -- it's just not
      * stable across a full restart. */
     char cloak_secret[65];
+    int class_count[CFG_MAX_CLASSES]; /* live connections per [[classes]] entry */
     int n_watchers;        /* clients with a non-empty MONITOR/WATCH list */
     char msgid_prefix[17]; /* random per run, so msgids stay unique across restarts */
     uint64_t msgid_counter;

@@ -185,6 +185,11 @@ int client_apply_real_address(server_t *srv, client_t *cl, const char *ip, const
     /* The intermediary vouches for the hostname; fall back to the IP if it's junk or just the IP again. */
     snprintf(cl->realhost, sizeof cl->realhost, "%s", (hostname && irc_valid_host(hostname) && strcmp(hostname, ip) != 0) ? hostname : ip);
     net_reset_host(srv, cl);
+    if (net_assign_class(srv, cl) != 0) { /* the real address belongs to a full class */
+        snprintf(cl->quit_reason, sizeof cl->quit_reason, "Too many connections in your class");
+        cl->quitting = 1;
+        return -1;
+    }
     cl->webirc = 1; /* "address supplied by a trusted intermediary": also makes net.c ignore the DNSBL result for the old address */
     cl->rdns_pending = cl->ident_pending = cl->dnsbl_pending = 0;
     const char *kl = server_kline_match(srv, cl->ip, NULL, cl->realhost, 0);
