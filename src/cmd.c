@@ -22,6 +22,7 @@ static const cmd_entry_t DISPATCH[] = {
     {"USER", cmd_user, 4, 0, 0},
     {"PASS", cmd_pass, 0, 0, 0},
     {"WEBIRC", cmd_webirc, 4, 0, 0},
+    {"TAGMSG", cmd_tagmsg, 1, 1, 0},
     {"USERIP", cmd_userip, 1, 1, 1},
     {"CAP", cmd_cap, 1, 0, 0},
     {"PING", cmd_ping, 0, 0, 0},

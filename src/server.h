@@ -49,6 +49,8 @@ typedef struct server {
      * doesn't recloak every connected user on every SIGHUP -- it's just not
      * stable across a full restart. */
     char cloak_secret[65];
+    char msgid_prefix[17]; /* random per run, so msgids stay unique across restarts */
+    uint64_t msgid_counter;
     int listen_fd;
     int tls_listen_fd;  /* -1 unless [tls] enabled (see net.c's TLS listener) */
     SSL_CTX *tls_ctx;
@@ -112,6 +114,8 @@ typedef struct server {
  * must name the software (004 MYINFO, 351 VERSION). buf must hold at least
  * strlen("SekurIRCd-") + sizeof(cfg.server.version). */
 extern const char sekurircd_build[]; /* build.c */
+/* Fills `out` with a fresh, unique message id (IRCv3 msgid tag). */
+void server_next_msgid(server_t *srv, char *out, size_t outsz);
 void server_software_version(const server_t *srv, char *buf, size_t bufsz);
 /* Send the 005 RPL_ISUPPORT lines (also re-sent by /VERSION, ircu-style). */
 void server_send_isupport(server_t *srv, client_t *cl);

@@ -21,7 +21,7 @@ int client_is_silencing(client_t *cl, client_t *from) {
  * the sender has an account to report, else the plain `line`. */
 /* One rendering of a message per tag combination: [0] plain, [1] +account,
  * [2] +bot, [3] both. Only the ones the sender needs are built. */
-#define LINE_SZ 760
+#define LINE_SZ 1200
 
 /* The '*' oper flag in WHO/WHOX/USERHOST/GLOB: honours +H (hidden oper) the
  * same way WHOIS does -- shown only to opers and to the user themself. */
@@ -30,20 +30,38 @@ static int visible_oper(const client_t *u, const client_t *viewer) {
     return !(u->umodes & UMODE_H) || u == viewer || (viewer->umodes & UMODE_O);
 }
 
+/* Tags a PRIVMSG/NOTICE/TAGMSG carries to a message-tags recipient: bot,
+ * msgid, and the sender's client-only (+) tags. Rendered once per message,
+ * not once per recipient. */
+#define MAX_CLIENT_TAGS 8
+typedef struct {
+    char msgid[48];
+    irc_tag_t ct[MAX_CLIENT_TAGS];
+    int nct;
+    int tagmsg; /* TAGMSG: only message-tags recipients get it */
+} msg_extra_t;
+
 static void build_lines(char lines[4][LINE_SZ], client_t *from, const char *prefix, const char *verb,
-                        const char **p, const char *text) {
+                        const char **p, const char *text, const msg_extra_t *x) {
     irc_build(lines[0], LINE_SZ, NULL, 0, prefix, verb, p, 1, text);
     int acct = from->account[0] != '\0', bot = (from->umodes & UMODE_B) != 0;
-    irc_tag_t ta = {"account", from->account}, tb = {"bot", ""};
+    irc_tag_t ta = {"account", from->account};
+    irc_tag_t mt[1 + 1 + MAX_CLIENT_TAGS + 1]; /* [account,] bot, msgid, client tags */
+    int n = 0;
+    if (acct) mt[n++] = ta;
+    if (bot) mt[n++] = (irc_tag_t){"bot", ""};
+    mt[n++] = (irc_tag_t){"msgid", x->msgid};
+    for (int i = 0; i < x->nct; i++) mt[n++] = x->ct[i];
     if (acct) irc_build(lines[1], LINE_SZ, &ta, 1, prefix, verb, p, 1, text);
-    if (bot) irc_build(lines[2], LINE_SZ, &tb, 1, prefix, verb, p, 1, text);
-    if (acct && bot) { irc_tag_t both[] = {ta, tb}; irc_build(lines[3], LINE_SZ, both, 2, prefix, verb, p, 1, text); }
+    irc_build(lines[2], LINE_SZ, mt + (acct ? 1 : 0), n - (acct ? 1 : 0), prefix, verb, p, 1, text);
+    if (acct) irc_build(lines[3], LINE_SZ, mt, n, prefix, verb, p, 1, text);
 }
 
-/* account tag needs account-tag; the IRCv3 bot tag needs message-tags. */
-static void deliver(client_t *rcpt, client_t *from, char lines[4][LINE_SZ]) {
-    int i = ((from->account[0] && (rcpt->caps & CAP_ACCOUNT_TAG)) ? 1 : 0) |
-            (((from->umodes & UMODE_B) && (rcpt->caps & CAP_MESSAGE_TAGS)) ? 2 : 0);
+/* account tag needs account-tag; bot/msgid/client tags need message-tags. */
+static void deliver(client_t *rcpt, client_t *from, char lines[4][LINE_SZ], const msg_extra_t *x) {
+    int m = (rcpt->caps & CAP_MESSAGE_TAGS) != 0;
+    if (x->tagmsg && !m) return;
+    int i = ((from->account[0] && (rcpt->caps & CAP_ACCOUNT_TAG)) ? 1 : 0) | (m ? 2 : 0);
     client_send(rcpt, lines[i]);
 }
 
@@ -92,9 +110,32 @@ static void flood_kick(server_t *srv, channel_t *chan, client_t *victim) {
     server_maybe_drop_channel(srv, chan); /* chan may be freed -- don't touch it after this */
 }
 
+/* The sender's client-only tags (+key[=value]) that are safe to relay: bounded count/size. */
+static void collect_client_tags(const irc_message_t *msg, msg_extra_t *x) {
+    size_t total = 0;
+    for (int i = 0; i < msg->ntags && x->nct < MAX_CLIENT_TAGS; i++) {
+        const char *k = msg->tags[i].key, *v = msg->tags[i].val ? msg->tags[i].val : "";
+        if (k[0] != '+' || !k[1] || strlen(k) > 64 || strlen(v) > 128) continue;
+        int ok = 1;
+        for (const char *c = k + 1; *c; c++)
+            if (!(isalnum((unsigned char)*c) || *c == '-' || *c == '/' || *c == '.')) { ok = 0; break; }
+        if (!ok || total + strlen(k) + strlen(v) + 2 > 400) continue;
+        total += strlen(k) + strlen(v) + 2;
+        x->ct[x->nct++] = msg->tags[i];
+    }
+}
+
 static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char *verb, int is_notice) {
     const char *target = msg->params[0];
-    if (msg->nparams < 2) {
+    int is_tagmsg = strcmp(verb, "TAGMSG") == 0;
+    msg_extra_t x = {.tagmsg = is_tagmsg};
+    server_next_msgid(srv, x.msgid, sizeof x.msgid);
+    collect_client_tags(msg, &x);
+    if (is_tagmsg) {
+        /* IRCv3 message-tags: TAGMSG is only meaningful from a client that negotiated it, and without any
+         * relayable (+) tag there is nothing to send. */
+        if (!(cl->caps & CAP_MESSAGE_TAGS) || x.nct == 0) return;
+    } else if (msg->nparams < 2) {
         if (!is_notice) client_reply(cl, N_NOTEXTTOSEND, NULL, 0, "No text to send");
         return;
     }
@@ -102,9 +143,10 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
      * same choke-point architecture as server._read_loop in the Python
      * daemon (see CLAUDE.md's "Security invariants to preserve"). */
     char textbuf[420];
-    snprintf(textbuf, sizeof textbuf, "%.*s", srv->cfg.messages.max_message_length, msg->params[msg->nparams - 1]);
+    if (is_tagmsg) textbuf[0] = '\0';
+    else snprintf(textbuf, sizeof textbuf, "%.*s", srv->cfg.messages.max_message_length, msg->params[msg->nparams - 1]);
 
-    if (spam_check_message(srv, cl, target, textbuf, is_notice)) return;
+    if (!is_tagmsg && spam_check_message(srv, cl, target, textbuf, is_notice)) return;
 
     char prefix[320];
     client_prefix(cl, prefix, sizeof prefix);
@@ -176,7 +218,7 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
         const char *outtext = textbuf;
         if (chan->modes & CMODE_STRIPCOLOR) { strip_formatting(stripbuf, sizeof stripbuf, textbuf); outtext = stripbuf; }
 
-        build_lines(lines, cl, prefix, verb, p, outtext);
+        build_lines(lines, cl, prefix, verb, p, is_tagmsg ? NULL : outtext, &x);
 
         member_t *mm, *tmp;
         if (status_prefix) {
@@ -187,14 +229,14 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
                 int has_it = (min_rank == RANK_OP) ? (rank & RANK_OP)
                            : (min_rank == RANK_HALFOP) ? (rank & (RANK_OP | RANK_HALFOP))
                            : (rank & (RANK_OP | RANK_HALFOP | RANK_VOICE));
-                if (has_it) deliver(mm->client, cl, lines);
+                if (has_it) deliver(mm->client, cl, lines, &x);
             }
             return; /* STATUSMSG has no echo-message in upstream either */
         }
 
         HASH_ITER(hh, chan->members, mm, tmp) {
             if (mm->client == cl) continue;
-            deliver(mm->client, cl, lines);
+            deliver(mm->client, cl, lines, &x);
         }
         delivered = 1;
     } else {
@@ -230,17 +272,18 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
             const char *pa[] = {dst->nick};
             client_reply(cl, N_AWAY, pa, 1, dst->away);
         }
-        build_lines(lines, cl, prefix, verb, p, textbuf);
-        deliver(dst, cl, lines);
+        build_lines(lines, cl, prefix, verb, p, is_tagmsg ? NULL : textbuf, &x);
+        deliver(dst, cl, lines, &x);
         delivered = 1;
     }
     /* IRCv3 echo-message: the sender gets its own message back too, once
      * delivery actually happened. */
-    if (delivered && (cl->caps & CAP_ECHO_MESSAGE)) deliver(cl, cl, lines);
+    if (delivered && (cl->caps & CAP_ECHO_MESSAGE)) deliver(cl, cl, lines, &x);
 }
 
 void cmd_privmsg(server_t *srv, client_t *cl, irc_message_t *msg) { send_msg(srv, cl, msg, "PRIVMSG", 0); }
 void cmd_notice(server_t *srv, client_t *cl, irc_message_t *msg) { send_msg(srv, cl, msg, "NOTICE", 1); }
+void cmd_tagmsg(server_t *srv, client_t *cl, irc_message_t *msg) { send_msg(srv, cl, msg, "TAGMSG", 1); }
 
 static void whois_one(server_t *srv, client_t *cl, const char *nick) {
     client_t *target = server_find_user(srv, nick);

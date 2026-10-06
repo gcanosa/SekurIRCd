@@ -601,6 +601,14 @@ static int read_client_once(server_t *srv, client_t *cl) {
         start = i + 1;
 
         if (cl->quitting) continue; /* a prior line this same read already ended the connection */
+        /* IRCv3 message-tags: the "@tags " section has its own 8191-byte budget and
+         * doesn't count against the 512-byte limit on the rest of the line. */
+        if (line[0] == '@') {
+            char *sp = memchr(line, ' ', linelen);
+            size_t tagsec = sp ? (size_t)(sp - line) + 1 : linelen;
+            if (tagsec > 8191 + 1) { client_reply(cl, N_INPUTTOOLONG, NULL, 0, "Input line was too long"); continue; }
+            linelen -= tagsec;
+        }
         if (linelen > maxlen) {
             client_reply(cl, N_INPUTTOOLONG, NULL, 0, "Input line was too long");
             continue;
