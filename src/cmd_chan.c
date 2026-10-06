@@ -691,6 +691,7 @@ static void cmd_mode_user(client_t *cl, irc_message_t *msg, const char *target) 
         if (c == 'o' && sign == '-') { /* de-opered: drop the oper-only modes too */
             cl->umodes &= ~(UMODE_Q | UMODE_H);
             cl->oper_name[0] = '\0';
+            cl->oper_privs = 0;
         }
         if (cursign != sign) { applied[ap++] = sign; cursign = sign; }
         applied[ap++] = c;

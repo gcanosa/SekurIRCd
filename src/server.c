@@ -685,7 +685,7 @@ void server_kline_prune_expired(server_t *srv) {
             pp = &(*pp)->next;
         }
     }
-    if (pruned) srv->klines_dirty = 1;
+    if (pruned) { srv->klines_dirty = 1; srv->kline_gen++; }
 }
 
 void server_kline_flush(server_t *srv) {
@@ -707,6 +707,7 @@ void server_kline_add(server_t *srv, const char *mask, const char *reason,
         if (newexp == 0 || e->expires_at == 0) e->expires_at = 0;
         else if (newexp > e->expires_at) e->expires_at = newexp;
         srv->klines_dirty = 1;
+        srv->kline_gen++;
         return;
     }
     kline_entry_t *k = calloc(1, sizeof *k);
@@ -719,6 +720,7 @@ void server_kline_add(server_t *srv, const char *mask, const char *reason,
     k->next = srv->klines;
     srv->klines = k;
     srv->klines_dirty = 1;
+    srv->kline_gen++;
 
     char snote[400];
     snprintf(snote, sizeof snote, "%s added %s-Line '%s' (%s)", set_by, line_type, mask, reason);
@@ -738,14 +740,18 @@ int server_kline_enforce(server_t *srv, const char *mask, const char *line_type,
     return matched;
 }
 
-int server_kline_remove(server_t *srv, const char *mask) {
+/* type 0 = any ban line (K/G/Z) -- never a SHUN/ELINE, so UNKLINE can't silently delete one. */
+int server_kline_remove_typed(server_t *srv, const char *mask, char type) {
     kline_entry_t **pp = &srv->klines;
     while (*pp) {
-        if (strcasecmp((*pp)->mask, mask) == 0) {
+        char t = (*pp)->line_type[0];
+        int type_ok = type ? t == type : (t != 'S' && t != 'E');
+        if (type_ok && strcasecmp((*pp)->mask, mask) == 0) {
             kline_entry_t *dead = *pp;
             *pp = dead->next;
             free(dead);
             srv->klines_dirty = 1;
+            srv->kline_gen++;
             char snote[350];
             snprintf(snote, sizeof snote, "removed line on '%s'", mask);
             server_notify_opers(srv, snote);
@@ -755,6 +761,8 @@ int server_kline_remove(server_t *srv, const char *mask) {
     }
     return 0;
 }
+
+int server_kline_remove(server_t *srv, const char *mask) { return server_kline_remove_typed(srv, mask, 0); }
 
 int server_line_mask_hits(const char *mask, const char *line_type, const char *ip,
                            const char *user, const char *host, int ident_confirmed) {
@@ -782,11 +790,31 @@ const char *server_kline_match(server_t *srv, const char *ip, const char *user,
                                 const char *host, int ident_confirmed) {
     static char reason_buf[300];
     for (kline_entry_t *k = srv->klines; k; k = k->next) {
+        if (k->line_type[0] == 'S' || k->line_type[0] == 'E') continue; /* SHUN/ELINE aren't bans */
         if (!server_line_mask_hits(k->mask, k->line_type, ip, user, host, ident_confirmed)) continue;
+        if (k->line_type[0] != 'Z') { /* an ELINE exempts K/G lines (a Z-line is applied before any user@host exists) */
+            int exempt = 0;
+            for (kline_entry_t *e = srv->klines; e && !exempt; e = e->next)
+                if (e->line_type[0] == 'E' && server_line_mask_hits(e->mask, "K", ip, user, host, ident_confirmed)) exempt = 1;
+            if (exempt) continue;
+        }
         snprintf(reason_buf, sizeof reason_buf, "%s-Lined: %s", k->line_type, k->reason);
         return reason_buf;
     }
     return NULL;
+}
+
+/* SHUN: a connected client matching an 'S' line keeps its connection but its
+ * messaging commands are dropped (see cmd.c). Cached per client, keyed on
+ * kline_gen, so it's one integer compare per command unless the list changed. */
+int server_is_shunned(server_t *srv, client_t *cl) {
+    if (cl->shun_gen != srv->kline_gen + 1) {
+        cl->shun_gen = srv->kline_gen + 1;
+        cl->shunned = 0;
+        for (kline_entry_t *k = srv->klines; k && !cl->shunned; k = k->next)
+            if (k->line_type[0] == 'S' && server_line_mask_hits(k->mask, "K", cl->ip, cl->user, cl->realhost, cl->ident_confirmed)) cl->shunned = 1;
+    }
+    return cl->shunned;
 }
 
 void server_free_tables(server_t *srv) {

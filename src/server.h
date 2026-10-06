@@ -81,6 +81,7 @@ typedef struct server {
     int whowas_count;                  /* how many slots are valid (<= WHOWAS_MAX) */
 
     kline_entry_t *klines;
+    unsigned kline_gen;     /* bumped whenever the list changes -- invalidates client_t's cached SHUN verdict */
     int klines_dirty;       /* a write is pending -- net.c's tick flushes it (see server_kline_flush) */
 
     /* Exact concurrent-connection count per IP, maintained by
@@ -214,6 +215,8 @@ void server_kline_add(server_t *srv, const char *mask, const char *reason,
                        const char *set_by, const char *line_type, long duration_secs);
 /* Returns 1 and removes+saves, or 0 if no line matched `mask` exactly. */
 int server_kline_remove(server_t *srv, const char *mask);
+int server_kline_remove_typed(server_t *srv, const char *mask, char type); /* type 'S'/'E' for SHUN/ELINE; 0 = ban lines */
+int server_is_shunned(server_t *srv, client_t *cl);
 /* First matching line's reason (K-Lined: <reason>), or NULL if `ip` isn't
  * listed. Does NOT prune expired lines itself -- call server_kline_prune_expired
  * periodically (net.c's tick). */

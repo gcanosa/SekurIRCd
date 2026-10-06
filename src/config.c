@@ -634,6 +634,29 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
                 snprintf(errbuf, errbufsz, "operators[%d] requires at least one hosts mask (use \"*@*\" to allow from anywhere)", i);
                 return -1;
             }
+            {
+                static const struct { const char *name; unsigned bit; } OPER_PRIV_NAMES[] = {
+                    {"kill", OPER_PRIV_KILL}, {"kline", OPER_PRIV_KLINE}, {"sa", OPER_PRIV_SA}, {"host", OPER_PRIV_HOST},
+                    {"wallops", OPER_PRIV_WALLOPS}, {"rehash", OPER_PRIV_REHASH}, {"die", OPER_PRIV_DIE}, {"link", OPER_PRIV_LINK},
+                    {"all", OPER_PRIV_ALL},
+                };
+                char pv[16][CFG_STR];
+                int npv = 0;
+                snprintf(fn, sizeof fn, "operators[%d].privileges", i);
+                if (cfg_get_str_array(o, "privileges", pv, 16, &npv, errbuf, errbufsz, fn)) return -1;
+                op->privs = 0;
+                for (int j = 0; j < npv; j++) {
+                    int found = 0;
+                    for (size_t k = 0; k < sizeof OPER_PRIV_NAMES / sizeof OPER_PRIV_NAMES[0]; k++)
+                        if (strcasecmp(pv[j], OPER_PRIV_NAMES[k].name) == 0) { op->privs |= OPER_PRIV_NAMES[k].bit; found = 1; }
+                    if (!found) {
+                        snprintf(errbuf, errbufsz, "operators[%d].privileges: unknown privilege '%s' (kill, kline, sa, host, wallops, rehash, die, link, all)", i, pv[j]);
+                        return -1;
+                    }
+                }
+                /* privileges = [] is an explicit "none of the restricted commands" -- distinct from the key being absent (everything). */
+                if (toml_key_exists(o, "privileges") && npv == 0) op->privs = 0x100u; /* only the unrestricted commands */
+            }
             for (int j = 0; j < op->n_hosts; j++) {
                 if (!op->hosts[j][0] || strpbrk(op->hosts[j], " \t\r\n")) {
                     snprintf(errbuf, errbufsz, "operators[%d].hosts[%d] must be a non-empty mask with no whitespace", i, j);

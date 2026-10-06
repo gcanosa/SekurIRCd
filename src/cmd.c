@@ -17,6 +17,24 @@ static int is_registration_command(const char *cmd) {
     return 0;
 }
 
+/* Which OPER_PRIV_* class an oper-only command belongs to (0 = no class: any oper may use it). */
+static unsigned command_priv(const char *c) {
+    static const struct { const char *cmd; unsigned priv; } MAP[] = {
+        {"KILL", OPER_PRIV_KILL},
+        {"KLINE", OPER_PRIV_KLINE}, {"SHUN", OPER_PRIV_KLINE}, {"UNSHUN", OPER_PRIV_KLINE}, {"ELINE", OPER_PRIV_KLINE}, {"UNELINE", OPER_PRIV_KLINE}, {"GLINE", OPER_PRIV_KLINE}, {"ZLINE", OPER_PRIV_KLINE},
+        {"UNKLINE", OPER_PRIV_KLINE}, {"UNGLINE", OPER_PRIV_KLINE}, {"UNZLINE", OPER_PRIV_KLINE},
+        {"SPAMFILTER", OPER_PRIV_KLINE}, {"PROTECT", OPER_PRIV_KLINE},
+        {"SAJOIN", OPER_PRIV_SA}, {"SAPART", OPER_PRIV_SA}, {"SAMODE", OPER_PRIV_SA}, {"SANICK", OPER_PRIV_SA},
+        {"CHGHOST", OPER_PRIV_HOST}, {"SETHOST", OPER_PRIV_HOST}, {"CHGIDENT", OPER_PRIV_HOST}, {"USERIP", OPER_PRIV_HOST},
+        {"WALLOPS", OPER_PRIV_WALLOPS}, {"GLOBOPS", OPER_PRIV_WALLOPS},
+        {"REHASH", OPER_PRIV_REHASH},
+        {"DIE", OPER_PRIV_DIE}, {"RESTART", OPER_PRIV_DIE},
+        {"SQUIT", OPER_PRIV_LINK}, {"CONNECT", OPER_PRIV_LINK},
+    };
+    for (size_t i = 0; i < sizeof MAP / sizeof MAP[0]; i++) if (strcasecmp(MAP[i].cmd, c) == 0) return MAP[i].priv;
+    return 0;
+}
+
 static const cmd_entry_t DISPATCH[] = {
     {"NICK", cmd_nick, 0, 0, 0},
     {"USER", cmd_user, 4, 0, 0},
@@ -25,6 +43,13 @@ static const cmd_entry_t DISPATCH[] = {
     {"TAGMSG", cmd_tagmsg, 1, 1, 0},
     {"CHATHISTORY", cmd_chathistory, 2, 1, 0},
     {"USERIP", cmd_userip, 1, 1, 1},
+    {"SHUN", cmd_shun, 0, 1, 1},
+    {"UNSHUN", cmd_unshun, 1, 1, 1},
+    {"ELINE", cmd_eline, 0, 1, 1},
+    {"UNELINE", cmd_uneline, 1, 1, 1},
+    {"GLOBOPS", cmd_globops, 1, 1, 1},
+    {"CHGIDENT", cmd_chgident, 2, 1, 1},
+    {"SANICK", cmd_sanick, 2, 1, 1},
     {"CAP", cmd_cap, 1, 0, 0},
     {"PING", cmd_ping, 0, 0, 0},
     {"PONG", cmd_pong, 0, 0, 0},
@@ -183,6 +208,13 @@ void cmd_dispatch(server_t *srv, client_t *cl, irc_message_t *msg) {
         err_not_registered(cl);
         return;
     }
+    if (cl->registered && !(cl->umodes & UMODE_O) && server_is_shunned(srv, cl)) {
+        /* SHUN: only harmless/informational commands still work; everything else is silently dropped. */
+        static const char *ALLOWED[] = {"PING", "PONG", "QUIT", "PART", "MOTD", "VERSION", "TIME", "LUSERS", "HELP", "ADMIN", "INFO", "CAP", "RULES"};
+        int ok = 0;
+        for (size_t a = 0; a < sizeof ALLOWED / sizeof ALLOWED[0]; a++) if (strcasecmp(msg->command, ALLOWED[a]) == 0) { ok = 1; break; }
+        if (!ok) return;
+    }
     for (int i = 0; i < N_DISPATCH; i++) {
         if (strcasecmp(DISPATCH[i].name, msg->command) != 0) continue;
         if (msg->nparams < DISPATCH[i].min_params) {
@@ -190,6 +222,11 @@ void cmd_dispatch(server_t *srv, client_t *cl, irc_message_t *msg) {
             return;
         }
         if (DISPATCH[i].oper_only && !(cl->umodes & UMODE_O)) {
+            err_no_privileges(cl);
+            return;
+        }
+        unsigned need = DISPATCH[i].oper_only ? command_priv(msg->command) : 0;
+        if (need && !(cl->oper_privs & need)) { /* an oper whose login lacks this command's privilege class */
             err_no_privileges(cl);
             return;
         }

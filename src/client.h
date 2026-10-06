@@ -72,12 +72,15 @@ typedef struct client {
     unsigned int umodes;
 
     int got_nick, got_user;
+    unsigned shun_gen;    /* server_is_shunned cache: kline_gen + 1 when `shunned` is current */
+    int shunned;
     int webirc;           /* a trusted gateway already set ip/realhost via WEBIRC */
     int cap_version;      /* 0, or the version from "CAP LS <n>" (302 enables multi-line LS, values, cap-notify) */
     int cap_negotiating;  /* true between "CAP LS" and "CAP END" */
     int registered;       /* welcome burst already sent */
 
     char oper_name[64];   /* "" if not opered */
+    unsigned oper_privs;  /* OPER_PRIV_* granted by that login (see config.h) */
     int is_service;       /* introduced by a trusted link as a service bot (chanserv) */
     char account[64];     /* "" if not logged in (SASL or /REGISTER) -- see accounts.h */
     char acct_created_for[64]; /* spam.c cache: account name whose created_at is in acct_created */
