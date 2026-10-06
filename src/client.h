@@ -122,6 +122,8 @@ typedef struct client {
     time_t auth_started;    /* when auth_pending was set -- net.c's tick clears a result that never came back */
     uint64_t auth_gen;      /* bumped on every SASL/REGISTER/OPER/DIE/RESTART job submitted -- see worker.h job_t.gen */
     char pending_account[64];
+    char pending_scram[160]; /* SCRAM verifier derived from the password in flight; stored if the login/registration succeeds */
+    struct scram_sess *scram; /* SASL SCRAM-SHA-256 exchange in progress (cmd_reg.c) */
     int auth_style;         /* AUTH_STYLE_*: how to word the result of the pending login/register */
     int register_attempts;  /* /REGISTER is unauthenticated account creation: cap it per connection */
     time_t register_last;
