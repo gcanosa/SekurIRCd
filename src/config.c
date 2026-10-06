@@ -794,6 +794,26 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
         if (parse_spam(sp, out, errbuf, errbufsz)) return -1;
     }
 
+    /* [websocket] */
+    {
+        int e;
+        toml_table_t *w = cfg_get_section(raw, "websocket", errbuf, errbufsz, &e);
+        if (e) return -1;
+        if (cfg_get_bool(w, "enabled", 0, &out->websocket.enabled, errbuf, errbufsz, "websocket.enabled")) return -1;
+        if (cfg_get_int(w, "port", 8080, &out->websocket.port, errbuf, errbufsz, "websocket.port")) return -1;
+        if (cfg_get_bool(w, "tls", 0, &out->websocket.tls, errbuf, errbufsz, "websocket.tls")) return -1;
+        if (cfg_get_str_array(w, "trusted_proxies", out->websocket.trusted_proxies, CFG_MAX_HOSTS_PER_WEBIRC, &out->websocket.n_trusted_proxies, errbuf, errbufsz, "websocket.trusted_proxies")) return -1;
+        if (cfg_get_str_array(w, "allowed_origins", out->websocket.allowed_origins, CFG_MAX_HOSTS_PER_WEBIRC, &out->websocket.n_allowed_origins, errbuf, errbufsz, "websocket.allowed_origins")) return -1;
+        if (out->websocket.enabled && (out->websocket.port < 1 || out->websocket.port > 65535)) {
+            snprintf(errbuf, errbufsz, "websocket.port must be in 1-65535");
+            return -1;
+        }
+        if (out->websocket.enabled && out->websocket.tls && !out->tls.enabled) {
+            snprintf(errbuf, errbufsz, "websocket.tls needs [tls] enabled (it reuses that certificate)");
+            return -1;
+        }
+    }
+
     /* [tls] */
     {
         int e;

@@ -52,6 +52,7 @@ typedef struct server {
     char msgid_prefix[17]; /* random per run, so msgids stay unique across restarts */
     uint64_t msgid_counter;
     int listen_fd;
+    int ws_listen_fd;   /* -1 unless [websocket] enabled */
     int tls_listen_fd;  /* -1 unless [tls] enabled (see net.c's TLS listener) */
     SSL_CTX *tls_ctx;
     int link_listen_fd; /* -1 unless [links] enabled + mode=hub (see link.h) */

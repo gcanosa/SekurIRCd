@@ -13,6 +13,7 @@
 #include "protection.h"
 #include "server.h"
 #include "spam.h"
+#include "ws.h"
 
 #include <assert.h>
 #include <stdio.h>
@@ -847,6 +848,28 @@ static void test_history_ring_and_timestamps(void) {
     channel_free(c);
 }
 
+static void test_websocket_helpers(void) {
+    char acc[64];
+    assert(ws_accept_key("dGhlIHNhbXBsZSBub25jZQ==", acc, sizeof acc) == 0); /* RFC 6455 section 1.3 example */
+    assert(strcmp(acc, "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=") == 0);
+    ws_request_t r;
+    assert(ws_parse_request("GET / HTTP/1.1\r\nHost: x\r\nUpgrade: WebSocket\r\nConnection: Upgrade\r\n"
+                            "sec-websocket-key: abc==\r\nOrigin: https://a.b\r\nX-Forwarded-For: 198.51.100.4, 10.0.0.1", &r) == 0);
+    assert(strcmp(r.key, "abc==") == 0 && strcmp(r.origin, "https://a.b") == 0 && strcmp(r.forwarded, "198.51.100.4") == 0);
+    assert(ws_parse_request("GET / HTTP/1.1\r\nHost: x", &r) == -1);
+    /* a masked client text frame "hi" */
+    unsigned char f[] = {0x81, 0x82, 1, 2, 3, 4, 'h' ^ 1, 'i' ^ 2};
+    int op, fin; unsigned char *pl; size_t pn, used;
+    assert(ws_decode_frame(f, sizeof f, &op, &fin, &pl, &pn, &used) == 1);
+    assert(op == 1 && fin && pn == 2 && memcmp(pl, "hi", 2) == 0 && used == sizeof f);
+    assert(ws_decode_frame(f, 5, &op, &fin, &pl, &pn, &used) == 0); /* truncated: need more */
+    unsigned char unmasked[] = {0x81, 0x02, 'h', 'i'};
+    assert(ws_decode_frame(unmasked, sizeof unmasked, &op, &fin, &pl, &pn, &used) == -1);
+    unsigned char out[32];
+    size_t n = ws_encode_frame(out, 1, (const unsigned char *)"hello", 5);
+    assert(n == 7 && out[0] == 0x81 && out[1] == 5 && memcmp(out + 2, "hello", 5) == 0);
+}
+
 static void test_parse_duration_overflow(void) {
     assert(irc_parse_duration("99999999999999999999999999d") > 0); /* clamps, no signed overflow */
     assert(irc_parse_duration("90m") == 5400 && irc_parse_duration("x") == -1);
@@ -903,6 +926,7 @@ int main(void) {
     RUN(test_build_truncates_and_defangs);
     RUN(test_parse_token_cap_and_names);
     RUN(test_parse_duration_overflow);
+    RUN(test_websocket_helpers);
     RUN(test_history_ring_and_timestamps);
     RUN(test_modes_string_flood_throttle_and_lazy_masklist);
     RUN(test_protection_pure_helpers);

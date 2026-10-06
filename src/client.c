@@ -31,6 +31,8 @@ void client_free(client_t *cl) {
     if (cl->ssl) SSL_free(cl->ssl); /* abrupt close, no SSL_shutdown close_notify -- fine for a teardown path */
     free(cl->sbuf);
     free(cl->rbuf);
+    free(cl->ws_in);
+    free(cl->ws_out);
     free(cl);
 }
 

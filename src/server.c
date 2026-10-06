@@ -46,6 +46,7 @@ int server_init(server_t *srv, const config_t *cfg) {
     crypto_random_hex(srv->msgid_prefix, sizeof srv->msgid_prefix, 8);
     srv->listen_fd = -1;
     srv->tls_listen_fd = -1;
+    srv->ws_listen_fd = -1;
     srv->link_listen_fd = -1;
     srv->start_time = time(NULL);
     server_load_motd(srv);

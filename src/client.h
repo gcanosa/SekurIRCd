@@ -74,6 +74,11 @@ typedef struct client {
     int got_nick, got_user;
     unsigned shun_gen;    /* server_is_shunned cache: kline_gen + 1 when `shunned` is current */
     int shunned;
+    int ws;               /* 0 plain IRC, 1 awaiting the WebSocket upgrade request, 2 framing active (net.c) */
+    unsigned char *ws_in; /* raw bytes read from the transport, not yet decoded */
+    size_t ws_in_len;
+    unsigned char *ws_out; /* encoded frames / handshake reply waiting for the socket */
+    size_t ws_out_len, ws_out_cap;
     int expect_proxy;     /* accepted from a [server] proxy_protocol_hosts peer: first line must be "PROXY ..." */
     int webirc;           /* a trusted gateway already set ip/realhost via WEBIRC */
     int cap_version;      /* 0, or the version from "CAP LS <n>" (302 enables multi-line LS, values, cap-notify) */

@@ -101,6 +101,17 @@ typedef struct {
     int sts_duration; /* seconds; 0 = don't advertise IRCv3 "sts" (STS policy expiry) */
 } cfg_tls_t;
 
+/* [websocket]: IRC over WebSocket (RFC 6455) for browser clients. */
+typedef struct {
+    int enabled;
+    int port;
+    int tls;                                            /* wss: reuse the [tls] certificate on this port */
+    char trusted_proxies[CFG_MAX_HOSTS_PER_WEBIRC][CFG_MASK]; /* reverse proxies whose X-Forwarded-For is believed */
+    int n_trusted_proxies;
+    char allowed_origins[CFG_MAX_HOSTS_PER_WEBIRC][CFG_MASK]; /* Origin globs; empty = any origin */
+    int n_allowed_origins;
+} cfg_websocket_t;
+
 typedef struct {
     char motd[CFG_PATH];
     char oper_motd[CFG_PATH];
@@ -302,6 +313,7 @@ typedef struct {
     cfg_dnsbl_t dnsbl;
     cfg_spam_t spam;
     cfg_tls_t tls;
+    cfg_websocket_t websocket;
     cfg_links_t links;
     cfg_accounts_t accounts;
     cfg_debug_channel_t debug_channel;
