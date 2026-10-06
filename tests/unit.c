@@ -815,6 +815,21 @@ static void test_build_truncates_and_defangs(void) {
     assert(strcmp(out, "CMD a_b * _x :t") == 0);
 }
 
+static void test_modes_string_flood_throttle_and_lazy_masklist(void) {
+    channel_t *c = channel_new("#t", "#t");
+    c->modes |= CMODE_N | CMODE_FLOOD | CMODE_JTHROT;
+    c->flood_lines = 5; c->flood_secs = 3; c->jt_joins = 2; c->jt_secs = 10;
+    char out[160];
+    channel_modes_string(c, out, sizeof out);
+    assert(strcmp(out, "+nfj 5:3 2:10") == 0);
+    assert(c->bans.masks == NULL && c->bans.n == 0); /* no ban list allocated until the first +b */
+    assert(masklist_add(&c->bans, "a!*@*") == 0 && c->bans.masks != NULL && c->bans.n == 1);
+    assert(masklist_add(&c->bans, "a!*@*") == -1); /* duplicate */
+    unsigned g = c->bans.gen;
+    assert(masklist_del(&c->bans, "a!*@*") == 0 && c->bans.gen != g && c->bans.n == 0);
+    channel_free(c);
+}
+
 static void test_parse_duration_overflow(void) {
     assert(irc_parse_duration("99999999999999999999999999d") > 0); /* clamps, no signed overflow */
     assert(irc_parse_duration("90m") == 5400 && irc_parse_duration("x") == -1);
@@ -871,6 +886,7 @@ int main(void) {
     RUN(test_build_truncates_and_defangs);
     RUN(test_parse_token_cap_and_names);
     RUN(test_parse_duration_overflow);
+    RUN(test_modes_string_flood_throttle_and_lazy_masklist);
     RUN(test_protection_pure_helpers);
     RUN(test_protection_bl_match);
     RUN(test_protection_bundle_config);

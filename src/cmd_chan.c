@@ -203,6 +203,15 @@ static void do_join_one(server_t *srv, client_t *cl, const char *chan_name, cons
             client_reply(cl, N_NEEDREGGEDNICK, p, 1, "Cannot join channel (+O, IRC operators only)");
             return;
         }
+        if ((chan->modes & CMODE_JTHROT) && chan->jt_joins > 0) {
+            time_t now = time(NULL);
+            if (now - chan->jt_start >= chan->jt_secs) { chan->jt_start = now; chan->jt_count = 0; }
+            if (++chan->jt_count > chan->jt_joins) { /* attempts count too, so a retry loop can't slip through */
+                const char *p[] = {chan->name};
+                client_reply(cl, N_CHANNELISFULL, p, 1, "Cannot join channel (+j, joining too fast -- try again shortly)");
+                return;
+            }
+        }
     }
 
     member_t *m = channel_add_member(chan, cl);
@@ -700,6 +709,18 @@ static void cmd_mode_user(client_t *cl, irc_message_t *msg, const char *target) 
 /* Shared by /MODE (is_full_op reflects the caller's real rank) and /SAMODE
  * (always full_op=1 -- that command's whole point is bypassing the rank
  * gate). Halfop may only toggle v/b/e/I; everything else needs full op/oper. */
+/* "<n>:<secs>" for +f/+j -- n in 1..100, secs in 1..600, nothing trailing. */
+static int parse_rate(const char *s, int *n, int *secs) {
+    char *e1, *e2;
+    long a = strtol(s, &e1, 10);
+    if (e1 == s || *e1 != ':') return 0;
+    long b = strtol(e1 + 1, &e2, 10);
+    if (e2 == e1 + 1 || *e2) return 0;
+    if (a < 1 || a > 100 || b < 1 || b > 600) return 0;
+    *n = (int)a; *secs = (int)b;
+    return 1;
+}
+
 #define MAX_MODE_PARAMS 6 /* advertised as MODES=6 in ISUPPORT */
 
 void cmd_apply_channel_mode(server_t *srv, client_t *cl, channel_t *chan,
@@ -771,7 +792,25 @@ void cmd_apply_channel_mode(server_t *srv, client_t *cl, channel_t *chan,
             continue;
         }
 
-        if (c == 'k') {
+        if (c == 'f' || c == 'j') {
+            int is_f = c == 'f';
+            if (sign == '+') {
+                if (argi >= nargs) continue;
+                int n, secs;
+                if (!parse_rate(args[argi], &n, &secs)) { argi++; continue; } /* malformed "lines:secs": consume, ignore */
+                if (is_f) { chan->modes |= CMODE_FLOOD; chan->flood_lines = n; chan->flood_secs = secs; }
+                else { chan->modes |= CMODE_JTHROT; chan->jt_joins = n; chan->jt_secs = secs; chan->jt_count = 0; chan->jt_start = 0; }
+                if (cursign != sign) { outflags[of++] = sign; cursign = sign; }
+                outflags[of++] = c;
+                snprintf(outparams[n_outparams++], sizeof outparams[0], "%d:%d", n, secs);
+                argi++;
+            } else {
+                if (is_f) { chan->modes &= ~CMODE_FLOOD; chan->flood_lines = chan->flood_secs = 0; }
+                else { chan->modes &= ~CMODE_JTHROT; chan->jt_joins = chan->jt_secs = 0; }
+                if (cursign != sign) { outflags[of++] = sign; cursign = sign; }
+                outflags[of++] = c;
+            }
+        } else if (c == 'k') {
             if (sign == '+') {
                 if (argi >= nargs) continue;
                 if (strchr(args[argi], ' ')) { argi++; continue; } /* a spaced key desyncs every client's parser -- still consume the arg */
@@ -888,8 +927,12 @@ static void cmd_mode_channel(server_t *srv, client_t *cl, irc_message_t *msg, co
             char *space = strchr(modestr, ' ');
             if (space) { *(space + 1) = '*'; *(space + 2) = '\0'; }
         }
-        const char *p[] = {chan->name, modestr};
-        client_reply(cl, N_CHANNELMODEIS, p, 2, NULL);
+        /* "+kl key 5": the flag letters and each argument are separate parameters on the wire */
+        const char *p[2 + 8] = {chan->name};
+        int np = 1;
+        char *save = NULL;
+        for (char *t = strtok_r(modestr, " ", &save); t && np < 10; t = strtok_r(NULL, " ", &save)) p[np++] = t;
+        client_reply(cl, N_CHANNELMODEIS, p, np, NULL);
         char tbuf[32];
         snprintf(tbuf, sizeof tbuf, "%ld", (long)chan->created);
         const char *p2[] = {chan->name, tbuf};

@@ -218,7 +218,7 @@ void channel_invite_remove(channel_t *chan, const char *casefold_nick) {
 }
 
 void channel_modes_string(channel_t *chan, char *out, size_t outsz) {
-    char flags[24] = "+";
+    char flags[32] = "+";
     char args[128] = "";
     size_t fp = 1;
     if (chan->modes & CMODE_N) flags[fp++] = 'n';
@@ -249,6 +249,16 @@ void channel_modes_string(channel_t *chan, char *out, size_t outsz) {
         char lbuf[32];
         snprintf(lbuf, sizeof lbuf, " %d", chan->limit);
         strncat(args, lbuf, sizeof args - strlen(args) - 1);
+    }
+    if ((chan->modes & CMODE_FLOOD) && chan->flood_lines > 0) {
+        flags[fp++] = 'f';
+        char b[32]; snprintf(b, sizeof b, " %d:%d", chan->flood_lines, chan->flood_secs);
+        strncat(args, b, sizeof args - strlen(args) - 1);
+    }
+    if ((chan->modes & CMODE_JTHROT) && chan->jt_joins > 0) {
+        flags[fp++] = 'j';
+        char b[32]; snprintf(b, sizeof b, " %d:%d", chan->jt_joins, chan->jt_secs);
+        strncat(args, b, sizeof args - strlen(args) - 1);
     }
     flags[fp] = '\0';
     snprintf(out, outsz, "%s%s", flags, args);
