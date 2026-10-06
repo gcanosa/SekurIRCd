@@ -4,6 +4,7 @@
 #include "log.h"
 #include "proto.h"
 #include "spam.h"
+#include "worker.h"
 #include "vendor/cJSON.h"
 
 #include <stdio.h>
@@ -388,6 +389,7 @@ void server_remove_client(server_t *srv, client_t *cl, const char *quit_reason) 
     client_prefix(cl, prefix, sizeof prefix);
     char line[512];
     irc_build(line, sizeof line, NULL, 0, prefix, "QUIT", NULL, 0, quit_reason ? quit_reason : "");
+    if (cl->conn_id) worker_cancel(cl->conn_id); /* skip its still-queued lookups */
 
     if (cl->registered && !cl->is_service) {
         server_whowas_record(srv, cl->nick, cl->user, cl->host, cl->realname);

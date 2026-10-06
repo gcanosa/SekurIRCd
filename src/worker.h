@@ -70,6 +70,8 @@ void worker_pool_stop(void); /* joins all threads; call once, at shutdown */
  * set, so the connection isn't left waiting on a result that will never come.
  * JOB_SASL/JOB_HASH are queued ahead of the slower DNS jobs. */
 int worker_submit(const job_t *job);
+/* The connection is gone: skip any of its jobs still queued (not ones already running). */
+void worker_cancel(uint64_t conn_id);
 /* Drains up to `max` completed results into `out` (main thread only). */
 int worker_poll_results(job_result_t *out, int max);
 

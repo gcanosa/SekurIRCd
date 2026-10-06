@@ -7,6 +7,7 @@
 #include "vendor/toml.h"
 
 #include <ctype.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -63,6 +64,10 @@ static int cfg_get_int(toml_table_t *tab, const char *key, int def, int *out,
     toml_datum_t d = toml_int_in(tab, key);
     if (!d.ok) {
         snprintf(errbuf, errbufsz, "%s is not a valid int", fieldname);
+        return -1;
+    }
+    if (d.u.i < INT_MIN || d.u.i > INT_MAX) { /* (int) would silently wrap, e.g. port = 4294973963 -> 6667 */
+        snprintf(errbuf, errbufsz, "%s is out of range", fieldname);
         return -1;
     }
     *out = (int)d.u.i;
@@ -134,6 +139,10 @@ static int cfg_get_str_array(toml_table_t *tab, const char *key,
         return -1;
     }
     int cnt = toml_array_nelem(arr);
+    if (cnt > max) { /* truncating silently would e.g. leave the 65th exempt IP scanned/banned */
+        snprintf(errbuf, errbufsz, "%s has too many entries (max %d)", fieldname, max);
+        return -1;
+    }
     for (int i = 0; i < cnt; i++) {
         toml_datum_t d = toml_string_at(arr, i);
         if (!d.ok) {
@@ -524,6 +533,8 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
         snprintf(errbuf, errbufsz, "security.oper_auto_join: '%s' is not a valid channel name", out->security.oper_auto_join);
         return -1;
     }
+    if (out->debug_channel.stats_interval < 0) { snprintf(errbuf, errbufsz, "debug_channel.stats_interval must be >= 0"); return -1; }
+    if (out->security.max_line_length > 8192) { snprintf(errbuf, errbufsz, "security.max_line_length must be <= 8192"); return -1; }
     if (out->security.max_line_length < 1) { snprintf(errbuf, errbufsz, "security.max_line_length must be >= 1"); return -1; }
     /* max_params bounds IRC_MAX_PARAMS (proto.h). 0 or negative used to slip
      * through and leave msg->params[0] unwritten for the handlers registered
@@ -1012,6 +1023,7 @@ static int parse_scanner(toml_table_t *sc, cfg_protection_t *p, char *errbuf, si
 
     if (p->scan_timeout <= 0) { snprintf(errbuf, errbufsz, "scanner.timeout must be > 0"); return -1; }
     if (p->scan_max_read < 64 || p->scan_max_read > 65536) { snprintf(errbuf, errbufsz, "scanner.max_read must be 64-65536"); return -1; }
+    if (p->scan_max_concurrent > 4096) { snprintf(errbuf, errbufsz, "scanner.max_concurrent must be <= 4096"); return -1; }
     if (p->scan_max_concurrent < 1) { snprintf(errbuf, errbufsz, "scanner.max_concurrent must be >= 1"); return -1; }
     if (p->target_port < 1 || p->target_port > 65535) { snprintf(errbuf, errbufsz, "scanner.target.port must be in 1-65535"); return -1; }
     if (check_ban_action("scanner.action", p->scan_action, errbuf, errbufsz)) return -1;
@@ -1107,6 +1119,7 @@ static void protection_legacy_dnsbl(config_t *out) {
             char url[CFG_PATH]; size_t o = 0;
             for (const char *c = out->dnsbl.lookup_url; *c && o + 3 < sizeof url; c++) {
                 if (strncmp(c, "{ip}", 4) == 0) { url[o++] = '%'; url[o++] = 'i'; c += 3; }
+                else if (*c == '%') { url[o++] = '%'; url[o++] = '%'; if (o + 3 >= sizeof url) break; } /* literal %: protection_expand would treat %i/%t as placeholders */
                 else url[o++] = *c;
             }
             url[o] = '\0';

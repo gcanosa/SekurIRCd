@@ -41,7 +41,11 @@ require_bin() {
 
 cmd_start() {
     require_bin "$IRCD_BIN"
-    "$IRCD_BIN" --config "$IRCD_CONFIG" --daemon --pidfile "$IRCD_PIDFILE"
+    # Don't bring chanserv up against an ircd that refused to start (port in use, bad config...).
+    "$IRCD_BIN" --config "$IRCD_CONFIG" --daemon --pidfile "$IRCD_PIDFILE" || {
+        echo "sekurircd: failed to start (exit $?)" >&2
+        return 1
+    }
     if chanserv_configured; then
         require_bin "$CHANSERV_BIN"
         "$CHANSERV_BIN" --config "$CHANSERV_CONFIG" --daemon --pidfile "$CHANSERV_PIDFILE"
@@ -66,6 +70,10 @@ cmd_restart() {
         pid_running "$CHANSERV_PIDFILE" || pid_running "$IRCD_PIDFILE" || break
         sleep 0.5
     done
+    if pid_running "$CHANSERV_PIDFILE" || pid_running "$IRCD_PIDFILE"; then
+        echo "restart: old daemon(s) still running after 10s -- not starting a second copy" >&2
+        return 1
+    fi
     cmd_start
 }
 

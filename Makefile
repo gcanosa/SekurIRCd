@@ -63,7 +63,11 @@ CFLAGS   ?= -std=c11 -O2 -g $(WARN) $(HARDEN_CFLAGS) -MMD -MP
 # _POSIX_C_SOURCE: glibc hides strtok_r/localtime_r/struct sigaction under
 # -std=c11 (strict ISO) unless a POSIX feature-test macro is defined; macOS's
 # libc exposes them regardless, so this was silently missing before.
-CPPFLAGS := -I$(SRC_DIR) -I$(VEND_DIR) -D_POSIX_C_SOURCE=200809L $(OPENSSL_CFLAGS)
+# Flags the build can't work without, kept out of CFLAGS (which `CFLAGS ?=` lets
+# the environment replace wholesale -- dropping -std=c11, dependency tracking
+# and all the hardening with it).
+REQ_CFLAGS := -std=c11 -MMD -MP $(HARDEN_CFLAGS)
+CPPFLAGS := -I$(SRC_DIR) -I$(VEND_DIR) -D_POSIX_C_SOURCE=200809L $(OPENSSL_CFLAGS) $(REQ_CFLAGS)
 LDFLAGS  ?= $(HARDEN_LDFLAGS)
 LDLIBS   := $(OPENSSL_LIBS) -lpthread
 
@@ -110,16 +114,18 @@ build-debug/%.o: %.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
+HEADERS := $(wildcard $(SRC_DIR)/*.h $(VEND_DIR)/*.h)
 UNIT_SRCS := tests/unit.c $(CORE_SRCS) $(VEND_SRCS)
 check: $(BIN_DIR)/unit
 	./$(BIN_DIR)/unit
 
-$(BIN_DIR)/unit: $(UNIT_SRCS)
+# These two compile straight from sources (no .o/.d files), so list the headers explicitly.
+$(BIN_DIR)/unit: $(UNIT_SRCS) $(HEADERS)
 	@mkdir -p $(BIN_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(UNIT_SRCS) $(LDLIBS)
 
 CHANSERV_SRCS := services/chanserv.c $(SRC_DIR)/proto.c $(SRC_DIR)/crypto.c $(SRC_DIR)/log.c $(VEND_SRCS)
-$(BIN_DIR)/chanserv: $(CHANSERV_SRCS)
+$(BIN_DIR)/chanserv: $(CHANSERV_SRCS) $(HEADERS)
 	@mkdir -p $(BIN_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(CHANSERV_SRCS) $(LDLIBS)
 

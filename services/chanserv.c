@@ -23,6 +23,7 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <limits.h>
 #include <fcntl.h>
 #include <netdb.h>
 #include <poll.h>
@@ -40,6 +41,7 @@
 #define RBUF_SZ 8192
 #define SBUF_SZ (8192 * 2)
 #define MLOCK_LETTERS "niptsm"
+#define MAX_LIST_ENTRIES 100 /* per-channel ACCESS / AKICK cap */
 
 typedef struct {
     char link_host[256];
@@ -93,7 +95,7 @@ static void toml_str(toml_table_t *tab, const char *key, const char *def, char *
 static int toml_int(toml_table_t *tab, const char *key, int def) {
     if (tab && toml_key_exists(tab, key)) {
         toml_datum_t d = toml_int_in(tab, key);
-        if (d.ok) return (int)d.u.i;
+        if (d.ok && d.u.i >= INT_MIN && d.u.i <= INT_MAX) return (int)d.u.i; /* out of range: keep the default rather than wrap */
     }
     return def;
 }
@@ -131,11 +133,17 @@ static int load_app_config(const char *path, app_cfg_t *cfg, char *errbuf, size_
     toml_table_t *st = toml_table_in(raw, "storage");
     toml_str(st, "path", cfg->storage_path, cfg->storage_path, sizeof cfg->storage_path);
     cfg->backup_count = toml_int(st, "backup_count", cfg->backup_count);
+    if (cfg->backup_count < 0) cfg->backup_count = 0; /* a negative count skipped store_load's loop entirely -> empty store -> next save wiped it */
+    if (cfg->backup_count > 50) cfg->backup_count = 50; /* each rotation is that many rename()s */
     resolve_against_dir(path, cfg->storage_path, cfg->storage_path, sizeof cfg->storage_path);
 
     toml_free(raw);
     if (!cfg->link_name[0] || !cfg->link_password[0]) {
         snprintf(errbuf, errbufsz, "[link] name and password are required");
+        return -1;
+    }
+    if (strpbrk(cfg->link_password, " \t\r\n") || strpbrk(cfg->link_name, " \t\r\n")) {
+        snprintf(errbuf, errbufsz, "[link] name and password must not contain whitespace");
         return -1;
     }
     return 0;
@@ -152,14 +160,22 @@ static int load_app_config(const char *path, app_cfg_t *cfg, char *errbuf, size_
 static cJSON *g_store = NULL;
 static app_cfg_t g_cfg;
 
-static void store_load(void) {
+/* Returns 0, or -1 if the live store exists but can't be read -- starting empty
+ * would let the next save overwrite every registration. */
+static int store_load(void) {
     for (int gen = 0; gen <= g_cfg.backup_count; gen++) {
         char path[600];
         if (gen == 0) snprintf(path, sizeof path, "%s", g_cfg.storage_path);
         else snprintf(path, sizeof path, "%s.bak%d", g_cfg.storage_path, gen);
 
         FILE *fp = fopen(path, "rb");
-        if (!fp) continue;
+        if (!fp) {
+            if (gen == 0 && errno != ENOENT) {
+                log_error("chanserv", "cannot read %s: %s -- refusing to start with an empty store", path, strerror(errno));
+                return -1;
+            }
+            continue;
+        }
         fseek(fp, 0, SEEK_END);
         long len = ftell(fp);
         fseek(fp, 0, SEEK_SET);
@@ -178,13 +194,14 @@ static void store_load(void) {
         if (parsed && cJSON_IsObject(parsed)) {
             g_store = parsed;
             if (gen > 0) log_warn("chanserv", "live store was missing/corrupt -- loaded backup %s", path);
-            return;
+            return 0;
         }
         cJSON_Delete(parsed);
         log_warn("chanserv", "%s was corrupt (not a JSON object), trying an older backup", path);
     }
     log_info("chanserv", "no existing store found -- starting with zero registered channels");
     g_store = cJSON_CreateObject();
+    return 0;
 }
 
 /* Backups rotate at most this often -- store_save() can be marked dirty
@@ -243,8 +260,8 @@ static int store_write_now(void) {
     size_t len = strlen(text);
     int ok = fwrite(text, 1, len, fp) == len && fflush(fp) == 0 && fsync(fd) == 0;
     if (fclose(fp) != 0) ok = 0;
-    if (ok) rename(tmp, g_cfg.storage_path);
-    else { unlink(tmp); log_error("chanserv", "failed to write %s -- keeping the previous version on disk", g_cfg.storage_path); }
+    if (ok && rename(tmp, g_cfg.storage_path) != 0) ok = 0; /* EXDEV/EACCES: report failure so the dirty flag stays set and it retries */
+    if (!ok) { unlink(tmp); log_error("chanserv", "failed to write %s -- keeping the previous version on disk", g_cfg.storage_path); }
     free(text);
     return ok;
 }
@@ -857,7 +874,10 @@ static void cmd_access(const char *from_nick, char *args) {
         if (normalize_mask(mask, norm, sizeof norm) != 0) { reply(from_nick, "That mask needs a host (a nick alone never grants access) -- see HELP ACCESS"); return; }
         cJSON *access = cJSON_GetObjectItemCaseSensitive(rec, "access");
         if (!access) { access = cJSON_CreateObject(); cJSON_AddItemToObject(rec, "access", access); }
-        cJSON_DeleteItemFromObjectCaseSensitive(access, norm);
+        if (!cJSON_HasObjectItem(access, norm) && cJSON_GetArraySize(access) >= MAX_LIST_ENTRIES) {
+            reply(from_nick, "That access list is full."); return;
+        }
+        cJSON_DeleteItemFromObject(access, norm); /* case-insensitive, like DEL -- no *!*@Host + *!*@host twins */
         cJSON_AddStringToObject(access, norm, levelbuf);
         store_save();
         char msg[300]; snprintf(msg, sizeof msg, "%s now has %s access on %s", norm, levelbuf, chan);
@@ -913,6 +933,10 @@ static void cmd_akick(const char *from_nick, char *args) {
         if (normalize_mask(mask, norm, sizeof norm) != 0) { reply(from_nick, "That mask needs a host -- see HELP AKICK"); return; }
         cJSON *akick = cJSON_GetObjectItemCaseSensitive(rec, "akick");
         if (!akick) { akick = cJSON_CreateArray(); cJSON_AddItemToObject(rec, "akick", akick); }
+        cJSON *dup;
+        cJSON_ArrayForEach(dup, akick)
+            if (cJSON_IsString(dup) && strcasecmp(dup->valuestring, norm) == 0) { reply(from_nick, "That mask is already on the AKICK list."); return; }
+        if (cJSON_GetArraySize(akick) >= MAX_LIST_ENTRIES) { reply(from_nick, "That AKICK list is full."); return; }
         cJSON_AddItemToArray(akick, cJSON_CreateString(norm));
         store_save();
         char msg[300]; snprintf(msg, sizeof msg, "%s added to %s's AKICK list", norm, chan);
@@ -1352,14 +1376,25 @@ static int read_line_blocking(int fd, char *out, size_t outsz, int timeout_ms) {
     return -1;
 }
 
+/* write(2) can accept fewer bytes than asked; loop until the whole string is out. */
+static int write_all(int fd, const char *s) {
+    size_t left = strlen(s);
+    while (left > 0) {
+        ssize_t n = write(fd, s, left);
+        if (n < 0) { if (errno == EINTR) continue; return -1; }
+        s += n; left -= (size_t)n;
+    }
+    return 0;
+}
+
 static int do_handshake(void) {
     char line[512];
     snprintf(line, sizeof line, "PASS %s", g_cfg.link_password);
-    if (write(g_fd, line, strlen(line)) < 0 || write(g_fd, "\r\n", 2) < 0) return -1;
+    if (write_all(g_fd, line) < 0 || write_all(g_fd, "\r\n") < 0) return -1;
 
     const char *p[] = {g_cfg.link_name, "1"};
     irc_build(line, sizeof line, NULL, 0, NULL, "SERVER", p, 2, "ChanServ services (C port)");
-    if (write(g_fd, line, strlen(line)) < 0 || write(g_fd, "\r\n", 2) < 0) return -1;
+    if (write_all(g_fd, line) < 0 || write_all(g_fd, "\r\n") < 0) return -1;
 
     char resp[512];
     if (read_line_blocking(g_fd, resp, sizeof resp, 5000) != 0) return -1;
@@ -1369,7 +1404,7 @@ static int do_handshake(void) {
 
     const char *np[] = {g_cfg.nick, g_cfg.user, g_cfg.host};
     irc_build(line, sizeof line, NULL, 0, NULL, "NICK", np, 3, g_cfg.realname);
-    if (write(g_fd, line, strlen(line)) < 0 || write(g_fd, "\r\n", 2) < 0) return -1;
+    if (write_all(g_fd, line) < 0 || write_all(g_fd, "\r\n") < 0) return -1;
     return 0;
 }
 
@@ -1386,7 +1421,10 @@ static int do_handshake(void) {
 static void guard_join_all(void) {
     cJSON *entry;
     cJSON_ArrayForEach(entry, g_store) {
+        if (!cJSON_IsObject(entry)) continue; /* hand-edited/corrupt record */
         const char *chan = rec_str(entry, "name");
+        if (!chan[0]) chan = entry->string ? entry->string : ""; /* fall back to the store key */
+        if (!chan[0]) continue;
         if (rec_bool(entry, "guard")) {
             wire_join(chan);
             /* TOPICLOCK: same reasoning as +r/MLOCK below -- the ircd's live
@@ -1663,6 +1701,20 @@ int main(int argc, char **argv) {
     log_config_t lcfg = {0};
     lcfg.enabled = 0; /* console only -- chanserv has no [logging] section of its own */
     lcfg.level = LOG_INFO;
+    if (do_daemon) {
+        /* daemonize() points stderr at /dev/null, so without a file every
+         * store-write failure / hub-unreachable message would vanish. Log next
+         * to the store. */
+        char dir[sizeof g_cfg.storage_path];
+        snprintf(dir, sizeof dir, "%s", g_cfg.storage_path);
+        char *slash = strrchr(dir, '/');
+        if (slash) *slash = '\0'; else snprintf(dir, sizeof dir, ".");
+        lcfg.enabled = 1;
+        snprintf(lcfg.directory, sizeof lcfg.directory, "%s", dir);
+        snprintf(lcfg.file, sizeof lcfg.file, "chanserv.log");
+        lcfg.max_bytes = 1 << 20;
+        lcfg.backup_count = 3;
+    }
     log_init(&lcfg, 0);
 
     signal(SIGPIPE, SIG_IGN);
@@ -1672,7 +1724,7 @@ int main(int argc, char **argv) {
     sigaction(SIGTERM, &sa, NULL);
     sigaction(SIGINT, &sa, NULL);
 
-    store_load();
+    if (store_load() != 0) return 1;
     log_info("chanserv", "starting (v%s), storage=%s", CHANSERV_VERSION, g_cfg.storage_path);
 
     int backoff = 2;

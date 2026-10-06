@@ -588,7 +588,9 @@ def upgrade(cur, st, tgt):
     except RuntimeError as e:
         fail(str(e)); warn("Reverting the source tree; your running install was not touched.")
         revert(cur)
-        for f in kept: os.remove(f"{f}.upstream-{tgt['version']}")
+        for f in kept:
+            up = f"{f}.upstream-{tgt['version']}"
+            if os.path.exists(up): os.remove(up) # absent if the target deleted that file
         LOG.w("RESULT: FAILED (build), reverted"); print(dim(f"  Log: {LOG.path}")); sys.exit(1)
 
     step("Installing")
