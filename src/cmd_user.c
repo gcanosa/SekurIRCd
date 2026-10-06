@@ -274,6 +274,28 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
             if (!is_notice) client_reply(cl, N_NONONREG, pe, 1, "is only accepting messages from registered users");
             return;
         }
+        if ((dst->umodes & UMODE_G) && cl != dst && !(cl->umodes & UMODE_O) && !cl->is_service) {
+            char scf[NICKLEN];
+            irc_casefold(scf, sizeof scf, cl->nick);
+            int allowed = 0;
+            for (int ai = 0; ai < dst->n_accept; ai++) if (strcmp(dst->accept[ai], scf) == 0) { allowed = 1; break; }
+            if (!allowed) {
+                if (!is_notice) { /* caller-ID: tell both sides once in a while, deliver nothing */
+                    const char *pe[] = {dst->nick};
+                    client_reply(cl, N_TARGUMODEG, pe, 1, "is in +g mode (server-side ignore).");
+                    time_t now = time(NULL);
+                    if (now - dst->last_cid_notice >= 60) {
+                        dst->last_cid_notice = now;
+                        char who[320];
+                        snprintf(who, sizeof who, "%s!%s@%s", cl->nick, cl->user, cl->host);
+                        const char *pw[] = {who};
+                        client_reply(dst, N_UMODEGMSG, pw, 1, "is messaging you, and you are umode +g.");
+                        client_reply(cl, N_TARGNOTIFY, pe, 1, "has been informed that you messaged them.");
+                    }
+                }
+                return;
+            }
+        }
         if (!is_notice && dst->is_away) {
             const char *pa[] = {dst->nick};
             client_reply(cl, N_AWAY, pa, 1, dst->away);
@@ -979,3 +1001,37 @@ static void refresh_watcher_flag(server_t *srv, client_t *cl) {
 
 void cmd_monitor(server_t *srv, client_t *cl, irc_message_t *msg) { monitor_impl(srv, cl, msg); refresh_watcher_flag(srv, cl); }
 void cmd_watch(server_t *srv, client_t *cl, irc_message_t *msg) { watch_impl(srv, cl, msg); refresh_watcher_flag(srv, cl); }
+
+/* ACCEPT [nick[,nick...]] -- caller-ID (+g) allow list. "-nick" removes, "*" or no argument lists. */
+void cmd_accept(server_t *srv, client_t *cl, irc_message_t *msg) {
+    (void)srv;
+    char list[400];
+    snprintf(list, sizeof list, "%s", msg->nparams > 0 ? msg->params[0] : "*");
+    char *save = NULL;
+    for (char *tok = strtok_r(list, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
+        if (strcmp(tok, "*") == 0) {
+            for (int i = 0; i < cl->n_accept; i++) {
+                const char *p[] = {cl->accept[i]};
+                client_reply(cl, N_ACCEPTLIST, p, 1, NULL);
+            }
+            client_reply(cl, N_ENDOFACCEPT, NULL, 0, "End of /ACCEPT list");
+            continue;
+        }
+        int del = tok[0] == '-';
+        const char *nick = del ? tok + 1 : tok;
+        if (!irc_valid_nick(nick, NICKLEN - 1)) { const char *p[] = {nick}; client_reply(cl, N_ERRONEUSNICKNAME, p, 1, "Erroneous nickname"); continue; }
+        char cf[NICKLEN];
+        irc_casefold(cf, sizeof cf, nick);
+        int at = -1;
+        for (int i = 0; i < cl->n_accept; i++) if (strcmp(cl->accept[i], cf) == 0) { at = i; break; }
+        if (del) {
+            if (at < 0) { client_reply(cl, N_ACCEPTNOT, NULL, 0, "is not on your accept list"); continue; }
+            memmove(cl->accept[at], cl->accept[at + 1], (size_t)(cl->n_accept - at - 1) * sizeof cl->accept[0]);
+            cl->n_accept--;
+        } else {
+            if (at >= 0) { client_reply(cl, N_ACCEPTEXIST, NULL, 0, "is already on your accept list"); continue; }
+            if (cl->n_accept >= (int)(sizeof cl->accept / sizeof cl->accept[0])) { client_reply(cl, N_ACCEPTFULL, NULL, 0, "Accept list is full"); continue; }
+            snprintf(cl->accept[cl->n_accept++], NICKLEN, "%s", cf);
+        }
+    }
+}

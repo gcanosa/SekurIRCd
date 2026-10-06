@@ -40,6 +40,7 @@ struct link_conn;
 #define UMODE_Q        0x400  /* q: unkickable from channels except by IRCOps */
 #define UMODE_REGONLY  0x800  /* R: only accept PMs from identified (registered-account) users */
 #define UMODE_NOPM     0x1000 /* D: accept PMs from nobody except IRCOps */
+#define UMODE_G        0x4000 /* g: caller-ID -- only accept PMs from users on your /ACCEPT list (and opers) */
 #define UMODE_B        0x2000 /* B: marks the user as a bot -- self-settable; WHOIS 335, WHO flag B, @bot tag */
 
 typedef struct chan_node {
@@ -80,6 +81,7 @@ typedef struct client {
     unsigned char *ws_out; /* encoded frames / handshake reply waiting for the socket */
     size_t ws_out_len, ws_out_cap;
     int expect_proxy;     /* accepted from a [server] proxy_protocol_hosts peer: first line must be "PROXY ..." */
+    time_t enforce_deadline; /* nick-ownership enforcement: rename at this time unless identified (0 = none) */
     int is_watcher;       /* counted in server_t.n_watchers (non-empty MONITOR/WATCH list) */
     int webirc;           /* a trusted gateway already set ip/realhost via WEBIRC */
     int cap_version;      /* 0, or the version from "CAP LS <n>" (302 enables multi-line LS, values, cap-notify) */
@@ -100,6 +102,9 @@ typedef struct client {
     char watch[128][NICKLEN];   /* legacy /WATCH list, casefolded nicks -- MAX_WATCH */
     int n_watch;
     char silence[15][256];      /* /SILENCE mask list -- _MAX_SILENCE */
+    char accept[20][NICKLEN]; /* caller-ID (+g): casefolded nicks allowed to message us */
+    int n_accept;
+    time_t last_cid_notice;   /* when we last told this +g user that someone tried to message them */
     int n_silence;
 
     unsigned int caps; /* CAP_* bitmask -- see cmd_reg.c's CAP_ATTRS table */

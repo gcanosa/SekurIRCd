@@ -974,6 +974,7 @@ static void drain_worker_results(server_t *srv) {
 /* PING/timeout for client connections + the link keepalive tick. */
 static void tick(server_t *srv) {
     time_t now = time(NULL);
+    if (srv->cfg.accounts.enforce_nicks) nick_enforce_tick(srv, now);
     for (client_t *cl = srv->all_clients; cl; cl = cl->all_next) {
         if (cl->fd < 0 || cl->quitting) continue; /* service pseudo-clients have no timeout of their own */
         double age = difftime(now, cl->signon_time);

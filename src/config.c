@@ -28,7 +28,7 @@ static int is_valid_level(const char *s) {
 }
 
 /* self-togglable user modes (client.USER_MODE_SELF) */
-#define USER_MODE_SELF "iwdsB"
+#define USER_MODE_SELF "iwdsBg"
 /* argument-free channel modes a deployment may set as a default
  * (channel.CHAN_MODES - MODE_ARG - {"r"}) */
 #define CHAN_FLAG_MODES "niptsmz"
@@ -527,7 +527,7 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
     }
     for (const char *c = out->security.default_user_modes; *c; c++) {
         if (!strchr(USER_MODE_SELF, *c)) {
-            snprintf(errbuf, errbufsz, "security.default_user_modes: '%c' is not a valid default user mode (allowed: iwdsB)", *c);
+            snprintf(errbuf, errbufsz, "security.default_user_modes: '%c' is not a valid default user mode (allowed: iwdsBg)", *c);
             return -1;
         }
     }
@@ -956,6 +956,12 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
         if (cfg_get_bool(acc, "enabled", 0, &out->accounts.enabled, errbuf, errbufsz, "accounts.enabled")) return -1;
         if (cfg_get_str(acc, "store_file", "accounts.json", out->accounts.store_file, CFG_PATH, errbuf, errbufsz, "accounts.store_file")) return -1;
         if (cfg_get_int(acc, "max_accounts", 10000, &out->accounts.max_accounts, errbuf, errbufsz, "accounts.max_accounts")) return -1;
+        if (cfg_get_bool(acc, "enforce_nicks", 0, &out->accounts.enforce_nicks, errbuf, errbufsz, "accounts.enforce_nicks")) return -1;
+        if (cfg_get_int(acc, "enforce_grace", 30, &out->accounts.enforce_grace, errbuf, errbufsz, "accounts.enforce_grace")) return -1;
+        if (out->accounts.enforce_grace < 5 || out->accounts.enforce_grace > 600) {
+            snprintf(errbuf, errbufsz, "accounts.enforce_grace must be in 5-600");
+            return -1;
+        }
         if (out->accounts.max_accounts < 0) {
             snprintf(errbuf, errbufsz, "accounts.max_accounts must be >= 0 (0 = unlimited)");
             return -1;

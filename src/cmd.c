@@ -41,6 +41,7 @@ static const cmd_entry_t DISPATCH[] = {
     {"PASS", cmd_pass, 0, 0, 0},
     {"WEBIRC", cmd_webirc, 4, 0, 0},
     {"TAGMSG", cmd_tagmsg, 1, 1, 0},
+    {"ACCEPT", cmd_accept, 0, 1, 0},
     {"CHATHISTORY", cmd_chathistory, 2, 1, 0},
     {"USERIP", cmd_userip, 1, 1, 1},
     {"SHUN", cmd_shun, 0, 1, 1},
@@ -196,6 +197,7 @@ void cmd_send_welcome_if_ready(server_t *srv, client_t *cl) {
     server_notify_opers(srv, snote);
 
     server_send_welcome(srv, cl);
+    nick_enforce_check(srv, cl);
     server_monitor_notify(srv, cl, 1);
     server_watch_notify(srv, cl, 1);
 
