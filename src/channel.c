@@ -126,12 +126,10 @@ int channel_is_banned(channel_t *chan, const char *nick, const char *user,
     return 1;
 }
 
-int channel_is_invited(channel_t *chan, const char *nick, const char *user,
+int channel_is_invited(channel_t *chan, const char *invite_key, const char *nick, const char *user,
                         const char *host, const char *account, int ident_confirmed) {
-    char cf[64];
-    irc_casefold(cf, sizeof cf, nick);
     for (int i = 0; i < chan->n_invited; i++)
-        if (strcmp(chan->invited[i], cf) == 0) return 1;
+        if (strcmp(chan->invited[i], invite_key) == 0) return 1;
     for (int i = 0; i < chan->invex.n; i++)
         if (channel_mask_hit(chan->invex.masks[i], nick, user, host, account, ident_confirmed)) return 1;
     return 0;
@@ -160,7 +158,10 @@ int masklist_del(masklist_t *ml, const char *mask) {
 void channel_invite_add(channel_t *chan, const char *casefold_nick) {
     for (int i = 0; i < chan->n_invited; i++)
         if (strcmp(chan->invited[i], casefold_nick) == 0) return;
-    if (chan->n_invited >= CHAN_MAX_INVITED) return; /* ponytail: capped, see channel.h */
+    if (chan->n_invited >= CHAN_MAX_INVITED) { /* full: evict the oldest -- stale entries of quit invitees would otherwise block new invites forever */
+        memmove(chan->invited[0], chan->invited[1], (size_t)(CHAN_MAX_INVITED - 1) * sizeof chan->invited[0]);
+        chan->n_invited--;
+    }
     snprintf(chan->invited[chan->n_invited], sizeof chan->invited[0], "%s", casefold_nick);
     chan->n_invited++;
 }

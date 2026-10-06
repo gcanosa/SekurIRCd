@@ -9,19 +9,22 @@
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <limits.h>
 #include <string.h>
 #include <strings.h>
 #include <time.h>
 
 #define MAX_CHANNELS_PER_CLIENT 200
 
+#define invite_key_of(c) client_invite_key(c)
+
 static void send_names(client_t *cl, channel_t *chan) {
-    char line[480];
+    char line[400]; /* + ":server 353 nick = #chan :" must stay under 512 */
     size_t pos = 0;
     line[0] = '\0';
     const char *chantype = "=";
-    if (chan->modes & CMODE_P) chantype = "*";
-    else if (chan->modes & CMODE_S) chantype = "@";
+    if (chan->modes & CMODE_S) chantype = "@"; /* secret wins over private */
+    else if (chan->modes & CMODE_P) chantype = "*";
 
     int multi = cl->caps & CAP_MULTI_PREFIX;
     int userhost = cl->caps & CAP_USERHOST_IN_NAMES;
@@ -165,7 +168,7 @@ static void do_join_one(server_t *srv, client_t *cl, const char *chan_name, cons
         chan = server_get_or_create_channel(srv, chan_name);
         if (!chan) { err_no_such_channel(cl, chan_name); return; }
     } else if (!(cl->umodes & UMODE_O)) {
-        if ((chan->modes & CMODE_I) && !channel_is_invited(chan, cl->nick, cl->user, cl->host, cl->account, cl->ident_confirmed)) {
+        if ((chan->modes & CMODE_I) && !channel_is_invited(chan, invite_key_of(cl), cl->nick, cl->user, cl->host, cl->account, cl->ident_confirmed)) {
             const char *p[] = {chan->name};
             client_reply(cl, N_INVITEONLYCHAN, p, 1, "Cannot join channel (+i)");
             return;
@@ -205,9 +208,7 @@ static void do_join_one(server_t *srv, client_t *cl, const char *chan_name, cons
     member_t *m = channel_add_member(chan, cl);
     if (!m) { server_maybe_drop_channel(srv, chan); err_no_such_channel(cl, chan_name); return; }
     if (is_new) m->rank |= RANK_OP;
-    char cf[64];
-    irc_casefold(cf, sizeof cf, cl->nick);
-    channel_invite_remove(chan, cf);
+    channel_invite_remove(chan, invite_key_of(cl));
     if (server_attach_membership(cl, chan) != 0) {
         channel_remove_member(chan, cl);
         server_maybe_drop_channel(srv, chan);
@@ -251,7 +252,7 @@ void cmd_part(server_t *srv, client_t *cl, irc_message_t *msg) {
         } else {
             char prefix[320];
             client_prefix(cl, prefix, sizeof prefix);
-            char line[500];
+            char line[510];
             const char *p[] = {chan->name};
             irc_build(line, sizeof line, NULL, 0, prefix, "PART", p, 1, reason);
             server_broadcast_channel(chan, line, NULL);
@@ -360,13 +361,13 @@ void cmd_topic(server_t *srv, client_t *cl, irc_message_t *msg) {
     }
     const char *newtopic = msg->params[msg->nparams - 1];
     if (spam_check_text(srv, cl, SPAM_T_TOPIC, newtopic)) return;
-    snprintf(chan->topic, sizeof chan->topic, "%s", newtopic);
+    snprintf(chan->topic, TOPIC_MAX_LEN + 1, "%s", newtopic); /* TOPICLEN: longer would overflow the broadcast line */
     client_prefix(cl, chan->topic_setter, sizeof chan->topic_setter);
     chan->topic_time = time(NULL);
 
     char prefix[320];
     client_prefix(cl, prefix, sizeof prefix);
-    char line[600];
+    char line[510];
     const char *p[] = {chan->name};
     irc_build(line, sizeof line, NULL, 0, prefix, "TOPIC", p, 1, chan->topic);
     server_broadcast_channel(chan, line, NULL);
@@ -374,7 +375,8 @@ void cmd_topic(server_t *srv, client_t *cl, irc_message_t *msg) {
 
 void cmd_names(server_t *srv, client_t *cl, irc_message_t *msg) {
     if (msg->nparams < 1) {
-        client_reply(cl, N_ENDOFNAMES, NULL, 0, "End of /NAMES list.");
+        const char *star[] = {"*"};
+        client_reply(cl, N_ENDOFNAMES, star, 1, "End of /NAMES list.");
         return;
     }
     char chanlist[600];
@@ -390,6 +392,9 @@ void cmd_names(server_t *srv, client_t *cl, irc_message_t *msg) {
             } else {
                 send_names(cl, chan);
             }
+        } else {
+            const char *pe[] = {tok};
+            client_reply(cl, N_ENDOFNAMES, pe, 1, "End of /NAMES list.");
         }
         tok = strtok_r(NULL, ",", &save);
     }
@@ -490,7 +495,7 @@ void cmd_map(server_t *srv, client_t *cl, irc_message_t *msg) {
 
 void cmd_invite(server_t *srv, client_t *cl, irc_message_t *msg) {
     client_t *target = server_find_user(srv, msg->params[0]);
-    if (!target) { err_no_such_nick(cl, msg->params[0]); return; }
+    if (!target || !target->registered) { err_no_such_nick(cl, msg->params[0]); return; }
     const char *chan_name = msg->params[1];
     /* An INVITE for a channel that doesn't exist still delivers its second
      * parameter verbatim to the target. Unvalidated, that made INVITE an
@@ -530,9 +535,7 @@ void cmd_invite(server_t *srv, client_t *cl, irc_message_t *msg) {
             err_not_channel_op(cl, chan->name);
             return;
         }
-        char cf[64];
-        irc_casefold(cf, sizeof cf, target->nick);
-        channel_invite_add(chan, cf);
+        if (chan->modes & CMODE_I) channel_invite_add(chan, invite_key_of(target)); /* only meaningful under +i -- don't let -i channels burn the 64 slots */
         chan_name = chan->name;
     }
     const char *p[] = {target->nick, chan_name};
@@ -697,6 +700,8 @@ static void cmd_mode_user(client_t *cl, irc_message_t *msg, const char *target) 
 /* Shared by /MODE (is_full_op reflects the caller's real rank) and /SAMODE
  * (always full_op=1 -- that command's whole point is bypassing the rank
  * gate). Halfop may only toggle v/b/e/I; everything else needs full op/oper. */
+#define MAX_MODE_PARAMS 6 /* advertised as MODES=6 in ISUPPORT */
+
 void cmd_apply_channel_mode(server_t *srv, client_t *cl, channel_t *chan,
                              const char *modestring, const char **args, int nargs, int is_full_op) {
     int argi = 0;
@@ -714,7 +719,7 @@ void cmd_apply_channel_mode(server_t *srv, client_t *cl, channel_t *chan,
          * to outflags[] unboundedly, and "MODE #c +nnnn...", 500 letters
          * long, smashes the stack. Every write below appends at most a sign
          * plus a letter, so leaving 2 bytes plus the NUL is sufficient. */
-        if (of + 2 >= sizeof outflags || n_outparams >= (int)(sizeof outparams / sizeof outparams[0])) break;
+        if (of + 2 >= sizeof outflags || n_outparams >= MAX_MODE_PARAMS) break; /* == ISUPPORT MODES= */
         char c = *pch;
         if (c == '+' || c == '-') { sign = c; continue; }
 
@@ -786,11 +791,14 @@ void cmd_apply_channel_mode(server_t *srv, client_t *cl, channel_t *chan,
         } else if (c == 'l') {
             if (sign == '+') {
                 if (argi >= nargs) continue;
-                chan->limit = atoi(args[argi]);
+                char *endp;
+                long lim = strtol(args[argi], &endp, 10);
+                if (endp == args[argi] || *endp || lim < 1 || lim > INT_MAX) { argi++; continue; } /* not a positive number: consume, ignore */
+                chan->limit = (int)lim;
                 chan->modes |= CMODE_L;
                 if (cursign != sign) { outflags[of++] = sign; cursign = sign; }
                 outflags[of++] = 'l';
-                snprintf(outparams[n_outparams++], sizeof outparams[0], "%s", args[argi]);
+                snprintf(outparams[n_outparams++], sizeof outparams[0], "%ld", lim);
                 argi++;
             } else {
                 chan->modes &= ~CMODE_L;
@@ -802,7 +810,12 @@ void cmd_apply_channel_mode(server_t *srv, client_t *cl, channel_t *chan,
             if (argi >= nargs) continue;
             client_t *target = server_find_user(srv, args[argi]);
             member_t *tm = target ? channel_find_member(chan, target) : NULL;
-            if (!tm) { argi++; continue; }
+            if (!target) { err_no_such_nick(cl, args[argi]); argi++; continue; }
+            if (!tm) {
+                const char *pe[] = {target->nick, chan->name};
+                client_reply(cl, N_USERNOTINCHANNEL, pe, 2, "They aren't on that channel");
+                argi++; continue;
+            }
             int rank = (c == 'o') ? RANK_OP : (c == 'h') ? RANK_HALFOP : RANK_VOICE;
             if (sign == '+') tm->rank |= rank; else tm->rank &= ~rank;
             if (cursign != sign) { outflags[of++] = sign; cursign = sign; }
@@ -814,7 +827,16 @@ void cmd_apply_channel_mode(server_t *srv, client_t *cl, channel_t *chan,
             if (strchr(args[argi], ' ')) { argi++; continue; } /* see the +k note above -- still consume the arg */
             const char *mask = args[argi];
             masklist_t *ml = (c == 'b') ? &chan->bans : (c == 'e') ? &chan->exceptions : &chan->invex;
-            if (sign == '+') masklist_add(ml, mask); else masklist_del(ml, mask);
+            int changed;
+            if (sign == '+') {
+                if (ml->n >= CHAN_MAX_MASKLIST) {
+                    const char *pe[] = {chan->name, mask};
+                    client_reply(cl, N_BANLISTFULL, pe, 2, "Channel list is full");
+                    argi++; continue;
+                }
+                changed = masklist_add(ml, mask) == 0;
+            } else changed = masklist_del(ml, mask) == 0;
+            if (!changed) { argi++; continue; } /* duplicate add / absent remove: nothing to announce */
             if (cursign != sign) { outflags[of++] = sign; cursign = sign; }
             outflags[of++] = c;
             snprintf(outparams[n_outparams++], sizeof outparams[0], "%s", mask);
@@ -835,9 +857,9 @@ void cmd_apply_channel_mode(server_t *srv, client_t *cl, channel_t *chan,
     outp[1] = outflags;
     int total = 2;
     for (int i = 0; i < n_outparams && total < 18; i++) outp[total++] = outparams[i];
-    char line[600];
-    irc_build(line, sizeof line, NULL, 0, prefix, "MODE", outp, total, NULL);
-    server_broadcast_channel(chan, line, NULL);
+    char line[510];
+    if (irc_build(line, sizeof line, NULL, 0, prefix, "MODE", outp, total, NULL) >= 0)
+        server_broadcast_channel(chan, line, NULL);
     log_info("chan", "%s set %s %s", cl->nick, chan->name, outflags);
 }
 

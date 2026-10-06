@@ -129,3 +129,8 @@ int client_flood_ok(client_t *cl, int max_msgs, double window_seconds) {
     cl->flood_count++;
     return cl->flood_count <= max_msgs;
 }
+
+const char *client_invite_key(client_t *cl) {
+    if (!cl->invite_key[0]) snprintf(cl->invite_key, sizeof cl->invite_key, "c%llu", (unsigned long long)cl->conn_id);
+    return cl->invite_key;
+}

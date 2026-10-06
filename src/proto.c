@@ -98,6 +98,7 @@ int irc_parse_line(char *line, irc_message_t *msg) {
             raw[nraw++] = p;
         }
     }
+    if (nraw == MAX_RAW_TOKENS && strchr(raw[nraw - 1], ' ')) return -1; /* token cap hit mid-line: the last "token" would hold spaces */
     if (nraw == 0 || raw[0][0] == '\0') return -1;
     for (char *c = raw[0]; *c; c++) *c = (char)toupper((unsigned char)*c);
     msg->command = raw[0];
@@ -189,11 +190,27 @@ int irc_build(char *out, size_t outsz,
 
     for (int i = 0; i < nparams; i++) {
         if (append_str(out, outsz, &pos, " ") != 0) return -1;
-        if (append_escaped(out, outsz, &pos, params[i]) != 0) return -1;
+        /* A middle parameter can't be empty, contain a space or start with ':'
+         * without shifting every later parameter on the wire -- defang rather
+         * than emit a malformed line (callers pass user-supplied names). */
+        char mid[512];
+        irc_escape(mid, sizeof mid, params[i]);
+        if (!mid[0]) { mid[0] = '*'; mid[1] = '\0'; }
+        if (mid[0] == ':') mid[0] = '_';
+        for (char *q = mid; *q; q++) if (*q == ' ') *q = '_';
+        if (append_str(out, outsz, &pos, mid) != 0) return -1;
     }
     if (trailing) {
         if (append_str(out, outsz, &pos, " :") != 0) return -1;
-        if (append_escaped(out, outsz, &pos, trailing) != 0) return -1;
+        /* Too long for the buffer: truncate the text to fit (still a valid
+         * line) instead of failing and leaving a half-built one callers send. */
+        char tbuf[1024];
+        irc_escape(tbuf, sizeof tbuf, trailing);
+        size_t room = outsz - 1 - pos, tl = strlen(tbuf);
+        if (tl > room) tl = room;
+        memcpy(out + pos, tbuf, tl);
+        pos += tl;
+        out[pos] = '\0';
     }
     return (int)pos;
 }
@@ -239,8 +256,12 @@ int irc_valid_channel(const char *chan, int max_len) {
     if (len < 2 || len - 1 > 49) return 0;
     for (size_t i = 1; i < len; i++) {
         unsigned char c = (unsigned char)chan[i];
-        if (!(isalnum(c) || c == '-' || c == '_' || c == '[' || c == ']' ||
-              c == '{' || c == '}' || c == '^' || c == '|')) return 0;
+        /* RFC 2812 only bars space, comma, BEL, NUL, CR, LF and ':' (plus other
+         * control bytes here); '*' '?' '!' '@' '\\' are barred too since they
+         * are mask/glob metacharacters and would make a channel unbannable
+         * or unlistable. Bytes >= 0x80 pass, so UTF-8 names work. */
+        if (c <= 0x20 || c == 0x7f || c == ',' || c == ':' || c == '*' || c == '?' ||
+            c == '!' || c == '@' || c == '\\') return 0;
     }
     return 1;
 }
@@ -248,7 +269,7 @@ int irc_valid_channel(const char *chan, int max_len) {
 int irc_valid_host(const char *host) {
     if (!host) return 0;
     size_t len = strlen(host);
-    if (len < 1 || len > 253) return 0;
+    if (len < 1 || len > 253 || host[0] == ':') return 0; /* a leading ':' would be read as the trailing marker in WHO/WHOIS lines */
     for (size_t i = 0; i < len; i++) {
         unsigned char c = (unsigned char)host[i];
         if (!(isalnum(c) || c == '.' || c == '-' || c == ':')) return 0;
@@ -318,13 +339,13 @@ int irc_mask_match(const char *nick, const char *user, const char *host, const c
     }
     char ident[128];
     irc_ident_for(ident, sizeof ident, user, ident_confirmed);
-    char full[384];
+    char full[64 + 1 + 128 + 1 + 256 + 1] /* NICKLEN + ident + HOSTLEN */;
     snprintf(full, sizeof full, "%s!%s@%s", nick ? nick : "", ident, host ? host : "");
     return irc_glob_match(mask, full);
 }
 
 int irc_host_mask_match(const char *user, const char *host, const char *mask) {
-    char full[384];
+    char full[64 + 1 + 128 + 1 + 256 + 1] /* NICKLEN + ident + HOSTLEN */;
     snprintf(full, sizeof full, "%s@%s", user ? user : "", host ? host : "");
     if (strchr(mask, '@')) {
         return irc_glob_match(mask, full);

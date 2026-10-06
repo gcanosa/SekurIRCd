@@ -33,6 +33,8 @@ void accounts_register_hashed(account_store_t *st, const char *name, const char 
 /* Stored scrypt hash for `name`, or NULL if no such account. Valid until the
  * next mutation of the store. */
 const char *accounts_hash(account_store_t *st, const char *name);
+/* The account's canonical (as registered) name, or `name` itself if unknown. */
+const char *accounts_display_name(account_store_t *st, const char *name);
 /* Unix time `name` was registered, or 0 if no such account -- see spam.c's
  * use of it to age-gate [spam] exempt_identified against an instant
  * self-service /REGISTER. */

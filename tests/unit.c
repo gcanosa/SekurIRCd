@@ -803,6 +803,30 @@ static void test_protection_bundle_config(void) {
 
 #define RUN(t) do { t(); g_tests_run++; } while (0)
 
+static void test_build_truncates_and_defangs(void) {
+    char out[64];
+    char longtxt[300]; memset(longtxt, 'x', sizeof longtxt - 1); longtxt[sizeof longtxt - 1] = '\0';
+    const char *p[] = {"#c"};
+    int n = irc_build(out, sizeof out, NULL, 0, "n!u@h", "TOPIC", p, 1, longtxt);
+    assert(n > 0 && (size_t)n == strlen(out) && n < (int)sizeof out);
+    assert(strncmp(out, ":n!u@h TOPIC #c :xxx", 20) == 0); /* text truncated, line still well-formed */
+    const char *bad[] = {"a b", "", ":x"};
+    irc_build(out, sizeof out, NULL, 0, NULL, "CMD", bad, 3, "t");
+    assert(strcmp(out, "CMD a_b * _x :t") == 0);
+}
+
+static void test_parse_token_cap_and_names(void) {
+    char line[512];
+    int n = snprintf(line, sizeof line, "MODE #c +k");
+    for (int i = 0; i < 300; i++) line[n++] = ' ';
+    n += snprintf(line + n, sizeof line - (size_t)n, "a b");
+    irc_message_t m;
+    assert(irc_parse_line(line, &m) == -1); /* cap hit with spaces left over: refuse, don't smuggle a spaced param */
+    assert(irc_valid_channel("##linux", 50) && irc_valid_channel("#c++", 50) && irc_valid_channel("#foo.bar", 50));
+    assert(!irc_valid_channel("#a,b", 50) && !irc_valid_channel("#a b", 50) && !irc_valid_channel("#a*", 50));
+    assert(!irc_valid_host(":foo") && irc_valid_host("a.b.c"));
+}
+
 int main(void) {
     RUN(test_parse_basic);
     RUN(test_parse_prefix_and_lowercase_command);
@@ -839,6 +863,8 @@ int main(void) {
     RUN(test_spam_track_limits);
     RUN(test_spam_filters_and_check);
     RUN(test_proc_stats);
+    RUN(test_build_truncates_and_defangs);
+    RUN(test_parse_token_cap_and_names);
     RUN(test_protection_pure_helpers);
     RUN(test_protection_bl_match);
     RUN(test_protection_bundle_config);
