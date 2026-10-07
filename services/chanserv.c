@@ -165,6 +165,8 @@ static int load_app_config(const char *path, app_cfg_t *cfg, char *errbuf, size_
  * argument-free channel-mode letters). */
 
 static cJSON *g_store = NULL;
+/* Account of whoever sent the PRIVMSG being handled ("" if not logged in): the hub tags forwarded messages with it. */
+static char g_from_account[64];
 static app_cfg_t g_cfg;
 
 /* Returns 0, or -1 if the live store exists but can't be read -- starting empty
@@ -465,6 +467,14 @@ static void wire_mode(const char *chan, const char *modestring, const char *arg)
     irc_build(line, sizeof line, NULL, 0, prefix, "MODE", p, arg ? 3 : 2, NULL);
     queue_line(line);
 }
+/* One MODE line with several arguments ("+kl key 5"); `args` is the space-separated argument string (or NULL). */
+static void wire_mode_args(const char *chan, const char *modestring, const char *args) {
+    char prefix[320];
+    irc_prefix_for(prefix, sizeof prefix, g_cfg.nick, g_cfg.user, g_cfg.host);
+    char line[700];
+    snprintf(line, sizeof line, ":%s MODE %s %s%s%s", prefix, chan, modestring, args && args[0] ? " " : "", args ? args : "");
+    queue_line(line);
+}
 static void wire_topic(const char *chan, const char *topic) {
     char prefix[320];
     irc_prefix_for(prefix, sizeof prefix, g_cfg.nick, g_cfg.user, g_cfg.host);
@@ -543,7 +553,13 @@ static cJSON *check_password(const char *from_nick, const char *chan, const char
         return NULL;
     }
     const char *hash = rec_str(rec, "pw_hash");
-    if (!hash[0] || !crypto_verify_password(password, hash)) {
+    /* "*" instead of the password: accepted for the founder ACCOUNT (SET FOUNDER) -- no password to type or leak. */
+    int founder_ok = 0;
+    if (strcmp(password, "*") == 0) {
+        const char *fa = rec_str(rec, "founder");
+        founder_ok = fa[0] && g_from_account[0] && strcasecmp(fa, g_from_account) == 0;
+    }
+    if (!founder_ok && (!hash[0] || !crypto_verify_password(password, hash))) {
         g_fails[fail_slot(from_nick, 1)].until = time(NULL) + FAIL_COOLDOWN;
         reply(from_nick, "Password incorrect.");
         log_warn("chanserv", "failed password for %s from %s", chan, from_nick);
@@ -562,12 +578,40 @@ static cJSON *check_password(const char *from_nick, const char *chan, const char
 }
 
 /* MLOCK: (re)assert the locked flag modes on the ircd. */
+/* Extended MLOCK. A record keeps: "mlock" (flag letters forced ON), "mlock_off" (letters forced OFF, k l f j L allowed),
+ * and the parameters for the ON parameter modes: mlock_key / mlock_limit / mlock_flood / mlock_jt / mlock_redirect. */
+#define MLOCK_FLAGS "nimpstzCNPQSTVROMcDuG"
+static const struct { char letter; const char *field; } MLOCK_PARAMS[] = {
+    {'k', "mlock_key"}, {'l', "mlock_limit"}, {'f', "mlock_flood"}, {'j', "mlock_jt"}, {'L', "mlock_redirect"},
+};
+#define N_MLOCK_PARAMS (int)(sizeof MLOCK_PARAMS / sizeof MLOCK_PARAMS[0])
+
 static void apply_mlock(cJSON *rec, const char *chan) {
-    const char *mlock = rec_str(rec, "mlock");
-    if (!mlock[0]) return;
-    char modes[16];
-    snprintf(modes, sizeof modes, "+%s", mlock);
-    wire_mode(chan, modes, NULL);
+    const char *on = rec_str(rec, "mlock"), *off = rec_str(rec, "mlock_off");
+    char modes[64] = "", args[300] = "";
+    size_t mp = 0;
+    int any_on = on[0] != '\0';
+    for (int i = 0; i < N_MLOCK_PARAMS; i++) if (rec_str(rec, MLOCK_PARAMS[i].field)[0]) any_on = 1;
+    if (any_on) {
+        modes[mp++] = '+';
+        for (const char *c = on; *c && mp < sizeof modes - 8; c++) modes[mp++] = *c;
+        for (int i = 0; i < N_MLOCK_PARAMS; i++) {
+            const char *v = rec_str(rec, MLOCK_PARAMS[i].field);
+            if (!v[0]) continue;
+            modes[mp++] = MLOCK_PARAMS[i].letter;
+            strncat(args, args[0] ? " " : "", sizeof args - strlen(args) - 1);
+            strncat(args, v, sizeof args - strlen(args) - 1);
+        }
+    }
+    if (off[0]) {
+        modes[mp++] = '-';
+        for (const char *c = off; *c && mp < sizeof modes - 2; c++) {
+            modes[mp++] = *c;
+            if (*c == 'k') { strncat(args, args[0] ? " " : "", sizeof args - strlen(args) - 1); strncat(args, "*", sizeof args - strlen(args) - 1); } /* -k wants an argument; any value */
+        }
+    }
+    modes[mp] = '\0';
+    if (mp) wire_mode_args(chan, modes, args);
 }
 
 /* Sessions that IDENTIFY'd (or REGISTERed, or SUCCESSOR CLAIMed) successfully
@@ -649,6 +693,49 @@ static void clear_identified_chan(const char *chan) {
     g_n_identified = w;
 }
 
+/* Nicks ChanServ itself opped on JOIN because of an ACCESS entry (or the founder account) this session -- SECUREOPS
+ * leaves those alone. Same shape and lifetime as the identified table above (cleared on QUIT, migrated on NICK). */
+#define MAX_GRANTED 256
+static struct { char chan[128]; char nick[64]; } g_granted[MAX_GRANTED];
+static int g_n_granted;
+
+static void granted_mark(const char *chan, const char *nick) {
+    char cc[128], cn[64];
+    irc_casefold(cc, sizeof cc, chan);
+    irc_casefold(cn, sizeof cn, nick);
+    for (int i = 0; i < g_n_granted; i++) if (!strcmp(g_granted[i].chan, cc) && !strcmp(g_granted[i].nick, cn)) return;
+    if (g_n_granted >= MAX_GRANTED) { memmove(&g_granted[0], &g_granted[1], (size_t)(MAX_GRANTED - 1) * sizeof g_granted[0]); g_n_granted--; }
+    snprintf(g_granted[g_n_granted].chan, sizeof g_granted[0].chan, "%s", cc);
+    snprintf(g_granted[g_n_granted].nick, sizeof g_granted[0].nick, "%s", cn);
+    g_n_granted++;
+}
+static int granted_has(const char *chan, const char *nick) {
+    char cc[128], cn[64];
+    irc_casefold(cc, sizeof cc, chan);
+    irc_casefold(cn, sizeof cn, nick);
+    for (int i = 0; i < g_n_granted; i++) if (!strcmp(g_granted[i].chan, cc) && !strcmp(g_granted[i].nick, cn)) return 1;
+    return 0;
+}
+static void granted_clear_nick(const char *nick) {
+    char cn[64];
+    irc_casefold(cn, sizeof cn, nick);
+    int w = 0;
+    for (int i = 0; i < g_n_granted; i++) if (strcmp(g_granted[i].nick, cn) != 0) g_granted[w++] = g_granted[i];
+    g_n_granted = w;
+}
+static void granted_rename(const char *old_nick, const char *new_nick) {
+    char co[64];
+    irc_casefold(co, sizeof co, old_nick);
+    for (int i = 0; i < g_n_granted; i++) if (!strcmp(g_granted[i].nick, co)) irc_casefold(g_granted[i].nick, sizeof g_granted[i].nick, new_nick);
+}
+static void granted_clear_chan(const char *chan) {
+    char cc[128];
+    irc_casefold(cc, sizeof cc, chan);
+    int w = 0;
+    for (int i = 0; i < g_n_granted; i++) if (strcmp(g_granted[i].chan, cc) != 0) g_granted[w++] = g_granted[i];
+    g_n_granted = w;
+}
+
 static int any_identified(const char *chan) {
     prune_identified();
     char cf_c[128];
@@ -686,6 +773,7 @@ static struct {
     char nick[64];
     char chan[128];
     char password[128];
+    char account[64]; /* the registrant's account at REGISTER time (becomes the founder account) */
     time_t sent_at;
 } g_pending_register;
 
@@ -712,6 +800,7 @@ static void cmd_register(const char *from_nick, char *args) {
     snprintf(g_pending_register.nick, sizeof g_pending_register.nick, "%s", from_nick);
     snprintf(g_pending_register.chan, sizeof g_pending_register.chan, "%s", chan);
     snprintf(g_pending_register.password, sizeof g_pending_register.password, "%s", password);
+    snprintf(g_pending_register.account, sizeof g_pending_register.account, "%s", g_from_account);
     g_pending_register.sent_at = time(NULL);
     wire_whoischan(chan, from_nick);
 }
@@ -727,6 +816,7 @@ static void finish_register(void) {
     cJSON *rec = cJSON_CreateObject();
     cJSON_AddStringToObject(rec, "name", chan);
     cJSON_AddStringToObject(rec, "pw_hash", hash);
+    if (g_pending_register.account[0]) cJSON_AddStringToObject(rec, "founder", g_pending_register.account); /* registered while logged in: that account is the founder */
     cJSON_AddNumberToObject(rec, "registered_at", (double)time(NULL));
     char cf[128];
     irc_casefold(cf, sizeof cf, chan);
@@ -792,6 +882,7 @@ static void expire_sweep(void) {
         wire_mode(chan, "-r", NULL);
         if (rec_bool(r, "guard")) wire_part(chan);
         clear_identified_chan(chan);
+    granted_clear_chan(chan);
         cJSON_DeleteItemFromObjectCaseSensitive(g_store, dead[i]);
         store_save();
         log_info("chanserv", "%s expired after %d days without use", chan, g_cfg.expire_days);
@@ -811,6 +902,7 @@ static void cmd_drop(const char *from_nick, char *args) {
     irc_casefold(cf, sizeof cf, chan);
     cJSON_DeleteItemFromObjectCaseSensitive(g_store, cf);
     clear_identified_chan(chan);
+    granted_clear_chan(chan);
     store_save();
     reply(from_nick, "Channel registration dropped.");
     log_info("chanserv", "%s dropped %s", from_nick, chan);
@@ -895,7 +987,17 @@ static void cmd_info(const char *from_nick, char *args) {
     reply(from_nick, msg);
     if (rec_str(rec, "desc")[0]) { snprintf(msg, sizeof msg, "  Description: %s", rec_str(rec, "desc")); reply(from_nick, msg); }
     if (rec_str(rec, "url")[0]) { snprintf(msg, sizeof msg, "  URL: %s", rec_str(rec, "url")); reply(from_nick, msg); }
-    if (rec_str(rec, "mlock")[0]) { snprintf(msg, sizeof msg, "  MLOCK: +%s", rec_str(rec, "mlock")); reply(from_nick, msg); }
+    if (rec_str(rec, "founder")[0]) { snprintf(msg, sizeof msg, "  Founder account: %s", rec_str(rec, "founder")); reply(from_nick, msg); }
+    snprintf(msg, sizeof msg, "  Options:%s%s%s", rec_bool(rec, "private") ? " PRIVATE" : "", rec_bool(rec, "restricted") ? " RESTRICTED" : "", rec_bool(rec, "secureops") ? " SECUREOPS" : "");
+    if (rec_bool(rec, "private") || rec_bool(rec, "restricted") || rec_bool(rec, "secureops")) reply(from_nick, msg);
+    {
+        char ml[200] = "";
+        const char *on = rec_str(rec, "mlock"), *off = rec_str(rec, "mlock_off");
+        if (on[0]) snprintf(ml, sizeof ml, "+%s", on);
+        for (int i = 0; i < N_MLOCK_PARAMS; i++) if (rec_str(rec, MLOCK_PARAMS[i].field)[0]) snprintf(ml + strlen(ml), sizeof ml - strlen(ml), "%s%c", strchr(ml, '+') ? "" : "+", MLOCK_PARAMS[i].letter);
+        if (off[0]) snprintf(ml + strlen(ml), sizeof ml - strlen(ml), "-%s", off);
+        if (ml[0]) { snprintf(msg, sizeof msg, "  MLOCK: %s", ml); reply(from_nick, msg); }
+    }
     if (rec_str(rec, "successor")[0]) { snprintf(msg, sizeof msg, "  Successor: %s", rec_str(rec, "successor")); reply(from_nick, msg); }
 }
 
@@ -1101,25 +1203,65 @@ static void finish_claim(const char *user, const char *host, const char *account
     log_info("chanserv", "%s claimed founder of %s via SUCCESSOR", from_nick, chan);
 }
 
+/* "+ntk-s secretkey" style MLOCK. A spec without a leading sign means "+". Parameters for the ON parameter modes
+ * (k l f j L) follow in the order those letters appear. On success fills on/off/fields and returns 1. */
+static int mlock_parse(const char *value, char *on, size_t onsz, char *off, size_t offsz, char fields[N_MLOCK_PARAMS][80],
+                       char *err, size_t errsz) {
+    on[0] = off[0] = '\0';
+    for (int i = 0; i < N_MLOCK_PARAMS; i++) fields[i][0] = '\0';
+    char buf[300];
+    snprintf(buf, sizeof buf, "%s", value);
+    char *save = NULL;
+    char *spec = strtok_r(buf, " ", &save);
+    if (!spec) return 1; /* empty = clear everything */
+    int sign = 1;
+    size_t no = 0, nf = 0;
+    char plus_params[8] = "";
+    if (spec[0] != '+' && spec[0] != '-') sign = 1;
+    for (const char *c = spec; *c; c++) {
+        if (*c == '+') { sign = 1; continue; }
+        if (*c == '-') { sign = 0; continue; }
+        int is_param = strchr("klfjL", *c) != NULL;
+        if (!is_param && !strchr(MLOCK_FLAGS, *c)) { snprintf(err, errsz, "MLOCK letters must be from: %s plus k l f j L", MLOCK_FLAGS); return 0; }
+        if (strchr(on, *c) || strchr(off, *c) || strchr(plus_params, *c)) { snprintf(err, errsz, "Letter '%c' given twice", *c); return 0; }
+        if (sign) {
+            if (is_param) { if (strlen(plus_params) < 7) plus_params[strlen(plus_params)] = *c; }
+            else if (no + 1 < onsz) { on[no++] = *c; on[no] = '\0'; }
+        } else if (nf + 1 < offsz) { off[nf++] = *c; off[nf] = '\0'; }
+    }
+    for (const char *c = plus_params; *c; c++) {
+        char *arg = strtok_r(NULL, " ", &save);
+        if (!arg) { snprintf(err, errsz, "+%c needs a parameter", *c); return 0; }
+        int ok = 1;
+        switch (*c) {
+            case 'k': ok = strlen(arg) < 60; break;
+            case 'l': { char *e; long n = strtol(arg, &e, 10); ok = !*e && n >= 1 && n <= 1000000; break; }
+            case 'f': case 'j': { int a, b; char x; ok = sscanf(arg, "%d:%d%c", &a, &b, &x) == 2 && a >= 1 && a <= 100 && b >= 1 && b <= 600; break; }
+            case 'L': ok = irc_valid_channel(arg, 50); break;
+        }
+        if (!ok) { snprintf(err, errsz, "Bad parameter for +%c", *c); return 0; }
+        for (int i = 0; i < N_MLOCK_PARAMS; i++) if (MLOCK_PARAMS[i].letter == *c) snprintf(fields[i], 80, "%s", arg);
+    }
+    return 1;
+}
+
 static void cmd_set(const char *from_nick, char *args) {
+    static const char *USAGE = "Syntax: SET <#channel> MLOCK|DESC|URL|ENTRYMSG|FOUNDER|PRIVATE|RESTRICTED|SECUREOPS <value> <password>";
     char *save = NULL;
     char *chan = strtok_r(args, " ", &save);
     char *option = strtok_r(NULL, " ", &save);
-    if (!chan || !option) { reply(from_nick, "Syntax: SET <#channel> MLOCK|DESC|URL|ENTRYMSG <text> <password>"); return; }
+    if (!chan || !option) { reply(from_nick, USAGE); return; }
     cJSON *rec = store_get(chan);
     if (!rec) { reply(from_nick, "That channel isn't registered."); return; }
-    char optlower[16] = ""; /* strtok_r can't hand us an empty token today, but the
-                              * loop below leaves this uninitialized if it ever does */
+    char optlower[16] = "";
     for (int i = 0; option[i] && i < 15; i++) optlower[i] = (char)tolower((unsigned char)option[i]), optlower[i + 1] = '\0';
-    if (strcmp(optlower, "mlock") != 0 && strcmp(optlower, "desc") != 0 &&
-        strcmp(optlower, "url") != 0 && strcmp(optlower, "entrymsg") != 0) {
-        reply(from_nick, "Syntax: SET <#channel> MLOCK|DESC|URL|ENTRYMSG <text> <password>");
-        return;
-    }
-    /* Remainder is "[value ]password" -- split on the LAST space so a
-     * value may itself contain spaces (same as upstream's rpartition). */
+    static const char *OPTS[] = {"mlock", "desc", "url", "entrymsg", "founder", "private", "restricted", "secureops"};
+    int known = 0;
+    for (size_t i = 0; i < sizeof OPTS / sizeof OPTS[0]; i++) if (strcmp(optlower, OPTS[i]) == 0) known = 1;
+    if (!known) { reply(from_nick, USAGE); return; }
+    /* Remainder is "[value ]password" -- split on the LAST space so a value may itself contain spaces. */
     char *rest = save;
-    if (!rest || !*rest) { reply(from_nick, "Syntax: SET <#channel> MLOCK|DESC|URL|ENTRYMSG <text> <password>"); return; }
+    if (!rest || !*rest) { reply(from_nick, USAGE); return; }
     char *last_space = strrchr(rest, ' ');
     char value[300] = "", password[128];
     if (last_space) {
@@ -1130,23 +1272,76 @@ static void cmd_set(const char *from_nick, char *args) {
     } else {
         snprintf(password, sizeof password, "%s", rest);
     }
-    if (strcmp(optlower, "mlock") == 0) {
-        for (const char *p = value; *p; p++) {
-            if (!strchr(MLOCK_LETTERS, *p)) {
-                char msg[100]; snprintf(msg, sizeof msg, "MLOCK letters must be from: %s", MLOCK_LETTERS);
-                reply(from_nick, msg);
-                return;
-            }
-        }
+    char on[32], off[32], fields[N_MLOCK_PARAMS][80], err[120];
+    if (strcmp(optlower, "mlock") == 0 && !mlock_parse(value, on, sizeof on, off, sizeof off, fields, err, sizeof err)) { reply(from_nick, err); return; }
+    int flag_val = -1;
+    if (!strcmp(optlower, "private") || !strcmp(optlower, "restricted") || !strcmp(optlower, "secureops")) {
+        if (strcasecmp(value, "on") == 0) flag_val = 1;
+        else if (strcasecmp(value, "off") == 0) flag_val = 0;
+        else { char m[100]; snprintf(m, sizeof m, "Syntax: SET <#channel> %s ON|OFF <password>", option); reply(from_nick, m); return; }
+    }
+    if (strcmp(optlower, "founder") == 0 && value[0] && strcmp(value, "-") != 0 && !irc_valid_user(value, 30)) {
+        reply(from_nick, "FOUNDER must be an account name (or - to clear it)");
+        return;
     }
     if (!check_password(from_nick, chan, password)) return;
-    rec_set_str(rec, optlower, value);
-    store_save();
-    if (strcmp(optlower, "mlock") == 0) apply_mlock(rec, rec_str(rec, "name"));
     char msg[350];
+    if (strcmp(optlower, "mlock") == 0) {
+        rec_set_str(rec, "mlock", on);
+        rec_set_str(rec, "mlock_off", off);
+        for (int i = 0; i < N_MLOCK_PARAMS; i++) rec_set_str(rec, MLOCK_PARAMS[i].field, fields[i]);
+        store_save();
+        apply_mlock(rec, rec_str(rec, "name"));
+    } else if (flag_val >= 0) {
+        rec_set_bool(rec, optlower, flag_val);
+        if (flag_val && (!strcmp(optlower, "restricted") || !strcmp(optlower, "secureops"))) {
+            /* these need to see joins and mode changes, which only reach us for a channel ChanServ sits in */
+            rec_set_bool(rec, "guard", 1);
+            wire_join(rec_str(rec, "name"));
+        }
+        store_save();
+        snprintf(msg, sizeof msg, "%s for %s is now %s", option, chan, flag_val ? "ON" : "OFF");
+        reply(from_nick, msg);
+        return;
+    } else if (strcmp(optlower, "founder") == 0) {
+        rec_set_str(rec, "founder", strcmp(value, "-") == 0 ? "" : value);
+        store_save();
+        snprintf(msg, sizeof msg, value[0] && strcmp(value, "-") != 0 ? "Founder account for %s is now %s (use * as the password while logged in as it)" : "Founder account for %s cleared", chan, value);
+        reply(from_nick, msg);
+        return;
+    } else {
+        rec_set_str(rec, optlower, value);
+        store_save();
+    }
     if (value[0]) snprintf(msg, sizeof msg, "%s for %s is now: '%s'", option, chan, value);
     else snprintf(msg, sizeof msg, "%s for %s cleared", option, chan);
     reply(from_nick, msg);
+}
+
+/* LIST [pattern]: registered channels (PRIVATE ones only to their founder account). */
+static void cmd_list_channels(const char *from_nick, char *args) {
+    char *save = NULL;
+    char *pat = strtok_r(args, " ", &save);
+    int shown = 0, hidden = 0;
+    cJSON *rec;
+    cJSON_ArrayForEach(rec, g_store) {
+        if (!cJSON_IsObject(rec)) continue;
+        const char *name = rec_str(rec, "name");
+        if (!name[0] || (pat && !irc_glob_match(pat, name))) continue;
+        const char *fa = rec_str(rec, "founder");
+        int mine = (fa[0] && g_from_account[0] && strcasecmp(fa, g_from_account) == 0) || is_identified(name, from_nick);
+        if (rec_bool(rec, "private") && !mine) { hidden++; continue; }
+        if (shown >= 50) { reply(from_nick, "(more channels match -- narrow the pattern)"); break; }
+        char m[400];
+        const char *desc = rec_str(rec, "desc");
+        snprintf(m, sizeof m, "  %s%s%s", name, desc[0] ? " -- " : "", desc);
+        reply(from_nick, m);
+        shown++;
+    }
+    char m[100];
+    snprintf(m, sizeof m, "%d channel(s) listed.", shown);
+    (void)hidden; /* private channels are not even counted -- their existence isn't revealed */
+    reply(from_nick, m);
 }
 
 /* OP/DEOP/VOICE/DEVOICE/HALFOP/DEHALFOP <#channel> [nick] <password> --
@@ -1287,9 +1482,16 @@ static void cmd_help(const char *from_nick, char *args) {
     reply(from_nick, "  AKICK #channel DEL <mask> <password>");
     reply(from_nick, "                                -- remove a mask from the auto-kick list");
     reply(from_nick, "  AKICK #channel LIST           -- show the auto-kick list");
-    reply(from_nick, "  SET #channel MLOCK <modes> <password>");
-    reply(from_nick, "                                -- lock flag modes on; ChanServ re-applies any");
-    reply(from_nick, "                                   of them that gets removed (empty <modes> clears)");
+    reply(from_nick, "  SET #channel MLOCK <+modes-modes [params]> <password>");
+    reply(from_nick, "                                -- lock modes; ChanServ puts back any that get changed (empty clears).");
+    reply(from_nick, "                                   e.g. +ntk-s secretkey forces n t k(key) on and s off; k l f j L");
+    reply(from_nick, "                                   take their parameters in order. No sign means +.");
+    reply(from_nick, "  SET #channel FOUNDER <account|-> <password>");
+    reply(from_nick, "                                -- the founder ACCOUNT is recognised on join and may use * as the password");
+    reply(from_nick, "  SET #channel PRIVATE|RESTRICTED|SECUREOPS ON|OFF <password>");
+    reply(from_nick, "                                -- PRIVATE hides it from LIST; RESTRICTED kicks anyone not on the access list;");
+    reply(from_nick, "                                   SECUREOPS takes ops away from anyone ChanServ did not grant them to");
+    reply(from_nick, "  LIST [pattern]                -- registered channels (not PRIVATE ones)");
     reply(from_nick, "  SET #channel DESC|URL|ENTRYMSG <text> <password>");
     reply(from_nick, "                                -- free-text metadata (DESC/URL shown by INFO,");
     reply(from_nick, "                                   ENTRYMSG sent to whoever JOINs); empty clears");
@@ -1348,6 +1550,7 @@ static void dispatch_privmsg(const char *from_nick, const char *from_prefix, con
     else if (strcasecmp(verb, "AKICK") == 0) cmd_akick(from_nick, rest);
     else if (strcasecmp(verb, "SUCCESSOR") == 0) cmd_successor(from_nick, from_prefix, rest);
     else if (strcasecmp(verb, "SET") == 0) cmd_set(from_nick, rest);
+    else if (strcasecmp(verb, "LIST") == 0) cmd_list_channels(from_nick, rest);
     else if (strcasecmp(verb, "OWNER") == 0) cmd_chanmode_one(from_nick, rest, "OWNER", '+', 'q');
     else if (strcasecmp(verb, "DEOWNER") == 0) cmd_chanmode_one(from_nick, rest, "DEOWNER", '-', 'q');
     else if (strcasecmp(verb, "ADMIN") == 0) cmd_chanmode_one(from_nick, rest, "ADMIN", '+', 'a');
@@ -1388,14 +1591,34 @@ static void handle_svcjoin(irc_message_t *msg) {
         wire_kick(chan, nick, "Banned from this channel (AKICK)");
         return;
     }
+    /* The founder's account is recognised on join: no password, no IDENTIFY. */
+    const char *fa = rec_str(rec, "founder");
+    int is_founder = fa[0] && account[0] && account[0] != '*' && strcasecmp(fa, account) == 0;
+    const char *level = access_level_for(rec, nick, user, host, account, ident_confirmed);
+
+    if (rec_bool(rec, "restricted") && !is_founder && !level[0] && !is_identified(chan, nick)) {
+        /* RESTRICTED: only the access list (and the founder) may be here. Ban the host too, so it can't rejoin in a loop. */
+        char rban[300];
+        snprintf(rban, sizeof rban, "*!*@%s", host);
+        wire_mode(chan, "+b", rban);
+        wire_kick(chan, nick, "This channel is restricted to its access list");
+        return;
+    }
     const char *entrymsg = rec_str(rec, "entrymsg");
     if (entrymsg[0]) reply(nick, entrymsg);
 
-    const char *level = access_level_for(rec, nick, user, host, account, ident_confirmed);
+    if (is_founder) {
+        mark_identified(chan, nick);
+        granted_mark(chan, nick);
+        char fm[3] = {'+', g_cfg.founder_mode, '\0'};
+        wire_mode(chan, fm, nick);
+        return;
+    }
     if (level[0]) {
         char modestring[4];
         snprintf(modestring, sizeof modestring, "+%s", level);
         wire_mode(chan, modestring, nick);
+        granted_mark(chan, nick);
     }
 }
 
@@ -1527,6 +1750,7 @@ static void process_line(char *line) {
         char from_nick[64];
         nick_from_prefix(msg.prefix, from_nick, sizeof from_nick);
         clear_identified_nick(from_nick);
+        granted_clear_nick(from_nick);
         return;
     }
     if (strcasecmp(msg.command, "NICK") == 0) {
@@ -1534,6 +1758,7 @@ static void process_line(char *line) {
         char old_nick[64];
         nick_from_prefix(msg.prefix, old_nick, sizeof old_nick);
         rename_identified_nick(old_nick, msg.params[0]);
+        granted_rename(old_nick, msg.params[0]);
         return;
     }
 
@@ -1552,24 +1777,56 @@ static void process_line(char *line) {
         return;
     }
 
-    /* MLOCK enforcement: the hub relays channel MODE changes for channels
-     * ChanServ sits in (GUARD) -- put back any locked letter someone removed. */
+    /* MODE changes the hub relays for channels ChanServ sits in (GUARD): enforce MLOCK (flags, key, limit, flood, join
+     * throttle, redirect) and SECUREOPS. Our own corrections are idempotent, so seeing them again does nothing. */
     if (strcasecmp(msg.command, "MODE") == 0) {
         if (msg.nparams < 2 || msg.params[0][0] != '#') return;
         cJSON *rec = store_get(msg.params[0]);
-        const char *mlock = rec ? rec_str(rec, "mlock") : "";
-        if (!mlock[0]) return;
-        char restore[16] = "+";
-        size_t rp = 1;
+        if (!rec) return;
+        char setter[64] = "";
+        if (msg.prefix) nick_from_prefix(msg.prefix, setter, sizeof setter);
+        int by_us = strcasecmp(setter, g_cfg.nick) == 0;
+        const char *on = rec_str(rec, "mlock"), *off = rec_str(rec, "mlock_off");
+        int secureops = rec_bool(rec, "secureops");
+        char fix_on[16] = "", fix_off[16] = "", fix_args[200] = "", fix_off_args[40] = "";
+        int argi = 2;
         char sign = '+';
-        for (const char *c = msg.params[1]; *c; c++) {
+        for (const char *c = msg.params[1]; *c && !by_us; c++) {
             if (*c == '+' || *c == '-') { sign = *c; continue; }
-            if (sign == '-' && strchr(mlock, *c) && !strchr(restore, *c) && rp + 1 < sizeof restore) {
-                restore[rp++] = *c;
-                restore[rp] = '\0';
+            const char *arg = NULL;
+            int takes = strchr("kbeIohvqa", *c) != NULL || (sign == '+' && strchr("lfjL", *c) != NULL);
+            if (takes && argi < msg.nparams) arg = msg.params[argi++];
+            if (strchr("ohvqabeI", *c)) {
+                if (sign == '+' && secureops && arg && strchr("oaq", *c) && strcasecmp(arg, g_cfg.nick) != 0 &&
+                    !is_identified(msg.params[0], arg) && !granted_has(msg.params[0], arg)) {
+                    char dm[3] = {'-', *c, '\0'};
+                    wire_mode(msg.params[0], dm, arg); /* SECUREOPS: ops only for the access list / identified founder */
+                }
+                continue;
             }
+            int pi = -1;
+            for (int i = 0; i < N_MLOCK_PARAMS; i++) if (MLOCK_PARAMS[i].letter == *c) pi = i;
+            if (pi >= 0) {
+                const char *want = rec_str(rec, MLOCK_PARAMS[pi].field);
+                if (sign == '+' && strchr(off, *c)) { strncat(fix_off, (char[]){*c, 0}, sizeof fix_off - strlen(fix_off) - 1); if (*c == 'k') strncat(fix_off_args, "*", sizeof fix_off_args - strlen(fix_off_args) - 1); }
+                else if (want[0] && ((sign == '-') || (arg && strcmp(arg, want) != 0))) {
+                    strncat(fix_on, (char[]){*c, 0}, sizeof fix_on - strlen(fix_on) - 1);
+                    strncat(fix_args, fix_args[0] ? " " : "", sizeof fix_args - strlen(fix_args) - 1);
+                    strncat(fix_args, want, sizeof fix_args - strlen(fix_args) - 1);
+                }
+                continue;
+            }
+            if (sign == '-' && strchr(on, *c) && !strchr(fix_on, *c) && strlen(fix_on) < sizeof fix_on - 1) strncat(fix_on, (char[]){*c, 0}, sizeof fix_on - strlen(fix_on) - 1);
+            if (sign == '+' && strchr(off, *c) && !strchr(fix_off, *c) && strlen(fix_off) < sizeof fix_off - 1) strncat(fix_off, (char[]){*c, 0}, sizeof fix_off - strlen(fix_off) - 1);
         }
-        if (rp > 1) wire_mode(msg.params[0], restore, NULL);
+        if (fix_on[0] || fix_off[0]) {
+            char modes[40] = "";
+            if (fix_on[0]) { strncat(modes, "+", sizeof modes - 1); strncat(modes, fix_on, sizeof modes - strlen(modes) - 1); }
+            if (fix_off[0]) { strncat(modes, "-", sizeof modes - strlen(modes) - 1); strncat(modes, fix_off, sizeof modes - strlen(modes) - 1); }
+            char args[260];
+            snprintf(args, sizeof args, "%s%s%s", fix_args, fix_args[0] && fix_off_args[0] ? " " : "", fix_off_args);
+            wire_mode_args(msg.params[0], modes, args);
+        }
         return;
     }
 
@@ -1578,7 +1835,11 @@ static void process_line(char *line) {
         if (strcasecmp(msg.params[0], g_cfg.nick) != 0) return; /* not addressed to us (e.g. channel chatter while GUARD-joined) */
         char from_nick[64];
         nick_from_prefix(msg.prefix, from_nick, sizeof from_nick);
+        g_from_account[0] = '\0';
+        for (int i = 0; i < msg.ntags; i++)
+            if (strcmp(msg.tags[i].key, "account") == 0) snprintf(g_from_account, sizeof g_from_account, "%s", msg.tags[i].val);
         dispatch_privmsg(from_nick, msg.prefix, msg.params[msg.nparams - 1]);
+        g_from_account[0] = '\0';
         return;
     }
     if (strcasecmp(msg.command, "SVCJOIN") == 0) { handle_svcjoin(&msg); return; }
@@ -1621,6 +1882,7 @@ static int run_session(void) {
      * could wrongly block (or, worse, a stale nick given to someone else
      * could wrongly satisfy) a SUCCESSOR CLAIM after reconnecting. */
     g_n_identified = 0;
+    g_n_granted = 0;
     g_last_activity = time(NULL);
     log_info("chanserv", "session established as '%s'", g_cfg.nick);
     guard_join_all();
