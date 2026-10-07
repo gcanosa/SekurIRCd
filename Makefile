@@ -90,7 +90,7 @@ $(OBJ_DIR)/$(SRC_DIR)/build.o: $(filter-out $(OBJ_DIR)/$(SRC_DIR)/build.o,$(ALL_
 build-debug/$(SRC_DIR)/build.o: CPPFLAGS += -DSEKURIRCD_BUILD='"$(BUILD_ID)-asan"'
 
 .DEFAULT_GOAL := all
-.PHONY: all debug check itest clean
+.PHONY: fuzz all debug check itest clean
 all: $(BIN_DIR)/sekurircd $(BIN_DIR)/chanserv
 
 $(OBJ_DIR)/%.o: %.c
@@ -100,6 +100,13 @@ $(OBJ_DIR)/%.o: %.c
 $(BIN_DIR)/sekurircd: $(ALL_OBJS)
 	@mkdir -p $(BIN_DIR)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+fuzz: CFLAGS := -std=c11 -O1 -g $(WARN) -fsanitize=address,undefined -fno-omit-frame-pointer
+fuzz: LDFLAGS += -fsanitize=address,undefined
+fuzz: $(HEADERS)
+	@mkdir -p $(BIN_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $(BIN_DIR)/fuzz tests/fuzz.c $(CORE_SRCS) $(VEND_SRCS) $(LDLIBS)
+	ASAN_OPTIONS=detect_leaks=0 $(BIN_DIR)/fuzz
 
 debug: CFLAGS := -std=c11 -O0 -g $(WARN) -MMD -MP -fsanitize=address,undefined -fno-omit-frame-pointer
 debug: LDFLAGS += -fsanitize=address,undefined
