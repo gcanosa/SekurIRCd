@@ -65,6 +65,25 @@ static void save(account_store_t *st) {
     free(text);
 }
 
+static long long now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+/* A mutation worth replicating: stamp the record (strictly newer than before), persist, and tell the network. */
+static void commit(account_store_t *st, cJSON *rec) {
+    cJSON *u = cJSON_GetObjectItemCaseSensitive(rec, "updated_at");
+    long long prev = cJSON_IsNumber(u) ? (long long)u->valuedouble : 0;
+    long long ts = now_ms();
+    if (ts <= prev) ts = prev + 1;
+    cJSON_DeleteItemFromObjectCaseSensitive(rec, "updated_at");
+    cJSON_AddNumberToObject(rec, "updated_at", (double)ts);
+    save(st);
+    cJSON *nm = cJSON_GetObjectItemCaseSensitive(rec, "name");
+    if (st->on_change && !st->applying && cJSON_IsString(nm)) st->on_change(st->ud, nm->valuestring, ts, 0);
+}
+
 static cJSON *find(account_store_t *st, const char *name) {
     char cf[64];
     irc_casefold(cf, sizeof cf, name);
@@ -87,7 +106,7 @@ void accounts_register_hashed(account_store_t *st, const char *name, const char 
     char cf[64];
     irc_casefold(cf, sizeof cf, name);
     cJSON_AddItemToObject(st->data, cf, rec);
-    save(st);
+    commit(st, rec);
 }
 
 const char *accounts_hash(account_store_t *st, const char *name) {
@@ -110,7 +129,7 @@ void accounts_set_scram(account_store_t *st, const char *name, const char *verif
     if (!rec || !verifier || !verifier[0]) return;
     cJSON_DeleteItemFromObjectCaseSensitive(rec, "scram");
     cJSON_AddStringToObject(rec, "scram", verifier);
-    save(st);
+    commit(st, rec);
 }
 
 long accounts_created_at(account_store_t *st, const char *name) {
@@ -123,7 +142,7 @@ void accounts_set_fingerprint(account_store_t *st, const char *name, const char 
     if (!rec) return;
     cJSON_DeleteItemFromObjectCaseSensitive(rec, "cert_fp");
     if (fp && fp[0]) cJSON_AddStringToObject(rec, "cert_fp", fp);
-    save(st);
+    commit(st, rec);
 }
 
 const char *accounts_fingerprint(account_store_t *st, const char *name) {
@@ -149,7 +168,7 @@ void accounts_set_hash(account_store_t *st, const char *name, const char *hash) 
     cJSON_DeleteItemFromObjectCaseSensitive(rec, "pw_hash");
     cJSON_AddStringToObject(rec, "pw_hash", hash);
     cJSON_DeleteItemFromObjectCaseSensitive(rec, "scram"); /* derived from the old password */
-    save(st);
+    commit(st, rec);
 }
 
 int accounts_drop(account_store_t *st, const char *name) {
@@ -159,8 +178,16 @@ int accounts_drop(account_store_t *st, const char *name) {
     if (!rec) return 0;
     cJSON *n = cJSON_GetObjectItemCaseSensitive(rec, "nicks");
     if (cJSON_IsArray(n)) st->n_grouped -= cJSON_GetArraySize(n);
+    long long ts = 0;
+    cJSON *u = cJSON_GetObjectItemCaseSensitive(rec, "updated_at");
+    ts = now_ms();
+    if (cJSON_IsNumber(u) && ts <= (long long)u->valuedouble) ts = (long long)u->valuedouble + 1;
+    char shown[64] = "";
+    cJSON *nm = cJSON_GetObjectItemCaseSensitive(rec, "name");
+    snprintf(shown, sizeof shown, "%s", cJSON_IsString(nm) ? nm->valuestring : name);
     cJSON_DeleteItemFromObjectCaseSensitive(st->data, cf);
     save(st);
+    if (st->on_change && !st->applying) st->on_change(st->ud, shown, ts, 1);
     return 1;
 }
 
@@ -186,7 +213,7 @@ void accounts_set_email(account_store_t *st, const char *name, const char *email
         cJSON_AddStringToObject(rec, "email", email);
         cJSON_AddBoolToObject(rec, "email_verified", verified);
     }
-    save(st);
+    commit(st, rec);
 }
 
 void accounts_set_pending_email(account_store_t *st, const char *name, const char *email, const char *code, long expires_at) {
@@ -230,7 +257,7 @@ int accounts_group_add(account_store_t *st, const char *name, const char *nick) 
     irc_casefold(cf, sizeof cf, nick);
     cJSON_AddItemToArray(n, cJSON_CreateString(cf));
     st->n_grouped++;
-    save(st);
+    commit(st, rec);
     return 0;
 }
 
@@ -246,7 +273,7 @@ int accounts_group_del(account_store_t *st, const char *name, const char *nick) 
         if (cJSON_IsString(it) && strcmp(it->valuestring, cf) == 0) {
             cJSON_DeleteItemFromArray(n, idx);
             st->n_grouped--;
-            save(st);
+            commit(st, rec);
             return 0;
         }
         idx++;
@@ -284,4 +311,60 @@ const char *accounts_owner_of_nick(account_store_t *st, const char *nick) {
         }
     }
     return NULL;
+}
+
+long long accounts_updated_at(account_store_t *st, const char *name) {
+    cJSON *u = cJSON_GetObjectItemCaseSensitive(find(st, name), "updated_at");
+    return cJSON_IsNumber(u) ? (long long)u->valuedouble : 0;
+}
+
+char *accounts_record_json(account_store_t *st, const char *name) {
+    cJSON *rec = find(st, name);
+    return rec ? cJSON_PrintUnformatted(rec) : NULL;
+}
+
+int accounts_apply_remote(account_store_t *st, const char *name, long long ts, const char *json) {
+    cJSON *rec = cJSON_Parse(json);
+    cJSON *nm = rec ? cJSON_GetObjectItemCaseSensitive(rec, "name") : NULL;
+    if (!cJSON_IsObject(rec) || !cJSON_IsString(nm) || strcasecmp(nm->valuestring, name) != 0) { cJSON_Delete(rec); return 0; }
+    if (accounts_updated_at(st, name) >= ts && find(st, name)) { cJSON_Delete(rec); return 0; } /* ours is as new or newer */
+    cJSON_DeleteItemFromObjectCaseSensitive(rec, "updated_at");
+    cJSON_AddNumberToObject(rec, "updated_at", (double)ts);
+    char cf[64];
+    irc_casefold(cf, sizeof cf, name);
+    cJSON *old = cJSON_GetObjectItemCaseSensitive(st->data, cf);
+    if (old) {
+        cJSON *on = cJSON_GetObjectItemCaseSensitive(old, "nicks");
+        if (cJSON_IsArray(on)) st->n_grouped -= cJSON_GetArraySize(on);
+        cJSON_DeleteItemFromObjectCaseSensitive(st->data, cf);
+    }
+    cJSON *nn = cJSON_GetObjectItemCaseSensitive(rec, "nicks");
+    if (cJSON_IsArray(nn)) st->n_grouped += cJSON_GetArraySize(nn);
+    cJSON_AddItemToObject(st->data, cf, rec);
+    save(st);
+    return 1;
+}
+
+int accounts_apply_remote_delete(account_store_t *st, const char *name, long long ts) {
+    cJSON *rec = find(st, name);
+    if (!rec) return 0;
+    if (accounts_updated_at(st, name) >= ts) return 0; /* modified after the delete: keep it */
+    char saved = st->applying;
+    st->applying = 1;
+    accounts_drop(st, name);
+    st->applying = saved;
+    return 1;
+}
+
+const char **accounts_all_names(account_store_t *st, int *n) {
+    int cnt = cJSON_GetArraySize(st->data);
+    const char **out = malloc(sizeof *out * (size_t)(cnt ? cnt : 1));
+    *n = 0;
+    cJSON *rec;
+    if (!out) return NULL;
+    cJSON_ArrayForEach(rec, st->data) {
+        cJSON *nm = cJSON_GetObjectItemCaseSensitive(rec, "name");
+        if (cJSON_IsString(nm)) out[(*n)++] = nm->valuestring;
+    }
+    return out;
 }
