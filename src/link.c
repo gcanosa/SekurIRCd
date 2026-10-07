@@ -573,6 +573,7 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
         if (!svc) return 0;
         svc->link_conn = lc;
         svc->is_service = 1;
+        svc->caps |= CAP_ACCOUNT_TAG; /* PRIVMSGs forwarded to the service carry the sender's account (@account=...) */
         svc->registered = 1;
         svc->got_nick = svc->got_user = 1;
         svc->signon_time = svc->last_activity = time(NULL);
