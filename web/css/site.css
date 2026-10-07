@@ -163,9 +163,15 @@ a.card:hover h3 { color: var(--link); }
 .chat-send input { flex: 1; }
 @media (max-width: 640px) { .chat-body { grid-template-columns: 1fr; } .chat-users { display: none; } }
 #users > div { cursor: pointer; user-select: none; }
-#users > div:hover { color: var(--link); }
-#users > .grp { cursor: default; color: var(--muted); font-size: .72rem; text-transform: uppercase; letter-spacing: .06em; margin: 10px 0 2px; }
+#users > div:hover { text-decoration: underline; }
+#users > .grp { cursor: default; font-size: .72rem; text-transform: uppercase; letter-spacing: .06em; margin: 10px 0 2px; }
 #users > .grp:first-child { margin-top: 0; }
-#users > .grp:hover { color: var(--muted); }
+#users > .grp:hover { text-decoration: none; }
 .chat-log .fgo { color: var(--c); }
 :root[data-theme="light"] .chat-log .fgo { color: color-mix(in srgb, var(--c) 55%, black); }
+/* user list ranks: one color per group (header and nicks) */
+:root, :root[data-theme="dark"] { --g-owner: #c678dd; --g-admin: #e06c75; --g-op: #98c379; --g-halfop: #e5c07b; --g-voice: #61afef; }
+:root[data-theme="light"] { --g-owner: #8e3aa8; --g-admin: #b3261e; --g-op: #2f6b3a; --g-halfop: #9a6a00; --g-voice: #1c5fa8; }
+#users .g-owner { color: var(--g-owner); } #users .g-admin { color: var(--g-admin); } #users .g-op { color: var(--g-op); }
+#users .g-halfop { color: var(--g-halfop); } #users .g-voice { color: var(--g-voice); }
+#users > .grp.g-user { color: var(--muted); }

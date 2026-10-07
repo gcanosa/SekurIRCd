@@ -11,8 +11,8 @@
   var tabs = $("tabs"), log = $("log"), users = $("users"), topic = $("topic"), input = $("input");
 
   // Highest prefix first (the server's PREFIX=(qaohv)~&@%+); "" is a regular user.
-  var GROUPS = [{ prefix: "~", name: "Owners" }, { prefix: "&", name: "Admins" }, { prefix: "@", name: "Operators" },
-                { prefix: "%", name: "Half-ops" }, { prefix: "+", name: "Voiced" }, { prefix: "", name: "Users" }];
+  var GROUPS = [{ prefix: "~", name: "Owners", cls: "owner" }, { prefix: "&", name: "Admins", cls: "admin" }, { prefix: "@", name: "Operators", cls: "op" },
+                { prefix: "%", name: "Half-ops", cls: "halfop" }, { prefix: "+", name: "Voiced", cls: "voice" }, { prefix: "", name: "Users", cls: "user" }];
   var AWAY_AFTER = 30 * 60 * 1000; // idle time before auto-away
   var CLIENT_VERSION = "SekurNet web chat";
   var ws, nick, wantChan, registered, tries = 0, closing = false, timer, away = false, awayTimer;
@@ -107,9 +107,9 @@
       var names = Object.keys(b.users).filter(function (n) { return b.users[n] === g.prefix; })
         .sort(function (x, y) { return x.toLowerCase() < y.toLowerCase() ? -1 : 1; });
       if (!names.length) return;
-      var h = document.createElement("div"); h.className = "grp"; h.textContent = g.name + " (" + names.length + ")"; users.appendChild(h);
+      var h = document.createElement("div"); h.className = "grp g-" + g.cls; h.textContent = g.name + " (" + names.length + ")"; users.appendChild(h);
       names.forEach(function (n) {
-        var d = document.createElement("div"); d.textContent = g.prefix + n; d.title = "Double-click to message " + n;
+        var d = document.createElement("div"); d.className = "g-" + g.cls; d.textContent = g.prefix + n; d.title = "Double-click to message " + n;
         d.ondblclick = function () { if (n !== nick) { buf(n); active = n; buf(n).unread = false; draw(); input.focus(); } };
         users.appendChild(d);
       });
