@@ -38,7 +38,8 @@
         if (st.b) e.style.fontWeight = "bold";
         if (st.i) e.style.fontStyle = "italic";
         if (st.u || st.s) e.style.textDecoration = (st.u ? "underline " : "") + (st.s ? "line-through" : "");
-        if (fg) e.style.color = fg;
+        if (fg && !bg) { e.className = "fgo"; e.style.setProperty("--c", fg); } // color alone: CSS darkens it in the light theme
+        else if (fg) e.style.color = fg;
         if (bg) e.style.backgroundColor = bg;
         e.textContent = run; frag.appendChild(e);
       }
