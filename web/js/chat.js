@@ -200,7 +200,7 @@
   }
   function fail() {
     app.hidden = true; form.hidden = false;
-    err.textContent = "Could not connect. The server may be down, or the browser does not trust its certificate (the WebSocket port needs a valid TLS certificate).";
+    err.textContent = "Could not connect. The server may be down, or something is blocking the connection. If you use an ad or content blocker (uBlock, Privacy Badger, a firewall extension), allow ircsekurnet.duckdns.org for this page or turn the blocker off for this site, then try again.";
   }
 
   form.addEventListener("submit", function (e) {
