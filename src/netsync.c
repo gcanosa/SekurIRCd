@@ -659,16 +659,6 @@ static void handle_kill(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
 
 /* --- receiving: channels ---------------------------------------------------------------------------------- */
 
-static void rank_letters(int rank, char *out) {
-    size_t n = 0;
-    if (rank & RANK_OWNER) out[n++] = 'q';
-    if (rank & RANK_ADMIN) out[n++] = 'a';
-    if (rank & RANK_OP) out[n++] = 'o';
-    if (rank & RANK_HALFOP) out[n++] = 'h';
-    if (rank & RANK_VOICE) out[n++] = 'v';
-    out[n] = '\0';
-}
-
 /* Sends ":source MODE #chan <modes> <args...>" to the channel's local members, 6 changes per line. `ops` is an
  * array of (letter, argument) pairs sharing one sign. */
 static void broadcast_rank_modes(channel_t *chan, const char *source, char sign, const char letters[], const char *args[], int n) {

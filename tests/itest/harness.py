@@ -4,8 +4,8 @@ Stdlib only. Everything lives in a temp directory that is removed afterwards."""
 import os, re, shutil, signal, socket, subprocess, tempfile, time, base64, struct, hashlib
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-IRCD = os.path.join(ROOT, "bin", "sekurircd")
-CHANSERV = os.path.join(ROOT, "bin", "chanserv")
+IRCD = os.environ.get("IRCD_BIN", os.path.join(ROOT, "bin", "sekurircd"))        # IRCD_BIN=bin/sekurircd-debug runs the suite under ASan/UBSan
+CHANSERV = os.environ.get("CHANSERV_BIN", os.path.join(ROOT, "bin", "chanserv"))
 
 
 def free_port():
@@ -322,7 +322,8 @@ class Network:
         while time.time() < deadline:
             ok = True
             for s in self.servers.values():
-                probe = Client(s.port, "probe", register=True)
+                self._probe_n = getattr(self, "_probe_n", 0) + 1
+                probe = Client(s.port, f"probe{self._probe_n}", register=True)
                 lines = probe.say("LINKS", 0.4)
                 probe.send("QUIT")
                 probe.close()
@@ -335,8 +336,14 @@ class Network:
         raise AssertionError("network did not converge: " + str({n: s.output()[-300:] for n, s in self.servers.items()}))
 
     def stop(self):
+        errors = []
         for s in self.servers.values():
-            s.stop()
+            try:
+                s.stop()
+            except AssertionError as e:
+                errors.append(str(e))
+        if errors:
+            raise AssertionError("\n".join(errors))
 
     def __enter__(self):
         return self.start()
