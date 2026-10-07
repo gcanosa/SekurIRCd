@@ -167,3 +167,5 @@ a.card:hover h3 { color: var(--link); }
 #users > .grp { cursor: default; color: var(--muted); font-size: .72rem; text-transform: uppercase; letter-spacing: .06em; margin: 10px 0 2px; }
 #users > .grp:first-child { margin-top: 0; }
 #users > .grp:hover { color: var(--muted); }
+.chat-log .fgo { color: var(--c); }
+:root[data-theme="light"] .chat-log .fgo { color: color-mix(in srgb, var(--c) 55%, black); }
