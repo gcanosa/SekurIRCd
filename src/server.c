@@ -449,7 +449,7 @@ void server_send_isupport(server_t *srv, client_t *cl) {
     char histtok[32];
     snprintf(histtok, sizeof histtok, "CHATHISTORY=%d", srv->cfg.messages.history_size > 100 ? 100 : srv->cfg.messages.history_size);
     const char *tokens[] = {
-        netbuf, "CHANTYPES=#", "CHANMODES=beI,k,lfj,imnprstzCNPQSTVROMc", "PREFIX=(qaohv)~&@%+",
+        netbuf, "CHANTYPES=#", "CHANMODES=beI,k,lfjL,imnprstzCNPQSTVROMcDuG", "PREFIX=(qaohv)~&@%+",
         nicklen, chanlen, topiclen, "CASEMAPPING=ascii", "MODES=6",
         "STATUSMSG=~&@%+", "AWAYLEN=390", "KICKLEN=300",
         "MAXLIST=b:100,e:100,I:100", "EXCEPTS=e", "INVEX=I", "MONITOR=100", "WATCH=128", "SILENCE=15",
@@ -583,7 +583,7 @@ void server_send_welcome(server_t *srv, client_t *cl) {
 
     char swver[CFG_STR + 16];
     server_software_version(srv, swver, sizeof swver);
-    const char *myinfo[] = {srv->cfg.server.name, swver, "diwsoZrpIHqRDBg", "beIklfjnimpstzrovhqaPCTSVQNROMc"};
+    const char *myinfo[] = {srv->cfg.server.name, swver, "diwsoZrpIHqRDBg", "beIklfjLnimpstzrovhqaPCTSVQNROMcDuG"};
     client_reply(cl, N_MYINFO, myinfo, 4, NULL);
 
     if (cl->ssl) {

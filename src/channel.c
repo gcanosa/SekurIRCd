@@ -93,6 +93,16 @@ void channel_forget_ban_extra_for(const struct client *cl) {
     if (g_extra && g_extra->cl == cl) g_extra = NULL;
 }
 
+int channel_member_visible(const channel_t *chan, const member_t *subject, const member_t *viewer) {
+    if (subject == viewer) return 1;
+    if (subject->hidden) return 0;
+    if (chan->modes & CMODE_AUDITORIUM) {
+        if (subject->rank & (RANK_VOICE | RANK_HALFOP | RANK_OP)) return 1;
+        return viewer && (viewer->rank & (RANK_HALFOP | RANK_OP));
+    }
+    return 1;
+}
+
 void channel_rank_prefix(int rank, int multi, char *out) {
     static const struct { int bit; char ch; } P[] = {{RANK_OWNER, '~'}, {RANK_ADMIN, '&'}, {RANK_OP, '@'}, {RANK_HALFOP, '%'}, {RANK_VOICE, '+'}};
     size_t n = 0;
@@ -297,8 +307,8 @@ void channel_invite_remove(channel_t *chan, const char *casefold_nick) {
 }
 
 void channel_modes_string(channel_t *chan, char *out, size_t outsz) {
-    char flags[32] = "+";
-    char args[128] = "";
+    char flags[40] = "+";
+    char args[256] = "";
     size_t fp = 1;
     if (chan->modes & CMODE_N) flags[fp++] = 'n';
     if (chan->modes & CMODE_I) flags[fp++] = 'i';
@@ -319,6 +329,9 @@ void channel_modes_string(channel_t *chan, char *out, size_t outsz) {
     if (chan->modes & CMODE_OPERONLY) flags[fp++] = 'O';
     if (chan->modes & CMODE_MODREG) flags[fp++] = 'M';
     if (chan->modes & CMODE_NOCOLOR) flags[fp++] = 'c';
+    if (chan->modes & CMODE_DELAYJOIN) flags[fp++] = 'D';
+    if (chan->modes & CMODE_AUDITORIUM) flags[fp++] = 'u';
+    if (chan->modes & CMODE_CENSOR) flags[fp++] = 'G';
     if ((chan->modes & CMODE_K) && chan->key[0]) {
         flags[fp++] = 'k';
         snprintf(args, sizeof args, " %s", chan->key);
@@ -328,6 +341,11 @@ void channel_modes_string(channel_t *chan, char *out, size_t outsz) {
         char lbuf[32];
         snprintf(lbuf, sizeof lbuf, " %d", chan->limit);
         strncat(args, lbuf, sizeof args - strlen(args) - 1);
+    }
+    if ((chan->modes & CMODE_REDIRECT) && chan->redirect[0]) {
+        flags[fp++] = 'L';
+        char b[CHAN_NAMELEN + 2]; snprintf(b, sizeof b, " %s", chan->redirect);
+        strncat(args, b, sizeof args - strlen(args) - 1);
     }
     if ((chan->modes & CMODE_FLOOD) && chan->flood_lines > 0) {
         flags[fp++] = 'f';

@@ -51,6 +51,10 @@ struct client;
 #define CMODE_MODREG     0x80000 /* M: only voice+/an account/an oper may speak */
 #define CMODE_FLOOD      0x200000 /* f <lines>:<secs>: kick a non-privileged member who exceeds the message rate */
 #define CMODE_JTHROT     0x400000 /* j <joins>:<secs>: refuse JOINs once the channel-wide join rate is exceeded */
+#define CMODE_REDIRECT   0x800000  /* L <#chan>: a JOIN refused by +l (full) or +i is forwarded to that channel */
+#define CMODE_DELAYJOIN  0x1000000 /* D: a joiner stays invisible until they speak (or get a rank) */
+#define CMODE_AUDITORIUM 0x2000000 /* u: ordinary members are visible only to ranked members (and themselves) */
+#define CMODE_CENSOR     0x4000000 /* G: configured bad words in messages are starred out */
 #define CMODE_NOCOLOR    0x100000 /* c: reject (not just strip) a message containing colour/formatting codes */
 
 typedef struct member {
@@ -58,6 +62,7 @@ typedef struct member {
     int rank; /* RANK_OP | RANK_HALFOP | RANK_VOICE */
     /* channel_ban_state() cache: the verdict holds while the channel's ban/
      * exception lists and the client's identity are unchanged. */
+    int hidden;                       /* +D: joined but not yet revealed -- see channel_member_visible */
     time_t fl_start;                  /* +f window start for this member */
     int fl_count;
     unsigned cache_lists_gen, cache_ident_hash;
@@ -93,6 +98,7 @@ typedef struct channel {
     unsigned int modes;               /* CMODE_* bitmask */
     char key[CHAN_KEYLEN];            /* +k value, "" if unset */
     int limit;                        /* +l value, 0 if unset */
+    char redirect[CHAN_NAMELEN];      /* +L target */
     int flood_lines, flood_secs;      /* +f */
     int jt_joins, jt_secs;            /* +j */
     int jt_count;                     /* joins seen in the current +j window */
@@ -167,6 +173,10 @@ void channel_ban_state(channel_t *chan, member_t *m, const char *nick, const cha
 void channel_rank_prefix(int rank, int multi, char *out);
 /* 0 none, 1 voice, 2 halfop, 3 op, 4 admin, 5 owner -- who may act on whom. */
 int channel_rank_level(int rank);
+
+/* May `viewer` (NULL = a non-member) see that `subject` is in the channel? False for a not-yet-revealed +D member,
+ * and under +u for an unranked member seen by an unranked viewer. A member always sees themself. */
+int channel_member_visible(const channel_t *chan, const member_t *subject, const member_t *viewer);
 
 /* Remember a message (no-op when cap <= 0). Oldest entries fall off. */
 void channel_history_add(channel_t *chan, int cap, const char *msgid, long long ms, const char *sender,

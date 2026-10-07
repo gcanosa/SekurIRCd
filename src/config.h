@@ -121,6 +121,8 @@ typedef struct {
     char rules[CFG_PATH];
     int max_message_length;
     int history_size; /* PRIVMSG/NOTICE lines kept per channel for CHATHISTORY; 0 = off */
+    char censor_words[32][CFG_STR]; /* words channel mode +G stars out */
+    int n_censor_words;
 } cfg_messages_t;
 
 typedef struct {

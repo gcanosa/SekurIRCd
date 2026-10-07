@@ -576,6 +576,7 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
     if (cfg_get_str(msg, "oper_motd", "oper.motd", out->messages.oper_motd, CFG_PATH, errbuf, errbufsz, "messages.oper_motd")) return -1;
     if (cfg_get_str(msg, "rules", "ircd.rules", out->messages.rules, CFG_PATH, errbuf, errbufsz, "messages.rules")) return -1;
     if (cfg_get_int(msg, "max_message_length", 400, &out->messages.max_message_length, errbuf, errbufsz, "messages.max_message_length")) return -1;
+    if (cfg_get_str_array(msg, "censor_words", out->messages.censor_words, 32, &out->messages.n_censor_words, errbuf, errbufsz, "messages.censor_words")) return -1;
     if (cfg_get_int(msg, "history_size", 50, &out->messages.history_size, errbuf, errbufsz, "messages.history_size")) return -1;
     if (out->messages.history_size < 0 || out->messages.history_size > 500) {
         snprintf(errbuf, errbufsz, "messages.history_size must be in 0-500");
