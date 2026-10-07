@@ -8,7 +8,7 @@
 /* Commands an unregistered connection may send (matches commands.py's
  * _REGISTRATION_COMMANDS). Everything else gets 451 ERR_NOTREGISTERED. */
 static const char *REGISTRATION_COMMANDS[] = {
-    "NICK", "USER", "PASS", "CAP", "PING", "PONG", "QUIT", "AUTHENTICATE", "WEBIRC",
+    "NICK", "USER", "PASS", "CAP", "PING", "PONG", "QUIT", "AUTHENTICATE", "WEBIRC", "AWAY",
 };
 
 static int is_registration_command(const char *cmd) {
@@ -23,10 +23,10 @@ static unsigned command_priv(const char *c) {
         {"KILL", OPER_PRIV_KILL},
         {"KLINE", OPER_PRIV_KLINE}, {"SHUN", OPER_PRIV_KLINE}, {"UNSHUN", OPER_PRIV_KLINE}, {"ELINE", OPER_PRIV_KLINE}, {"UNELINE", OPER_PRIV_KLINE}, {"GLINE", OPER_PRIV_KLINE}, {"ZLINE", OPER_PRIV_KLINE},
         {"UNKLINE", OPER_PRIV_KLINE}, {"UNGLINE", OPER_PRIV_KLINE}, {"UNZLINE", OPER_PRIV_KLINE},
-        {"SPAMFILTER", OPER_PRIV_KLINE}, {"PROTECT", OPER_PRIV_KLINE},
+        {"SPAMFILTER", OPER_PRIV_KLINE}, {"TESTLINE", OPER_PRIV_KLINE}, {"PROTECT", OPER_PRIV_KLINE},
         {"SAJOIN", OPER_PRIV_SA}, {"SAPART", OPER_PRIV_SA}, {"SAMODE", OPER_PRIV_SA}, {"SANICK", OPER_PRIV_SA},
         {"CHGHOST", OPER_PRIV_HOST}, {"SETHOST", OPER_PRIV_HOST}, {"CHGIDENT", OPER_PRIV_HOST}, {"USERIP", OPER_PRIV_HOST},
-        {"WALLOPS", OPER_PRIV_WALLOPS}, {"GLOBOPS", OPER_PRIV_WALLOPS},
+        {"WALLOPS", OPER_PRIV_WALLOPS}, {"GLOBOPS", OPER_PRIV_WALLOPS}, {"OPERWALL", OPER_PRIV_WALLOPS}, {"LOCOPS", OPER_PRIV_WALLOPS},
         {"REHASH", OPER_PRIV_REHASH},
         {"DIE", OPER_PRIV_DIE}, {"RESTART", OPER_PRIV_DIE},
         {"SQUIT", OPER_PRIV_LINK}, {"CONNECT", OPER_PRIV_LINK},
@@ -49,6 +49,9 @@ static const cmd_entry_t DISPATCH[] = {
     {"ELINE", cmd_eline, 0, 1, 1},
     {"UNELINE", cmd_uneline, 1, 1, 1},
     {"GLOBOPS", cmd_globops, 1, 1, 1},
+    {"OPERWALL", cmd_globops, 1, 1, 1},
+    {"LOCOPS", cmd_locops, 1, 1, 1},
+    {"TESTLINE", cmd_testline, 1, 1, 1},
     {"CHGIDENT", cmd_chgident, 2, 1, 1},
     {"SANICK", cmd_sanick, 2, 1, 1},
     {"CAP", cmd_cap, 1, 0, 0},

@@ -91,7 +91,7 @@ static void announce_join(channel_t *chan, client_t *cl) {
         const char *pt[] = {chan->name};
         client_reply(cl, N_NOTOPIC, pt, 1, "No topic is set");
     }
-    send_names(cl, chan);
+    if (!(cl->caps & CAP_NO_IMPLICIT_NAMES)) send_names(cl, chan); /* draft/no-implicit-names: client will ask itself */
 }
 
 static int n_channels_of(client_t *cl) {

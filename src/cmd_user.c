@@ -152,11 +152,11 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
     client_prefix(cl, prefix, sizeof prefix);
     char lines[4][LINE_SZ];
 
-    /* STATUSMSG (ISUPPORT STATUSMSG=@%+): "@#chan"/"%#chan"/"+#chan"
+    /* STATUSMSG (ISUPPORT STATUSMSG=~&@%+): "~#chan"/"&#chan"/"@#chan"/"%#chan"/"+#chan"
      * delivers only to members holding at least that rank. */
     char status_prefix = '\0';
     const char *chan_target = target;
-    if ((target[0] == '@' || target[0] == '%' || target[0] == '+') && target[1] == '#') {
+    if ((target[0] == '~' || target[0] == '&' || target[0] == '@' || target[0] == '%' || target[0] == '+') && target[1] == '#') {
         status_prefix = target[0];
         chan_target = target + 1;
     }
@@ -224,14 +224,11 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
 
         member_t *mm, *tmp;
         if (status_prefix) {
-            int min_rank = (status_prefix == '@') ? RANK_OP : (status_prefix == '%') ? RANK_HALFOP : RANK_VOICE;
+            /* "at least that rank": ~ owner(5) & admin(4) @ op(3) % halfop(2) + voice(1) -- channel_rank_level's scale */
+            int min_level = (status_prefix == '~') ? 5 : (status_prefix == '&') ? 4 : (status_prefix == '@') ? 3 : (status_prefix == '%') ? 2 : 1;
             HASH_ITER(hh, chan->members, mm, tmp) {
                 if (mm->client == cl) continue;
-                int rank = mm->rank;
-                int has_it = (min_rank == RANK_OP) ? (rank & RANK_OP)
-                           : (min_rank == RANK_HALFOP) ? (rank & (RANK_OP | RANK_HALFOP))
-                           : (rank & (RANK_OP | RANK_HALFOP | RANK_VOICE));
-                if (has_it) deliver(mm->client, cl, lines, &x);
+                if (channel_rank_level(mm->rank) >= min_level) deliver(mm->client, cl, lines, &x);
             }
             return; /* STATUSMSG has no echo-message in upstream either */
         }
@@ -542,9 +539,16 @@ static void broadcast_away(server_t *srv, client_t *cl) {
     char line[500];
     irc_build(line, sizeof line, NULL, 0, prefix, "AWAY", NULL, 0, cl->is_away ? cl->away : NULL);
     server_send_common_channels(srv, cl, line, CAP_AWAY_NOTIFY);
+    server_monitor_extend(srv, cl, line, CAP_AWAY_NOTIFY);
 }
 
 void cmd_away(server_t *srv, client_t *cl, irc_message_t *msg) {
+    if (!cl->registered) { /* draft/pre-away: set the status quietly before registration finishes */
+        if (!(cl->caps & CAP_PRE_AWAY)) { err_not_registered(cl); return; }
+        if (msg->nparams < 1 || msg->params[0][0] == '\0' || strcmp(msg->params[0], "*") == 0) { cl->is_away = 0; cl->away[0] = '\0'; }
+        else { cl->is_away = 1; snprintf(cl->away, sizeof cl->away, "%.399s", msg->params[msg->nparams - 1]); }
+        return;
+    }
     if (msg->nparams < 1 || msg->params[0][0] == '\0') {
         cl->is_away = 0;
         cl->away[0] = '\0';
@@ -590,6 +594,7 @@ void cmd_setname(server_t *srv, client_t *cl, irc_message_t *msg) {
 
     if (cl->caps & CAP_SETNAME) client_send(cl, line);
     server_send_common_channels(srv, cl, line, CAP_SETNAME);
+    server_monitor_extend(srv, cl, line, CAP_SETNAME);
 }
 
 /* Registered user by nick -- a connection that has only sent NICK must not

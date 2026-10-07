@@ -106,6 +106,10 @@ void irc_prefix_for(char *out, size_t outsz, const char *nick, const char *user,
  * (needs at least 25 bytes). */
 /* Epoch milliseconds <-> "YYYY-MM-DDThh:mm:ss.sssZ" (the server-time/CHATHISTORY
  * timestamp form). The parser returns -1 on anything malformed. */
+/* PROXY protocol v2 (binary) header at the start of `buf`. Returns 1 and fills `ip`/`port` (ip "" for a LOCAL
+ * command: keep the socket peer) with `consumed` header bytes; 0 if more bytes are needed; -1 if it isn't a usable
+ * v2 header (bad signature/version, or an address family we don't take). */
+int irc_proxy_v2_parse(const unsigned char *buf, size_t len, char *ip, size_t ipsz, int *port, size_t *consumed);
 void irc_iso8601_from_ms(char *out, size_t outsz, long long ms);
 long long irc_parse_iso8601_ms(const char *s);
 void irc_iso8601_now(char *out, size_t outsz);
@@ -133,6 +137,9 @@ void irc_add_time_tag(char *line, size_t linesz);
 #define CAP_CAP_NOTIFY        0x2000u
 #define CAP_BATCH             0x4000u
 #define CAP_LABELED_RESPONSE  0x10000u
+#define CAP_NO_IMPLICIT_NAMES 0x20000u
+#define CAP_PRE_AWAY          0x40000u
+#define CAP_EXTENDED_MONITOR  0x80000u
 #define CAP_CHATHISTORY       0x8000u
 
 /* --- numeric reply codes (protocol.N) ------------------------------------ */

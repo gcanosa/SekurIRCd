@@ -392,6 +392,7 @@ void server_login(server_t *srv, client_t *cl, const char *account) {
     const char *pa[] = {account};
     irc_build(line, sizeof line, NULL, 0, prefix, "ACCOUNT", pa, 1, NULL);
     server_send_common_channels(srv, cl, line, CAP_ACCOUNT_NOTIFY);
+    server_monitor_extend(srv, cl, line, CAP_ACCOUNT_NOTIFY);
 }
 
 void server_remove_client(server_t *srv, client_t *cl, const char *quit_reason) {
@@ -449,7 +450,7 @@ void server_send_isupport(server_t *srv, client_t *cl) {
     const char *tokens[] = {
         netbuf, "CHANTYPES=#", "CHANMODES=beI,k,lfj,imnprstzCNPQSTVROMc", "PREFIX=(qaohv)~&@%+",
         nicklen, chanlen, topiclen, "CASEMAPPING=ascii", "MODES=6",
-        "STATUSMSG=@%+", "AWAYLEN=390", "KICKLEN=300",
+        "STATUSMSG=~&@%+", "AWAYLEN=390", "KICKLEN=300",
         "MAXLIST=b:100,e:100,I:100", "EXCEPTS=e", "INVEX=I", "MONITOR=100", "WATCH=128", "SILENCE=15",
         "EXTBAN=~,amrzj", "ELIST=MNU", "WHOX", "CHANLIMIT=#:200", "BOT=B", "CALLERID=g", "LINELEN=512",
         "TARGMAX=PRIVMSG:1,NOTICE:1,KICK:1,JOIN:1,PART:1,WHOIS:1", srv->cfg.messages.history_size > 0 ? histtok : NULL, srv->cfg.messages.history_size > 0 ? "MSGREFTYPES=msgid,timestamp" : NULL,
@@ -859,6 +860,19 @@ void server_whowas_record(server_t *srv, const char *nick, const char *user,
 }
 
 /* --- MONITOR --------------------------------------------------------------- */
+
+void server_monitor_extend(server_t *srv, client_t *cl, const char *line, unsigned int cap) {
+    if (srv->n_watchers == 0) return;
+    char cf[NICKLEN];
+    irc_casefold(cf, sizeof cf, cl->nick);
+    for (client_t *w = srv->all_clients; w; w = w->all_next) {
+        if (w == cl || !w->is_watcher || w->fd < 0 || w->quitting) continue;
+        if (!(w->caps & CAP_EXTENDED_MONITOR) || (cap && !(w->caps & cap))) continue;
+        if (w->fanout_mark == srv->fanout_gen) continue; /* already got it via a shared channel */
+        for (int i = 0; i < w->n_monitor; i++)
+            if (w->monitor[i][0] == cf[0] && strcmp(w->monitor[i], cf) == 0) { client_send(w, line); break; }
+    }
+}
 
 void server_monitor_notify(server_t *srv, client_t *cl, int online) {
     if (srv->n_watchers == 0) return;

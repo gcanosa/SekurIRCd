@@ -245,6 +245,9 @@ void server_whowas_record(server_t *srv, const char *nick, const char *user,
  * watchers of the online/offline transition (server->all_clients scan --
  * no separate reverse index, fine at this daemon's expected scale). Called
  * from cmd_nick (online) and server_remove_client (offline). */
+/* IRCv3 extended-monitor: after server_send_common_channels(cl, line, cap), also send `line` to clients that
+ * MONITOR cl's nick, negotiated extended-monitor and `cap`, and weren't already reached through a shared channel. */
+void server_monitor_extend(server_t *srv, client_t *cl, const char *line, unsigned int cap);
 void server_monitor_notify(server_t *srv, client_t *cl, int online);
 
 /* Same as server_monitor_notify but for the legacy /WATCH list (600 RPL_LOGON /
