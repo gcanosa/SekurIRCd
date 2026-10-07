@@ -162,3 +162,5 @@ a.card:hover h3 { color: var(--link); }
 .chat-send { display: flex; gap: 8px; padding: 8px; border-top: 1px solid var(--border); }
 .chat-send input { flex: 1; }
 @media (max-width: 640px) { .chat-body { grid-template-columns: 1fr; } .chat-users { display: none; } }
+.chat-users div { cursor: pointer; user-select: none; }
+.chat-users div:hover { color: var(--link); }
