@@ -99,6 +99,7 @@ int server_rehash(server_t *srv, char *errbuf, size_t errbufsz) {
     server_apply_cloak_secret(srv);
     cmd_cap_notify_changes(srv, old_accounts, old_history);
     net_reclass_all(srv);
+    net_apply_listeners(srv);
     server_load_motd(srv);
     spam_reload(srv);
     protection_reload(srv);

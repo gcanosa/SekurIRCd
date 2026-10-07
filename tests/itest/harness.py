@@ -107,6 +107,7 @@ class Server:
     def reload(self):
         """Rewrite the config (after editing self.cfg) and send SIGHUP."""
         self.write_config()
+        self.port = self.cfg["server"]["port"]
         self.proc.send_signal(signal.SIGHUP)
         time.sleep(0.6)
 

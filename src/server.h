@@ -54,6 +54,8 @@ typedef struct server {
     char msgid_prefix[17]; /* random per run, so msgids stay unique across restarts */
     uint64_t msgid_counter;
     int listen_fd;
+    /* What each listener is actually bound to, so a rehash can tell which ones to rebind (net_apply_listeners). */
+    struct { char bind[256]; int port; } bound_main, bound_tls, bound_ws, bound_link;
     int ws_listen_fd;   /* -1 unless [websocket] enabled */
     int tls_listen_fd;  /* -1 unless [tls] enabled (see net.c's TLS listener) */
     SSL_CTX *tls_ctx;
