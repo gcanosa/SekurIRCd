@@ -152,7 +152,7 @@ a.card:hover h3 { color: var(--link); }
 .chat-tabs button.unread { color: var(--link); }
 .chat-topic { padding: 6px 12px; border-bottom: 1px solid var(--border); color: var(--muted); font-size: .85rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chat-body { display: grid; grid-template-columns: 1fr 160px; height: 55vh; min-height: 280px; }
-.chat-log { overflow-y: auto; padding: 8px 12px; font-size: .88rem; line-height: 1.5; overflow-wrap: anywhere; }
+.chat-log { white-space: pre-wrap; overflow-y: auto; padding: 8px 12px; font-size: .88rem; line-height: 1.5; overflow-wrap: anywhere; }
 .chat-log .ts { color: var(--muted); }
 .chat-log .evt, .chat-log .notice { color: var(--muted); }
 .chat-log .err { color: var(--link); }
