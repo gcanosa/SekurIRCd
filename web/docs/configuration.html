@@ -63,6 +63,20 @@ key_file  = "tls/key.pem"</pre>
 <p>A self-signed certificate still encrypts the connection. Clients just need "only allow trusted certificates" unchecked.
   Channel mode <code>+z</code> then restricts a channel to clients connected this way.</p>
 
+<h3>a real certificate (optional)</h3>
+<p>If you own a domain pointing at your server and want clients to connect without any trust warning, <code>tools/mkcert.sh</code> gets a free, trusted
+  <a href="https://letsencrypt.org/">Let's Encrypt</a> certificate, drops it where <code>[tls]</code> expects it, enables <code>[tls]</code> if it wasn't,
+  sets up automatic renewal, and rehashes the running ircd so the new certificate is used without a restart. It is also what browsers need for the web chat
+  over <code>wss://</code>. Skip it if a self-signed certificate is fine for you.</p>
+<pre>export DuckDNS_Token=your-token     # or prompted; any acme.sh DNS plugin works via --dns
+tools/mkcert.sh --domain irc.example.org --email you@example.org
+tools/mkcert.sh --domain irc.example.org --staging    # test run with untrusted certs
+tools/mkcert.sh --domain irc.example.org --dry-run    # show what would happen</pre>
+<p>It installs <a href="https://github.com/acmesh-official/acme.sh">acme.sh</a> if missing and proves domain ownership with a DNS-01 challenge (a temporary TXT
+  record), so port 80 doesn't need to be open. The default plugin is DuckDNS; pick another with <code>--dns dns_cf</code> etc. and export that plugin's credentials,
+  or use <code>--webroot DIR</code> for HTTP-01 instead. Old certificate files are kept as <code>*.bak</code>. Other options: <code>--domain</code> (repeatable),
+  <code>--config</code>, <code>--pidfile</code>. For web chat it also reminds you to set <code>[websocket]</code> with <code>tls = true</code> if it isn't.</p>
+
 <h2>operators</h2>
 <p>An <code>[[operators]]</code> entry is a <code>/OPER</code> login: <code>name</code>, <code>hosts</code> (ident@IP masks it may log in from)
   and exactly one of <code>password_hash</code> (scrypt, recommended) or a legacy plain <code>password</code>.</p>

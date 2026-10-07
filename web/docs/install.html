@@ -56,6 +56,9 @@ JOIN #general
 PRIVMSG #general :hello
 QUIT</pre>
 
+<p>Optional: for a trusted TLS certificate instead of a self-signed one, run <code>tools/mkcert.sh --domain irc.example.org</code>
+  (see <a href="configuration.html#tls">configuration: tls</a>).</p>
+
 <h2>start/stop/status script</h2>
 <p>The repo root ships a small wrapper, <code>./sekurircd</code>, that runs both daemons in the background with the right flags and pidfiles, so you
   don't manage them by hand:</p>
