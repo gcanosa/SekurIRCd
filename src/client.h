@@ -91,6 +91,12 @@ typedef struct client {
     size_t label_len, label_cap;
     int label_lines;
     struct ml_state *ml;  /* draft/multiline batch being collected (cmd_user.c) */
+    /* netsync (multi-server): */
+    int remote;           /* lives on another server; fd == -1, nothing is ever written to it here */
+    struct netserver *nserver; /* the server it's on (self for local clients once registered) */
+    char uid[10];         /* network-unique id, "" until registered */
+    UT_hash_handle hh_uid;
+    long nick_ts;         /* when the nick was taken -- settles nick collisions */
     int is_watcher;       /* counted in server_t.n_watchers (non-empty MONITOR/WATCH list) */
     int webirc;           /* a trusted gateway already set ip/realhost via WEBIRC */
     int cap_version;      /* 0, or the version from "CAP LS <n>" (302 enables multi-line LS, values, cap-notify) */

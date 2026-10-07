@@ -1145,7 +1145,7 @@ void net_apply_listeners(server_t *srv) {
     rebind_one("WebSocket", &srv->ws_listen_fd, srv->bound_ws.bind, sizeof srv->bound_ws.bind, &srv->bound_ws.port,
                c->websocket.enabled && (!c->websocket.tls || srv->tls_ctx), c->server.bind, c->websocket.port);
     rebind_one("link", &srv->link_listen_fd, srv->bound_link.bind, sizeof srv->bound_link.bind, &srv->bound_link.port,
-               c->links.enabled && strcmp(c->links.mode, "hub") == 0, c->links.bind, c->links.port);
+               c->links.enabled && strcmp(c->links.mode, "leaf") != 0, c->links.bind, c->links.port);
 }
 
 int net_run(server_t *srv) {
@@ -1186,14 +1186,7 @@ int net_run(server_t *srv) {
     if (srv->ws_listen_fd >= 0) { snprintf(srv->bound_ws.bind, sizeof srv->bound_ws.bind, "%s", srv->cfg.server.bind); srv->bound_ws.port = srv->cfg.websocket.port; }
     link_start_hub(srv);
     if (srv->link_listen_fd >= 0) { snprintf(srv->bound_link.bind, sizeof srv->bound_link.bind, "%s", srv->cfg.links.bind); srv->bound_link.port = srv->cfg.links.port; }
-    if (srv->cfg.links.enabled && strcmp(srv->cfg.links.mode, "leaf") == 0) {
-        if (link_connect_leaf(srv) == 0) {
-            srv->leaf_backoff = srv->cfg.links.reconnect_delay;
-        } else {
-            srv->leaf_backoff = srv->cfg.links.reconnect_delay;
-            srv->leaf_next_attempt = time(NULL) + (time_t)srv->leaf_backoff;
-        }
-    }
+    link_dial_peers(srv, 1, NULL); /* every dial-out peer, now (later attempts back off per peer in link_leaf_tick) */
 
     server_install_debug_log_hook(srv);
     time_t last_tick = time(NULL);

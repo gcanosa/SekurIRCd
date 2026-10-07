@@ -279,6 +279,18 @@ void channel_invite_remove(channel_t *chan, const char *casefold_nick) {
     }
 }
 
+unsigned int channel_flag_bit(char c) {
+    switch (c) {
+        case 'n': return CMODE_N; case 'i': return CMODE_I; case 'p': return CMODE_P; case 't': return CMODE_T;
+        case 's': return CMODE_S; case 'm': return CMODE_M; case 'z': return CMODE_Z; case 'r': return CMODE_R;
+        case 'P': return CMODE_PERM; case 'C': return CMODE_NOCTCP; case 'T': return CMODE_NONOTICE; case 'S': return CMODE_STRIPCOLOR;
+        case 'V': return CMODE_NOINVITE; case 'Q': return CMODE_NOKICK; case 'N': return CMODE_NONICK; case 'R': return CMODE_REGONLY;
+        case 'O': return CMODE_OPERONLY; case 'M': return CMODE_MODREG; case 'c': return CMODE_NOCOLOR; case 'D': return CMODE_DELAYJOIN;
+        case 'u': return CMODE_AUDITORIUM; case 'G': return CMODE_CENSOR;
+        default: return 0;
+    }
+}
+
 void channel_modes_string(channel_t *chan, char *out, size_t outsz) {
     char flags[40] = "+";
     char args[256] = "";

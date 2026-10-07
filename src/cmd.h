@@ -8,6 +8,7 @@
 #include "client.h"
 #include "proto.h"
 #include "server.h"
+#include "netsync.h"
 #include "spam.h"
 
 typedef void (*cmd_handler_t)(server_t *srv, client_t *cl, irc_message_t *msg);
@@ -56,6 +57,9 @@ void channel_reveal_member(struct channel *chan, struct member *m); /* +D: first
 void cmd_markread(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_batch(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_rename(server_t *srv, client_t *cl, irc_message_t *msg);
+/* Tell the channel's local members that `cl` joined (honours +D/+u visibility; also pings a guarding service). */
+void cmd_channel_rename_apply(struct server *srv, struct channel *chan, struct client *by, const char *newname, const char *reason);
+void cmd_announce_join(struct channel *chan, struct client *cl);
 void cmd_chathistory(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_tagmsg(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_globops(server_t *srv, client_t *cl, irc_message_t *msg);

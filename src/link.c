@@ -10,6 +10,7 @@
 #include <openssl/err.h>
 
 #include <arpa/inet.h>
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <netdb.h>
@@ -88,7 +89,7 @@ void link_tls_try_handshake(server_t *srv, link_conn_t *lc) {
 }
 
 int link_start_hub(server_t *srv) {
-    if (!srv->cfg.links.enabled || strcmp(srv->cfg.links.mode, "hub") != 0) return -1;
+    if (!srv->cfg.links.enabled || strcmp(srv->cfg.links.mode, "leaf") == 0) return -1;
     int fd = net_listen(srv->cfg.links.bind, srv->cfg.links.port);
     if (fd < 0) {
         log_error("link", "could not bind link listener %s:%d", srv->cfg.links.bind, srv->cfg.links.port);
@@ -189,14 +190,13 @@ static int dial_uplink(const char *host, int port) {
     return fd;
 }
 
-int link_connect_leaf(server_t *srv) {
-    if (!srv->cfg.links.enabled || strcmp(srv->cfg.links.mode, "leaf") != 0) return -1;
-    if (srv->cfg.links.n_peers < 1) return -1;
-    cfg_link_peer_t *up = &srv->cfg.links.peers[0];
-
+/* Dials one configured peer (a [[links.peers]] entry with `host`). 0 on success. The handshake briefly blocks (bounded
+ * by SO_RCVTIMEO, see connect_bounded); link establishment is rare, not a per-request path. */
+static int dial_peer(server_t *srv, int peer_idx) {
+    cfg_link_peer_t *up = &srv->cfg.links.peers[peer_idx];
     int fd = dial_uplink(up->host, up->port);
     if (fd < 0) {
-        log_warn("link", "could not connect to uplink %s:%d", up->host, up->port);
+        log_warn("link", "could not connect to %s:%d", up->host, up->port);
         return -1;
     }
 
@@ -207,7 +207,7 @@ int link_connect_leaf(server_t *srv) {
     if (srv->cfg.links.tls) {
         SSL_CTX *ctx = leaf_tls_ctx();
         if (!ctx) {
-            log_error("link", "TLS setup failed dialing uplink %s:%d", up->host, up->port);
+            log_error("link", "TLS setup failed dialing %s:%d", up->host, up->port);
             close(fd); free(lc); return -1;
         }
         lc->ssl = SSL_new(ctx);
@@ -220,38 +220,40 @@ int link_connect_leaf(server_t *srv) {
         if (SSL_connect(lc->ssl) != 1) {
             char errbuf[256];
             ERR_error_string_n(ERR_get_error(), errbuf, sizeof errbuf);
-            log_warn("link", "TLS handshake to uplink %s:%d failed: %s", up->host, up->port, errbuf);
+            log_warn("link", "TLS handshake to %s:%d failed: %s", up->host, up->port, errbuf);
             SSL_free(lc->ssl); close(fd); free(lc);
             return -1;
         }
-        log_info("link", "TLS established to uplink %s:%d (%s/%s)", up->host, up->port,
+        log_info("link", "TLS established to %s:%d (%s/%s)", up->host, up->port,
                   SSL_get_version(lc->ssl), SSL_get_cipher_name(lc->ssl));
     }
 
     char line[512];
     snprintf(line, sizeof line, "PASS %s", up->password);
-    if (write_line_blocking(lc, line) != 0) {
-        log_warn("link", "write failed sending handshake to uplink %s:%d", up->host, up->port);
-        goto fail;
-    }
-    const char *p[] = {srv->cfg.server.name, "1"};
-    irc_build(line, sizeof line, NULL, 0, NULL, "SERVER", p, 2, "sekurircd-c link");
-    if (write_line_blocking(lc, line) != 0) {
-        log_warn("link", "write failed sending handshake to uplink %s:%d", up->host, up->port);
-        goto fail;
-    }
+    if (write_line_blocking(lc, line) != 0) goto wfail;
+    if (write_line_blocking(lc, "CAPAB :SEKURNET") != 0) goto wfail; /* ask for the state-sync protocol */
+    const char *p[] = {srv->cfg.server.name, "1", srv->self_srv->sid};
+    irc_build(line, sizeof line, NULL, 0, NULL, "SERVER", p, 3, srv->self_srv->desc);
+    if (write_line_blocking(lc, line) != 0) goto wfail;
 
     char resp[512];
-    if (read_line_blocking(lc, resp, sizeof resp, LINK_HANDSHAKE_TIMEOUT_MS) != 0) {
-        log_warn("link", "uplink '%s' did not respond to the handshake", up->name);
-        goto fail;
-    }
+    int got_capab = 0;
     irc_message_t msg;
-    if (irc_parse_line(resp, &msg) != 0 || strcasecmp(msg.command, "SERVER") != 0 ||
-        msg.nparams < 1 || strcmp(msg.params[0], up->name) != 0) {
-        log_warn("link", "uplink handshake failed (bad reply or name mismatch)");
+    for (int tries = 0; ; tries++) { /* the peer may send CAPAB before its SERVER line */
+        if (tries >= 4 || read_line_blocking(lc, resp, sizeof resp, LINK_HANDSHAKE_TIMEOUT_MS) != 0) {
+            log_warn("link", "peer '%s' did not respond to the handshake", up->name);
+            goto fail;
+        }
+        if (irc_parse_line(resp, &msg) != 0) continue;
+        if (strcasecmp(msg.command, "ERROR") == 0) { log_warn("link", "peer '%s' refused the link: %s", up->name, msg.nparams ? msg.params[msg.nparams - 1] : "?"); goto fail; }
+        if (strcasecmp(msg.command, "CAPAB") == 0) { if (msg.nparams && strstr(msg.params[msg.nparams - 1], "SEKURNET")) got_capab = 1; continue; }
+        break;
+    }
+    if (strcasecmp(msg.command, "SERVER") != 0 || msg.nparams < 1 || strcmp(msg.params[0], up->name) != 0) {
+        log_warn("link", "peer handshake failed (bad reply or name mismatch)");
         goto fail;
     }
+    int server_link = got_capab && msg.nparams >= 4;
 
     net_set_nonblocking(fd);
     lc->authenticated = 1;
@@ -259,12 +261,19 @@ int link_connect_leaf(server_t *srv) {
     lc->created = lc->last_activity = time(NULL);
     lc->next = srv->links;
     srv->links = lc;
-    log_info("link", "connected to uplink '%s'%s", up->name, lc->ssl ? " (TLS)" : "");
+    log_info("link", "connected to '%s'%s%s", up->name, lc->ssl ? " (TLS)" : "", server_link ? " [state sync]" : "");
     char snote[200];
     snprintf(snote, sizeof snote, "Link with %s established", up->name);
     server_notify_opers(srv, snote);
+    if (server_link) {
+        char sid[8];
+        snprintf(sid, sizeof sid, "%s", msg.params[2]);
+        if (netsync_link_up(srv, lc, up->name, sid, msg.params[3]) != 0) { link_close(srv, lc); return -1; }
+    }
     return 0;
 
+wfail:
+    log_warn("link", "write failed sending handshake to %s:%d", up->host, up->port);
 fail:
     if (lc->ssl) SSL_free(lc->ssl);
     close(fd);
@@ -272,21 +281,37 @@ fail:
     return -1;
 }
 
-void link_leaf_tick(server_t *srv) {
-    if (!srv->cfg.links.enabled || strcmp(srv->cfg.links.mode, "leaf") != 0) return;
-    if (srv->links) return; /* already connected (or connecting) */
-    time_t now = time(NULL);
-    if (now < srv->leaf_next_attempt) return;
-
-    if (link_connect_leaf(srv) == 0) {
-        srv->leaf_backoff = srv->cfg.links.reconnect_delay;
-    } else {
-        if (srv->leaf_backoff <= 0) srv->leaf_backoff = srv->cfg.links.reconnect_delay;
-        srv->leaf_next_attempt = now + (time_t)srv->leaf_backoff;
-        srv->leaf_backoff = srv->leaf_backoff * 2 > srv->cfg.links.reconnect_delay_max
-                                ? srv->cfg.links.reconnect_delay_max : srv->leaf_backoff * 2;
-    }
+static int peer_is_linked(server_t *srv, const cfg_link_peer_t *p) {
+    for (link_conn_t *lc = srv->links; lc; lc = lc->next)
+        if (!lc->closing && lc->authenticated && strcasecmp(lc->peer_name, p->name) == 0) return 1;
+    return 0;
 }
+
+/* Dial every dial-out peer that isn't linked yet and whose back-off has run out. `force` ignores the back-off
+ * (startup, the CONNECT command). Returns how many links came up. */
+int link_dial_peers(server_t *srv, int force, const char *only_name) {
+    if (!srv->cfg.links.enabled || strcmp(srv->cfg.links.mode, "hub") == 0) return 0;
+    int up_count = 0;
+    time_t now = time(NULL);
+    for (int i = 0; i < srv->cfg.links.n_peers; i++) {
+        cfg_link_peer_t *p = &srv->cfg.links.peers[i];
+        if (!p->host[0] || (only_name && strcasecmp(only_name, p->name) != 0) || peer_is_linked(srv, p)) continue;
+        if (!force && now < srv->dial[i].next) continue;
+        if (dial_peer(srv, i) == 0) {
+            srv->dial[i].backoff = srv->cfg.links.reconnect_delay;
+            srv->dial[i].next = 0;
+            up_count++;
+        } else {
+            if (srv->dial[i].backoff <= 0) srv->dial[i].backoff = srv->cfg.links.reconnect_delay;
+            srv->dial[i].next = now + (time_t)srv->dial[i].backoff;
+            srv->dial[i].backoff = srv->dial[i].backoff * 2 > srv->cfg.links.reconnect_delay_max
+                                       ? srv->cfg.links.reconnect_delay_max : srv->dial[i].backoff * 2;
+        }
+    }
+    return up_count;
+}
+
+void link_leaf_tick(server_t *srv) { link_dial_peers(srv, 0, NULL); }
 
 /* ponytail: fixed, not a config knob -- only pre-configured peers (n_peers,
  * checked at handshake time) are ever supposed to reach this listener, so a
@@ -469,6 +494,7 @@ void link_reap(server_t *srv) {
         link_conn_t *lc = *pp;
         if (!lc->closing) { pp = &lc->next; continue; }
         *pp = lc->next;
+        if (lc->is_server) netsync_link_down(srv, lc, "Link closed");
         if (lc->service) {
             log_info("link", "link '%s' lost -- removing service nick '%s'", lc->peer_name, lc->service->nick);
             server_remove_client(srv, lc->service, "Service disconnected");
@@ -496,6 +522,10 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
     if (!lc->authenticated) {
         if (strcasecmp(msg.command, "PASS") == 0) {
             if (msg.nparams >= 1) snprintf(lc->pending_pass, sizeof lc->pending_pass, "%s", msg.params[0]);
+            return 0;
+        }
+        if (strcasecmp(msg.command, "CAPAB") == 0) { /* CAPAB :SEKURNET -- the peer wants the state-sync protocol */
+            if (msg.nparams >= 1 && strstr(msg.params[msg.nparams - 1], "SEKURNET")) lc->peer_capab_sekurnet = 1;
             return 0;
         }
         if (strcasecmp(msg.command, "SERVER") == 0) {
@@ -540,6 +570,23 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
             }
             snprintf(lc->peer_name, sizeof lc->peer_name, "%s", name);
             lc->authenticated = 1;
+            if (lc->peer_capab_sekurnet && msg.nparams >= 4) { /* a server link: answer in kind, then burst */
+                const char *sid = msg.params[2];
+                int sid_ok = strlen(sid) == 3 && isdigit((unsigned char)sid[0]);
+                for (int k = 1; k < 3 && sid_ok; k++) sid_ok = isdigit((unsigned char)sid[k]) || (sid[k] >= 'A' && sid[k] <= 'Z');
+                if (!sid_ok) { link_forward_line(lc, "ERROR :Bad SID"); link_close(srv, lc); return -1; }
+                link_forward_line(lc, "CAPAB :SEKURNET");
+                char me[300];
+                const char *mp[] = {srv->cfg.server.name, "1", srv->self_srv->sid};
+                irc_build(me, sizeof me, NULL, 0, NULL, "SERVER", mp, 3, srv->self_srv->desc);
+                link_forward_line(lc, me);
+                log_info("link", "link '%s' authenticated [state sync]", name);
+                char sn[200];
+                snprintf(sn, sizeof sn, "Link with %s established", name);
+                server_notify_opers(srv, sn);
+                if (netsync_link_up(srv, lc, name, sid, msg.params[3]) != 0) { link_close(srv, lc); return -1; }
+                return 0;
+            }
             char resp[300];
             const char *rp[] = {srv->cfg.server.name, "1"};
             irc_build(resp, sizeof resp, NULL, 0, NULL, "SERVER", rp, 2, "sekurircd-c link");
@@ -551,6 +598,13 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
             return 0;
         }
         return 0; /* ignore anything else pre-auth */
+    }
+
+    if (lc->is_server) { /* state-sync link: keepalives here, everything else is netsync's (its NICK is a nick change, not a service intro) */
+        if (strcasecmp(msg.command, "PING") == 0) { link_forward_line(lc, "PONG"); return 0; }
+        if (strcasecmp(msg.command, "PONG") == 0) return 0;
+        netsync_handle(srv, lc, &msg);
+        return 0;
     }
 
     if (strcasecmp(msg.command, "NICK") == 0) {
@@ -574,6 +628,7 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
         svc->link_conn = lc;
         svc->is_service = 1;
         svc->caps |= CAP_ACCOUNT_TAG; /* PRIVMSGs forwarded to the service carry the sender's account (@account=...) */
+        svc->nick_ts = (long)time(NULL);
         svc->registered = 1;
         svc->got_nick = svc->got_user = 1;
         svc->signon_time = svc->last_activity = time(NULL);
@@ -585,6 +640,7 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
         snprintf(svc->realname, sizeof svc->realname, "%s", realname);
         server_add_user(srv, svc);
         lc->service = svc;
+        netsync_introduce_user(srv, svc); /* a service nick is a user to the rest of the network too */
         log_info("link", "link '%s' introduced service nick '%s'", lc->peer_name, nick);
         return 0;
     }
@@ -645,6 +701,7 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
             const char *p[] = {chan->name};
             irc_build(partline, sizeof partline, NULL, 0, prefix, "PART", p, 1, "Guard disabled");
             server_broadcast_channel(chan, partline, NULL);
+            netsync_chan_part(srv, chan, svc, "Guard disabled");
             channel_remove_member(chan, svc);
             server_detach_membership(svc, chan);
             server_maybe_drop_channel(srv, chan);
@@ -681,6 +738,7 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
         const char *p[] = {chan->name};
         irc_build(line, sizeof line, NULL, 0, prefix, "TOPIC", p, 1, chan->topic);
         server_broadcast_channel(chan, line, NULL);
+        netsync_chan_topic(srv, chan, svc, chan->topic);
         return 0;
     }
     if (strcasecmp(msg.command, "KICK") == 0) {
@@ -696,6 +754,7 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
         const char *p[] = {chan->name, target->nick};
         irc_build(kickline, sizeof kickline, NULL, 0, prefix, "KICK", p, 2, reason);
         server_broadcast_channel(chan, kickline, NULL);
+        netsync_chan_kick(srv, chan, svc, target, reason);
         channel_remove_member(chan, target);
         server_detach_membership(target, chan);
         server_maybe_drop_channel(srv, chan);
@@ -717,6 +776,7 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
         const char *p[] = {target->nick};
         irc_build(line, sizeof line, NULL, 0, prefix, "INVITE", p, 1, chan->name);
         client_send(target, line);
+        netsync_invite(srv, svc, target, chan);
         return 0;
     }
     if (strcasecmp(msg.command, "UNBAN") == 0) {

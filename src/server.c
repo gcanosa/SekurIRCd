@@ -77,6 +77,7 @@ int server_init(server_t *srv, const config_t *cfg) {
     memset(srv, 0, sizeof *srv);
     srv->cfg = *cfg;
     server_apply_cloak_secret(srv);
+    netsync_init(srv);
     crypto_random_hex(srv->msgid_prefix, sizeof srv->msgid_prefix, 8);
     srv->listen_fd = -1;
     srv->tls_listen_fd = -1;
@@ -426,6 +427,7 @@ void server_logout(server_t *srv, client_t *cl) {
     irc_build(line, sizeof line, NULL, 0, prefix, "ACCOUNT", pa, 1, NULL);
     server_send_common_channels(srv, cl, line, CAP_ACCOUNT_NOTIFY);
     server_monitor_extend(srv, cl, line, CAP_ACCOUNT_NOTIFY);
+    netsync_user_account(srv, cl);
 }
 
 void server_login(server_t *srv, client_t *cl, const char *account) {
@@ -443,6 +445,7 @@ void server_login(server_t *srv, client_t *cl, const char *account) {
     irc_build(line, sizeof line, NULL, 0, prefix, "ACCOUNT", pa, 1, NULL);
     server_send_common_channels(srv, cl, line, CAP_ACCOUNT_NOTIFY);
     server_monitor_extend(srv, cl, line, CAP_ACCOUNT_NOTIFY);
+    netsync_user_account(srv, cl);
 }
 
 void server_remove_client(server_t *srv, client_t *cl, const char *quit_reason) {
@@ -451,6 +454,13 @@ void server_remove_client(server_t *srv, client_t *cl, const char *quit_reason) 
     char line[512];
     irc_build(line, sizeof line, NULL, 0, prefix, "QUIT", NULL, 0, quit_reason ? quit_reason : "");
     if (cl->conn_id) worker_cancel(cl->conn_id); /* skip its still-queued lookups */
+    if (cl->uid[0] && !cl->remote) netsync_user_quit(srv, cl, quit_reason); /* tell the rest of the network */
+    if (cl->uid[0]) { /* out of the UID index */
+        client_t *byu;
+        HASH_FIND(hh_uid, srv->by_uid, cl->uid, strlen(cl->uid), byu);
+        if (byu == cl) HASH_DELETE(hh_uid, srv->by_uid, cl);
+        if (cl->nserver && cl->nserver->n_users > 0) cl->nserver->n_users--;
+    }
     if (cl->is_watcher) { srv->n_watchers--; cl->is_watcher = 0; }
     channel_forget_ban_extra_for(cl);
     net_release_class(srv, cl);
@@ -520,7 +530,8 @@ void server_send_lusers(server_t *srv, client_t *cl) {
      * n_local names anyway so this reads the same as the Python original
      * and doesn't need touching if link.c ever grows real mirroring. */
     int n_users = HASH_COUNT(srv->users);
-    int n_local = n_users;
+    int n_local = 0; /* users on THIS server; srv->users also holds the remote ones now */
+    { client_t *lu, *ltmp; HASH_ITER(hh, srv->users, lu, ltmp) if (!lu->remote) n_local++; }
     int n_opers = 0, n_invisible = 0;
     client_t *u, *tmp;
     HASH_ITER(hh, srv->users, u, tmp) {
@@ -529,9 +540,9 @@ void server_send_lusers(server_t *srv, client_t *cl) {
     }
     int n_chans = HASH_COUNT(srv->channels);
 
-    int n_servers = 1;
+    int n_servers = HASH_COUNT(srv->servers);
     for (link_conn_t *lc = srv->links; lc; lc = lc->next)
-        if (lc->authenticated) n_servers++;
+        if (lc->authenticated && !lc->is_server) n_servers++; /* service links count as before */
 
     int n_unknown = 0;
     for (client_t *c = srv->all_clients; c; c = c->all_next)
@@ -887,6 +898,7 @@ int server_is_shunned(server_t *srv, client_t *cl) {
 
 void server_free_tables(server_t *srv) {
     server_kline_flush(srv);
+    netsync_free(srv);
     history_maybe_save(srv, 1);
     history_free(srv);
     spam_free(srv);

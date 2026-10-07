@@ -448,6 +448,15 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
     if (cfg_get_str(srv, "name", "sekuri", out->server.name, CFG_STR, errbuf, errbufsz, "server.name")) return -1;
     if (cfg_get_str(srv, "network", "SekuriIRC Network", out->server.network, CFG_STR, errbuf, errbufsz, "server.network")) return -1;
     if (cfg_get_str(srv, "version", SEKURIRCD_VERSION, out->server.version, CFG_STR, errbuf, errbufsz, "server.version")) return -1;
+    if (cfg_get_str(srv, "sid", "", out->server.sid, sizeof out->server.sid, errbuf, errbufsz, "server.sid")) return -1;
+    if (out->server.sid[0]) {
+        const char *s = out->server.sid;
+        if (strlen(s) != 3 || !isdigit((unsigned char)s[0]) || !(isdigit((unsigned char)s[1]) || (s[1] >= 'A' && s[1] <= 'Z')) ||
+            !(isdigit((unsigned char)s[2]) || (s[2] >= 'A' && s[2] <= 'Z'))) {
+            snprintf(errbuf, errbufsz, "server.sid must be 3 characters: a digit, then two of 0-9 A-Z (e.g. \"4AB\")");
+            return -1;
+        }
+    }
     if (cfg_get_str(srv, "bind", "0.0.0.0", out->server.bind, CFG_STR, errbuf, errbufsz, "server.bind")) return -1;
     if (cfg_get_str_array(srv, "proxy_protocol_hosts", out->server.proxy_hosts, CFG_MAX_HOSTS_PER_WEBIRC, &out->server.n_proxy_hosts, errbuf, errbufsz, "server.proxy_protocol_hosts")) return -1;
     if (cfg_get_int(srv, "port", 6667, &out->server.port, errbuf, errbufsz, "server.port")) return -1;
@@ -952,8 +961,8 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
         }
 
         if (out->links.enabled) {
-            if (strcmp(out->links.mode, "hub") != 0 && strcmp(out->links.mode, "leaf") != 0) {
-                snprintf(errbuf, errbufsz, "links.mode must be \"hub\" or \"leaf\""); return -1;
+            if (strcmp(out->links.mode, "hub") != 0 && strcmp(out->links.mode, "leaf") != 0 && strcmp(out->links.mode, "both") != 0) {
+                snprintf(errbuf, errbufsz, "links.mode must be \"hub\", \"leaf\" or \"both\""); return -1;
             }
             if (out->links.port < 1 || out->links.port > 65535) { snprintf(errbuf, errbufsz, "links.port must be in 1-65535"); return -1; }
             if (out->links.ping_interval <= 0) { snprintf(errbuf, errbufsz, "links.ping_interval must be > 0"); return -1; }
@@ -967,7 +976,7 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
                 snprintf(errbuf, errbufsz, "links.max_line_length must be <= 8192 (link.h's LINK_BUF)");
                 return -1;
             }
-            if (out->links.tls && strcmp(out->links.mode, "hub") == 0 && !out->tls.enabled) {
+            if (out->links.tls && strcmp(out->links.mode, "leaf") != 0 && !out->tls.enabled) {
                 snprintf(errbuf, errbufsz, "links.tls requires [tls] enabled (a hub-mode link reuses the client-facing TLS certificate)");
                 return -1;
             }
@@ -984,6 +993,15 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
                     snprintf(errbuf, errbufsz, "links.mode is \"hub\" but no [[links.peers]] entry accepts an incoming leaf");
                     return -1;
                 }
+            } else if (strcmp(out->links.mode, "both") == 0) {
+                int accepts = 0;
+                for (int i = 0; i < out->links.n_peers; i++) {
+                    const cfg_link_peer_t *p = &out->links.peers[i];
+                    if (p->host[0] && (p->port < 1 || p->port > 65535)) { snprintf(errbuf, errbufsz, "links.peers[%d].port must be in 1-65535", i); return -1; }
+                    if (!p->host[0]) accepts++;
+                }
+                if (out->links.n_peers < 1) { snprintf(errbuf, errbufsz, "links.mode is \"both\" but no [[links.peers]] are configured"); return -1; }
+                (void)accepts;
             } else {
                 if (out->links.n_peers != 1) {
                     snprintf(errbuf, errbufsz, "links.mode is \"leaf\" but requires exactly one [[links.peers]] entry (its uplink)");

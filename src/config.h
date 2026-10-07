@@ -45,6 +45,7 @@ typedef struct {
     char name[CFG_STR];
     char network[CFG_STR];
     char version[CFG_STR];
+    char sid[4];          /* 3-character server id for linked networks (digit + 2 of [0-9A-Z]); "" = derived from the name */
     char bind[CFG_STR];
     int port;
     char proxy_hosts[CFG_MAX_HOSTS_PER_WEBIRC][CFG_MASK]; /* IP globs of trusted PROXY-protocol load balancers */
@@ -197,7 +198,7 @@ typedef struct {
 
 typedef struct {
     int enabled;
-    char mode[8]; /* "hub" | "leaf" */
+    char mode[8]; /* "hub" (accept) | "leaf" (dial the one peer) | "both" (accept + dial every peer with a host) */
     char bind[CFG_STR];
     int port;
     int tls;
