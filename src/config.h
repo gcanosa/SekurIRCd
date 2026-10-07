@@ -206,6 +206,7 @@ typedef struct {
     double ping_interval;
     double ping_timeout;
     int max_line_length;
+    int autoconnect;     /* dial the configured peers on startup and whenever they drop (default on); off = only on /CONNECT */
     double reconnect_delay;
     double reconnect_delay_max;
     cfg_link_peer_t peers[CFG_MAX_LINK_PEERS];

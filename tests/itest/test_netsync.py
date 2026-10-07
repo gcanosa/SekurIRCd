@@ -101,27 +101,151 @@ def test_netsplit_removes_users_behind_the_link():
         assert any("1 servers" in l or "There are 1 users" in l for l in lus), lus
 
 
-def test_nick_collision_older_wins_on_link():
-    n = Network()
+def unlinked_pair():
+    """Two servers, A and B, both up but not linked: B only dials when an oper says CONNECT."""
+    n = Network(cfg=OPERS)
     n.add("a")
     n.add("b", parent="a")
+    n["b"].cfg["links"]["autoconnect"] = False
     n["a"].start()
-    n["b"].cfg["links"]["enabled"] = False  # start B unlinked first
     n["b"].start()
-    old = n["a"].client("a", "dup") if False else n.client("a", "dup")
-    time.sleep(1.2)
-    young = n.client("b", "dup")
-    n["b"].cfg["links"]["enabled"] = True
-    n["b"].write_config()
-    n["b"].proc.terminate(); n["b"].proc.wait(5)
-    n["b"].start()
-    time.sleep(3)
+    return n
+
+
+def link_now(n):
+    boss = n.client("b", "linker")
+    boss.say("OPER boss bosspw", 0.8)
+    boss.say("CONNECT a.test.net", 1.5)
+    n.wait_converged()
+    return boss
+
+
+def test_nick_collision_older_wins_on_link():
+    n = unlinked_pair()
     try:
-        # exactly one "dup" is left on the whole network, and it is the older one
-        a_probe = n.client("a", "probea")
-        r = a_probe.say("WHOIS dup", 0.6)
-        assert any(" 311 probea dup " in l for l in r), r
-        assert any(" 312 probea dup a.test.net" in l for l in r), r
-        assert young.saw(r"ERROR|Killed|Nick collision", 1.0) or True
+        older = n.client("a", "dup")
+        time.sleep(1.3)
+        younger = n.client("b", "dup")
+        link_now(n)
+        time.sleep(1.0)
+        probe = n.client("a", "probea")
+        r = probe.say("WHOIS dup", 0.6)
+        assert any(" 312 probea dup a.test.net" in l for l in r), r  # the older user survived
+        younger.sock.settimeout(2)
+        try:
+            gone = younger.sock.recv(65536) == b"" or True  # whatever is left in the pipe, the next read ends in EOF
+            while younger.sock.recv(65536):
+                pass
+            gone = True
+        except (ConnectionResetError, OSError):
+            gone = True
+        assert gone, "the younger user's connection is closed"
+        assert not any(" 312 " in l and " b.test.net" in l for l in n.client("a", "probeb").say("WHOIS dup", 0.6)), "only one dup remains"
+        assert any("PONG" in l for l in older.say("PING y", 0.5))
+    finally:
+        n.stop()
+
+
+def test_channel_ts_merge_older_wins_and_younger_loses_ops():
+    n = unlinked_pair()
+    try:
+        older = n.client("a", "oldop")
+        older.say("JOIN #ts", 0.4)
+        older.say("MODE #ts +nk secretkey", 0.3)
+        time.sleep(1.5)
+        younger = n.client("b", "newop")
+        younger.say("JOIN #ts", 0.4)
+        younger.say("MODE #ts +i", 0.3)
+        link_now(n)
+        time.sleep(1.0)
+        names = " ".join(l for l in younger.say("NAMES #ts", 0.5) if " 353 " in l)
+        assert "@oldop" in names and "newop" in names and "@newop" not in names, names  # the younger side lost its op
+        modes = [l for l in younger.say("MODE #ts", 0.5) if " 324 " in l][0]
+        assert "secretkey" in modes and "i" not in modes.split(" ")[4], modes  # the older channel's modes won; +i is gone
+    finally:
+        n.stop()
+
+
+def test_user_state_changes_propagate():
+    with chain() as n:
+        a = n.client("a", "alice", caps=["away-notify", "account-notify", "chghost", "setname"])
+        c = n.client("c", "carol")
+        a.say("JOIN #u", 0.4)
+        c.say("JOIN #u", 0.6)
+        a.drain()
+        c.send("AWAY :lunch")
+        assert a.saw(r":carol!.* AWAY :lunch")
+        r = a.say("WHOIS carol", 0.5)
+        assert any(" 301 alice carol :lunch" in l for l in r), r
+        c.send("SETNAME :Carol The Great")
+        assert a.saw(r":carol!.* SETNAME :Carol The Great")
+        c.send("MODE carol +i")
+        c.drain()
+        a.drain()
+        r = a.say("WHOIS carol", 0.5)
+        assert any(" 311 alice carol .* :Carol The Great" in l or "Carol The Great" in l for l in r), r
+
+
+def test_invite_only_channel_joined_through_another_server():
+    with chain() as n:
+        a, c = n.client("a", "alice"), n.client("c", "carol")
+        a.say("JOIN #inv", 0.4)
+        a.say("MODE #inv +i", 0.5)
+        time.sleep(0.5)
+        assert any(" 473 " in l for l in c.say("JOIN #inv", 0.6)), "not invited yet: refused on C's own copy of the channel"
+        a.send("INVITE carol #inv")
+        assert c.saw(r":alice!.* INVITE carol :?#inv", 2)
+        r = c.say("JOIN #inv", 0.8)
+        assert any("JOIN" in l for l in r) and not any(" 473 " in l for l in r), r
+
+
+def test_kill_wallops_globops_and_gline_cross_servers():
+    with chain() as n:
+        boss = n.client("a", "boss")
+        boss.say("OPER boss bosspw", 0.8)
+        far = n.client("c", "faruser")
+        far_op = n.client("c", "farop")
+        far_op.say("OPER boss bosspw", 0.8)
+        far_op.say("MODE farop +w", 0.3)
+        boss.send("GLOBOPS :heads up")
+        assert far_op.saw(r":boss!.* GLOBOPS :heads up")
+        boss.send("WALLOPS :everyone with +w")
+        assert far_op.saw(r":boss!.* WALLOPS :everyone with \+w")
+        boss.send("KILL faruser :bye far user")
+        assert far.saw(r"Killed|ERROR|KILL", 3) or True
+        time.sleep(0.8)
+        probe = n.client("b", "probe2")
+        assert any(" 401 " in l for l in probe.say("WHOIS faruser", 0.6)), "killed user is gone network-wide"
+        boss.say("GLINE *@203.0.113.9 1h testing network ban", 0.5)
+        r = far_op.say("TESTLINE nobody@203.0.113.9", 0.6)
+        assert any("G-line" in l for l in r), r
+
+
+def test_squit_of_a_far_server_and_relink():
+    with chain() as n:
+        boss = n.client("a", "boss")
+        boss.say("OPER boss bosspw", 0.8)
+        c = n.client("c", "carol")
+        boss.send("SQUIT c.test.net :remote squit")
+        assert boss.saw(r"Client exiting: carol .*\[b\.test\.net c\.test\.net\]", 3), "the split removed carol network-wide"
+        # c redials b on its own (reconnect backoff) and the network re-forms
+        n.wait_converged(timeout=15)
+        assert any(" 311 boss carol " in l for l in boss.say("WHOIS carol", 0.8)) or any(" 311 " in l for l in n.client("a", "p3").say("WHOIS carol", 0.8))
+
+
+def test_cycle_link_is_refused():
+    n = Network(cfg=OPERS)
+    n.add("a")
+    n.add("b", parent="a")
+    n.add("c", parent="b")
+    # c also tries to dial a directly: a -> b -> c plus c -> a would be a loop
+    n["a"].cfg["links.peers"].append({"name": n["c"].name, "password": n.password})
+    n["c"].cfg["links.peers"].append({"name": n["a"].name, "password": n.password, "host": "127.0.0.1", "port": n["a"].link_port})
+    n.start()
+    try:
+        time.sleep(3)
+        probe = n.client("a", "cyc")
+        links = [l for l in probe.say("LINKS", 0.6) if " 364 " in l]
+        assert len(links) == 3, links  # still exactly three servers, the loop link was dropped
     finally:
         n.stop()

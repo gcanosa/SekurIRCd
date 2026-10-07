@@ -311,7 +311,7 @@ int link_dial_peers(server_t *srv, int force, const char *only_name) {
     return up_count;
 }
 
-void link_leaf_tick(server_t *srv) { link_dial_peers(srv, 0, NULL); }
+void link_leaf_tick(server_t *srv) { if (srv->cfg.links.autoconnect) link_dial_peers(srv, 0, NULL); }
 
 /* ponytail: fixed, not a config knob -- only pre-configured peers (n_peers,
  * checked at handshake time) are ever supposed to reach this listener, so a
