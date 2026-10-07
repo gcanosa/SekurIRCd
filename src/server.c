@@ -90,6 +90,8 @@ int server_init(server_t *srv, const config_t *cfg) {
     int has_path = config_accounts_path(&srv->cfg, accounts_path, sizeof accounts_path);
     accounts_init(&srv->accounts, has_path ? accounts_path : NULL);
     history_load(srv);
+    srv->accounts.on_change = netsync_account_changed; /* accounts replicate to linked servers */
+    srv->accounts.ud = srv;
 
     server_kline_load(srv);
     spam_reload(srv);

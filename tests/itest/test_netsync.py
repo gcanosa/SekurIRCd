@@ -313,3 +313,70 @@ def test_rename_and_status_messages_cross_servers():
         a.drain(); c.drain()
         a.send("PRIVMSG @#new :for ops only")
         assert c.saw(r"PRIVMSG @#new :for ops only", 1.5)
+
+
+def test_accounts_replicate_between_servers():
+    import base64
+    cfg = {**OPERS, "accounts": {"enabled": True, "store_file": "acc.json"}}
+    n = Network(cfg=cfg)
+    n.add("a")
+    n.add("b", parent="a")
+    n.add("c", parent="b")
+    n.start()
+    try:
+        def sasl(server, nick, account, pw):
+            c = n.client(server, nick, register=False, extra=["CAP REQ :sasl"])
+            c.send("AUTHENTICATE PLAIN")
+            c.expect(r"AUTHENTICATE \+")
+            c.send("AUTHENTICATE " + base64.b64encode(f"\0{account}\0{pw}".encode()).decode())
+            return c.saw(r" 903 ", 3)
+
+        reg = n.client("a", "regger")
+        reg.say("REGISTER shared password1", 1.5)
+        time.sleep(0.8)
+        assert sasl("c", "login1", "shared", "password1"), "an account registered on A logs in on C"
+        # change the password through NickServ on C: A must follow
+        c2 = n.client("c", "chg")
+        c2.send("PRIVMSG NickServ :IDENTIFY shared password1")
+        c2.saw(r"identified for shared", 3)
+        c2.send("PRIVMSG NickServ :SET PASSWORD password1 newpass789")
+        assert c2.saw(r"Password changed", 3)
+        time.sleep(0.8)
+        assert sasl("a", "login2", "shared", "newpass789")
+        assert not sasl("a", "login3", "shared", "password1")
+        # DROP on B removes it everywhere
+        b2 = n.client("b", "dropper")
+        b2.send("PRIVMSG NickServ :IDENTIFY shared newpass789")
+        b2.saw(r"identified for shared", 3)
+        b2.send("PRIVMSG NickServ :DROP newpass789")
+        assert b2.saw(r"account has been dropped", 3)
+        time.sleep(0.8)
+        assert not sasl("c", "login4", "shared", "newpass789")
+    finally:
+        n.stop()
+
+
+def test_accounts_sync_in_the_burst_when_servers_link():
+    import base64
+    cfg = {**OPERS, "accounts": {"enabled": True, "store_file": "acc.json"}}
+    n = Network(cfg=cfg)
+    n.add("a")
+    n.add("b", parent="a")
+    n["b"].cfg["links"]["autoconnect"] = False
+    n["a"].start()
+    n["b"].start()
+    try:
+        reg = n.client("a", "early")
+        reg.say("REGISTER preexisting password1", 1.5)
+        boss = n.client("b", "linker")
+        boss.say("OPER boss bosspw", 0.8)
+        boss.say("CONNECT a.test.net", 1.5)
+        n.wait_converged()
+        time.sleep(1)
+        c = n.client("b", "login", register=False, extra=["CAP REQ :sasl"])
+        c.send("AUTHENTICATE PLAIN")
+        c.expect(r"AUTHENTICATE \+")
+        c.send("AUTHENTICATE " + base64.b64encode(b"\0preexisting\0password1").decode())
+        assert c.saw(r" 903 ", 3), "accounts that existed before the link are burst across"
+    finally:
+        n.stop()

@@ -27,6 +27,7 @@
  *               :<sid> PUSH <uid> :<raw line>    (deliver a reply/notice to a user on the receiving server)
  *               :<uid> WALLOPS|GLOBOPS :<text>   :<uid> RENAME <#old> <#new> :<reason>
  *               :<sid> GLINE ... / UNGLINE <mask>
+ *               :<sid> ACCT <ts> <name> :<json record>   :<sid> ACCTDEL <ts> <name>    (the account database, last writer wins)
  * Channel state converges by timestamp (TS6-style): the older channel wins; the younger side drops its modes and
  * strips its members' ranks. A nick collision is settled by nick timestamp (older wins, a tie kills both).
  */
@@ -108,6 +109,9 @@ void netsync_wallops(struct server *srv, struct client *from, const char *verb, 
 void netsync_gline(struct server *srv, const char *mask, const char *setter, long expires, const char *reason);
 void netsync_ungline(struct server *srv, const char *mask);
 /* Reply/notice for a user on another server. */
+/* accounts.c's replication hook (installed by server_init): a registration/password/email/group/drop reaches every
+ * linked server, last writer wins. */
+void netsync_account_changed(void *ud, const char *name, long long ts, int deleted);
 void netsync_push(struct server *srv, struct client *target, const char *line);
 
 /* --- remote -> local application, implemented in cmd_*.c ---------------------------------------------- */

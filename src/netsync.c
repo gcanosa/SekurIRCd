@@ -266,7 +266,24 @@ static void send_burst(server_t *srv, link_conn_t *lc) {
         }
         (void)theirs;
     }
-    /* 4. global lines */
+    /* 4. the account database (each server also persists its own copy) */
+    if (srv->cfg.accounts.enabled) {
+        int na = 0;
+        const char **names = accounts_all_names(&srv->accounts, &na);
+        for (int i = 0; i < na && names; i++) {
+            char *json = accounts_record_json(&srv->accounts, names[i]);
+            if (!json) continue;
+            long long ts = accounts_updated_at(&srv->accounts, names[i]);
+            char tsb[24];
+            snprintf(tsb, sizeof tsb, "%lld", ts > 0 ? ts : 1);
+            char big[3000];
+            irc_build(big, sizeof big, NULL, 0, self_sid(srv), "ACCT", (const char *[]){tsb, names[i]}, 2, json);
+            send_link(lc, big);
+            free(json);
+        }
+        free(names);
+    }
+    /* 5. global lines */
     for (kline_entry_t *k = srv->klines; k; k = k->next) {
         if (k->line_type[0] != 'G') continue;
         char exp[24];
@@ -1162,6 +1179,53 @@ static void handle_rsquit(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     (void)lc;
 }
 
+static void handle_acct(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
+    netserver_t *s = src_server(srv, lc, msg->prefix);
+    if (!s && msg->prefix && lc->nserver && strcmp(msg->prefix, lc->nserver->sid) == 0) s = lc->nserver;
+    if (!s || !srv->cfg.accounts.enabled || msg->nparams < 3) return;
+    long long ts = atoll(msg->params[0]);
+    srv->accounts.applying = 1; /* don't echo it back out through the replication hook */
+    int applied = accounts_apply_remote(&srv->accounts, msg->params[1], ts, msg->params[msg->nparams - 1]);
+    srv->accounts.applying = 0;
+    (void)applied;
+    char fl[3000];
+    irc_build(fl, sizeof fl, NULL, 0, s->sid, "ACCT", (const char *[]){msg->params[0], msg->params[1]}, 2, msg->params[msg->nparams - 1]);
+    flood(srv, lc, fl);
+}
+
+static void handle_acctdel(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
+    netserver_t *s = src_server(srv, lc, msg->prefix);
+    if (!s && msg->prefix && lc->nserver && strcmp(msg->prefix, lc->nserver->sid) == 0) s = lc->nserver;
+    if (!s || !srv->cfg.accounts.enabled || msg->nparams < 2) return;
+    long long ts = atoll(msg->params[0]);
+    if (accounts_apply_remote_delete(&srv->accounts, msg->params[1], ts)) {
+        for (client_t *c = srv->all_clients; c; c = c->all_next) /* local sessions of a dropped account are logged out */
+            if (c->fd >= 0 && c->account[0] && strcasecmp(c->account, msg->params[1]) == 0) server_logout(srv, c);
+    }
+    char fl[400];
+    irc_build(fl, sizeof fl, NULL, 0, s->sid, "ACCTDEL", (const char *[]){msg->params[0], msg->params[1]}, 2, NULL);
+    flood(srv, lc, fl);
+}
+
+void netsync_account_changed(void *ud, const char *name, long long ts, int deleted) {
+    server_t *srv = ud;
+    if (!netsync_has_links(srv) || !srv->self_srv) return;
+    char tsb[24];
+    snprintf(tsb, sizeof tsb, "%lld", ts);
+    if (deleted) {
+        char line[400];
+        irc_build(line, sizeof line, NULL, 0, self_sid(srv), "ACCTDEL", (const char *[]){tsb, name}, 2, NULL);
+        flood(srv, NULL, line);
+        return;
+    }
+    char *json = accounts_record_json(&srv->accounts, name);
+    if (!json) return;
+    char big[3000];
+    irc_build(big, sizeof big, NULL, 0, self_sid(srv), "ACCT", (const char *[]){tsb, name}, 2, json);
+    free(json);
+    flood(srv, NULL, big);
+}
+
 static void handle_rename(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     client_t *u = src_user(srv, lc, msg->prefix);
     if (!u || msg->nparams < 2) return;
@@ -1203,6 +1267,8 @@ void netsync_handle(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     else if (!strcmp(c, "UNGLINE")) handle_ungline(srv, lc, msg);
     else if (!strcmp(c, "RENAME")) handle_rename(srv, lc, msg);
     else if (!strcmp(c, "RSQUIT")) handle_rsquit(srv, lc, msg);
+    else if (!strcmp(c, "ACCT")) handle_acct(srv, lc, msg);
+    else if (!strcmp(c, "ACCTDEL")) handle_acctdel(srv, lc, msg);
     else if (!strcmp(c, "EOB")) log_info("netsync", "end of burst from %s", lc->peer_name);
     /* PING/PONG are answered in link.c; anything unknown is ignored (forward compatibility). */
 }
