@@ -479,3 +479,37 @@ void irc_add_time_tag(char *line, size_t linesz) {
         line[6 + tl] = ' ';
     }
 }
+
+int irc_proxy_v2_parse(const unsigned char *buf, size_t len, char *ip, size_t ipsz, int *port, size_t *consumed) {
+    static const unsigned char SIG[12] = {'\r', '\n', '\r', '\n', 0, '\r', '\n', 'Q', 'U', 'I', 'T', '\n'};
+    ip[0] = '\0';
+    *port = 0;
+    size_t cmp = len < 12 ? len : 12;
+    if (memcmp(buf, SIG, cmp) != 0) return -1;
+    if (len < 16) return 0;
+    if ((buf[12] >> 4) != 2) return -1;
+    size_t alen = ((size_t)buf[14] << 8) | buf[15];
+    if (alen > 512) return -1;
+    if (len < 16 + alen) return 0;
+    *consumed = 16 + alen;
+    int cmd = buf[12] & 0x0f;
+    if (cmd == 0) return 1; /* LOCAL: health check from the balancer itself */
+    if (cmd != 1) return -1;
+    const unsigned char *a = buf + 16;
+    if (buf[13] == 0x11 && alen >= 12) { /* TCP over IPv4 */
+        snprintf(ip, ipsz, "%u.%u.%u.%u", a[0], a[1], a[2], a[3]);
+        *port = (a[8] << 8) | a[9];
+        return 1;
+    }
+    if (buf[13] == 0x21 && alen >= 36) { /* TCP over IPv6 */
+        char *o = ip;
+        size_t left = ipsz;
+        for (int i = 0; i < 8 && left > 5; i++) {
+            int n = snprintf(o, left, i ? ":%x" : "%x", (a[2 * i] << 8) | a[2 * i + 1]);
+            o += n; left -= (size_t)n;
+        }
+        *port = (a[32] << 8) | a[33];
+        return 1;
+    }
+    return -1;
+}

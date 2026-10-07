@@ -243,6 +243,9 @@ static const struct { const char *name; unsigned int bit; } CAP_ATTRS[] = {
     {"cap-notify", CAP_CAP_NOTIFY},
     {"batch", CAP_BATCH},
     {"labeled-response", CAP_LABELED_RESPONSE},
+    {"draft/no-implicit-names", CAP_NO_IMPLICIT_NAMES},
+    {"draft/pre-away", CAP_PRE_AWAY},
+    {"extended-monitor", CAP_EXTENDED_MONITOR},
     {"draft/chathistory", CAP_CHATHISTORY},
 };
 #define N_CAP_ATTRS (int)(sizeof CAP_ATTRS / sizeof CAP_ATTRS[0])

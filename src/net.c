@@ -792,6 +792,25 @@ static int read_client_once(server_t *srv, client_t *cl) {
     memcpy(cl->rbuf + cl->rbuf_len, tmp, (size_t)n);
     cl->rbuf_len += (size_t)n;
 
+    if (cl->expect_proxy && cl->rbuf_len > 0 && cl->rbuf[0] == '\r') { /* PROXY protocol v2: a binary header, no newline to find */
+        char pip[64];
+        int pport = 0;
+        size_t used = 0;
+        int r = irc_proxy_v2_parse((const unsigned char *)cl->rbuf, cl->rbuf_len, pip, sizeof pip, &pport, &used);
+        if (r == 0) return 1; /* header not complete yet */
+        if (r < 0 || (pip[0] && client_apply_real_address(srv, cl, pip, NULL) != 0)) {
+            log_warn("net", "%s is a proxy_protocol_hosts peer but sent no valid PROXY header -- dropping", cl->ip);
+            cl->quitting = 1;
+            snprintf(cl->quit_reason, sizeof cl->quit_reason, "PROXY protocol required");
+            return 0;
+        }
+        if (pport > 0) cl->port = pport;
+        cl->expect_proxy = 0;
+        memmove(cl->rbuf, cl->rbuf + used, cl->rbuf_len - used);
+        cl->rbuf_len -= used;
+        if (cl->rbuf_len == 0) return 1;
+    }
+
     size_t start = 0;
     for (size_t i = 0; i < cl->rbuf_len; i++) {
         if (cl->rbuf[i] != '\n') continue;

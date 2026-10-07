@@ -198,6 +198,51 @@ void cmd_globops(server_t *srv, client_t *cl, irc_message_t *msg) {
     }
 }
 
+/* LOCOPS: like GLOBOPS but only operators on THIS server (a linked network keeps it local). */
+void cmd_locops(server_t *srv, client_t *cl, irc_message_t *msg) {
+    const char *text = msg->params[msg->nparams - 1];
+    char prefix[320];
+    client_prefix(cl, prefix, sizeof prefix);
+    char line[600];
+    irc_build(line, sizeof line, NULL, 0, prefix, "LOCOPS", NULL, 0, text);
+    client_t *u, *tmp;
+    HASH_ITER(hh, srv->users, u, tmp) {
+        if ((u->umodes & UMODE_O) && u->fd >= 0) client_send(u, line);
+    }
+}
+
+/* TESTLINE <nick | user@host | ip>: which active lines (K/G/Z/SHUN/ELINE) would hit that address. */
+void cmd_testline(server_t *srv, client_t *cl, irc_message_t *msg) {
+    server_kline_prune_expired(srv);
+    const char *arg = msg->params[0];
+    char ip[64] = "", user[USERLEN] = "", host[HOSTLEN] = "";
+    int ident_confirmed = 0;
+    client_t *t = server_find_user(srv, arg);
+    if (t && t->registered) {
+        snprintf(ip, sizeof ip, "%s", t->ip);
+        snprintf(user, sizeof user, "%s", t->user);
+        snprintf(host, sizeof host, "%s", t->realhost);
+        ident_confirmed = t->ident_confirmed;
+    } else if (strchr(arg, '@')) {
+        const char *at = strrchr(arg, '@');
+        snprintf(user, sizeof user, "%.*s", (int)(at - arg), arg);
+        snprintf(host, sizeof host, "%s", at + 1);
+        snprintf(ip, sizeof ip, "%s", at + 1); /* a bare IP after '@' is matched as an IP too */
+    } else {
+        snprintf(ip, sizeof ip, "%s", arg);
+        snprintf(host, sizeof host, "%s", arg);
+    }
+    int hits = 0;
+    for (kline_entry_t *k = srv->klines; k; k = k->next) {
+        if (!server_line_mask_hits(k->mask, k->line_type[0] == 'S' || k->line_type[0] == 'E' ? "K" : k->line_type, ip, user, host, ident_confirmed)) continue;
+        char m[500];
+        snprintf(m, sizeof m, "%s-line %s (by %s): %s", k->line_type, k->mask, k->set_by, k->reason);
+        notice_self(srv, cl, m);
+        hits++;
+    }
+    if (!hits) notice_self(srv, cl, "No active line matches that address");
+}
+
 /* CHGIDENT <nick> <ident>: change a user's ident (the user part of nick!user@host),
  * announced with IRCv3 CHGHOST like CHGHOST/SETHOST. */
 void cmd_chgident(server_t *srv, client_t *cl, irc_message_t *msg) {
@@ -374,6 +419,7 @@ static void broadcast_chghost(server_t *srv, client_t *cl, const char *old_prefi
     irc_build(line, sizeof line, NULL, 0, old_prefix, "CHGHOST", p, 2, NULL);
     if (cl->caps & CAP_CHGHOST) client_send(cl, line);
     server_send_common_channels(srv, cl, line, CAP_CHGHOST);
+    server_monitor_extend(srv, cl, line, CAP_CHGHOST);
 }
 
 void cmd_vhost(server_t *srv, client_t *cl, irc_message_t *msg) {

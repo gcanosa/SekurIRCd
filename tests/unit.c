@@ -910,6 +910,19 @@ static void test_scram_sha256_rfc7677(void) {
     assert(scram_verifier_from_string(str, &v2) == 0 && v2.iter == 4096 && memcmp(v2.stored_key, v.stored_key, 32) == 0);
 }
 
+static void test_proxy_v2_parse(void) {
+    unsigned char h[28] = {'\r', '\n', '\r', '\n', 0, '\r', '\n', 'Q', 'U', 'I', 'T', '\n', 0x21, 0x11, 0, 12,
+                          198, 51, 100, 9, 10, 0, 0, 1, 0x9c, 0x40, 0x1a, 0x0b};
+    char ip[64]; int port = 0; size_t used = 0;
+    assert(irc_proxy_v2_parse(h, sizeof h, ip, sizeof ip, &port, &used) == 1);
+    assert(strcmp(ip, "198.51.100.9") == 0 && port == 40000 && used == 28);
+    assert(irc_proxy_v2_parse(h, 20, ip, sizeof ip, &port, &used) == 0); /* truncated */
+    h[12] = 0x11; /* version 1 in the v2 slot */
+    assert(irc_proxy_v2_parse(h, sizeof h, ip, sizeof ip, &port, &used) == -1);
+    unsigned char junk[16] = {'G', 'E', 'T'};
+    assert(irc_proxy_v2_parse(junk, sizeof junk, ip, sizeof ip, &port, &used) == -1);
+}
+
 static void test_parse_duration_overflow(void) {
     assert(irc_parse_duration("99999999999999999999999999d") > 0); /* clamps, no signed overflow */
     assert(irc_parse_duration("90m") == 5400 && irc_parse_duration("x") == -1);
@@ -966,6 +979,7 @@ int main(void) {
     RUN(test_build_truncates_and_defangs);
     RUN(test_parse_token_cap_and_names);
     RUN(test_parse_duration_overflow);
+    RUN(test_proxy_v2_parse);
     RUN(test_scram_sha256_rfc7677);
     RUN(test_extbans_r_z);
     RUN(test_websocket_helpers);
