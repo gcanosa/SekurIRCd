@@ -37,7 +37,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define CHANSERV_VERSION "1.1.0"
+#define CHANSERV_VERSION "1.2.0"
 #define RBUF_SZ 8192
 #define SBUF_SZ (8192 * 2)
 #define MLOCK_LETTERS "niptsm"

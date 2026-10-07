@@ -1,5 +1,18 @@
 [
   {
+    "tag": "v1.2.0",
+    "date": "2026-10-07",
+    "changes": [
+      "Multi-server networking: SekurIRCd servers now link into a tree and share users, channels, modes, topics, bans, messages, away/account/host state and G-lines, with TS-based channel merging, nick-collision resolution, netsplit QUITs, /MAP, /LINKS, /SQUIT (also remote), /CONNECT, KILL/WALLOPS/GLOBOPS across servers and ChanServ serving users on any server. links.mode \"both\" with several [[links.peers]] and links.autoconnect",
+      "Accounts are replicated between linked servers (register, password, email, grouped nicks, drop; sent in the burst, last writer wins)",
+      "IRCv3: CAP 302/cap-notify, msgid, TAGMSG, batch, labeled-response, chathistory (server-level store with optional persistence and DM history), draft/multiline, draft/read-marker, draft/channel-rename, draft/no-implicit-names, draft/pre-away, extended-monitor, SASL SCRAM-SHA-256",
+      "Channel modes +f, +j, +L, +D, +u, +G, +q/+a ranks (~ and &); extbans ~r, ~z, ~j; caller-ID (+g/ACCEPT); connection classes; WEBIRC; PROXY protocol v1/v2; WebSocket (ws/wss) listener; oper privilege classes, SHUN, ELINE, GLOBOPS, SANICK, CHGIDENT, TESTLINE, LOCOPS, USERIP",
+      "NickServ: SET PASSWORD, DROP, LOGOUT, INFO, SET EMAIL/VERIFY, GROUP/UNGROUP, GHOST and nick enforcement. ChanServ: account-based founder, SECUREOPS, RESTRICTED, PRIVATE, LIST, extended MLOCK, owner/admin ranks",
+      "Hardening from the 2026-10 audit (stale worker results, link allowed_ips, +P abuse, NOTICE auto-replies, ISUPPORT/protocol fixes, link/worker robustness) and rehash now rebinds listeners and reloads the TLS certificate",
+      "Testing: 88-test end-to-end integration suite (make itest, including 3-server networks), clean under ASan/UBSan, plus a parser fuzz harness (make fuzz)"
+    ]
+  },
+  {
     "tag": "v1.1.0",
     "date": "2026-09-22",
     "changes": [

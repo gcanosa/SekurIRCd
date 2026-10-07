@@ -1,23 +1,16 @@
-/* Server-to-server linking -- redesigned protocol for the C port (see the
- * plan: v1.0.1 does not need Python-node interop). Newline-delimited IRC
- * lines (reusing proto.c, not JSON), hub-only in this version: the ircd
- * always accepts, chanserv always dials out. A leaf-dials-a-hub mode and
- * full network mirroring (Python's link.py feature set) are future phases
- * -- this MVP exists to let services/chanserv connect, introduce its bot
- * nick, and exchange PRIVMSG/NOTICE with real local clients.
+/* Server-to-server linking. Newline-delimited IRC lines (proto.c). One listener accepts both ChanServ-style service
+ * links and real server links; a peer that sends "CAPAB :SEKURNET" before SERVER is a server (see netsync.h for the
+ * state-sharing protocol: UIDs, bursts, SJOIN/TS, netsplits). Servers form a tree and may be many: `links.mode`
+ * "hub" accepts, "leaf" dials its configured peers, "both" does both; every [[links.peers]] entry with a host is
+ * dialled (with backoff) unless links.autoconnect is false.
  *
- * Handshake: leaf sends "PASS <secret>" then "SERVER <name> <proto> :<desc>".
- * Hub verifies against a [[links.peers]] entry (name + password/password_hash)
- * and replies "SERVER <hubname> <proto> :<desc>" on success, closes the
- * connection otherwise. After handshake:
+ * Handshake: dialer sends "PASS <secret>", (CAPAB), "SERVER <name> <proto> :<desc>"; the acceptor verifies the peer
+ * against [[links.peers]] (name + password/password_hash, allowed_ips) and replies in kind, then bursts.
+ * A service link then speaks:
  *   NICK <nick> <user> <host> :<realname>   -- introduce a service pseudo-client
  *   PRIVMSG/NOTICE <target> :<text>         -- literal IRC lines, relayed verbatim
- *   PING / PONG                             -- keepalive, separate from the
- *                                              client-facing ping/timeout
- * A service pseudo-client (client_t with fd == -1) has no real socket;
- * client_send() on one forwards the already-built IRC line straight over its
- * link_conn's socket (see client.c) -- the sender's prefix is already in the
- * line, so no extra encoding is needed in either direction.
+ *   PING / PONG                             -- keepalive
+ * A pseudo-client (client_t with fd == -1) forwards client_send() over its link_conn's socket (see client.c).
  */
 #ifndef SEKURIRCD_LINK_H
 #define SEKURIRCD_LINK_H
