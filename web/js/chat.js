@@ -56,7 +56,9 @@
     topic.textContent = b.topic || (b.name === "*" ? "SekurNet web chat" : "");
     users.textContent = "";
     Object.keys(b.users).sort(function (x, y) { return x.toLowerCase() < y.toLowerCase() ? -1 : 1; }).forEach(function (n) {
-      var d = document.createElement("div"); d.textContent = b.users[n] + n; users.appendChild(d);
+      var d = document.createElement("div"); d.textContent = b.users[n] + n; d.title = "Double-click to message " + n;
+      d.ondblclick = function () { if (n !== nick) { buf(n); active = n; buf(n).unread = false; draw(); input.focus(); } };
+      users.appendChild(d);
     });
     users.parentNode.hidden = b.name[0] !== "#" && b.name[0] !== "&";
   }
