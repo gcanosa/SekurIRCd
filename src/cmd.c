@@ -42,6 +42,8 @@ static const cmd_entry_t DISPATCH[] = {
     {"WEBIRC", cmd_webirc, 4, 0, 0},
     {"TAGMSG", cmd_tagmsg, 1, 1, 0},
     {"RENAME", cmd_rename, 2, 1, 0},
+    {"BATCH", cmd_batch, 1, 1, 0},
+    {"MARKREAD", cmd_markread, 1, 1, 0},
     {"ACCEPT", cmd_accept, 0, 1, 0},
     {"CHATHISTORY", cmd_chathistory, 2, 1, 0},
     {"USERIP", cmd_userip, 1, 1, 1},

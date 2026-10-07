@@ -89,6 +89,7 @@ typedef struct client {
     char *label_buf;      /* captured lines, '\n'-separated */
     size_t label_len, label_cap;
     int label_lines;
+    struct ml_state *ml;  /* draft/multiline batch being collected (cmd_user.c) */
     int is_watcher;       /* counted in server_t.n_watchers (non-empty MONITOR/WATCH list) */
     int webirc;           /* a trusted gateway already set ip/realhost via WEBIRC */
     int cap_version;      /* 0, or the version from "CAP LS <n>" (302 enables multi-line LS, values, cap-notify) */
