@@ -33,6 +33,9 @@ int net_assign_class(struct server *srv, struct client *cl);
 void net_release_class(struct server *srv, struct client *cl);
 void net_reclass_all(struct server *srv); /* after a rehash changed the class list */
 void net_reset_host(struct server *srv, struct client *cl);
+/* After a rehash: rebind any listener whose bind/port changed, open/close listeners that were enabled/disabled,
+ * and reload the TLS certificate. A bind failure keeps the old listener (logged) -- never leaves it dead. */
+void net_apply_listeners(struct server *srv);
 int net_run(struct server *srv);
 
 #endif /* SEKURIRCD_NET_H */
