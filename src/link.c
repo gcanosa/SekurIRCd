@@ -651,6 +651,10 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
         if (msg.nparams < 2) return 0;
         const char *target = msg.params[0];
         client_t *dst = server_find_user(srv, target);
+        if (dst && dst->remote && !dst->is_service && lc->service) { /* a user on another server: relay as the service's own message */
+            netsync_message(srv, lc->service, msg.command, target, dst, msg.params[msg.nparams - 1], NULL, 0);
+            return 0;
+        }
         if (!dst || dst->fd < 0) return 0; /* no such local user, or it's another service */
 
         char prefix[320];

@@ -249,3 +249,67 @@ def test_cycle_link_is_refused():
         assert len(links) == 3, links  # still exactly three servers, the loop link was dropped
     finally:
         n.stop()
+
+
+def test_chanserv_serves_users_on_other_servers():
+    from harness import ChanServ
+    n = Network(cfg={**OPERS, "accounts": {"enabled": True, "store_file": "acc.json"}})
+    n.add("a")
+    n.add("b", parent="a")
+    n["a"].cfg["links.peers"].append({"name": "services.test.net", "password": "svcsecret"})
+    n.start()
+    try:
+        with ChanServ(n["a"], n["a"].link_port, password="svcsecret"):
+            time.sleep(1.5)
+            far = n.client("b", "farfounder")  # lives on the leaf, ChanServ is on the hub
+            far.say("JOIN #svc", 0.5)
+            r = []
+            far.send("PRIVMSG ChanServ :REGISTER #svc farpass1")
+            assert far.saw(r"ChanServ.*NOTICE farfounder :#svc is now registered", 4), "REGISTER works from the other side of the link"
+            far.send("PRIVMSG ChanServ :JOIN #svc farpass1")
+            far.drain(0.8)
+            near = n.client("a", "nearuser")
+            near.say("JOIN #svc", 0.8)
+            far.send("PRIVMSG ChanServ :ACCESS #svc ADD *!*@127.0.0.1 o farpass1")
+            far.drain(1.0)
+            third = n.client("b", "thirduser")
+            third.say("JOIN #svc", 1.0)
+            names = " ".join(l for l in far.say("NAMES #svc", 0.5) if " 353 " in l)
+            assert "ChanServ" in names, names                  # the service sits in the channel for everyone
+            assert "@thirduser" in names, names                # and its ACCESS auto-op reached a user on the leaf
+            far.send("PRIVMSG ChanServ :AKICK #svc ADD bad!*@127.0.0.1 farpass1")
+            far.drain(0.8)
+            bad = n.client("a", "bad")
+            bad.say("JOIN #svc", 1.0)
+            assert bad.saw(r"KICK #svc bad", 1.5) or "bad" not in " ".join(l for l in far.say("NAMES #svc", 0.5) if " 353 " in l)
+    finally:
+        n.stop()
+
+
+def test_history_and_markers_follow_messages_across_servers():
+    with chain() as n:
+        a = n.client("a", "alice")
+        c = n.client("c", "carol", caps=["batch", "draft/chathistory", "message-tags"])
+        a.say("JOIN #h", 0.4)
+        c.say("JOIN #h", 0.6)
+        a.send("PRIVMSG #h :said on server a")
+        time.sleep(0.5)
+        c.drain()
+        c.send("CHATHISTORY LATEST #h * 5")
+        assert c.saw(r"PRIVMSG #h :said on server a", 1.5), "history on C includes what A's user said"
+
+
+def test_rename_and_status_messages_cross_servers():
+    with chain() as n:
+        a = n.client("a", "alice", caps=["draft/channel-rename"])
+        c = n.client("c", "carol", caps=["draft/channel-rename"])
+        a.say("JOIN #old", 0.4)
+        c.say("JOIN #old", 0.6)
+        a.send("MODE #old +o carol")
+        a.drain(); c.drain()
+        a.send("RENAME #old #new :moved")
+        assert c.saw(r":alice!.* RENAME #old #new :moved", 2)
+        assert any(" 324 " in l for l in c.say("MODE #new", 0.5))
+        a.drain(); c.drain()
+        a.send("PRIVMSG @#new :for ops only")
+        assert c.saw(r"PRIVMSG @#new :for ops only", 1.5)
