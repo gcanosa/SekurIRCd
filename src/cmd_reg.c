@@ -246,6 +246,7 @@ static const struct { const char *name; unsigned int bit; } CAP_ATTRS[] = {
     {"draft/no-implicit-names", CAP_NO_IMPLICIT_NAMES},
     {"draft/pre-away", CAP_PRE_AWAY},
     {"extended-monitor", CAP_EXTENDED_MONITOR},
+    {"draft/channel-rename", CAP_CHANNEL_RENAME},
     {"draft/chathistory", CAP_CHATHISTORY},
 };
 #define N_CAP_ATTRS (int)(sizeof CAP_ATTRS / sizeof CAP_ATTRS[0])

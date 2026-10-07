@@ -56,6 +56,8 @@ static void send_names(client_t *cl, channel_t *chan) {
     client_reply(cl, N_ENDOFNAMES, pe, 1, "End of /NAMES list.");
 }
 
+static void send_join_burst(client_t *cl, channel_t *chan);
+
 static void announce_join(channel_t *chan, client_t *cl) {
     char prefix[320];
     client_prefix(cl, prefix, sizeof prefix);
@@ -83,7 +85,11 @@ static void announce_join(channel_t *chan, client_t *cl) {
             client_send(m->client, account_line);
     }
     link_notify_channel_join(chan, cl);
+    send_join_burst(cl, chan);
+}
 
+/* Topic + (unless draft/no-implicit-names) the member list: what a client gets right after joining. */
+static void send_join_burst(client_t *cl, channel_t *chan) {
     if (chan->topic[0]) {
         const char *pt[] = {chan->name};
         client_reply(cl, N_TOPIC, pt, 1, chan->topic);
@@ -311,6 +317,65 @@ void cmd_part(server_t *srv, client_t *cl, irc_message_t *msg) {
         }
         tok = strtok_r(NULL, ",", &save);
     }
+}
+
+/* RENAME <old> <new> [:reason] (draft/channel-rename): a chanop renames a live channel, keeping members, modes,
+ * bans and topic. Clients that negotiated the cap get a RENAME; the rest see themselves part and rejoin. */
+void cmd_rename(server_t *srv, client_t *cl, irc_message_t *msg) {
+    const char *oldname = msg->params[0], *newname = msg->params[1];
+    const char *reason = msg->nparams > 2 ? msg->params[msg->nparams - 1] : "No reason";
+    channel_t *chan = server_find_channel(srv, oldname);
+    if (!chan) { err_no_such_channel(cl, oldname); return; }
+    member_t *me = channel_find_member(chan, cl);
+    if (!me && !(cl->umodes & UMODE_O)) { const char *p[] = {chan->name}; client_reply(cl, N_NOTONCHANNEL, p, 1, "You're not on that channel"); return; }
+    if (!(cl->umodes & UMODE_O) && !(me->rank & (RANK_OP | RANK_HALFOP))) { err_not_channel_op(cl, chan->name); return; }
+    char fail[300];
+    const char *fp[] = {"RENAME", NULL, chan->name, newname};
+    const char *code = NULL, *desc = NULL;
+    char ncf[CHAN_NAMELEN];
+    irc_casefold(ncf, sizeof ncf, newname);
+    channel_t *clash = irc_valid_channel(newname, 50) ? server_find_channel(srv, newname) : NULL;
+    if (!irc_valid_channel(newname, 50)) { code = "CANNOT_RENAME"; desc = "That is not a valid channel name"; }
+    else if (clash && clash != chan) { code = "CHANNEL_NAME_IN_USE"; desc = "A channel with that name already exists"; }
+    else if (chan->modes & CMODE_R) { code = "CANNOT_RENAME"; desc = "A registered channel can't be renamed"; }
+    else if (srv->cfg.debug_channel.enabled) {
+        char dcf[CHAN_NAMELEN];
+        irc_casefold(dcf, sizeof dcf, srv->cfg.debug_channel.name);
+        if (strcmp(dcf, ncf) == 0) { code = "CANNOT_RENAME"; desc = "That name is reserved"; }
+    }
+    if (code) {
+        fp[1] = code;
+        irc_build(fail, sizeof fail, NULL, 0, srv->cfg.server.name, "FAIL", fp, 4, desc);
+        client_send(cl, fail);
+        return;
+    }
+    char old_display[CHAN_NAMELEN];
+    snprintf(old_display, sizeof old_display, "%s", chan->name);
+
+    char prefix[320], rename_line[500];
+    client_prefix(cl, prefix, sizeof prefix);
+    const char *rp[] = {old_display, newname};
+    irc_build(rename_line, sizeof rename_line, NULL, 0, prefix, "RENAME", rp, 2, reason);
+
+    HASH_DEL(srv->channels, chan);
+    snprintf(chan->name, sizeof chan->name, "%s", newname);
+    snprintf(chan->casefold_name, sizeof chan->casefold_name, "%s", ncf);
+    HASH_ADD_STR(srv->channels, casefold_name, chan);
+
+    member_t *m, *tmp;
+    HASH_ITER(hh, chan->members, m, tmp) {
+        if (m->client->caps & CAP_CHANNEL_RENAME) { client_send(m->client, rename_line); continue; }
+        char mp[320], part[500], join[400];
+        client_prefix(m->client, mp, sizeof mp);
+        const char *pp[] = {old_display};
+        irc_build(part, sizeof part, NULL, 0, mp, "PART", pp, 1, reason);
+        const char *jp[] = {chan->name};
+        irc_build(join, sizeof join, NULL, 0, mp, "JOIN", jp, 1, NULL);
+        client_send(m->client, part);
+        client_send(m->client, join);
+        send_join_burst(m->client, chan);
+    }
+    log_info("chan", "%s renamed %s to %s", cl->nick, old_display, newname);
 }
 
 /* --- SAJOIN / SAPART (oper-only overrides) ---------------------------------- */

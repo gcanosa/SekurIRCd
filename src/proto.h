@@ -140,6 +140,7 @@ void irc_add_time_tag(char *line, size_t linesz);
 #define CAP_NO_IMPLICIT_NAMES 0x20000u
 #define CAP_PRE_AWAY          0x40000u
 #define CAP_EXTENDED_MONITOR  0x80000u
+#define CAP_CHANNEL_RENAME    0x100000u
 #define CAP_CHATHISTORY       0x8000u
 
 /* --- numeric reply codes (protocol.N) ------------------------------------ */
