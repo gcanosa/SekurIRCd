@@ -280,7 +280,11 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
             char scf[NICKLEN];
             irc_casefold(scf, sizeof scf, cl->nick);
             int allowed = 0;
-            for (int ai = 0; ai < dst->n_accept; ai++) if (strcmp(dst->accept[ai], scf) == 0) { allowed = 1; break; }
+            for (int ai = 0; ai < dst->n_accept && !allowed; ai++) {
+                if (dst->accept[ai].account[0]) allowed = cl->account[0] && strcasecmp(dst->accept[ai].account, cl->account) == 0;
+                else if (dst->accept[ai].conn_id) allowed = dst->accept[ai].conn_id == cl->conn_id;
+                else allowed = strcmp(dst->accept[ai].nick, scf) == 0; /* nobody was on that nick when it was added */
+            }
             if (!allowed) {
                 if (!is_notice) { /* caller-ID: tell both sides once in a while, deliver nothing */
                     const char *pe[] = {dst->nick};
@@ -998,14 +1002,13 @@ void cmd_watch(server_t *srv, client_t *cl, irc_message_t *msg) { watch_impl(srv
 
 /* ACCEPT [nick[,nick...]] -- caller-ID (+g) allow list. "-nick" removes, "*" or no argument lists. */
 void cmd_accept(server_t *srv, client_t *cl, irc_message_t *msg) {
-    (void)srv;
     char list[400];
     snprintf(list, sizeof list, "%s", msg->nparams > 0 ? msg->params[0] : "*");
     char *save = NULL;
     for (char *tok = strtok_r(list, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
         if (strcmp(tok, "*") == 0) {
             for (int i = 0; i < cl->n_accept; i++) {
-                const char *p[] = {cl->accept[i]};
+                const char *p[] = {cl->accept[i].nick};
                 client_reply(cl, N_ACCEPTLIST, p, 1, NULL);
             }
             client_reply(cl, N_ENDOFACCEPT, NULL, 0, "End of /ACCEPT list");
@@ -1017,15 +1020,24 @@ void cmd_accept(server_t *srv, client_t *cl, irc_message_t *msg) {
         char cf[NICKLEN];
         irc_casefold(cf, sizeof cf, nick);
         int at = -1;
-        for (int i = 0; i < cl->n_accept; i++) if (strcmp(cl->accept[i], cf) == 0) { at = i; break; }
+        for (int i = 0; i < cl->n_accept; i++) if (strcmp(cl->accept[i].nick, cf) == 0) { at = i; break; }
         if (del) {
             if (at < 0) { client_reply(cl, N_ACCEPTNOT, NULL, 0, "is not on your accept list"); continue; }
-            memmove(cl->accept[at], cl->accept[at + 1], (size_t)(cl->n_accept - at - 1) * sizeof cl->accept[0]);
+            memmove(&cl->accept[at], &cl->accept[at + 1], (size_t)(cl->n_accept - at - 1) * sizeof cl->accept[0]);
             cl->n_accept--;
         } else {
             if (at >= 0) { client_reply(cl, N_ACCEPTEXIST, NULL, 0, "is already on your accept list"); continue; }
             if (cl->n_accept >= (int)(sizeof cl->accept / sizeof cl->accept[0])) { client_reply(cl, N_ACCEPTFULL, NULL, 0, "Accept list is full"); continue; }
-            snprintf(cl->accept[cl->n_accept++], NICKLEN, "%s", cf);
+            /* Bind to the person currently using the nick (see client.h), not just the string. */
+            client_t *who = server_find_user(srv, nick);
+            int k = cl->n_accept++;
+            snprintf(cl->accept[k].nick, NICKLEN, "%s", cf);
+            cl->accept[k].account[0] = '\0';
+            cl->accept[k].conn_id = 0;
+            if (who && who->registered && !who->is_service) {
+                if (who->account[0]) snprintf(cl->accept[k].account, sizeof cl->accept[k].account, "%s", who->account);
+                else cl->accept[k].conn_id = who->conn_id;
+            }
         }
     }
 }

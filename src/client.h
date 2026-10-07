@@ -109,7 +109,10 @@ typedef struct client {
     char watch[128][NICKLEN];   /* legacy /WATCH list, casefolded nicks -- MAX_WATCH */
     int n_watch;
     char silence[15][256];      /* /SILENCE mask list -- _MAX_SILENCE */
-    char accept[20][NICKLEN]; /* caller-ID (+g): casefolded nicks allowed to message us */
+    /* caller-ID (+g) allow list. An entry binds to who the nick belonged to when it was added -- their
+     * account (survives reconnects/renames), else their connection -- so a stranger who later takes the
+     * nick isn't let through. Only for a nick nobody was using does it fall back to matching the nick. */
+    struct { char nick[NICKLEN]; char account[64]; uint64_t conn_id; } accept[20];
     int n_accept;
     time_t last_cid_notice;   /* when we last told this +g user that someone tried to message them */
     int n_silence;
