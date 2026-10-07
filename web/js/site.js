@@ -20,7 +20,7 @@
       '<div class="wrap"><a class="brand" href="' + root + '" aria-label="SekurIRCd home">' +
       '<img class="logo-dark" src="' + root + 'img/logo-dark.png" alt="SekurIRCd">' +
       '<img class="logo-light" src="' + root + 'img/logo-light.png" alt="SekurIRCd"></a>' +
-      '<nav aria-label="Main"><a href="' + root + 'docs/"' + cur("docs") + '>Docs</a>' +
+      '<nav aria-label="Main"><a href="' + root + 'chat.html"' + cur("chat") + '>Chat</a><a href="' + root + 'docs/"' + cur("docs") + '>Docs</a>' +
       '<a href="' + root + 'changelog.html"' + cur("changelog") + '>Changelog</a>' +
       '<a href="' + REPO + '">GitHub</a>' +
       '<button class="theme-btn" id="theme" type="button"></button></nav></div>';
