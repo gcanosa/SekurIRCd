@@ -338,6 +338,13 @@ max_accounts = 10000
 # Either way, `/msg NickServ GHOST <nick>` (while identified as that account)
 # disconnects a session squatting on your nick.
 #enforce_nicks = false
+
+# Email verification. NickServ `SET EMAIL <address>` generates a code and runs
+#     <email_command> <address> <code> <account> <network>
+# (directly, no shell -- point it at a small script that mails the code); the
+# user then sends `/msg NickServ VERIFY <code>` within an hour. Empty (the
+# default) = no mail is sent, and the address is stored as unverified.
+#email_command = "/usr/local/bin/send-verification"
 #enforce_grace = 30
 
 

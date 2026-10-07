@@ -191,6 +191,7 @@ void server_install_debug_log_hook(server_t *srv);
 
 /* Log `cl` in as `account` (+r, 900) and tell channel-mates with
  * account-notify. Shared by SASL and /REGISTER. */
+void server_logout(server_t *srv, client_t *cl); /* drop the account login, tell account-notify clients */
 void server_login(server_t *srv, client_t *cl, const char *account);
 
 /* A server notice ("*** Notice -- <message>") to every currently-connected

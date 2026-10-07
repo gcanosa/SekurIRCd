@@ -1004,6 +1004,7 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
         if (cfg_get_bool(acc, "enabled", 0, &out->accounts.enabled, errbuf, errbufsz, "accounts.enabled")) return -1;
         if (cfg_get_str(acc, "store_file", "accounts.json", out->accounts.store_file, CFG_PATH, errbuf, errbufsz, "accounts.store_file")) return -1;
         if (cfg_get_int(acc, "max_accounts", 10000, &out->accounts.max_accounts, errbuf, errbufsz, "accounts.max_accounts")) return -1;
+        if (cfg_get_str(acc, "email_command", "", out->accounts.email_command, CFG_PATH, errbuf, errbufsz, "accounts.email_command")) return -1;
         if (cfg_get_bool(acc, "enforce_nicks", 0, &out->accounts.enforce_nicks, errbuf, errbufsz, "accounts.enforce_nicks")) return -1;
         if (cfg_get_int(acc, "enforce_grace", 30, &out->accounts.enforce_grace, errbuf, errbufsz, "accounts.enforce_grace")) return -1;
         if (out->accounts.enforce_grace < 5 || out->accounts.enforce_grace > 600) {

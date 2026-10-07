@@ -81,6 +81,7 @@ typedef struct client {
     unsigned char *ws_out; /* encoded frames / handshake reply waiting for the socket */
     size_t ws_out_len, ws_out_cap;
     int expect_proxy;     /* accepted from a [server] proxy_protocol_hosts peer: first line must be "PROXY ..." */
+    char enforce_owner[64];  /* the account that owns this nick (enforce_nicks) */
     time_t enforce_deadline; /* nick-ownership enforcement: rename at this time unless identified (0 = none) */
     int class_idx;        /* [[classes]] index this connection is counted in, -1 = none */
     size_t sendq_max;     /* 0 = the global SENDQ_MAX */
@@ -131,6 +132,8 @@ typedef struct client {
     time_t auth_started;    /* when auth_pending was set -- net.c's tick clears a result that never came back */
     uint64_t auth_gen;      /* bumped on every SASL/REGISTER/OPER/DIE/RESTART job submitted -- see worker.h job_t.gen */
     char pending_account[64];
+    char pending_newpw[256]; /* NickServ SET PASSWORD: the new password while the old one is being verified */
+    char pending_email[160]; /* email given at REGISTER, stored once the account exists */
     char pending_scram[160]; /* SCRAM verifier derived from the password in flight; stored if the login/registration succeeds */
     struct scram_sess *scram; /* SASL SCRAM-SHA-256 exchange in progress (cmd_reg.c) */
     int auth_style;         /* AUTH_STYLE_*: how to word the result of the pending login/register */

@@ -91,6 +91,7 @@ typedef struct {
     int enabled;
     char store_file[CFG_PATH];
     int max_accounts;   /* 0 = unlimited; caps self-service /REGISTER growth */
+    char email_command[CFG_PATH]; /* run as `cmd <address> <code> <account> <network>` to deliver a verification code; "" = no verification */
     int enforce_nicks;  /* a nick equal to a registered account must IDENTIFY within enforce_grace secs or be renamed Guest#### */
     int enforce_grace;
 } cfg_accounts_t;
