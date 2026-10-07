@@ -7,7 +7,7 @@ def test_registration_and_isupport():
         c.send("VERSION")
         lines = c.drain(0.5)
         isupport = " ".join(l for l in lines if " 005 " in l)
-        for tok in ("MODES=6", "MAXLIST=b:100,e:100,I:100", "PREFIX=(qaohv)~&@%+", "CHANMODES=beI,k,lfj,", "CALLERID=g", "CHATHISTORY=50"):
+        for tok in ("MODES=6", "MAXLIST=b:100,e:100,I:100", "PREFIX=(qaohv)~&@%+", "CHANMODES=beI,k,lfjL,", "CALLERID=g", "CHATHISTORY=50"):
             assert tok in isupport, (tok, isupport)
 
 
