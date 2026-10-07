@@ -396,6 +396,10 @@ max_message_length = 400
 # 0 turns history off (the cap is then not advertised). Max 500.
 history_size = 50
 
+# Channel mode +G ("censor"): these words (case-insensitive, matched anywhere in
+# the text) are replaced with asterisks in messages to that channel.
+#censor_words = ["badword", "otherword"]
+
 
 # -----------------------------------------------------------------------------
 # [logging] -- file + console logging

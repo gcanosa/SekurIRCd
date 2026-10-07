@@ -30,7 +30,9 @@ static void send_names(client_t *cl, channel_t *chan) {
     int userhost = cl->caps & CAP_USERHOST_IN_NAMES;
 
     member_t *m, *tmp;
+    member_t *viewer = channel_find_member(chan, cl);
     HASH_ITER(hh, chan->members, m, tmp) {
+        if (!channel_member_visible(chan, m, viewer)) continue; /* +D not yet revealed / +u unranked */
         char nickbuf[NICKLEN + HOSTLEN + 8];
         char rankch[8];
         channel_rank_prefix(m->rank, multi, rankch);
@@ -71,7 +73,9 @@ static void announce_join(channel_t *chan, client_t *cl) {
     irc_build(account_line, sizeof account_line, NULL, 0, prefix, "ACCOUNT", p3, 1, NULL);
 
     member_t *m, *tmp;
+    member_t *subject = channel_find_member(chan, cl);
     HASH_ITER(hh, chan->members, m, tmp) {
+        if (subject && !channel_member_visible(chan, subject, m)) continue; /* +D hidden / +u audience: this member isn't told */
         client_send(m->client, (m->client->caps & CAP_EXTENDED_JOIN) ? ext_join : plain_join);
         /* account-notify's own ACCOUNT line would just duplicate what
          * extended-join already embedded in JOIN -- skip it for those. */
@@ -92,6 +96,25 @@ static void announce_join(channel_t *chan, client_t *cl) {
         client_reply(cl, N_NOTOPIC, pt, 1, "No topic is set");
     }
     if (!(cl->caps & CAP_NO_IMPLICIT_NAMES)) send_names(cl, chan); /* draft/no-implicit-names: client will ask itself */
+}
+
+/* +D: the member has spoken (or been given a rank): tell everyone who can now see them that they joined. */
+void channel_reveal_member(channel_t *chan, member_t *m) {
+    if (!m->hidden) return;
+    m->hidden = 0;
+    client_t *cl = m->client;
+    char prefix[320];
+    client_prefix(cl, prefix, sizeof prefix);
+    char plain[400], ext[600];
+    const char *p1[] = {chan->name};
+    irc_build(plain, sizeof plain, NULL, 0, prefix, "JOIN", p1, 1, NULL);
+    const char *p2[] = {chan->name, cl->account[0] ? cl->account : "*"};
+    irc_build(ext, sizeof ext, NULL, 0, prefix, "JOIN", p2, 2, cl->realname);
+    member_t *r, *tmp;
+    HASH_ITER(hh, chan->members, r, tmp) {
+        if (r == m || !channel_member_visible(chan, m, r)) continue; /* the member already saw their own join */
+        client_send(r->client, (r->client->caps & CAP_EXTENDED_JOIN) ? ext : plain);
+    }
 }
 
 static int n_channels_of(client_t *cl) {
@@ -121,6 +144,23 @@ void cmd_force_join(server_t *srv, client_t *cl, const char *chan_name) {
         return;
     }
     announce_join(chan, cl);
+}
+
+static void do_join_one(server_t *srv, client_t *cl, const char *chan_name, const char *key);
+
+/* +L: a JOIN refused because the channel is full (+l) or invite-only (+i) is forwarded to the +L target instead.
+ * One hop only -- the target's own +L isn't followed, so two channels can't bounce a user around forever. */
+static int g_redirect_depth;
+static int try_redirect(server_t *srv, client_t *cl, channel_t *chan) {
+    if (!(chan->modes & CMODE_REDIRECT) || !chan->redirect[0] || g_redirect_depth) return 0;
+    char target[CHAN_NAMELEN];
+    snprintf(target, sizeof target, "%s", chan->redirect);
+    const char *p[] = {chan->name, target};
+    client_reply(cl, N_LINKCHANNEL, p, 2, "Forwarding to another channel");
+    g_redirect_depth = 1;
+    do_join_one(srv, cl, target, NULL);
+    g_redirect_depth = 0;
+    return 1;
 }
 
 static void do_join_one(server_t *srv, client_t *cl, const char *chan_name, const char *key) {
@@ -162,6 +202,7 @@ static void do_join_one(server_t *srv, client_t *cl, const char *chan_name, cons
         channel_set_ban_extra(&bx); /* for ~r/~z/~j in +b/+e/+I */
         if ((chan->modes & CMODE_I) && !channel_is_invited(chan, invite_key_of(cl), cl->nick, cl->user, cl->host, cl->account, cl->ident_confirmed)) {
             const char *p[] = {chan->name};
+            if (try_redirect(srv, cl, chan)) return;
             client_reply(cl, N_INVITEONLYCHAN, p, 1, "Cannot join channel (+i)");
             return;
         }
@@ -172,6 +213,7 @@ static void do_join_one(server_t *srv, client_t *cl, const char *chan_name, cons
         }
         if ((chan->modes & CMODE_L) && chan->limit > 0 && channel_member_count(chan) >= chan->limit) {
             const char *p[] = {chan->name};
+            if (try_redirect(srv, cl, chan)) return;
             client_reply(cl, N_CHANNELISFULL, p, 1, "Cannot join channel (+l)");
             return;
         }
@@ -209,6 +251,7 @@ static void do_join_one(server_t *srv, client_t *cl, const char *chan_name, cons
     member_t *m = channel_add_member(chan, cl);
     if (!m) { server_maybe_drop_channel(srv, chan); err_no_such_channel(cl, chan_name); return; }
     if (is_new) m->rank |= RANK_OP;
+    if ((chan->modes & CMODE_DELAYJOIN) && m->rank == 0) m->hidden = 1; /* +D: invisible until they speak */
     channel_invite_remove(chan, invite_key_of(cl));
     if (server_attach_membership(cl, chan) != 0) {
         channel_remove_member(chan, cl);
@@ -256,7 +299,11 @@ void cmd_part(server_t *srv, client_t *cl, irc_message_t *msg) {
             char line[510];
             const char *p[] = {chan->name};
             irc_build(line, sizeof line, NULL, 0, prefix, "PART", p, 1, reason);
-            server_broadcast_channel(chan, line, NULL);
+            { /* only members who could see them in the channel see them leave (+D hidden, +u audience) */
+                member_t *pm, *ptmp;
+                HASH_ITER(hh, chan->members, pm, ptmp)
+                    if (channel_member_visible(chan, m, pm)) client_send(pm->client, line);
+            }
             channel_remove_member(chan, cl);
             server_detach_membership(cl, chan);
             server_maybe_drop_channel(srv, chan);
@@ -782,16 +829,49 @@ void cmd_apply_channel_mode(server_t *srv, client_t *cl, channel_t *chan,
             case 'O': flagbit = CMODE_OPERONLY; break;
             case 'M': flagbit = CMODE_MODREG; break;
             case 'c': flagbit = CMODE_NOCOLOR; break;
+            case 'D': flagbit = CMODE_DELAYJOIN; break;
+            case 'u': flagbit = CMODE_AUDITORIUM; break;
+            case 'G': flagbit = CMODE_CENSOR; break;
             default: break;
         }
         if (flagbit) {
             if (sign == '+') chan->modes |= flagbit; else chan->modes &= ~flagbit;
+            if (sign == '-' && flagbit == CMODE_DELAYJOIN) { /* -D: everyone still hidden becomes visible */
+                member_t *hm, *htmp;
+                HASH_ITER(hh, chan->members, hm, htmp) if (hm->hidden) channel_reveal_member(chan, hm);
+            }
+            if (sign == '-' && flagbit == CMODE_AUDITORIUM) { /* -u: announce the members the audience couldn't see */
+                /* nothing to replay: they were always in NAMES for ranked viewers; ordinary members just start seeing each other
+                 * on their next NAMES/WHO. */
+            }
             if (cursign != sign) { outflags[of++] = sign; cursign = sign; }
             outflags[of++] = c;
             continue;
         }
 
-        if (c == 'f' || c == 'j') {
+        if (c == 'L') { /* redirect target */
+            if (sign == '+') {
+                if (argi >= nargs) continue;
+                const char *target = args[argi++];
+                char tcf[CHAN_NAMELEN], ccf[CHAN_NAMELEN];
+                irc_casefold(tcf, sizeof tcf, target);
+                irc_casefold(ccf, sizeof ccf, chan->name);
+                if (!irc_valid_channel(target, 50) || strcmp(tcf, ccf) == 0) { /* junk, or a channel forwarding to itself */
+                    err_no_such_channel(cl, target);
+                    continue;
+                }
+                chan->modes |= CMODE_REDIRECT;
+                snprintf(chan->redirect, sizeof chan->redirect, "%s", target);
+                if (cursign != sign) { outflags[of++] = sign; cursign = sign; }
+                outflags[of++] = 'L';
+                snprintf(outparams[n_outparams++], sizeof outparams[0], "%s", target);
+            } else {
+                chan->modes &= ~CMODE_REDIRECT;
+                chan->redirect[0] = '\0';
+                if (cursign != sign) { outflags[of++] = sign; cursign = sign; }
+                outflags[of++] = 'L';
+            }
+        } else if (c == 'f' || c == 'j') {
             int is_f = c == 'f';
             if (sign == '+') {
                 if (argi >= nargs) continue;
@@ -871,6 +951,7 @@ void cmd_apply_channel_mode(server_t *srv, client_t *cl, channel_t *chan,
             if (sign == '+') {
                 tm->rank |= rank;
                 if (c == 'q' || c == 'a') tm->rank |= RANK_OP; /* owner/admin are ops too -- every op check keeps working */
+                if (tm->hidden) channel_reveal_member(chan, tm); /* a ranked member can't stay hidden */
             } else {
                 tm->rank &= ~rank;
                 if (c == 'o') tm->rank &= ~(RANK_ADMIN | RANK_OWNER); /* -o is a full demotion */
@@ -938,7 +1019,7 @@ static void cmd_mode_channel(server_t *srv, client_t *cl, irc_message_t *msg, co
     if (!chan) { err_no_such_channel(cl, chan_name); return; }
 
     if (msg->nparams < 2) {
-        char modestr[160];
+        char modestr[360];
         channel_modes_string(chan, modestr, sizeof modestr);
         if ((chan->modes & CMODE_K) && !(channel_find_member(chan, cl) || (cl->umodes & UMODE_O))) {
             /* redact the key from a non-member query */

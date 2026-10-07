@@ -125,6 +125,23 @@ static void collect_client_tags(const irc_message_t *msg, msg_extra_t *x) {
     }
 }
 
+/* strcasestr isn't in -std=c11/POSIX 2008, so a small portable one. */
+static char *find_nocase(char *hay, const char *needle) {
+    size_t nl = strlen(needle);
+    for (; *hay; hay++) if (strncasecmp(hay, needle, nl) == 0) return hay;
+    return NULL;
+}
+
+/* +G: star out every configured censor word (case-insensitive substring), in place. */
+static void censor_text(const server_t *srv, char *text) {
+    for (int i = 0; i < srv->cfg.messages.n_censor_words; i++) {
+        const char *w = srv->cfg.messages.censor_words[i];
+        size_t wl = strlen(w);
+        if (wl == 0) continue;
+        for (char *p = text; (p = find_nocase(p, w)) != NULL; p += wl) memset(p, '*', wl);
+    }
+}
+
 static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char *verb, int is_notice) {
     const char *target = msg->params[0];
     int is_tagmsg = strcmp(verb, "TAGMSG") == 0;
@@ -220,6 +237,13 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
         const char *outtext = textbuf;
         if (chan->modes & CMODE_STRIPCOLOR) { strip_formatting(stripbuf, sizeof stripbuf, textbuf); outtext = stripbuf; }
 
+        char censored[420];
+        if ((chan->modes & CMODE_CENSOR) && !is_tagmsg) {
+            snprintf(censored, sizeof censored, "%s", outtext);
+            censor_text(srv, censored);
+            outtext = censored;
+        }
+        if (m && m->hidden) channel_reveal_member(chan, m); /* +D: speaking reveals you */
         build_lines(lines, cl, prefix, verb, p, is_tagmsg ? NULL : outtext, &x);
 
         member_t *mm, *tmp;
@@ -228,6 +252,7 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
             int min_level = (status_prefix == '~') ? 5 : (status_prefix == '&') ? 4 : (status_prefix == '@') ? 3 : (status_prefix == '%') ? 2 : 1;
             HASH_ITER(hh, chan->members, mm, tmp) {
                 if (mm->client == cl) continue;
+                if ((chan->modes & CMODE_AUDITORIUM) && m && !channel_member_visible(chan, m, mm)) continue;
                 if (channel_rank_level(mm->rank) >= min_level) deliver(mm->client, cl, lines, &x);
             }
             return; /* STATUSMSG has no echo-message in upstream either */
@@ -235,6 +260,8 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
 
         HASH_ITER(hh, chan->members, mm, tmp) {
             if (mm->client == cl) continue;
+            /* +u: an unranked member's words reach only members who can see them (ranked members) */
+            if ((chan->modes & CMODE_AUDITORIUM) && m && !channel_member_visible(chan, m, mm)) continue;
             deliver(mm->client, cl, lines, &x);
         }
         if (!is_tagmsg && srv->cfg.messages.history_size > 0) {
@@ -504,7 +531,9 @@ void cmd_who(server_t *srv, client_t *cl, irc_message_t *msg) {
             return;
         }
         member_t *m, *tmp;
+        member_t *viewer = channel_find_member(chan, cl);
         HASH_ITER(hh, chan->members, m, tmp) {
+            if (!channel_member_visible(chan, m, viewer)) continue; /* +D hidden / +u audience */
             if (whox_fields) send_whox_reply(cl, whox_fields, whox_token, m->client, chan);
             else send_who_classic(cl, m->client, chan, multi);
         }

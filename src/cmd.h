@@ -51,6 +51,8 @@ int force_nick_change(server_t *srv, client_t *target, const char *newnick);
 void nick_enforce_check(server_t *srv, client_t *cl);
 void nick_enforce_tick(server_t *srv, time_t now);
 void cmd_accept(server_t *srv, client_t *cl, irc_message_t *msg);
+struct member;
+void channel_reveal_member(struct channel *chan, struct member *m); /* +D: first message / rank reveals a hidden member */
 void cmd_chathistory(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_tagmsg(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_globops(server_t *srv, client_t *cl, irc_message_t *msg);
