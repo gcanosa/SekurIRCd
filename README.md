@@ -514,6 +514,14 @@ are configured on the client side. `CAP LS` only advertises `sasl=PLAIN` vs.
 `sasl=PLAIN,EXTERNAL` depending on whether `request_client_cert` is on, so a
 client can tell without guessing.
 
+## Linking servers (multi-server networks)
+
+Servers link into a tree and share users, channels, modes, topics, messages and the account database.
+Give every server a unique `[server] sid` (digit + 2 alphanumerics) and, in `[links]`, `mode = "both"`.
+Each `[[links.peers]]` entry needs `name` + `password`; add `host`/`port` on the side that dials out.
+`/CONNECT <name>`, `/SQUIT <name>`, `/MAP`, `/LINKS` work across the network; `autoconnect = false`
+keeps a peer from being dialled automatically. ChanServ links to any one server and serves all of them.
+
 ## Channel services (ChanServ)
 
 `services/chanserv` is a **completely separate, optional process** --
