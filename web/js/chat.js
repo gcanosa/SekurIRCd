@@ -165,19 +165,30 @@
       if (body) { send("PRIVMSG " + a[0] + " :" + body); say(a[0], "<" + nick + "> " + body, "me"); }
       return;
     }
-    if (cmd === "quit") { closing = true; clearTimeout(awayTimer); send("QUIT :" + (rest || "Web chat closed")); return; }
+    if (cmd === "quit") {
+      closing = true; clearTimeout(awayTimer); clearTimeout(timer);
+      send("QUIT :" + (rest || "Web chat closed"));
+      var s = ws; setTimeout(function () { if (s && s.readyState < 2) s.close(); }, 1500); // the server normally closes first; this is the fallback
+      return;
+    }
     send(a.length ? cmd.toUpperCase() + " " + rest : cmd.toUpperCase()); // /mode /whois /topic /nick ...: pass through
   }
 
   function connect() {
     clearTimeout(timer); registered = false; away = false; // a new connection starts un-away
     say("*", "Connecting to ircsekurnet.duckdns.org ...");
-    try { ws = new WebSocket(WS_URL); } catch (e) { return fail(); }
+    var sock;
+    try { sock = ws = new WebSocket(WS_URL); } catch (e) { return fail(); }
     var opened = false;
     ws.onopen = function () { opened = true; send("NICK " + nick); send("USER webchat 0 * :SekurNet web chat"); };
     ws.onmessage = function (ev) { String(ev.data).split(/\r?\n/).forEach(function (l) { if (l) onLine(l); }); };
     ws.onclose = function () {
-      if (closing) return say("*", "Disconnected.", "err");
+      if (sock !== ws) return; // a stale socket from before a quit/reconnect
+      if (closing) { // /quit: back to the connect form so you can join again without reloading
+        app.hidden = true; form.hidden = false;
+        err.textContent = "You left SekurNet. Connect again below.";
+        return;
+      }
       if (!opened && !registered && tries === 0) return fail();
       if (++tries > 5) return say("*", "Disconnected. Reload the page to try again.", "err");
       var wait = tries * 3000;
