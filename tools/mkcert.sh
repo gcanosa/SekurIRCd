@@ -111,6 +111,7 @@ args=(--issue --server letsencrypt)
 for d in "${domains[@]}"; do args+=(-d "$d"); done
 if [ -n "$webroot" ]; then args+=(-w "$webroot"); else args+=(--dns "$dns"); fi
 [ -z "$staging" ] || args+=(--staging)
+[ -z "$email" ] || args+=(--accountemail "$email") # without this an email given after the first install is ignored, and acme.sh registers with whatever it saved or guessed
 if [ -n "$dry" ]; then echo "  [dry-run] $ACME ${args[*]}"
 else
   set +e; "$ACME" "${args[@]}"; rc=$?; set -e
