@@ -230,6 +230,7 @@ static const help_entry_t HELP_TABLE[] = {
     {"LOCOPS", {"LOCOPS :<text>", "IRC operators only: message the operators on this server."}},
     {"OPERWALL", {"OPERWALL :<text>", "IRC operators only: same as GLOBOPS."}},
     {"TESTLINE", {"TESTLINE <nick|user@host|ip>", "IRC operators only: show which K/G/Z/SHUN/ELINE lines match that address."}},
+    {"RENAME", {"RENAME <old> <new> [:reason]", "Rename a channel you operate (not a registered one), keeping members, modes and topic."}},
     {"USERIP", {"USERIP <nick> [nick...]", "IRC operators only: like USERHOST but shows the real IP address."}},
     {"ISON", {"ISON <nick> [nick...]", "Check which of the given nicks are currently online."}},
     {"MONITOR", {"MONITOR + nick[,nick...] | - nick[,...] | C | L | S",
