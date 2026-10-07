@@ -104,6 +104,12 @@ class Server:
                 self.proc.kill()
         shutil.rmtree(self.dir, ignore_errors=True)
 
+    def restart(self):
+        """Stop the process (SIGTERM, so it saves state) but keep the directory; start it again on the same ports."""
+        self.proc.terminate()
+        self.proc.wait(8)
+        self.start()
+
     def reload(self):
         """Rewrite the config (after editing self.cfg) and send SIGHUP."""
         self.write_config()

@@ -7,6 +7,7 @@
 #include "cmd.h"
 #include "config.h"
 #include "crypto.h"
+#include "history.h"
 #include "log.h"
 #include "net.h"
 #include "proto.h"
@@ -839,14 +840,23 @@ static void test_history_ring_and_timestamps(void) {
     assert(irc_parse_iso8601_ms("2023-11-14T22:13:20.123Z") == 1700000000123LL);
     assert(irc_parse_iso8601_ms("2023-11-14T22:13:20Z") == 1700000000000LL);
     assert(irc_parse_iso8601_ms("garbage") == -1 && irc_parse_iso8601_ms("2023-13-01T00:00:00.000Z") == -1);
-    channel_t *c = channel_new("#h", "#h");
+    hist_buf_t b;
+    memset(&b, 0, sizeof b);
     for (int i = 0; i < 5; i++) {
-        char id[16]; snprintf(id, sizeof id, "m%d", i);
-        channel_history_add(c, 3, id, 1000 + i, "n!u@h", "", "PRIVMSG", "x");
+        hist_entry_t e;
+        memset(&e, 0, sizeof e);
+        snprintf(e.msgid, sizeof e.msgid, "m%d", i);
+        e.ms = 1000 + i;
+        snprintf(e.text, sizeof e.text, "x");
+        hist_buf_add(&b, 3, &e);
     }
-    assert(c->hist_n == 3 && strcmp(channel_history_at(c, 0)->msgid, "m2") == 0 && strcmp(channel_history_at(c, 2)->msgid, "m4") == 0);
-    assert(channel_history_at(c, 3) == NULL);
-    channel_free(c);
+    assert(b.n == 3 && strcmp(hist_buf_at(&b, 0)->msgid, "m2") == 0 && strcmp(hist_buf_at(&b, 2)->msgid, "m4") == 0);
+    assert(hist_buf_at(&b, 3) == NULL && b.last_ms == 1004);
+    free(b.e);
+    char k1[160], k2[160];
+    history_key_dm(k1, sizeof k1, "Bob", "alice");
+    history_key_dm(k2, sizeof k2, "ALICE", "bob");
+    assert(strcmp(k1, k2) == 0 && history_key_is_dm(k1)); /* order and case don't matter */
 }
 
 static void test_websocket_helpers(void) {

@@ -6,6 +6,7 @@
 #include "proto.h"
 #include "spam.h"
 #include "worker.h"
+#include "history.h"
 #include "vendor/cJSON.h"
 
 #include <stdio.h>
@@ -36,7 +37,7 @@ static void server_apply_cloak_secret(server_t *srv) {
     }
 }
 
-typedef struct marker { char key[200]; long long ms; UT_hash_handle hh; } marker_t;
+typedef struct marker marker_t;
 
 static void marker_key(char *out, size_t outsz, const char *account, const char *target) {
     char a[72], t[72];
@@ -87,6 +88,7 @@ int server_init(server_t *srv, const config_t *cfg) {
     char accounts_path[CFG_PATH];
     int has_path = config_accounts_path(&srv->cfg, accounts_path, sizeof accounts_path);
     accounts_init(&srv->accounts, has_path ? accounts_path : NULL);
+    history_load(srv);
 
     server_kline_load(srv);
     spam_reload(srv);
@@ -870,6 +872,8 @@ int server_is_shunned(server_t *srv, client_t *cl) {
 
 void server_free_tables(server_t *srv) {
     server_kline_flush(srv);
+    history_maybe_save(srv, 1);
+    history_free(srv);
     spam_free(srv);
     protection_free(srv);
     { marker_t *mk, *mt; HASH_ITER(hh, srv->markers, mk, mt) { HASH_DEL(srv->markers, mk); free(mk); } }

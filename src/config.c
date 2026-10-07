@@ -229,6 +229,11 @@ const char *config_scan_proto_name(int type) {
     return "?";
 }
 
+int config_history_path(const config_t *cfg, char *out, size_t outsz) {
+    resolve_against_config_dir(cfg, cfg->messages.history_file, out, outsz);
+    return 1;
+}
+
 int config_accounts_path(const config_t *cfg, char *out, size_t outsz) {
     if (!cfg->accounts.enabled) return 0;
     resolve_against_config_dir(cfg, cfg->accounts.store_file, out, outsz);
@@ -334,6 +339,7 @@ void config_defaults(config_t *out) {
     snprintf(out->messages.rules, CFG_PATH, "ircd.rules");
     out->messages.max_message_length = 400;
     out->messages.history_size = 50;
+    out->messages.history_dm = 1;
 
     out->logging.enabled = 1;
     snprintf(out->logging.directory, CFG_PATH, "logs");
@@ -578,6 +584,8 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
     if (cfg_get_int(msg, "max_message_length", 400, &out->messages.max_message_length, errbuf, errbufsz, "messages.max_message_length")) return -1;
     if (cfg_get_str_array(msg, "censor_words", out->messages.censor_words, 32, &out->messages.n_censor_words, errbuf, errbufsz, "messages.censor_words")) return -1;
     if (cfg_get_int(msg, "history_size", 50, &out->messages.history_size, errbuf, errbufsz, "messages.history_size")) return -1;
+    if (cfg_get_str(msg, "history_file", "", out->messages.history_file, CFG_PATH, errbuf, errbufsz, "messages.history_file")) return -1;
+    if (cfg_get_bool(msg, "history_dm", 1, &out->messages.history_dm, errbuf, errbufsz, "messages.history_dm")) return -1;
     if (out->messages.history_size < 0 || out->messages.history_size > 500) {
         snprintf(errbuf, errbufsz, "messages.history_size must be in 0-500");
         return -1;
