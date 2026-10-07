@@ -32,6 +32,8 @@ void accounts_init(account_store_t *st, const char *path) {
         }
     }
     if (!st->data) st->data = cJSON_CreateObject();
+    cJSON *rec;
+    cJSON_ArrayForEach(rec, st->data) { cJSON *n = cJSON_GetObjectItemCaseSensitive(rec, "nicks"); if (cJSON_IsArray(n)) st->n_grouped += cJSON_GetArraySize(n); }
 }
 
 void accounts_free(account_store_t *st) {
@@ -137,6 +139,149 @@ const char *accounts_find_by_fingerprint(account_store_t *st, const char *fp) {
         if (!cJSON_IsString(cf) || strcasecmp(cf->valuestring, fp) != 0) continue;
         cJSON *name = cJSON_GetObjectItemCaseSensitive(rec, "name");
         return cJSON_IsString(name) ? name->valuestring : NULL;
+    }
+    return NULL;
+}
+
+void accounts_set_hash(account_store_t *st, const char *name, const char *hash) {
+    cJSON *rec = find(st, name);
+    if (!rec) return;
+    cJSON_DeleteItemFromObjectCaseSensitive(rec, "pw_hash");
+    cJSON_AddStringToObject(rec, "pw_hash", hash);
+    cJSON_DeleteItemFromObjectCaseSensitive(rec, "scram"); /* derived from the old password */
+    save(st);
+}
+
+int accounts_drop(account_store_t *st, const char *name) {
+    char cf[64];
+    irc_casefold(cf, sizeof cf, name);
+    cJSON *rec = cJSON_GetObjectItemCaseSensitive(st->data, cf);
+    if (!rec) return 0;
+    cJSON *n = cJSON_GetObjectItemCaseSensitive(rec, "nicks");
+    if (cJSON_IsArray(n)) st->n_grouped -= cJSON_GetArraySize(n);
+    cJSON_DeleteItemFromObjectCaseSensitive(st->data, cf);
+    save(st);
+    return 1;
+}
+
+const char *accounts_email(account_store_t *st, const char *name) {
+    cJSON *v = cJSON_GetObjectItemCaseSensitive(find(st, name), "email");
+    return cJSON_IsString(v) ? v->valuestring : NULL;
+}
+
+int accounts_email_verified(account_store_t *st, const char *name) {
+    cJSON *v = cJSON_GetObjectItemCaseSensitive(find(st, name), "email_verified");
+    return cJSON_IsTrue(v);
+}
+
+void accounts_set_email(account_store_t *st, const char *name, const char *email, int verified) {
+    cJSON *rec = find(st, name);
+    if (!rec) return;
+    cJSON_DeleteItemFromObjectCaseSensitive(rec, "email");
+    cJSON_DeleteItemFromObjectCaseSensitive(rec, "email_verified");
+    cJSON_DeleteItemFromObjectCaseSensitive(rec, "pending_email");
+    cJSON_DeleteItemFromObjectCaseSensitive(rec, "verify_code");
+    cJSON_DeleteItemFromObjectCaseSensitive(rec, "verify_expires");
+    if (email && email[0]) {
+        cJSON_AddStringToObject(rec, "email", email);
+        cJSON_AddBoolToObject(rec, "email_verified", verified);
+    }
+    save(st);
+}
+
+void accounts_set_pending_email(account_store_t *st, const char *name, const char *email, const char *code, long expires_at) {
+    cJSON *rec = find(st, name);
+    if (!rec) return;
+    cJSON_DeleteItemFromObjectCaseSensitive(rec, "pending_email");
+    cJSON_DeleteItemFromObjectCaseSensitive(rec, "verify_code");
+    cJSON_DeleteItemFromObjectCaseSensitive(rec, "verify_expires");
+    cJSON_AddStringToObject(rec, "pending_email", email);
+    cJSON_AddStringToObject(rec, "verify_code", code);
+    cJSON_AddNumberToObject(rec, "verify_expires", (double)expires_at);
+    save(st);
+}
+
+const char *accounts_pending_email(account_store_t *st, const char *name) {
+    cJSON *v = cJSON_GetObjectItemCaseSensitive(find(st, name), "pending_email");
+    return cJSON_IsString(v) ? v->valuestring : NULL;
+}
+
+int accounts_check_verify(account_store_t *st, const char *name, const char *code) {
+    cJSON *rec = find(st, name);
+    if (!rec) return 0;
+    cJSON *c = cJSON_GetObjectItemCaseSensitive(rec, "verify_code");
+    cJSON *e = cJSON_GetObjectItemCaseSensitive(rec, "verify_expires");
+    cJSON *pe = cJSON_GetObjectItemCaseSensitive(rec, "pending_email");
+    if (!cJSON_IsString(c) || !cJSON_IsString(pe) || !cJSON_IsNumber(e)) return 0;
+    if ((long)e->valuedouble < (long)time(NULL) || strcasecmp(c->valuestring, code) != 0) return 0;
+    char email[200];
+    snprintf(email, sizeof email, "%s", pe->valuestring);
+    accounts_set_email(st, name, email, 1);
+    return 1;
+}
+
+int accounts_group_add(account_store_t *st, const char *name, const char *nick) {
+    cJSON *rec = find(st, name);
+    if (!rec || accounts_owner_of_nick(st, nick)) return -1; /* already an account name or somebody's grouped nick */
+    cJSON *n = cJSON_GetObjectItemCaseSensitive(rec, "nicks");
+    if (!n) { n = cJSON_CreateArray(); cJSON_AddItemToObject(rec, "nicks", n); }
+    if (cJSON_GetArraySize(n) >= ACCOUNT_MAX_GROUP) return -1;
+    char cf[64];
+    irc_casefold(cf, sizeof cf, nick);
+    cJSON_AddItemToArray(n, cJSON_CreateString(cf));
+    st->n_grouped++;
+    save(st);
+    return 0;
+}
+
+int accounts_group_del(account_store_t *st, const char *name, const char *nick) {
+    cJSON *rec = find(st, name);
+    cJSON *n = rec ? cJSON_GetObjectItemCaseSensitive(rec, "nicks") : NULL;
+    if (!n) return -1;
+    char cf[64];
+    irc_casefold(cf, sizeof cf, nick);
+    int idx = 0;
+    cJSON *it;
+    cJSON_ArrayForEach(it, n) {
+        if (cJSON_IsString(it) && strcmp(it->valuestring, cf) == 0) {
+            cJSON_DeleteItemFromArray(n, idx);
+            st->n_grouped--;
+            save(st);
+            return 0;
+        }
+        idx++;
+    }
+    return -1;
+}
+
+int accounts_group_count(account_store_t *st, const char *name) {
+    cJSON *n = cJSON_GetObjectItemCaseSensitive(find(st, name), "nicks");
+    return cJSON_IsArray(n) ? cJSON_GetArraySize(n) : 0;
+}
+
+const char *accounts_group_nick(account_store_t *st, const char *name, int i) {
+    cJSON *n = cJSON_GetObjectItemCaseSensitive(find(st, name), "nicks");
+    cJSON *it = cJSON_IsArray(n) ? cJSON_GetArrayItem(n, i) : NULL;
+    return cJSON_IsString(it) ? it->valuestring : NULL;
+}
+
+const char *accounts_owner_of_nick(account_store_t *st, const char *nick) {
+    cJSON *own = find(st, nick);
+    if (own) { cJSON *nm = cJSON_GetObjectItemCaseSensitive(own, "name"); return cJSON_IsString(nm) ? nm->valuestring : NULL; }
+    if (st->n_grouped <= 0) return NULL;
+    char cf[64];
+    irc_casefold(cf, sizeof cf, nick);
+    cJSON *rec;
+    cJSON_ArrayForEach(rec, st->data) {
+        cJSON *n = cJSON_GetObjectItemCaseSensitive(rec, "nicks");
+        cJSON *it;
+        if (!cJSON_IsArray(n)) continue;
+        cJSON_ArrayForEach(it, n) {
+            if (cJSON_IsString(it) && strcmp(it->valuestring, cf) == 0) {
+                cJSON *nm = cJSON_GetObjectItemCaseSensitive(rec, "name");
+                return cJSON_IsString(nm) ? nm->valuestring : NULL;
+            }
+        }
     }
     return NULL;
 }

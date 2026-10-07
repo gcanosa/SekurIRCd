@@ -87,6 +87,8 @@ void cmd_finish_auth(server_t *srv, client_t *cl, int is_register, int success, 
 /* net.c: apply a finished JOB_SASL for AUTH_OPER/AUTH_DIE/AUTH_RESTART
  * (cmd_oper.c) -- `purpose` is an auth_purpose_t (worker.h), passed as int
  * so this header doesn't need to pull in worker.h. */
+/* net.c: a finished worker job for NickServ SET PASSWORD / DROP (`text` is the new hash for AUTH_PASSWD_HASH). */
+void cmd_finish_account_op(server_t *srv, client_t *cl, int purpose, int success, const char *text);
 void cmd_finish_privileged_auth(server_t *srv, client_t *cl, int purpose, int success);
 
 /* Channel handlers (cmd_chan.c) */

@@ -413,6 +413,21 @@ void server_notify_opers(server_t *srv, const char *message) {
     }
 }
 
+void server_logout(server_t *srv, client_t *cl) {
+    if (!cl->account[0]) return;
+    char prefix[320];
+    client_prefix(cl, prefix, sizeof prefix);
+    cl->account[0] = '\0';
+    cl->umodes &= ~UMODE_R;
+    const char *p[] = {prefix};
+    client_reply(cl, N_LOGGEDOUT, p, 1, "You are now logged out");
+    char line[400];
+    const char *pa[] = {"*"};
+    irc_build(line, sizeof line, NULL, 0, prefix, "ACCOUNT", pa, 1, NULL);
+    server_send_common_channels(srv, cl, line, CAP_ACCOUNT_NOTIFY);
+    server_monitor_extend(srv, cl, line, CAP_ACCOUNT_NOTIFY);
+}
+
 void server_login(server_t *srv, client_t *cl, const char *account) {
     snprintf(cl->account, sizeof cl->account, "%s", account);
     cl->umodes |= UMODE_R;

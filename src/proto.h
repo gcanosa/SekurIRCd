@@ -278,6 +278,7 @@ void irc_add_time_tag(char *line, size_t linesz);
 #define N_UNAVAILRESOURCE  "437"
 #define N_USERNOTINCHANNEL "441"
 #define N_USERIP           "340"
+#define N_LOGGEDOUT        "901"
 #define N_LINKCHANNEL      "470" /* "<chan> <target> :Forwarding to another channel" */
 #define N_BANLISTFULL      "478"
 #define N_NOTONCHANNEL     "442"

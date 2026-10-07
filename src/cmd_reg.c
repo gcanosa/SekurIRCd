@@ -10,6 +10,10 @@
 #include "worker.h"
 
 #include <arpa/inet.h>
+#include <ctype.h>
+#include <fcntl.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #include <netinet/in.h>
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
@@ -19,6 +23,9 @@
 #include <string.h>
 #include <strings.h>
 #include <time.h>
+
+static int valid_email(const char *e);
+static void ns_begin_email(server_t *srv, client_t *cl, const char *email);
 
 void cmd_nick(server_t *srv, client_t *cl, irc_message_t *msg) {
     if (msg->nparams < 1) {
@@ -510,6 +517,8 @@ static const char *auth_decoy_hash(void) {
  * -- the caller words the failure for its own protocol. */
 static int start_plain_login(server_t *srv, client_t *cl, const char *authcid, const char *passwd, int style) {
     if (cl->auth_pending || auth_fail_throttled(cl->ip)) return -1;
+    const char *owner_acct = accounts_owner_of_nick(&srv->accounts, authcid);
+    if (owner_acct) authcid = owner_acct; /* logging in as a grouped nick means its account */
     const char *hash = accounts_hash(&srv->accounts, authcid);
     int unknown = !hash;
     if (unknown) hash = auth_decoy_hash();
@@ -890,10 +899,129 @@ void cmd_register(server_t *srv, client_t *cl, irc_message_t *msg) {
     if (msg->nparams >= 3) {
         style = AUTH_STYLE_DRAFT;
         password = msg->params[2];
+        snprintf(cl->pending_email, sizeof cl->pending_email, "%s", strcmp(msg->params[1], "*") != 0 && valid_email(msg->params[1]) ? msg->params[1] : "");
         if (strcmp(account, "*") == 0) account = cl->nick;
     }
     if (!password[0]) { err_need_more_params(cl, "REGISTER"); return; }
     start_register(srv, cl, account, password, style);
+}
+
+/* --- email, verification codes ------------------------------------------------ */
+
+static int valid_email(const char *e) {
+    size_t n = strlen(e);
+    if (n < 3 || n > 120 || e[0] == '-' || e[0] == '@') return 0;
+    int at = 0;
+    for (const char *p = e; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c == '@') { if (++at > 1) return 0; continue; }
+        if (!(isalnum(c) || c == '.' || c == '_' || c == '%' || c == '+' || c == '-')) return 0; /* never a shell metacharacter, space or '/' */
+    }
+    return at == 1 && e[n - 1] != '@';
+}
+
+/* Runs `cmd addr code account network` fully detached (double fork, so no zombie and nothing to wait on), no shell. */
+static void spawn_email_command(const char *cmd, const char *addr, const char *code, const char *account, const char *network) {
+    pid_t p1 = fork();
+    if (p1 < 0) return;
+    if (p1 == 0) {
+        if (fork() == 0) {
+            int dn = open("/dev/null", O_RDWR);
+            if (dn >= 0) { dup2(dn, 0); dup2(dn, 1); dup2(dn, 2); }
+            execl(cmd, cmd, addr, code, account, network, (char *)NULL);
+            _exit(127);
+        }
+        _exit(0);
+    }
+    waitpid(p1, NULL, 0);
+}
+
+/* The account's owner has asked to use `email`: send a code (if email_command is set) or just store it. */
+static void ns_begin_email(server_t *srv, client_t *cl, const char *email) {
+    if (!valid_email(email)) { ns_say(srv, cl, "That does not look like a valid email address"); return; }
+    if (!srv->cfg.accounts.email_command[0]) {
+        accounts_set_email(&srv->accounts, cl->account, email, 0);
+        ns_say(srv, cl, "Email saved (this server does not verify addresses)");
+        return;
+    }
+    char code[12];
+    crypto_random_hex(code, sizeof code, 4);
+    accounts_set_pending_email(&srv->accounts, cl->account, email, code, (long)time(NULL) + 3600);
+    spawn_email_command(srv->cfg.accounts.email_command, email, code, cl->account, srv->cfg.server.network);
+    ns_say(srv, cl, "A verification code was sent -- finish with /msg NickServ VERIFY <code> within an hour");
+}
+
+/* Disconnect-free logout of every session on `account` (used when it is dropped). */
+static void logout_all_sessions(server_t *srv, const char *account) {
+    for (client_t *c = srv->all_clients; c; c = c->all_next)
+        if (c->fd >= 0 && c->account[0] && strcasecmp(c->account, account) == 0) server_logout(srv, c);
+}
+
+/* NickServ SET PASSWORD / DROP need scrypt (worker thread): this is the second half, called from net.c. */
+void cmd_finish_account_op(server_t *srv, client_t *cl, int purpose, int success, const char *text) {
+    cl->auth_pending = 0;
+    switch ((auth_purpose_t)purpose) {
+    case AUTH_PASSWD_VERIFY: {
+        if (!success) {
+            auth_fail_record(cl->ip);
+            ns_say(srv, cl, "Current password incorrect");
+            OPENSSL_cleanse(cl->pending_newpw, sizeof cl->pending_newpw);
+            return;
+        }
+        job_t j; memset(&j, 0, sizeof j);
+        j.type = JOB_HASH;
+        j.purpose = AUTH_PASSWD_HASH;
+        j.conn_id = cl->conn_id;
+        snprintf(j.secret, sizeof j.secret, "%s", cl->pending_newpw);
+        OPENSSL_cleanse(cl->pending_newpw, sizeof cl->pending_newpw);
+        cl->auth_pending = 1;
+        cl->auth_started = time(NULL);
+        j.gen = ++cl->auth_gen;
+        int rc = worker_submit(&j);
+        OPENSSL_cleanse(j.secret, sizeof j.secret);
+        if (rc != 0) { cl->auth_pending = 0; ns_say(srv, cl, "Server busy -- try again"); }
+        return;
+    }
+    case AUTH_PASSWD_HASH:
+        if (!success || !cl->account[0]) { ns_say(srv, cl, "Could not change the password -- try again"); return; }
+        accounts_set_hash(&srv->accounts, cl->account, text);
+        if (cl->pending_scram[0]) accounts_set_scram(&srv->accounts, cl->account, cl->pending_scram);
+        cl->pending_scram[0] = '\0';
+        ns_say(srv, cl, "Password changed");
+        log_info("nickserv", "%s changed the password of %s", cl->nick, cl->account);
+        return;
+    case AUTH_DROP_VERIFY: {
+        if (!success) { auth_fail_record(cl->ip); ns_say(srv, cl, "Password incorrect -- account NOT dropped"); return; }
+        char account[64];
+        snprintf(account, sizeof account, "%s", cl->account);
+        logout_all_sessions(srv, account);
+        accounts_drop(&srv->accounts, account);
+        ns_say(srv, cl, "Your account has been dropped");
+        log_info("nickserv", "account %s dropped by %s", account, cl->nick);
+        return;
+    }
+    default: return;
+    }
+}
+
+/* Submits the scrypt verification of `password` against the logged-in account's stored hash. */
+static int ns_verify_own_password(server_t *srv, client_t *cl, const char *password, auth_purpose_t purpose) {
+    if (cl->auth_pending || auth_fail_throttled(cl->ip)) return -1;
+    const char *hash = accounts_hash(&srv->accounts, cl->account);
+    if (!hash) return -1;
+    job_t j; memset(&j, 0, sizeof j);
+    j.type = JOB_SASL;
+    j.purpose = purpose;
+    j.conn_id = cl->conn_id;
+    snprintf(j.secret, sizeof j.secret, "%s", password);
+    snprintf(j.hash, sizeof j.hash, "%s", hash);
+    cl->auth_pending = 1;
+    cl->auth_started = time(NULL);
+    j.gen = ++cl->auth_gen;
+    int rc = worker_submit(&j);
+    OPENSSL_cleanse(j.secret, sizeof j.secret);
+    if (rc != 0) { cl->auth_pending = 0; return -1; }
+    return 0;
 }
 
 /* PRIVMSG to "NickServ" when no real user by that name exists (see
@@ -907,16 +1035,22 @@ void nickserv_message(server_t *srv, client_t *cl, const char *text) {
     char *cmd = strtok_r(buf, " ", &save);
     char *a = cmd ? strtok_r(NULL, " ", &save) : NULL;
     char *b = cmd ? strtok_r(NULL, " ", &save) : NULL;
+    char *c3 = cmd ? strtok_r(NULL, " ", &save) : NULL;
 
     if (!srv->cfg.accounts.enabled) {
         ns_say(srv, cl, "Accounts are not enabled on this server");
     } else if (cmd && strcasecmp(cmd, "REGISTER") == 0) {
-        /* REGISTER <password> [email] -- email ignored, see cmd_register. */
+        /* REGISTER <password> [email] */
         if (!a) ns_say(srv, cl, "Syntax: REGISTER <password> [email]");
-        else start_register(srv, cl, cl->nick, a, AUTH_STYLE_NICKSERV);
+        else {
+            snprintf(cl->pending_email, sizeof cl->pending_email, "%s", b && valid_email(b) ? b : "");
+            start_register(srv, cl, cl->nick, a, AUTH_STYLE_NICKSERV);
+        }
     } else if (cmd && (strcasecmp(cmd, "IDENTIFY") == 0 || strcasecmp(cmd, "ID") == 0)) {
         /* IDENTIFY [account] <password> */
         const char *account = b ? a : cl->nick;
+        const char *owner = accounts_owner_of_nick(&srv->accounts, account); /* a grouped nick identifies its account */
+        if (owner) account = owner;
         const char *password = b ? b : a;
         if (!password) ns_say(srv, cl, "Syntax: IDENTIFY [account] <password>");
         else if (cl->account[0]) ns_say(srv, cl, "You are already identified");
@@ -929,7 +1063,8 @@ void nickserv_message(server_t *srv, client_t *cl, const char *text) {
         if (!a) ns_say(srv, cl, "Syntax: GHOST <nick>");
         else if (!cl->account[0]) ns_say(srv, cl, "You must IDENTIFY first");
         else if (!t || !t->registered || t == cl) ns_say(srv, cl, "No such nick (or that is you)");
-        else if (strcasecmp(cl->account, a) != 0 && strcasecmp(cl->account, t->account) != 0)
+        else if (!(accounts_owner_of_nick(&srv->accounts, a) && strcasecmp(cl->account, accounts_owner_of_nick(&srv->accounts, a)) == 0) &&
+                 strcasecmp(cl->account, t->account) != 0)
             ns_say(srv, cl, "You do not own that nickname");
         else {
             snprintf(t->quit_reason, sizeof t->quit_reason, "Killed (GHOST command used by %s)", cl->nick);
@@ -937,8 +1072,68 @@ void nickserv_message(server_t *srv, client_t *cl, const char *text) {
             ns_say(srv, cl, "Ghost session disconnected");
             log_info("nickserv", "%s ghosted %s", cl->nick, a);
         }
+    } else if (cmd && strcasecmp(cmd, "LOGOUT") == 0) {
+        if (!cl->account[0]) ns_say(srv, cl, "You are not identified");
+        else server_logout(srv, cl);
+    } else if (cmd && strcasecmp(cmd, "INFO") == 0) {
+        const char *who = a ? accounts_owner_of_nick(&srv->accounts, a) : (cl->account[0] ? cl->account : NULL);
+        if (!who) { ns_say(srv, cl, a ? "No such account" : "You are not identified -- INFO <account>"); }
+        else {
+            char m[300];
+            snprintf(m, sizeof m, "Account %s, registered %ld", who, accounts_created_at(&srv->accounts, who));
+            ns_say(srv, cl, m);
+            int self = cl->account[0] && strcasecmp(cl->account, who) == 0;
+            if (self) { /* the owner also sees their email and grouped nicks */
+                const char *em = accounts_email(&srv->accounts, who);
+                snprintf(m, sizeof m, "Email: %s%s", em ? em : "(none)", em ? (accounts_email_verified(&srv->accounts, who) ? " (verified)" : " (unverified)") : "");
+                ns_say(srv, cl, m);
+                int gn = accounts_group_count(&srv->accounts, who);
+                if (gn) {
+                    char list[250] = "";
+                    for (int i = 0; i < gn; i++) { strncat(list, i ? ", " : "", sizeof list - strlen(list) - 1); strncat(list, accounts_group_nick(&srv->accounts, who, i), sizeof list - strlen(list) - 1); }
+                    snprintf(m, sizeof m, "Grouped nicks: %s", list);
+                    ns_say(srv, cl, m);
+                }
+            }
+        }
+    } else if (cmd && strcasecmp(cmd, "SET") == 0 && a && strcasecmp(a, "PASSWORD") == 0) {
+        if (!cl->account[0]) ns_say(srv, cl, "You must IDENTIFY first");
+        else if (!b || !c3) ns_say(srv, cl, "Syntax: SET PASSWORD <current> <new>");
+        else if (strlen(c3) < 6 || strlen(c3) >= 200) ns_say(srv, cl, "The new password must be 6-199 characters");
+        else {
+            snprintf(cl->pending_newpw, sizeof cl->pending_newpw, "%s", c3);
+            cl->pending_scram[0] = '\0';
+            { scram_verifier_t sv; if (scram_make_verifier(c3, &sv) == 0) scram_verifier_to_string(&sv, cl->pending_scram, sizeof cl->pending_scram); }
+            if (ns_verify_own_password(srv, cl, b, AUTH_PASSWD_VERIFY) != 0) {
+                OPENSSL_cleanse(cl->pending_newpw, sizeof cl->pending_newpw);
+                ns_say(srv, cl, "Could not start the password change -- try again shortly");
+            }
+        }
+    } else if (cmd && strcasecmp(cmd, "SET") == 0 && a && strcasecmp(a, "EMAIL") == 0) {
+        if (!cl->account[0]) ns_say(srv, cl, "You must IDENTIFY first");
+        else if (!b) ns_say(srv, cl, "Syntax: SET EMAIL <address>");
+        else ns_begin_email(srv, cl, b);
+    } else if (cmd && strcasecmp(cmd, "VERIFY") == 0) {
+        if (!cl->account[0]) ns_say(srv, cl, "You must IDENTIFY first");
+        else if (!a) ns_say(srv, cl, "Syntax: VERIFY <code>");
+        else if (accounts_check_verify(&srv->accounts, cl->account, a)) ns_say(srv, cl, "Email verified");
+        else ns_say(srv, cl, "That code is wrong or has expired");
+    } else if (cmd && strcasecmp(cmd, "DROP") == 0) {
+        if (!cl->account[0]) ns_say(srv, cl, "You must IDENTIFY first");
+        else if (!a) ns_say(srv, cl, "Syntax: DROP <password> -- permanently deletes your account");
+        else if (ns_verify_own_password(srv, cl, a, AUTH_DROP_VERIFY) != 0) ns_say(srv, cl, "Could not start that -- try again shortly");
+    } else if (cmd && strcasecmp(cmd, "GROUP") == 0) {
+        if (!cl->account[0]) ns_say(srv, cl, "You must IDENTIFY first");
+        else if (accounts_group_add(&srv->accounts, cl->account, cl->nick) != 0)
+            ns_say(srv, cl, "That nick is already registered/grouped, or your group is full (10 nicks)");
+        else { char m[200]; snprintf(m, sizeof m, "%s is now part of account %s", cl->nick, cl->account); ns_say(srv, cl, m); }
+    } else if (cmd && strcasecmp(cmd, "UNGROUP") == 0) {
+        if (!cl->account[0]) ns_say(srv, cl, "You must IDENTIFY first");
+        else if (!a || accounts_group_del(&srv->accounts, cl->account, a) != 0) ns_say(srv, cl, "Syntax: UNGROUP <nick> (a nick in your group)");
+        else ns_say(srv, cl, "Nick removed from your account");
     } else {
-        ns_say(srv, cl, "Commands: REGISTER <password> [email], IDENTIFY [account] <password>, GHOST <nick>");
+        ns_say(srv, cl, "Commands: REGISTER <password> [email], IDENTIFY [account] <password>, LOGOUT, INFO [account], "
+                        "SET PASSWORD <old> <new>, SET EMAIL <address>, VERIFY <code>, GROUP, UNGROUP <nick>, GHOST <nick>, DROP <password>");
     }
     OPENSSL_cleanse(buf, sizeof buf);
 }
@@ -1024,6 +1219,9 @@ void cmd_finish_auth(server_t *srv, client_t *cl, int is_register, int success, 
     accounts_register_hashed(&srv->accounts, account, hash);
     if (cl->pending_scram[0]) accounts_set_scram(&srv->accounts, account, cl->pending_scram);
     cl->pending_scram[0] = '\0';
+    char reg_email[160];
+    snprintf(reg_email, sizeof reg_email, "%s", cl->pending_email);
+    cl->pending_email[0] = '\0';
     server_login(srv, cl, account);
     char m[200];
     snprintf(m, sizeof m, "Account %s registered -- you are now logged in as it", account);
@@ -1038,6 +1236,7 @@ void cmd_finish_auth(server_t *srv, client_t *cl, int is_register, int success, 
         notice_self(srv, cl, m);
     }
     log_info("main", "%s registered account %s", cl->nick, account);
+    if (reg_email[0]) ns_begin_email(srv, cl, reg_email);
 }
 
 /* --- nick ownership enforcement ([accounts] enforce_nicks) ------------------ */
@@ -1046,8 +1245,10 @@ void cmd_finish_auth(server_t *srv, client_t *cl, int is_register, int success, 
 void nick_enforce_check(server_t *srv, client_t *cl) {
     cl->enforce_deadline = 0;
     if (!srv->cfg.accounts.enabled || !srv->cfg.accounts.enforce_nicks || cl->is_service || !cl->registered) return;
-    if (!accounts_exists(&srv->accounts, cl->nick)) return;
-    if (cl->account[0] && strcasecmp(cl->account, cl->nick) == 0) return; /* already logged in as the owner */
+    const char *owner = accounts_owner_of_nick(&srv->accounts, cl->nick); /* the account named so, or whose group holds it */
+    if (!owner) return;
+    snprintf(cl->enforce_owner, sizeof cl->enforce_owner, "%s", owner);
+    if (cl->account[0] && strcasecmp(cl->account, owner) == 0) return; /* already logged in as the owner */
     cl->enforce_deadline = time(NULL) + srv->cfg.accounts.enforce_grace;
     char m[300];
     snprintf(m, sizeof m, "This nickname is registered. Log in (SASL, or /msg NickServ IDENTIFY <password>) within %d seconds "
@@ -1059,7 +1260,7 @@ void nick_enforce_check(server_t *srv, client_t *cl) {
 void nick_enforce_tick(server_t *srv, time_t now) {
     for (client_t *cl = srv->all_clients; cl; cl = cl->all_next) {
         if (!cl->enforce_deadline || cl->quitting) continue;
-        if (cl->account[0] && strcasecmp(cl->account, cl->nick) == 0) { cl->enforce_deadline = 0; continue; }
+        if (cl->account[0] && strcasecmp(cl->account, cl->enforce_owner) == 0) { cl->enforce_deadline = 0; continue; }
         if (now < cl->enforce_deadline) continue;
         cl->enforce_deadline = 0;
         char guest[NICKLEN];
