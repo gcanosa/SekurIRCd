@@ -10,7 +10,9 @@
   var form = $("connect"), app = $("chat"), nickIn = $("nick"), chanIn = $("chan"), err = $("conn-err");
   var tabs = $("tabs"), log = $("log"), users = $("users"), topic = $("topic"), input = $("input");
 
-  var ws, nick, wantChan, registered, tries = 0, closing = false, timer;
+  var AWAY_AFTER = 30 * 60 * 1000; // idle time before auto-away
+  var CLIENT_VERSION = "SekurNet web chat";
+  var ws, nick, wantChan, registered, tries = 0, closing = false, timer, away = false, awayTimer;
   var bufs = {}, active = "*";
 
   try { nickIn.value = localStorage.getItem("chat-nick") || ""; chanIn.value = localStorage.getItem("chat-chan") || ""; } catch (e) {}
@@ -79,7 +81,8 @@
   function onLine(raw) {
     var m = parse(raw), p = m.params, me = nick, c = m.cmd;
     if (c === "PING") return send("PONG :" + (p[0] || ""));
-    if (c === "001") { registered = true; tries = 0; nick = p[0]; say("*", p[1]); if (wantChan) send("JOIN " + wantChan); return; }
+    if (c === "001") { registered = true; tries = 0; armAway(); nick = p[0]; say("*", p[1]); if (wantChan) send("JOIN " + wantChan); return; }
+    if (c === "305" || c === "306") away = c === "306";
     if (c === "433" && !registered) { nick = nick + "_"; return send("NICK " + nick); }
     if (c === "353") { // names
       var b = buf(p[2]);
@@ -114,6 +117,10 @@
     if (c === "PRIVMSG" || c === "NOTICE") {
       var target = p[0][0] === "#" || p[0][0] === "&" ? p[0] : (m.prefix.indexOf("!") < 0 ? "*" : m.nick);
       var txt = p[1], act = /^\x01ACTION (.*?)\x01?$/.exec(txt);
+      if (c === "PRIVMSG" && txt === "\x01VERSION\x01" && m.prefix.indexOf("!") >= 0) {
+        say("*", "CTCP VERSION request from " + m.nick, "evt");
+        return send("NOTICE " + m.nick + " :\x01VERSION " + CLIENT_VERSION + "\x01");
+      }
       if (!act && txt[0] === "\x01") return; // other CTCP: ignored
       say(target, act ? "* " + m.nick + " " + act[1] : "<" + m.nick + "> " + txt, (c === "NOTICE" ? "notice " : "") + (txt.toLowerCase().indexOf(me.toLowerCase()) >= 0 ? "hl" : ""));
       return;
@@ -122,7 +129,22 @@
     if (/^\d+$/.test(c)) say(+c >= 400 ? active : "*", p.slice(1).join(" "), +c >= 400 ? "err" : "");
   }
 
+  // Any message or command you send counts as activity: it clears away and restarts the idle timer.
+  function activity(text) {
+    if (away && !/^\/away(\s|$)/i.test(text)) send("AWAY");
+    armAway();
+  }
+  function armAway() { // also called on connect, so a user who only reads still goes away
+    clearTimeout(awayTimer);
+    awayTimer = setTimeout(function () {
+      if (!registered || away) return;
+      send("AWAY :Auto-away (idle 30 minutes)");
+      say("*", "You were marked away after 30 minutes without activity. Send any message to come back.", "evt");
+    }, AWAY_AFTER);
+  }
+
   function command(text) {
+    activity(text);
     if (text[0] !== "/" || text.slice(0, 2) === "//") {
       if (text.slice(0, 2) === "//") text = text.slice(1);
       if (active === "*") return say("*", "Join a channel first (/join #name).", "err");
@@ -132,18 +154,23 @@
     var a = text.slice(1).split(" "), cmd = a.shift().toLowerCase(), rest = a.join(" ");
     if (cmd === "join" && rest) return send("JOIN " + (/^[#&]/.test(rest) ? rest : "#" + rest));
     if (cmd === "part") return send("PART " + (a[0] || active));
+    if (cmd === "close") {
+      if (active === "*") return say("*", "The status tab cannot be closed.", "err");
+      if (active[0] === "#" || active[0] === "&") return send("PART " + active); // the PART echo closes the tab
+      delete bufs[key(active)]; active = "*"; return draw();
+    }
     if (cmd === "me") { if (active === "*") return; send("PRIVMSG " + active + " :\x01ACTION " + rest + "\x01"); return say(active, "* " + nick + " " + rest, "me"); }
     if ((cmd === "msg" || cmd === "query") && a[0]) {
       var body = a.slice(1).join(" "); buf(a[0]); active = a[0]; draw();
       if (body) { send("PRIVMSG " + a[0] + " :" + body); say(a[0], "<" + nick + "> " + body, "me"); }
       return;
     }
-    if (cmd === "quit") { closing = true; send("QUIT :" + (rest || "Web chat closed")); return; }
+    if (cmd === "quit") { closing = true; clearTimeout(awayTimer); send("QUIT :" + (rest || "Web chat closed")); return; }
     send(a.length ? cmd.toUpperCase() + " " + rest : cmd.toUpperCase()); // /mode /whois /topic /nick ...: pass through
   }
 
   function connect() {
-    clearTimeout(timer); registered = false;
+    clearTimeout(timer); registered = false; away = false; // a new connection starts un-away
     say("*", "Connecting to ircsekurnet.duckdns.org ...");
     try { ws = new WebSocket(WS_URL); } catch (e) { return fail(); }
     var opened = false;
