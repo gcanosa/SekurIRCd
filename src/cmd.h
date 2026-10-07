@@ -53,6 +53,8 @@ void nick_enforce_tick(server_t *srv, time_t now);
 void cmd_accept(server_t *srv, client_t *cl, irc_message_t *msg);
 struct member;
 void channel_reveal_member(struct channel *chan, struct member *m); /* +D: first message / rank reveals a hidden member */
+void cmd_markread(server_t *srv, client_t *cl, irc_message_t *msg);
+void cmd_batch(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_rename(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_chathistory(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_tagmsg(server_t *srv, client_t *cl, irc_message_t *msg);

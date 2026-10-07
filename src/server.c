@@ -36,6 +36,38 @@ static void server_apply_cloak_secret(server_t *srv) {
     }
 }
 
+typedef struct marker { char key[200]; long long ms; UT_hash_handle hh; } marker_t;
+
+static void marker_key(char *out, size_t outsz, const char *account, const char *target) {
+    char a[72], t[72];
+    irc_casefold(a, sizeof a, account);
+    irc_casefold(t, sizeof t, target);
+    snprintf(out, outsz, "%s\x01%s", a, t);
+}
+
+long long server_marker_get(server_t *srv, const char *account, const char *target) {
+    char key[200];
+    marker_key(key, sizeof key, account, target);
+    marker_t *m;
+    HASH_FIND_STR(srv->markers, key, m);
+    return m ? m->ms : 0;
+}
+
+long long server_marker_set(server_t *srv, const char *account, const char *target, long long ms) {
+    char key[200];
+    marker_key(key, sizeof key, account, target);
+    marker_t *m;
+    HASH_FIND_STR(srv->markers, key, m);
+    if (!m) {
+        m = calloc(1, sizeof *m);
+        if (!m) return 0;
+        snprintf(m->key, sizeof m->key, "%s", key);
+        HASH_ADD_STR(srv->markers, key, m);
+    }
+    if (ms > m->ms) m->ms = ms; /* a marker only ever moves forward */
+    return m->ms;
+}
+
 void server_next_msgid(server_t *srv, char *out, size_t outsz) {
     snprintf(out, outsz, "%s-%llu", srv->msgid_prefix, (unsigned long long)++srv->msgid_counter);
 }
@@ -840,6 +872,7 @@ void server_free_tables(server_t *srv) {
     server_kline_flush(srv);
     spam_free(srv);
     protection_free(srv);
+    { marker_t *mk, *mt; HASH_ITER(hh, srv->markers, mk, mt) { HASH_DEL(srv->markers, mk); free(mk); } }
     kline_entry_t *k = srv->klines;
     while (k) { kline_entry_t *next = k->next; free(k); k = next; }
     srv->klines = NULL;

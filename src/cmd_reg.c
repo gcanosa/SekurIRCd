@@ -247,6 +247,8 @@ static const struct { const char *name; unsigned int bit; } CAP_ATTRS[] = {
     {"draft/pre-away", CAP_PRE_AWAY},
     {"extended-monitor", CAP_EXTENDED_MONITOR},
     {"draft/channel-rename", CAP_CHANNEL_RENAME},
+    {"draft/multiline", CAP_MULTILINE},
+    {"draft/read-marker", CAP_READ_MARKER},
     {"draft/chathistory", CAP_CHATHISTORY},
 };
 #define N_CAP_ATTRS (int)(sizeof CAP_ATTRS / sizeof CAP_ATTRS[0])
@@ -262,7 +264,8 @@ static int supported_cap_tokens(server_t *srv, client_t *cl, char tok[][CAP_TOKE
     int n = 0, v302 = cl->cap_version >= 302;
     for (int i = 0; i < N_CAP_ATTRS && n < MAX_CAP_TOKENS; i++) {
         if (CAP_ATTRS[i].bit == CAP_CHATHISTORY && srv->cfg.messages.history_size <= 0) continue; /* history off */
-        snprintf(tok[n++], CAP_TOKEN_LEN, "%s", CAP_ATTRS[i].name);
+        if (CAP_ATTRS[i].bit == CAP_MULTILINE && v302) snprintf(tok[n++], CAP_TOKEN_LEN, "draft/multiline=max-bytes=%d,max-lines=%d", 4096, 24);
+        else snprintf(tok[n++], CAP_TOKEN_LEN, "%s", CAP_ATTRS[i].name);
     }
     if (srv->cfg.accounts.enabled && n + 2 <= MAX_CAP_TOKENS) {
         /* EXTERNAL only ever succeeds if the TLS listener actually asks

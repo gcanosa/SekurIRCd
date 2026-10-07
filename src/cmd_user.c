@@ -57,8 +57,92 @@ static void build_lines(char lines[4][LINE_SZ], client_t *from, const char *pref
     if (acct) irc_build(lines[3], LINE_SZ, mt, n, prefix, verb, p, 1, text);
 }
 
+/* --- draft/multiline ----------------------------------------------------------
+ * A client sends BATCH +ref draft/multiline <target>, PRIVMSG/NOTICE lines tagged @batch=ref (an optional
+ * draft/multiline-concat tag glues a line onto the previous one), then BATCH -ref. The whole thing is checked
+ * and delivered as ONE message: recipients with the cap get it as a batch, everyone else gets plain lines. */
+#define ML_MAX_LINES 24
+#define ML_MAX_BYTES 4096
+typedef struct ml_state {
+    char ref[32];
+    char target[72];
+    char verb[8];
+    int n, bytes;
+    int concat[ML_MAX_LINES];
+    char text[ML_MAX_LINES][420];
+} ml_state_t;
+
+static const ml_state_t *g_ml; /* set around send_msg for a finished batch: deliver() then fans it out multiline-aware */
+static void censor_text(const server_t *srv, char *text);
+static void strip_formatting(char *dst, size_t dstsz, const char *src);
+
+static void deliver_ml(client_t *rcpt, client_t *from, const msg_extra_t *x) {
+    const ml_state_t *ml = g_ml;
+    server_t *srv = from->srv;
+    char prefix[320];
+    client_prefix(from, prefix, sizeof prefix);
+    channel_t *chan = ml->target[0] == '#' ? server_find_channel(srv, ml->target) : NULL;
+    int strip = chan && (chan->modes & CMODE_STRIPCOLOR), censor = chan && (chan->modes & CMODE_CENSOR);
+    const char *tp[] = {ml->target};
+    char line[1200], txt[420], tmp[420];
+    if ((rcpt->caps & CAP_MULTILINE) && (rcpt->caps & CAP_BATCH)) {
+        static unsigned long seq = 0;
+        char bid[24], plus[28], minus[28];
+        snprintf(bid, sizeof bid, "ml%lu", ++seq);
+        snprintf(plus, sizeof plus, "+%s", bid);
+        snprintf(minus, sizeof minus, "-%s", bid);
+        irc_tag_t st[3];
+        int nst = 0;
+        if (from->account[0] && (rcpt->caps & CAP_ACCOUNT_TAG)) st[nst++] = (irc_tag_t){"account", from->account};
+        st[nst++] = (irc_tag_t){"msgid", x->msgid};
+        const char *bp[] = {plus, "draft/multiline", ml->target};
+        irc_build(line, sizeof line, st, nst, prefix, "BATCH", bp, 3, NULL);
+        client_send(rcpt, line);
+        for (int i = 0; i < ml->n; i++) {
+            snprintf(txt, sizeof txt, "%s", ml->text[i]);
+            if (strip) { strip_formatting(tmp, sizeof tmp, txt); snprintf(txt, sizeof txt, "%s", tmp); }
+            if (censor) censor_text(srv, txt);
+            irc_tag_t lt[2];
+            int nlt = 0;
+            lt[nlt++] = (irc_tag_t){"batch", bid};
+            if (ml->concat[i]) lt[nlt++] = (irc_tag_t){"draft/multiline-concat", ""};
+            irc_build(line, sizeof line, lt, nlt, prefix, ml->verb, tp, 1, txt);
+            client_send(rcpt, line);
+        }
+        const char *ep[] = {minus};
+        irc_build(line, sizeof line, NULL, 0, prefix, "BATCH", ep, 1, NULL);
+        client_send(rcpt, line);
+        return;
+    }
+    /* No multiline cap: concat fragments are glued into one line, every other line is its own message. */
+    char cur[420] = "";
+    int first = 1;
+    for (int i = 0; i <= ml->n; i++) {
+        int boundary = i == ml->n || !ml->concat[i];
+        if (boundary && (i > 0)) {
+            snprintf(txt, sizeof txt, "%s", cur);
+            if (strip) { strip_formatting(tmp, sizeof tmp, txt); snprintf(txt, sizeof txt, "%s", tmp); }
+            if (censor) censor_text(srv, txt);
+            msg_extra_t xi = *x;
+            if (!first) server_next_msgid(srv, xi.msgid, sizeof xi.msgid);
+            first = 0;
+            char one[4][LINE_SZ];
+            build_lines(one, from, prefix, ml->verb, tp, txt, &xi);
+            int m = (rcpt->caps & CAP_MESSAGE_TAGS) != 0;
+            int k = ((from->account[0] && (rcpt->caps & CAP_ACCOUNT_TAG)) ? 1 : 0) | (m ? 2 : 0);
+            client_send(rcpt, one[k]);
+            cur[0] = '\0';
+        }
+        if (i < ml->n) {
+            size_t l = strlen(cur);
+            snprintf(cur + l, sizeof cur - l, "%s", ml->text[i]);
+        }
+    }
+}
+
 /* account tag needs account-tag; bot/msgid/client tags need message-tags. */
 static void deliver(client_t *rcpt, client_t *from, char lines[4][LINE_SZ], const msg_extra_t *x) {
+    if (g_ml) { deliver_ml(rcpt, from, x); return; }
     int m = (rcpt->caps & CAP_MESSAGE_TAGS) != 0;
     if (x->tagmsg && !m) return;
     int i = ((from->account[0] && (rcpt->caps & CAP_ACCOUNT_TAG)) ? 1 : 0) | (m ? 2 : 0);
@@ -339,8 +423,88 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
     if (delivered && (cl->caps & CAP_ECHO_MESSAGE)) deliver(cl, cl, lines, &x);
 }
 
-void cmd_privmsg(server_t *srv, client_t *cl, irc_message_t *msg) { send_msg(srv, cl, msg, "PRIVMSG", 0); }
-void cmd_notice(server_t *srv, client_t *cl, irc_message_t *msg) { send_msg(srv, cl, msg, "NOTICE", 1); }
+static void batch_fail(server_t *srv, client_t *cl, const char *code, const char *ref, const char *desc) {
+    char line[400];
+    const char *p[] = {"BATCH", code, ref};
+    irc_build(line, sizeof line, NULL, 0, srv->cfg.server.name, "FAIL", p, 3, desc);
+    client_send(cl, line);
+}
+
+/* A PRIVMSG/NOTICE carrying @batch=<ref> of the client's open multiline batch is collected, not sent.
+ * Returns 1 if it was consumed. */
+static int ml_collect(server_t *srv, client_t *cl, irc_message_t *msg, const char *verb) {
+    const char *ref = NULL;
+    int concat = 0;
+    for (int i = 0; i < msg->ntags; i++) {
+        if (strcmp(msg->tags[i].key, "batch") == 0) ref = msg->tags[i].val;
+        else if (strcmp(msg->tags[i].key, "draft/multiline-concat") == 0) concat = 1;
+    }
+    if (!ref) return 0;
+    ml_state_t *ml = cl->ml;
+    if (!ml || strcmp(ml->ref, ref) != 0) { batch_fail(srv, cl, "INVALID_REFTAG", ref, "No such open batch"); return 1; }
+    char tcf[72], mcf[72];
+    irc_casefold(tcf, sizeof tcf, ml->target);
+    irc_casefold(mcf, sizeof mcf, msg->nparams > 0 ? msg->params[0] : "");
+    const char *text = msg->nparams > 1 ? msg->params[msg->nparams - 1] : "";
+    if (strcmp(tcf, mcf) != 0) { batch_fail(srv, cl, "MULTILINE_INVALID_TARGET", ml->ref, "Line target differs from the batch target"); goto cancel; }
+    if (ml->n == 0) snprintf(ml->verb, sizeof ml->verb, "%s", verb);
+    else if (strcmp(ml->verb, verb) != 0) { batch_fail(srv, cl, "MULTILINE_INVALID", ml->ref, "Mixed PRIVMSG and NOTICE in one batch"); goto cancel; }
+    if (ml->n >= ML_MAX_LINES) { batch_fail(srv, cl, "MULTILINE_MAX_LINES", ml->ref, "Too many lines"); goto cancel; }
+    if (ml->n == 0 && concat) { batch_fail(srv, cl, "MULTILINE_INVALID", ml->ref, "The first line cannot be a concat"); goto cancel; }
+    if (!concat && text[0] == '\0') { batch_fail(srv, cl, "MULTILINE_INVALID", ml->ref, "Blank lines are not allowed"); goto cancel; }
+    if (ml->bytes + (int)strlen(text) > ML_MAX_BYTES) { batch_fail(srv, cl, "MULTILINE_MAX_BYTES", ml->ref, "Batch too large"); goto cancel; }
+    snprintf(ml->text[ml->n], sizeof ml->text[0], "%.*s", srv->cfg.messages.max_message_length, text);
+    ml->concat[ml->n] = concat;
+    ml->bytes += (int)strlen(ml->text[ml->n]);
+    ml->n++;
+    return 1;
+cancel:
+    free(cl->ml);
+    cl->ml = NULL;
+    return 1;
+}
+
+void cmd_privmsg(server_t *srv, client_t *cl, irc_message_t *msg) { if (!ml_collect(srv, cl, msg, "PRIVMSG")) send_msg(srv, cl, msg, "PRIVMSG", 0); }
+void cmd_notice(server_t *srv, client_t *cl, irc_message_t *msg) { if (!ml_collect(srv, cl, msg, "NOTICE")) send_msg(srv, cl, msg, "NOTICE", 1); }
+
+/* BATCH +ref draft/multiline <target>  ...  BATCH -ref */
+void cmd_batch(server_t *srv, client_t *cl, irc_message_t *msg) {
+    const char *r = msg->params[0];
+    if (!(cl->caps & CAP_MULTILINE) || !(cl->caps & CAP_BATCH)) { batch_fail(srv, cl, "INVALID", r, "Negotiate batch and draft/multiline first"); return; }
+    if (r[0] == '+') {
+        if (msg->nparams < 3 || strcasecmp(msg->params[1], "draft/multiline") != 0) { batch_fail(srv, cl, "UNKNOWN_TYPE", r + 1, "Only draft/multiline batches are accepted"); return; }
+        if (cl->ml) { batch_fail(srv, cl, "TOO_MANY", r + 1, "Finish the open batch first"); return; }
+        if (strlen(r + 1) >= sizeof cl->ml->ref || strlen(msg->params[2]) >= sizeof cl->ml->target) { batch_fail(srv, cl, "INVALID", r + 1, "Reference or target too long"); return; }
+        cl->ml = calloc(1, sizeof *cl->ml);
+        if (!cl->ml) return;
+        snprintf(cl->ml->ref, sizeof cl->ml->ref, "%s", r + 1);
+        snprintf(cl->ml->target, sizeof cl->ml->target, "%s", msg->params[2]);
+        return;
+    }
+    if (r[0] != '-' || !cl->ml || strcmp(cl->ml->ref, r + 1) != 0) { batch_fail(srv, cl, "INVALID_REFTAG", r[0] ? r + 1 : r, "No such open batch"); return; }
+    ml_state_t *ml = cl->ml;
+    cl->ml = NULL; /* ours to free below, whatever happens */
+    int all_concat = 1;
+    for (int i = 0; i < ml->n; i++) if (!ml->concat[i]) all_concat = 0;
+    if (ml->n == 0 || all_concat) { batch_fail(srv, cl, "MULTILINE_INVALID", ml->ref, "Empty batch"); free(ml); return; }
+    /* One synthetic message for the ordinary send path: all the usual checks (+n/+m/bans/flood/spam/...) run once on the
+     * joined text, then deliver() fans the batch out through g_ml. */
+    char joined[420] = "";
+    for (int i = 0; i < ml->n; i++) {
+        if (i && !ml->concat[i]) strncat(joined, " ", sizeof joined - strlen(joined) - 1);
+        strncat(joined, ml->text[i], sizeof joined - strlen(joined) - 1);
+    }
+    irc_message_t synth;
+    memset(&synth, 0, sizeof synth);
+    synth.command = (char *)ml->verb;
+    synth.params[0] = ml->target;
+    synth.params[1] = joined;
+    synth.nparams = 2;
+    g_ml = ml;
+    send_msg(srv, cl, &synth, ml->verb, strcmp(ml->verb, "NOTICE") == 0);
+    g_ml = NULL;
+    free(ml);
+}
 void cmd_tagmsg(server_t *srv, client_t *cl, irc_message_t *msg) { send_msg(srv, cl, msg, "TAGMSG", 1); }
 
 static void whois_one(server_t *srv, client_t *cl, const char *nick) {
@@ -1074,4 +1238,49 @@ void cmd_accept(server_t *srv, client_t *cl, irc_message_t *msg) {
             }
         }
     }
+}
+
+/* --- MARKREAD (draft/read-marker) --------------------------------------------- */
+
+static void send_marker(client_t *to, const char *target, long long ms) {
+    char line[300], val[80], ts[40];
+    if (ms > 0) { irc_iso8601_from_ms(ts, sizeof ts, ms); snprintf(val, sizeof val, "timestamp=%s", ts); }
+    else snprintf(val, sizeof val, "timestamp=*");
+    const char *p[] = {target, val};
+    irc_build(line, sizeof line, NULL, 0, to->srv->cfg.server.name, "MARKREAD", p, 2, NULL);
+    client_send(to, line);
+}
+
+/* MARKREAD <target> [timestamp=<ISO>]: query or advance your read position in a channel/DM; every session of the
+ * same account that negotiated the cap is told, so clients stay in sync. */
+void cmd_markread(server_t *srv, client_t *cl, irc_message_t *msg) {
+    char line[300];
+    const char *target = msg->params[0];
+    if (!(cl->caps & CAP_READ_MARKER)) return;
+    if (!cl->account[0]) {
+        const char *p[] = {"MARKREAD", "ACCOUNT_REQUIRED", target};
+        irc_build(line, sizeof line, NULL, 0, srv->cfg.server.name, "FAIL", p, 3, "You must be logged in to use read markers");
+        client_send(cl, line);
+        return;
+    }
+    int is_chan = target[0] == '#';
+    channel_t *chan = is_chan ? server_find_channel(srv, target) : NULL;
+    if (is_chan ? (!chan || !channel_find_member(chan, cl)) : !irc_valid_nick(target, NICKLEN - 1)) {
+        const char *p[] = {"MARKREAD", "INVALID_PARAMS", target};
+        irc_build(line, sizeof line, NULL, 0, srv->cfg.server.name, "FAIL", p, 3, "Invalid target");
+        client_send(cl, line);
+        return;
+    }
+    if (msg->nparams < 2) { send_marker(cl, is_chan ? chan->name : target, server_marker_get(srv, cl->account, target)); return; }
+    long long ms = strncmp(msg->params[1], "timestamp=", 10) == 0 ? irc_parse_iso8601_ms(msg->params[1] + 10) : -1;
+    if (ms < 0) {
+        const char *p[] = {"MARKREAD", "INVALID_PARAMS", msg->params[1]};
+        irc_build(line, sizeof line, NULL, 0, srv->cfg.server.name, "FAIL", p, 3, "Invalid timestamp");
+        client_send(cl, line);
+        return;
+    }
+    long long stored = server_marker_set(srv, cl->account, target, ms);
+    for (client_t *c = srv->all_clients; c; c = c->all_next)
+        if (c->fd >= 0 && !c->quitting && (c->caps & CAP_READ_MARKER) && c->account[0] && strcasecmp(c->account, cl->account) == 0)
+            send_marker(c, is_chan ? chan->name : target, stored);
 }

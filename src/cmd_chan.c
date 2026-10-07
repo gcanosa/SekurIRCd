@@ -90,6 +90,15 @@ static void announce_join(channel_t *chan, client_t *cl) {
 
 /* Topic + (unless draft/no-implicit-names) the member list: what a client gets right after joining. */
 static void send_join_burst(client_t *cl, channel_t *chan) {
+    if ((cl->caps & CAP_READ_MARKER) && cl->account[0]) { /* draft/read-marker: where this account stopped reading here */
+        long long ms = server_marker_get(cl->srv, cl->account, chan->name);
+        char line[300], val[80], ts[40];
+        if (ms > 0) { irc_iso8601_from_ms(ts, sizeof ts, ms); snprintf(val, sizeof val, "timestamp=%s", ts); }
+        else snprintf(val, sizeof val, "timestamp=*");
+        const char *p[] = {chan->name, val};
+        irc_build(line, sizeof line, NULL, 0, cl->srv->cfg.server.name, "MARKREAD", p, 2, NULL);
+        client_send(cl, line);
+    }
     if (chan->topic[0]) {
         const char *pt[] = {chan->name};
         client_reply(cl, N_TOPIC, pt, 1, chan->topic);
