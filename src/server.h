@@ -53,6 +53,11 @@ typedef struct server {
     int history_dirty;
     time_t history_last_save;
     struct marker *markers;           /* draft/read-marker: account+target -> last-read time (ms) */
+    struct netserver *servers;        /* netsync: every server on the network by SID (incl. ourselves) */
+    struct netserver *self_srv;
+    struct client *by_uid;            /* netsync: every user (local and remote) by UID */
+    unsigned long uid_counter;
+    struct { time_t next; double backoff; } dial[CFG_MAX_LINK_PEERS]; /* per dial-out peer reconnect state */
     int class_count[CFG_MAX_CLASSES]; /* live connections per [[classes]] entry */
     int n_watchers;        /* clients with a non-empty MONITOR/WATCH list */
     char msgid_prefix[17]; /* random per run, so msgids stay unique across restarts */

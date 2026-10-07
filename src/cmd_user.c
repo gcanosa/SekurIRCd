@@ -190,6 +190,7 @@ static void flood_kick(server_t *srv, channel_t *chan, client_t *victim) {
     const char *p[] = {chan->name, victim->nick};
     irc_build(line, sizeof line, NULL, 0, srv->cfg.server.name, "KICK", p, 2, "Channel flood (+f)");
     server_broadcast_channel(chan, line, NULL); /* the victim is still a member, so they see it too */
+    netsync_chan_kick(srv, chan, NULL, victim, "Channel flood (+f)");
     channel_remove_member(chan, victim);
     server_detach_membership(victim, chan);
     server_maybe_drop_channel(srv, chan); /* chan may be freed -- don't touch it after this */
@@ -225,6 +226,74 @@ static void censor_text(const server_t *srv, char *text) {
         if (wl == 0) continue;
         for (char *p = text; (p = find_nocase(p, w)) != NULL; p += wl) memset(p, '*', wl);
     }
+}
+
+/* msgid + the sender's client-only tags, as they travel between servers. */
+static int wire_tags(const msg_extra_t *x, irc_tag_t *out) {
+    int n = 0;
+    out[n++] = (irc_tag_t){"msgid", x->msgid};
+    for (int i = 0; i < x->nct; i++) out[n++] = x->ct[i];
+    return n;
+}
+
+/* Where a refusal/notice for the SENDER goes: straight to a local sender, or over the link for one on another server. */
+static void sender_reply(client_t *from, const char *code, const char **params, int np, const char *text) {
+    if (!from->remote) { client_reply(from, code, params, np, text); return; }
+    const char *all[IRC_MAX_PARAMS];
+    int n = 0;
+    all[n++] = from->nick;
+    for (int i = 0; i < np && n < IRC_MAX_PARAMS; i++) all[n++] = params[i];
+    char line[600];
+    irc_build(line, sizeof line, NULL, 0, from->srv->cfg.server.name, code, all, n, text);
+    netsync_push(from->srv, from, line);
+}
+
+/* The recipient-side checks for a private message to the LOCAL user `dst` (silence, +d/+R/+D/+g, away notice). Returns 1 if
+ * it should be delivered. Used for local senders and for messages arriving from other servers alike. */
+static int pm_target_ok(client_t *cl, client_t *dst, const char *textbuf, int is_notice) {
+    if (client_is_silencing(dst, cl)) return 0; /* dropped without telling the sender */
+    if ((dst->umodes & UMODE_D) && is_blocked_ctcp(textbuf)) return 0; /* +d: suppress CTCP */
+    if ((dst->umodes & UMODE_NOPM) && !(cl->umodes & UMODE_O) && cl != dst) {
+        const char *pe[] = {dst->nick};
+        if (!is_notice) sender_reply(cl, N_NONONREG, pe, 1, "is not accepting private messages");
+        return 0;
+    }
+    if ((dst->umodes & UMODE_REGONLY) && !cl->account[0] && !(cl->umodes & UMODE_O) && cl != dst) {
+        const char *pe[] = {dst->nick};
+        if (!is_notice) sender_reply(cl, N_NONONREG, pe, 1, "is only accepting messages from registered users");
+        return 0;
+    }
+    if ((dst->umodes & UMODE_G) && cl != dst && !(cl->umodes & UMODE_O) && !cl->is_service) {
+        char scf[NICKLEN];
+        irc_casefold(scf, sizeof scf, cl->nick);
+        int allowed = 0;
+        for (int ai = 0; ai < dst->n_accept && !allowed; ai++) {
+            if (dst->accept[ai].account[0]) allowed = cl->account[0] && strcasecmp(dst->accept[ai].account, cl->account) == 0;
+            else if (dst->accept[ai].conn_id) allowed = dst->accept[ai].conn_id == cl->conn_id;
+            else allowed = strcmp(dst->accept[ai].nick, scf) == 0; /* nobody was on that nick when it was added */
+        }
+        if (!allowed) {
+            if (!is_notice) { /* caller-ID: tell both sides once in a while, deliver nothing */
+                const char *pe[] = {dst->nick};
+                sender_reply(cl, N_TARGUMODEG, pe, 1, "is in +g mode (server-side ignore).");
+                time_t now = time(NULL);
+                if (now - dst->last_cid_notice >= 60) {
+                    dst->last_cid_notice = now;
+                    char who[320];
+                    snprintf(who, sizeof who, "%s!%s@%s", cl->nick, cl->user, cl->host);
+                    const char *pw[] = {who};
+                    client_reply(dst, N_UMODEGMSG, pw, 1, "is messaging you, and you are umode +g.");
+                    sender_reply(cl, N_TARGNOTIFY, pe, 1, "has been informed that you messaged them.");
+                }
+            }
+            return 0;
+        }
+    }
+    if (!is_notice && dst->is_away) {
+        const char *pa[] = {dst->nick};
+        sender_reply(cl, N_AWAY, pa, 1, dst->away);
+    }
+    return 1;
 }
 
 static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char *verb, int is_notice) {
@@ -340,6 +409,7 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
                 if ((chan->modes & CMODE_AUDITORIUM) && m && !channel_member_visible(chan, m, mm)) continue;
                 if (channel_rank_level(mm->rank) >= min_level) deliver(mm->client, cl, lines, &x);
             }
+            { irc_tag_t wt[1 + MAX_CLIENT_TAGS]; int nwt = wire_tags(&x, wt); netsync_message(srv, cl, verb, target, NULL, is_tagmsg ? NULL : outtext, wt, nwt); }
             return; /* STATUSMSG has no echo-message in upstream either */
         }
 
@@ -349,6 +419,7 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
             if ((chan->modes & CMODE_AUDITORIUM) && m && !channel_member_visible(chan, m, mm)) continue;
             deliver(mm->client, cl, lines, &x);
         }
+        { irc_tag_t wt[1 + MAX_CLIENT_TAGS]; int nwt = wire_tags(&x, wt); netsync_message(srv, cl, verb, target, NULL, is_tagmsg ? NULL : outtext, wt, nwt); }
         if (!is_tagmsg && srv->cfg.messages.history_size > 0) {
             hist_entry_t h;
             memset(&h, 0, sizeof h);
@@ -383,50 +454,15 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
             if (!is_notice) err_no_such_nick(cl, target);
             return;
         }
-        if (client_is_silencing(dst, cl)) return; /* dropped without telling the sender */
-        if ((dst->umodes & UMODE_D) && is_blocked_ctcp(textbuf)) return; /* +d: suppress CTCP */
-        if ((dst->umodes & UMODE_NOPM) && !(cl->umodes & UMODE_O) && cl != dst) {
-            const char *pe[] = {dst->nick};
-            if (!is_notice) client_reply(cl, N_NONONREG, pe, 1, "is not accepting private messages");
-            return;
-        }
-        if ((dst->umodes & UMODE_REGONLY) && !cl->account[0] && !(cl->umodes & UMODE_O) && cl != dst) {
-            const char *pe[] = {dst->nick};
-            if (!is_notice) client_reply(cl, N_NONONREG, pe, 1, "is only accepting messages from registered users");
-            return;
-        }
-        if ((dst->umodes & UMODE_G) && cl != dst && !(cl->umodes & UMODE_O) && !cl->is_service) {
-            char scf[NICKLEN];
-            irc_casefold(scf, sizeof scf, cl->nick);
-            int allowed = 0;
-            for (int ai = 0; ai < dst->n_accept && !allowed; ai++) {
-                if (dst->accept[ai].account[0]) allowed = cl->account[0] && strcasecmp(dst->accept[ai].account, cl->account) == 0;
-                else if (dst->accept[ai].conn_id) allowed = dst->accept[ai].conn_id == cl->conn_id;
-                else allowed = strcmp(dst->accept[ai].nick, scf) == 0; /* nobody was on that nick when it was added */
-            }
-            if (!allowed) {
-                if (!is_notice) { /* caller-ID: tell both sides once in a while, deliver nothing */
-                    const char *pe[] = {dst->nick};
-                    client_reply(cl, N_TARGUMODEG, pe, 1, "is in +g mode (server-side ignore).");
-                    time_t now = time(NULL);
-                    if (now - dst->last_cid_notice >= 60) {
-                        dst->last_cid_notice = now;
-                        char who[320];
-                        snprintf(who, sizeof who, "%s!%s@%s", cl->nick, cl->user, cl->host);
-                        const char *pw[] = {who};
-                        client_reply(dst, N_UMODEGMSG, pw, 1, "is messaging you, and you are umode +g.");
-                        client_reply(cl, N_TARGNOTIFY, pe, 1, "has been informed that you messaged them.");
-                    }
-                }
-                return;
-            }
-        }
-        if (!is_notice && dst->is_away) {
-            const char *pa[] = {dst->nick};
-            client_reply(cl, N_AWAY, pa, 1, dst->away);
-        }
+        if (!dst->remote && !pm_target_ok(cl, dst, textbuf, is_notice)) return;
         build_lines(lines, cl, prefix, verb, p, is_tagmsg ? NULL : textbuf, &x);
-        deliver(dst, cl, lines, &x);
+        if (dst->remote) { /* on another server: it runs the recipient-side checks and delivers */
+            irc_tag_t wt[1 + MAX_CLIENT_TAGS];
+            int nwt = wire_tags(&x, wt);
+            netsync_message(srv, cl, verb, target, dst, is_tagmsg ? NULL : textbuf, wt, nwt);
+        } else {
+            deliver(dst, cl, lines, &x);
+        }
         delivered = 1;
         /* Private-message history, only between two logged-in accounts (so each side can ask for it by account). */
         if (!is_tagmsg && srv->cfg.messages.history_size > 0 && srv->cfg.messages.history_dm &&
@@ -548,8 +584,8 @@ static void whois_one(server_t *srv, client_t *cl, const char *nick) {
     const char *p1[] = {target->nick, target->user, target->host};
     client_reply(cl, N_WHOISUSER, p1, 3, target->realname);
 
-    const char *p2[] = {target->nick, srv->cfg.server.name};
-    client_reply(cl, N_WHOISSERVER, p2, 2, srv->cfg.server.network);
+    const char *p2[] = {target->nick, netsync_server_name_of(srv, target)};
+    client_reply(cl, N_WHOISSERVER, p2, 2, target->remote && target->nserver ? target->nserver->desc : srv->cfg.server.network);
 
     int self_or_oper = (cl == target) || (cl->umodes & UMODE_O);
     if ((target->umodes & UMODE_O) && (!(target->umodes & UMODE_H) || self_or_oper)) {
@@ -600,7 +636,7 @@ static void whois_one(server_t *srv, client_t *cl, const char *nick) {
         client_reply(cl, N_WHOISCHANNELS, p4, 1, chanbuf);
     }
 
-    if (!(target->umodes & UMODE_HIDEIDLE) || self_or_oper) {
+    if (!target->remote && (!(target->umodes & UMODE_HIDEIDLE) || self_or_oper)) { /* idle time lives on the user's own server */
         long idle = (long)difftime(time(NULL), target->last_activity);
         char idlebuf[32], signonbuf[32];
         snprintf(idlebuf, sizeof idlebuf, "%ld", idle);
@@ -633,7 +669,7 @@ static const char *whox_value(char letter, client_t *u, channel_t *chan, client_
     case 'u': return u->user;
     case 'i': return ((cl->umodes & UMODE_O) || u == cl) ? u->ip : "255.255.255.255";
     case 'h': return u->host;
-    case 's': return cl->srv->cfg.server.name;
+    case 's': return netsync_server_name_of(cl->srv, u);
     case 'n': return u->nick;
     case 'f': {
         int multi = cl->caps & CAP_MULTI_PREFIX;
@@ -679,7 +715,7 @@ static void send_who_classic(client_t *cl, client_t *u, channel_t *chan, int mul
     who_rank_flags(m ? m->rank : 0, multi, rankch);
     char flags[10];
     snprintf(flags, sizeof flags, "%s%s%s%s", u->is_away ? "G" : "H", visible_oper(u, cl) ? "*" : "", (u->umodes & UMODE_B) ? "B" : "", rankch);
-    const char *p[] = {chan ? chan->name : "*", u->user, u->host, cl->srv->cfg.server.name, u->nick, flags};
+    const char *p[] = {chan ? chan->name : "*", u->user, u->host, netsync_server_name_of(cl->srv, u), u->nick, flags};
     char trailing[600];
     snprintf(trailing, sizeof trailing, "0 %s", u->realname);
     client_reply(cl, N_WHOREPLY, p, 6, trailing);
@@ -782,6 +818,7 @@ void cmd_away(server_t *srv, client_t *cl, irc_message_t *msg) {
         client_reply(cl, N_NOWAWAY, NULL, 0, "You have been marked as being away");
     }
     broadcast_away(srv, cl);
+    netsync_user_away(srv, cl);
 }
 
 void cmd_whowas(server_t *srv, client_t *cl, irc_message_t *msg) {
@@ -817,6 +854,7 @@ void cmd_setname(server_t *srv, client_t *cl, irc_message_t *msg) {
     if (cl->caps & CAP_SETNAME) client_send(cl, line);
     server_send_common_channels(srv, cl, line, CAP_SETNAME);
     server_monitor_extend(srv, cl, line, CAP_SETNAME);
+    netsync_user_setname(srv, cl);
 }
 
 /* Registered user by nick -- a connection that has only sent NICK must not
@@ -1095,7 +1133,7 @@ void cmd_glob(server_t *srv, client_t *cl, irc_message_t *msg) {
         }
         char flags[8];
         snprintf(flags, sizeof flags, "%s%s%s", u->is_away ? "G" : "H", visible_oper(u, cl) ? "*" : "", (u->umodes & UMODE_B) ? "B" : "");
-        const char *p[] = {"*", u->user, u->host, srv->cfg.server.name, u->nick, flags};
+        const char *p[] = {"*", u->user, u->host, netsync_server_name_of(srv, u), u->nick, flags};
         char trailing[600];
         snprintf(trailing, sizeof trailing, "0 %s", u->realname);
         client_reply(cl, N_WHOREPLY, p, 6, trailing);
@@ -1393,4 +1431,84 @@ void cmd_markread(server_t *srv, client_t *cl, irc_message_t *msg) {
     for (client_t *c = srv->all_clients; c; c = c->all_next)
         if (c->fd >= 0 && !c->quitting && (c->caps & CAP_READ_MARKER) && c->account[0] && strcasecmp(c->account, cl->account) == 0)
             send_marker(c, is_chan ? chan->name : target, stored);
+}
+
+/* A message from a user on another server, for our local users: PM to a local user (UID target) or a channel (maybe
+ * @#chan). The origin server already ran the sender-side checks and any +S/+G text rewriting; we run the recipient-side
+ * ones (PM) and fan it out to OUR members only. */
+void cmd_deliver_remote_message(server_t *srv, client_t *from, const char *verb, const char *target, const char *text,
+                                const irc_message_t *tagsrc) {
+    int is_tagmsg = strcmp(verb, "TAGMSG") == 0;
+    int is_notice = is_tagmsg || strcmp(verb, "NOTICE") == 0;
+    msg_extra_t x = {.tagmsg = is_tagmsg};
+    server_next_msgid(srv, x.msgid, sizeof x.msgid);
+    for (int i = 0; tagsrc && i < tagsrc->ntags; i++)
+        if (strcmp(tagsrc->tags[i].key, "msgid") == 0) snprintf(x.msgid, sizeof x.msgid, "%s", tagsrc->tags[i].val);
+    if (tagsrc) collect_client_tags(tagsrc, &x);
+    char prefix[320];
+    client_prefix(from, prefix, sizeof prefix);
+    char lines[4][LINE_SZ];
+
+    if (strlen(target) == UID_LEN && !strchr(target, '#')) { /* a private message to one of ours */
+        client_t *dst = netsync_find_uid(srv, target);
+        if (!dst || dst->remote || !dst->registered) return;
+        if (!pm_target_ok(from, dst, text, is_notice)) return;
+        const char *p[] = {dst->nick};
+        build_lines(lines, from, prefix, verb, p, is_tagmsg ? NULL : text, &x);
+        deliver(dst, from, lines, &x);
+        if (!is_tagmsg && srv->cfg.messages.history_size > 0 && srv->cfg.messages.history_dm && from->account[0] && dst->account[0]) {
+            hist_entry_t h;
+            memset(&h, 0, sizeof h);
+            struct timespec ts;
+            clock_gettime(CLOCK_REALTIME, &ts);
+            snprintf(h.msgid, sizeof h.msgid, "%s", x.msgid);
+            h.ms = (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+            snprintf(h.sender, sizeof h.sender, "%s", prefix);
+            snprintf(h.account, sizeof h.account, "%s", from->account);
+            snprintf(h.verb, sizeof h.verb, "%s", verb);
+            snprintf(h.target, sizeof h.target, "%s", dst->nick);
+            snprintf(h.text, sizeof h.text, "%s", text);
+            char hkey[160];
+            history_key_dm(hkey, sizeof hkey, from->account, dst->account);
+            history_add(srv, hkey, srv->cfg.messages.history_size, &h);
+        }
+        return;
+    }
+
+    char status_prefix = '\0';
+    const char *chan_target = target;
+    if ((target[0] == '~' || target[0] == '&' || target[0] == '@' || target[0] == '%' || target[0] == '+') && target[1] == '#') {
+        status_prefix = target[0];
+        chan_target = target + 1;
+    }
+    channel_t *chan = server_find_channel(srv, chan_target);
+    if (!chan) return;
+    member_t *m = channel_find_member(chan, from);
+    if (m && m->hidden) channel_reveal_member(chan, m); /* +D: speaking reveals them here too */
+    const char *p[] = {target};
+    build_lines(lines, from, prefix, verb, p, is_tagmsg ? NULL : text, &x);
+    int min_level = !status_prefix ? 0 : (status_prefix == '~') ? 5 : (status_prefix == '&') ? 4 : (status_prefix == '@') ? 3 : (status_prefix == '%') ? 2 : 1;
+    member_t *mm, *tmp;
+    HASH_ITER(hh, chan->members, mm, tmp) {
+        if (mm->client->remote || mm->client == from) continue;
+        if ((chan->modes & CMODE_AUDITORIUM) && m && !channel_member_visible(chan, m, mm)) continue;
+        if (min_level && channel_rank_level(mm->rank) < min_level) continue;
+        deliver(mm->client, from, lines, &x);
+    }
+    if (!is_tagmsg && !status_prefix && srv->cfg.messages.history_size > 0) {
+        hist_entry_t h;
+        memset(&h, 0, sizeof h);
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        snprintf(h.msgid, sizeof h.msgid, "%s", x.msgid);
+        h.ms = (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+        snprintf(h.sender, sizeof h.sender, "%s", prefix);
+        snprintf(h.account, sizeof h.account, "%s", from->account);
+        snprintf(h.verb, sizeof h.verb, "%s", verb);
+        snprintf(h.target, sizeof h.target, "%s", chan->name);
+        snprintf(h.text, sizeof h.text, "%s", text);
+        char hkey[160];
+        history_key_channel(hkey, sizeof hkey, chan->name);
+        history_add(srv, hkey, srv->cfg.messages.history_size, &h);
+    }
 }

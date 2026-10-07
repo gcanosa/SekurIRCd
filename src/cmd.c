@@ -203,6 +203,7 @@ void cmd_send_welcome_if_ready(server_t *srv, client_t *cl) {
     server_notify_opers(srv, snote);
 
     server_send_welcome(srv, cl);
+    netsync_introduce_user(srv, cl); /* the rest of the network learns about them */
     nick_enforce_check(srv, cl);
     server_monitor_notify(srv, cl, 1);
     server_watch_notify(srv, cl, 1);

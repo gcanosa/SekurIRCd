@@ -91,6 +91,7 @@ void cmd_nick(server_t *srv, client_t *cl, irc_message_t *msg) {
         client_send(cl, line);
         server_send_common_channels(srv, cl, line, 0);
         snprintf(cl->nick, sizeof cl->nick, "%s", newnick);
+        netsync_user_nick(srv, cl);
         return;
     }
 
@@ -122,6 +123,7 @@ void cmd_nick(server_t *srv, client_t *cl, irc_message_t *msg) {
     server_add_user(srv, cl);
     server_monitor_notify(srv, cl, 1);
     server_watch_notify(srv, cl, 1);
+    netsync_user_nick(srv, cl);
     nick_enforce_check(srv, cl);
 }
 
@@ -1067,8 +1069,8 @@ void nickserv_message(server_t *srv, client_t *cl, const char *text) {
                  strcasecmp(cl->account, t->account) != 0)
             ns_say(srv, cl, "You do not own that nickname");
         else {
-            snprintf(t->quit_reason, sizeof t->quit_reason, "Killed (GHOST command used by %s)", cl->nick);
-            t->quitting = 1;
+            if (t->remote) netsync_kill(srv, cl, t, "GHOST command used"); /* its server disconnects it */
+            else { snprintf(t->quit_reason, sizeof t->quit_reason, "Killed (GHOST command used by %s)", cl->nick); t->quitting = 1; }
             ns_say(srv, cl, "Ghost session disconnected");
             log_info("nickserv", "%s ghosted %s", cl->nick, a);
         }

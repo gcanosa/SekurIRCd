@@ -272,3 +272,77 @@ class ChanServ:
 
     def __exit__(self, *a):
         self.stop()
+
+
+class Network:
+    """A tree of linked ircd processes. net.add("hub") ... net.add("leaf", parent="hub"); net.start()."""
+
+    def __init__(self, cfg=None):
+        self.servers = {}
+        self.parents = {}
+        self.order = []
+        self.cfg = cfg or {}
+        self.password = "linkpw"
+
+    def add(self, name, parent=None, cfg=None):
+        sid = f"{len(self.order) + 1}{chr(65 + len(self.order))}{chr(66 + len(self.order))}"
+        merged = {k: dict(v) if isinstance(v, dict) else list(v) for k, v in self.cfg.items()}
+        for sec, body in (cfg or {}).items():
+            if isinstance(body, list):
+                merged[sec] = body
+            else:
+                merged.setdefault(sec, {}).update(body)
+        s = Server(name=f"{name}.test.net", cfg=merged, sid=sid)
+        s.cfg["links"] = {"enabled": True, "mode": "both", "bind": "127.0.0.1", "port": s.link_port, "reconnect_delay": 1.0,
+                          "reconnect_delay_max": 2.0, "ping_interval": 60.0, "ping_timeout": 180.0}
+        s.cfg["links.peers"] = []
+        self.servers[name] = s
+        self.parents[name] = parent
+        self.order.append(name)
+        if parent:
+            p = self.servers[parent]
+            p.cfg["links.peers"].append({"name": s.name, "password": self.password})
+            s.cfg["links.peers"].append({"name": p.name, "password": self.password, "host": "127.0.0.1", "port": p.link_port})
+        return s
+
+    def __getitem__(self, name):
+        return self.servers[name]
+
+    def start(self, wait=True):
+        for name in self.order:
+            self.servers[name].start()
+        if wait:
+            self.wait_converged()
+        return self
+
+    def wait_converged(self, timeout=10):
+        """Until every server lists every server in LINKS."""
+        want = len(self.order)
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            ok = True
+            for s in self.servers.values():
+                probe = Client(s.port, "probe", register=True)
+                lines = probe.say("LINKS", 0.4)
+                probe.send("QUIT")
+                probe.close()
+                if sum(" 364 " in l for l in lines) < want:
+                    ok = False
+                    break
+            if ok:
+                return
+            time.sleep(0.3)
+        raise AssertionError("network did not converge: " + str({n: s.output()[-300:] for n, s in self.servers.items()}))
+
+    def stop(self):
+        for s in self.servers.values():
+            s.stop()
+
+    def __enter__(self):
+        return self.start()
+
+    def __exit__(self, *a):
+        self.stop()
+
+    def client(self, server, nick, **kw):
+        return self.servers[server].client(nick, **kw)

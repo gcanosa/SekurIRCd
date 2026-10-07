@@ -58,7 +58,7 @@ static void send_names(client_t *cl, channel_t *chan) {
 
 static void send_join_burst(client_t *cl, channel_t *chan);
 
-static void announce_join(channel_t *chan, client_t *cl) {
+void cmd_announce_join(channel_t *chan, client_t *cl) {
     char prefix[320];
     client_prefix(cl, prefix, sizeof prefix);
 
@@ -158,7 +158,8 @@ void cmd_force_join(server_t *srv, client_t *cl, const char *chan_name) {
         server_maybe_drop_channel(srv, chan);
         return;
     }
-    announce_join(chan, cl);
+    cmd_announce_join(chan, cl);
+    netsync_chan_join(srv, chan, cl, is_new);
 }
 
 static void do_join_one(server_t *srv, client_t *cl, const char *chan_name, const char *key);
@@ -274,7 +275,8 @@ static void do_join_one(server_t *srv, client_t *cl, const char *chan_name, cons
         err_no_such_channel(cl, chan_name);
         return;
     }
-    announce_join(chan, cl);
+    cmd_announce_join(chan, cl);
+    netsync_chan_join(srv, chan, cl, is_new);
 }
 
 void cmd_join(server_t *srv, client_t *cl, irc_message_t *msg) {
@@ -314,6 +316,7 @@ void cmd_part(server_t *srv, client_t *cl, irc_message_t *msg) {
             char line[510];
             const char *p[] = {chan->name};
             irc_build(line, sizeof line, NULL, 0, prefix, "PART", p, 1, reason);
+            netsync_chan_part(srv, chan, cl, reason);
             { /* only members who could see them in the channel see them leave (+D hidden, +u audience) */
                 member_t *pm, *ptmp;
                 HASH_ITER(hh, chan->members, pm, ptmp)
@@ -360,7 +363,19 @@ void cmd_rename(server_t *srv, client_t *cl, irc_message_t *msg) {
     }
     char old_display[CHAN_NAMELEN];
     snprintf(old_display, sizeof old_display, "%s", chan->name);
+    cmd_channel_rename_apply(srv, chan, cl, newname, reason);
+    netsync_chan_rename(srv, chan, cl, old_display, reason);
+    log_info("chan", "%s renamed %s to %s", cl->nick, old_display, newname);
+}
 
+/* The rename itself, shared by the local RENAME command and one arriving from another server: rekey the channel and
+ * tell its LOCAL members (RENAME for clients with the cap, a part+join for the rest). */
+void cmd_channel_rename_apply(server_t *srv, channel_t *chan, client_t *by, const char *newname, const char *reason) {
+    char ncf[CHAN_NAMELEN];
+    irc_casefold(ncf, sizeof ncf, newname);
+    char old_display[CHAN_NAMELEN];
+    snprintf(old_display, sizeof old_display, "%s", chan->name);
+    client_t *cl = by;
     char prefix[320], rename_line[500];
     client_prefix(cl, prefix, sizeof prefix);
     const char *rp[] = {old_display, newname};
@@ -373,6 +388,7 @@ void cmd_rename(server_t *srv, client_t *cl, irc_message_t *msg) {
 
     member_t *m, *tmp;
     HASH_ITER(hh, chan->members, m, tmp) {
+        if (m->client->remote) continue;
         if (m->client->caps & CAP_CHANNEL_RENAME) { client_send(m->client, rename_line); continue; }
         char mp[320], part[500], join[400];
         client_prefix(m->client, mp, sizeof mp);
@@ -384,7 +400,6 @@ void cmd_rename(server_t *srv, client_t *cl, irc_message_t *msg) {
         client_send(m->client, join);
         send_join_burst(m->client, chan);
     }
-    log_info("chan", "%s renamed %s to %s", cl->nick, old_display, newname);
 }
 
 /* --- SAJOIN / SAPART (oper-only overrides) ---------------------------------- */
@@ -392,6 +407,7 @@ void cmd_rename(server_t *srv, client_t *cl, irc_message_t *msg) {
 void cmd_sajoin(server_t *srv, client_t *cl, irc_message_t *msg) {
     client_t *target = server_find_user(srv, msg->params[0]);
     if (!target) { err_no_such_nick(cl, msg->params[0]); return; }
+    if (target->remote) { notice_self(srv, cl, "That user is on another server -- SAJOIN works on local users only"); return; }
     char joined[600] = "";
     char chanlist[600];
     snprintf(chanlist, sizeof chanlist, "%s", msg->params[1]);
@@ -418,6 +434,7 @@ void cmd_sajoin(server_t *srv, client_t *cl, irc_message_t *msg) {
 void cmd_sapart(server_t *srv, client_t *cl, irc_message_t *msg) {
     client_t *target = server_find_user(srv, msg->params[0]);
     if (!target) { err_no_such_nick(cl, msg->params[0]); return; }
+    if (target->remote) { notice_self(srv, cl, "That user is on another server -- SAPART works on local users only"); return; }
     const char *reason = msg->nparams > 2 ? msg->params[2] : cl->nick;
     char parted[600] = "";
     char chanlist[600];
@@ -432,6 +449,7 @@ void cmd_sapart(server_t *srv, client_t *cl, irc_message_t *msg) {
         const char *p[] = {chan->name};
         irc_build(line, sizeof line, NULL, 0, prefix, "PART", p, 1, reason);
         server_broadcast_channel(chan, line, NULL);
+        netsync_chan_part(srv, chan, target, reason);
         char chan_name_buf[CHAN_NAMELEN];
         snprintf(chan_name_buf, sizeof chan_name_buf, "%s", chan->name); /* chan may be freed below */
         channel_remove_member(chan, target);
@@ -493,6 +511,7 @@ void cmd_topic(server_t *srv, client_t *cl, irc_message_t *msg) {
     const char *p[] = {chan->name};
     irc_build(line, sizeof line, NULL, 0, prefix, "TOPIC", p, 1, chan->topic);
     server_broadcast_channel(chan, line, NULL);
+    netsync_chan_topic(srv, chan, cl, chan->topic);
 }
 
 void cmd_names(server_t *srv, client_t *cl, irc_message_t *msg) {
@@ -591,11 +610,15 @@ void cmd_list(server_t *srv, client_t *cl, irc_message_t *msg) {
 
 void cmd_links(server_t *srv, client_t *cl, irc_message_t *msg) {
     (void)msg;
-    const char *p0[] = {srv->cfg.server.name, srv->cfg.server.name};
-    char m0[64]; snprintf(m0, sizeof m0, "0 %s", srv->cfg.server.name);
-    client_reply(cl, N_LINKS, p0, 2, m0);
-    for (link_conn_t *lc = srv->links; lc; lc = lc->next) {
-        if (!lc->authenticated) continue;
+    netserver_t *s, *tmp;
+    HASH_ITER(hh, srv->servers, s, tmp) {
+        const char *p[] = {s->name, s->uplink ? s->uplink->name : srv->cfg.server.name};
+        char m[200];
+        snprintf(m, sizeof m, "%d %s", s->hop, s->desc);
+        client_reply(cl, N_LINKS, p, 2, m);
+    }
+    for (link_conn_t *lc = srv->links; lc; lc = lc->next) { /* plain (service) links aren't in the server table */
+        if (!lc->authenticated || lc->is_server) continue;
         const char *p[] = {lc->peer_name, srv->cfg.server.name};
         char m[128]; snprintf(m, sizeof m, "1 %s", lc->peer_name);
         client_reply(cl, N_LINKS, p, 2, m);
@@ -604,12 +627,23 @@ void cmd_links(server_t *srv, client_t *cl, irc_message_t *msg) {
     client_reply(cl, N_ENDOFLINKS, pe, 1, "End of /LINKS list.");
 }
 
+/* /MAP as a tree: each server indented under the one it hangs off, with its user count. */
+static void map_subtree(server_t *srv, client_t *cl, const netserver_t *node, int depth) {
+    char m[200], pad[64] = "";
+    for (int i = 0; i < depth && i < 20; i++) strncat(pad, i == depth - 1 ? "|-- " : "    ", sizeof pad - strlen(pad) - 1);
+    snprintf(m, sizeof m, "%s%s (%d users)", pad, node->name, node->n_users);
+    client_reply(cl, N_MAP, NULL, 0, m);
+    netserver_t *s, *tmp;
+    HASH_ITER(hh, srv->servers, s, tmp)
+        if (s->uplink == node) map_subtree(srv, cl, s, depth + 1);
+}
+
 void cmd_map(server_t *srv, client_t *cl, irc_message_t *msg) {
     (void)msg;
-    client_reply(cl, N_MAP, NULL, 0, srv->cfg.server.name);
-    for (link_conn_t *lc = srv->links; lc; lc = lc->next) {
-        if (!lc->authenticated) continue;
-        char m[160]; snprintf(m, sizeof m, " |-- %s", lc->peer_name);
+    if (srv->self_srv) map_subtree(srv, cl, srv->self_srv, 0);
+    for (link_conn_t *lc = srv->links; lc; lc = lc->next) { /* service links */
+        if (!lc->authenticated || lc->is_server) continue;
+        char m[160]; snprintf(m, sizeof m, "|-- %s", lc->peer_name);
         client_reply(cl, N_MAP, NULL, 0, m);
     }
     client_reply(cl, N_MAPEND, NULL, 0, "End of /MAP");
@@ -668,6 +702,7 @@ void cmd_invite(server_t *srv, client_t *cl, irc_message_t *msg) {
     const char *pt[] = {target->nick};
     irc_build(line, sizeof line, NULL, 0, prefix, "INVITE", pt, 1, chan_name);
     client_send(target, line);
+    if (chan) netsync_invite(srv, cl, target, chan); /* other servers deliver it to a remote invitee and remember it for +i */
 
     /* IRCv3 invite-notify: every other op (not the inviter, not the
      * invitee -- they already got the INVITE above) that negotiated it. */
@@ -752,6 +787,7 @@ void cmd_kick(server_t *srv, client_t *cl, irc_message_t *msg) {
     const char *p[] = {chan->name, target->nick};
     irc_build(line, sizeof line, NULL, 0, prefix, "KICK", p, 2, reason);
     server_broadcast_channel(chan, line, NULL);
+    netsync_chan_kick(srv, chan, cl, target, reason);
 
     /* server_maybe_drop_channel frees chan once it's empty (e.g. the kicker
      * kicking themself from a channel they're alone in) -- log using the
@@ -766,7 +802,7 @@ void cmd_kick(server_t *srv, client_t *cl, irc_message_t *msg) {
 
 /* --- MODE --------------------------------------------------------------- */
 
-static void cmd_mode_user(client_t *cl, irc_message_t *msg, const char *target) {
+static void cmd_mode_user(server_t *srv, client_t *cl, irc_message_t *msg, const char *target) {
     char cf[NICKLEN];
     irc_casefold(cf, sizeof cf, target);
     if (strcmp(cf, cl->casefold_nick) != 0) {
@@ -824,6 +860,7 @@ static void cmd_mode_user(client_t *cl, irc_message_t *msg, const char *target) 
     const char *p2[] = {cl->nick, applied};
     irc_build(line, sizeof line, NULL, 0, prefix, "MODE", p2, 2, NULL);
     client_send(cl, line);
+    netsync_user_modes(srv, cl);
 }
 
 /* Shared by /MODE (is_full_op reflects the caller's real rank) and /SAMODE
@@ -1072,6 +1109,11 @@ void cmd_apply_channel_mode(server_t *srv, client_t *cl, channel_t *chan,
     char line[510];
     if (irc_build(line, sizeof line, NULL, 0, prefix, "MODE", outp, total, NULL) >= 0)
         server_broadcast_channel(chan, line, NULL);
+    { /* the rest of the network gets the same change (rank-mode arguments travel as UIDs) */
+        const char *wire_args[8];
+        for (int i = 0; i < n_outparams && i < 8; i++) wire_args[i] = outparams[i];
+        netsync_chan_mode(srv, chan, cl, outflags, wire_args, n_outparams < 8 ? n_outparams : 8);
+    }
     log_info("chan", "%s set %s %s", cl->nick, chan->name, outflags);
 }
 
@@ -1136,7 +1178,7 @@ static void cmd_mode_channel(server_t *srv, client_t *cl, irc_message_t *msg, co
 void cmd_mode(server_t *srv, client_t *cl, irc_message_t *msg) {
     const char *target = msg->params[0];
     if (target[0] == '#') cmd_mode_channel(srv, cl, msg, target);
-    else cmd_mode_user(cl, msg, target);
+    else cmd_mode_user(srv, cl, msg, target);
 }
 
 void cmd_samode(server_t *srv, client_t *cl, irc_message_t *msg) {

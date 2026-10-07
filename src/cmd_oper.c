@@ -71,6 +71,7 @@ static void finish_oper(server_t *srv, client_t *cl, const char *op_name, int pw
     irc_build(line, sizeof line, NULL, 0, prefix, "MODE", p2, 2, NULL);
     client_send(cl, line);
     client_reply(cl, N_YOUREOPER, NULL, 0, "You are now an IRC operator");
+    netsync_user_modes(srv, cl);
 
     server_send_oper_motd(srv, cl);
     if (srv->cfg.security.oper_auto_join[0]) cmd_force_join(srv, cl, srv->cfg.security.oper_auto_join);
@@ -149,6 +150,14 @@ void cmd_kill(server_t *srv, client_t *cl, irc_message_t *msg) {
     const char *reason = msg->nparams > 1 ? msg->params[msg->nparams - 1] : "No reason given";
     client_t *target = server_find_user(srv, target_nick);
     if (!target) { err_no_such_nick(cl, target_nick); return; }
+    if (target->remote && !target->is_service) { /* someone else's user: their server disconnects them */
+        netsync_kill(srv, cl, target, reason);
+        log_info("oper", "%s KILLed %s (on %s): %s", cl->nick, target->nick, netsync_server_name_of(srv, target), reason);
+        char snote[400];
+        snprintf(snote, sizeof snote, "Received KILL message for %s. From %s: %s", target->nick, cl->nick, reason);
+        server_notify_opers(srv, snote);
+        return;
+    }
     if (target->fd < 0) {
         /* A service pseudo-client isn't in net.c's teardown sweep -- marking
          * it quitting would just silently mute it forever. SQUIT its link. */
@@ -183,6 +192,7 @@ void cmd_wallops(server_t *srv, client_t *cl, irc_message_t *msg) {
     HASH_ITER(hh, srv->users, u, tmp) {
         if (u->umodes & UMODE_W) client_send(u, line);
     }
+    netsync_wallops(srv, cl, "WALLOPS", text);
 }
 
 /* GLOBOPS: like WALLOPS but only operators receive it. */
@@ -196,6 +206,7 @@ void cmd_globops(server_t *srv, client_t *cl, irc_message_t *msg) {
     HASH_ITER(hh, srv->users, u, tmp) {
         if (u->umodes & UMODE_O) client_send(u, line);
     }
+    netsync_wallops(srv, cl, "GLOBOPS", text);
 }
 
 /* LOCOPS: like GLOBOPS but only operators on THIS server (a linked network keeps it local). */
@@ -248,6 +259,7 @@ void cmd_testline(server_t *srv, client_t *cl, irc_message_t *msg) {
 void cmd_chgident(server_t *srv, client_t *cl, irc_message_t *msg) {
     client_t *target = server_find_user(srv, msg->params[0]);
     if (!target || !target->registered) { err_no_such_nick(cl, msg->params[0]); return; }
+    if (target->remote) { notice_self(srv, cl, "That user is on another server -- CHGIDENT works on local users only"); return; }
     const char *ident = msg->params[1];
     if (!irc_valid_user(ident, USERLEN - 1)) {
         char m[300]; snprintf(m, sizeof m, "Invalid ident: %s", ident);
@@ -286,6 +298,7 @@ int force_nick_change(server_t *srv, client_t *target, const char *newnick) {
     server_add_user(srv, target);
     server_monitor_notify(srv, target, 1);
     server_watch_notify(srv, target, 1);
+    netsync_user_nick(srv, target);
     return 0;
 }
 
@@ -293,6 +306,7 @@ int force_nick_change(server_t *srv, client_t *target, const char *newnick) {
 void cmd_sanick(server_t *srv, client_t *cl, irc_message_t *msg) {
     client_t *target = server_find_user(srv, msg->params[0]);
     if (!target || !target->registered || target->is_service) { err_no_such_nick(cl, msg->params[0]); return; }
+    if (target->remote) { notice_self(srv, cl, "That user is on another server -- SANICK works on local users only"); return; }
     const char *newnick = msg->params[1];
     char old_nick[NICKLEN];
     snprintf(old_nick, sizeof old_nick, "%s", target->nick);
@@ -420,6 +434,7 @@ static void broadcast_chghost(server_t *srv, client_t *cl, const char *old_prefi
     if (cl->caps & CAP_CHGHOST) client_send(cl, line);
     server_send_common_channels(srv, cl, line, CAP_CHGHOST);
     server_monitor_extend(srv, cl, line, CAP_CHGHOST);
+    netsync_user_chghost(srv, cl);
 }
 
 void cmd_vhost(server_t *srv, client_t *cl, irc_message_t *msg) {
@@ -464,6 +479,7 @@ void cmd_vhost(server_t *srv, client_t *cl, irc_message_t *msg) {
 void cmd_chghost(server_t *srv, client_t *cl, irc_message_t *msg) {
     client_t *target = server_find_user(srv, msg->params[0]);
     if (!target) { err_no_such_nick(cl, msg->params[0]); return; }
+    if (target->remote) { notice_self(srv, cl, "That user is on another server -- CHGHOST works on local users only"); return; }
     const char *new_host = msg->params[1];
     if (!irc_valid_host(new_host)) {
         char m[300]; snprintf(m, sizeof m, "Invalid hostname: %s", new_host);
@@ -563,6 +579,7 @@ static void line_common(server_t *srv, client_t *cl, irc_message_t *msg, const c
     }
     const char *reason = argi < msg->nparams ? msg->params[argi] : "No reason given";
     server_kline_add(srv, maskbuf, reason, cl->nick, line_type, duration);
+    if (line_type[0] == 'G') netsync_gline(srv, maskbuf, cl->nick, duration > 0 ? (long)time(NULL) + duration : 0, reason); /* G = network-wide */
 
     char m[400];
     if (duration) {
@@ -607,16 +624,21 @@ static void unline_typed(server_t *srv, client_t *cl, const char *mask, char typ
 void cmd_unshun(server_t *srv, client_t *cl, irc_message_t *msg) { unline_typed(srv, cl, msg->params[0], 'S'); }
 void cmd_uneline(server_t *srv, client_t *cl, irc_message_t *msg) { unline_typed(srv, cl, msg->params[0], 'E'); }
 void cmd_unkline(server_t *srv, client_t *cl, irc_message_t *msg) { unline_common(srv, cl, msg->params[0]); }
-void cmd_ungline(server_t *srv, client_t *cl, irc_message_t *msg) { unline_common(srv, cl, msg->params[0]); }
+void cmd_ungline(server_t *srv, client_t *cl, irc_message_t *msg) { unline_common(srv, cl, msg->params[0]); netsync_ungline(srv, msg->params[0]); }
 void cmd_unzline(server_t *srv, client_t *cl, irc_message_t *msg) { unline_common(srv, cl, msg->params[0]); }
 
 /* --- SQUIT (closes any link, hub or leaf side) / CONNECT (leaf-mode manual
  * dial, see link.c's link_connect_leaf). ------------------------------------ */
 
 void cmd_squit(server_t *srv, client_t *cl, irc_message_t *msg) {
-    for (link_conn_t *lc = srv->links; lc; lc = lc->next) {
+    const char *reason = msg->nparams > 1 ? msg->params[msg->nparams - 1] : "Requested";
+    if (netsync_find_name(srv, msg->params[0])) { /* a server on the network, near or far */
+        log_info("oper", "%s SQUIT %s: %s", cl->nick, msg->params[0], reason);
+        netsync_squit_command(srv, cl, msg->params[0], reason);
+        return;
+    }
+    for (link_conn_t *lc = srv->links; lc; lc = lc->next) { /* a plain (service) link */
         if (lc->closing || strcasecmp(lc->peer_name, msg->params[0]) != 0) continue;
-        const char *reason = msg->nparams > 1 ? msg->params[1] : "Requested";
         char m[300]; snprintf(m, sizeof m, "Closed link to %s (%s)", lc->peer_name, reason);
         notice_self(srv, cl, m);
         log_info("oper", "%s SQUIT %s: %s", cl->nick, lc->peer_name, reason);
@@ -628,20 +650,14 @@ void cmd_squit(server_t *srv, client_t *cl, irc_message_t *msg) {
 }
 
 void cmd_connect(server_t *srv, client_t *cl, irc_message_t *msg) {
-    (void)msg;
-    if (!srv->cfg.links.enabled || strcmp(srv->cfg.links.mode, "leaf") != 0) {
-        notice_self(srv, cl, "This server is not configured in leaf link mode");
+    if (!srv->cfg.links.enabled || strcmp(srv->cfg.links.mode, "hub") == 0) {
+        notice_self(srv, cl, "This server is not configured to dial out (links.mode is leaf or both)");
         return;
     }
-    if (srv->links) {
-        notice_self(srv, cl, "Already connected to an uplink");
-        return;
-    }
-    if (link_connect_leaf(srv) == 0) {
-        srv->leaf_backoff = srv->cfg.links.reconnect_delay;
-        notice_self(srv, cl, "Connected to uplink");
-        log_info("oper", "%s CONNECT: uplink established", cl->nick);
-    } else {
-        notice_self(srv, cl, "Could not connect to uplink (see server log)");
-    }
+    const char *only = msg->nparams > 0 ? msg->params[0] : NULL;
+    int up = link_dial_peers(srv, 1, only);
+    char m[200];
+    if (up) { snprintf(m, sizeof m, "Connected to %d peer(s)", up); log_info("oper", "%s CONNECT: %d link(s) established", cl->nick, up); }
+    else snprintf(m, sizeof m, "Nothing connected (already linked, no such dial-out peer, or it could not be reached -- see the server log)");
+    notice_self(srv, cl, m);
 }

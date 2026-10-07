@@ -176,6 +176,8 @@ void channel_invite_remove(channel_t *chan, const char *casefold_nick); /* calle
 
 /* Render the channel's current modes as a MODE-line string, e.g. "+ntk key"
  * (key/limit only included when set). Writes into `out`. */
+/* The CMODE_* bit for a flag-only channel mode letter (n i p t s m z r P C T S V Q N R O M c D u G), or 0. */
+unsigned int channel_flag_bit(char letter);
 void channel_modes_string(channel_t *chan, char *out, size_t outsz);
 
 #endif /* SEKURIRCD_CHANNEL_H */

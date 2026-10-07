@@ -54,6 +54,9 @@ typedef struct link_conn {
                               * sending junk, since that keeps last_activity fresh */
     time_t last_activity;
     struct client *service; /* the pseudo-client this link introduced, or NULL */
+    int is_server;          /* negotiated the SEKURNET state-sync protocol (see netsync.h); else a plain/service link */
+    int peer_capab_sekurnet; /* acceptor side: the dialer sent CAPAB :SEKURNET before SERVER */
+    struct netserver *nserver; /* is_server: the directly linked server's table entry */
     struct link_conn *next;
 } link_conn_t;
 
@@ -71,12 +74,12 @@ int link_start_hub(struct server *srv);
  * -- two sekurircd nodes linked this way authenticate and stay connected,
  * but don't yet share users/channels the way the original Python design
  * did; that scope was dropped from the start of this port. */
-int link_connect_leaf(struct server *srv);
+int link_dial_peers(struct server *srv, int force, const char *only_name);
 
 /* net.c's periodic tick for leaf mode: reconnects with backoff
  * (links.reconnect_delay doubling to reconnect_delay_max) whenever there's
  * no currently-authenticated uplink. No-op unless mode=leaf+enabled. */
-void link_leaf_tick(struct server *srv);
+void link_leaf_tick(struct server *srv); /* dials any due dial-out peer */
 
 /* net.c integration: accept a new inbound link connection. */
 void link_accept(struct server *srv);
