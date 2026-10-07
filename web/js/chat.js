@@ -22,6 +22,50 @@
   if (!nickIn.value) nickIn.value = "Guest" + Math.floor(1000 + Math.random() * 9000);
   if (!chanIn.value) chanIn.value = DEFAULT_CHAN;
 
+  // IRC formatting: ^B bold, ^I italic (0x1d), ^_ underline, ^S strike (0x1e), ^R reverse, ^K color fg[,bg], ^O reset.
+  // Built from text nodes and styled spans only, never innerHTML, so message text stays inert.
+  var COLORS = ["#ffffff", "#000000", "#00007f", "#009300", "#ff0000", "#7f0000", "#9c009c", "#fc7f00",
+                "#ffff00", "#00fc00", "#009393", "#00ffff", "#0000fc", "#ff00ff", "#7f7f7f", "#d2d2d2"];
+  function fmt(text) {
+    var frag = document.createDocumentFragment(), st = {}, run = "", i = 0, m;
+    function flush() {
+      if (!run) return;
+      var fg = st.fg, bg = st.bg;
+      if (st.rev) { var t = fg; fg = bg || "var(--bg)"; bg = t || "var(--fg)"; }
+      if (!(st.b || st.i || st.u || st.s || fg || bg)) frag.appendChild(document.createTextNode(run));
+      else {
+        var e = document.createElement("span");
+        if (st.b) e.style.fontWeight = "bold";
+        if (st.i) e.style.fontStyle = "italic";
+        if (st.u || st.s) e.style.textDecoration = (st.u ? "underline " : "") + (st.s ? "line-through" : "");
+        if (fg) e.style.color = fg;
+        if (bg) e.style.backgroundColor = bg;
+        e.textContent = run; frag.appendChild(e);
+      }
+      run = "";
+    }
+    while (i < text.length) {
+      var ch = text[i++];
+      if (ch === "\x02") { flush(); st.b = !st.b; }
+      else if (ch === "\x1d") { flush(); st.i = !st.i; }
+      else if (ch === "\x1f") { flush(); st.u = !st.u; }
+      else if (ch === "\x1e") { flush(); st.s = !st.s; }
+      else if (ch === "\x16") { flush(); st.rev = !st.rev; }
+      else if (ch === "\x0f") { flush(); st = {}; }
+      else if (ch === "\x11") { /* monospace: the log already is */ }
+      else if (ch === "\x03") {
+        flush();
+        m = /^(\d{1,2})(?:,(\d{1,2}))?/.exec(text.slice(i));
+        if (!m) { st.fg = st.bg = null; continue; } // a bare ^K resets colors
+        i += m[0].length;
+        st.fg = COLORS[+m[1]] || (+m[1] === 99 ? null : st.fg); // 16-98 (extended palette) keep the current color
+        if (m[2] !== undefined) st.bg = COLORS[+m[2]] || (+m[2] === 99 ? null : st.bg);
+      } else run += ch;
+    }
+    flush();
+    return frag;
+  }
+
   function key(n) { return n.toLowerCase(); }
   function buf(name) {
     var k = key(name);
@@ -38,7 +82,7 @@
     var stick = log.scrollTop + log.clientHeight >= log.scrollHeight - 30;
     var d = document.createElement("div"); d.className = "ln " + l.cls;
     var s = document.createElement("span"); s.className = "ts"; s.textContent = l.t + " ";
-    d.append(s, document.createTextNode(l.text)); log.appendChild(d);
+    d.append(s, fmt(l.text)); log.appendChild(d);
     if (stick) log.scrollTop = log.scrollHeight;
   }
   function drawTabs() {
@@ -56,7 +100,7 @@
     var b = buf(active);
     drawTabs();
     log.textContent = ""; b.lines.forEach(addLine); log.scrollTop = log.scrollHeight;
-    topic.textContent = b.topic || (b.name === "*" ? "SekurNet web chat" : "");
+    topic.textContent = ""; topic.appendChild(fmt(b.topic || (b.name === "*" ? "SekurNet web chat" : "")));
     users.textContent = "";
     GROUPS.forEach(function (g) {
       var names = Object.keys(b.users).filter(function (n) { return b.users[n] === g.prefix; })
