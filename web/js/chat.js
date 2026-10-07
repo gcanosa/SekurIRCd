@@ -10,6 +10,9 @@
   var form = $("connect"), app = $("chat"), nickIn = $("nick"), chanIn = $("chan"), err = $("conn-err");
   var tabs = $("tabs"), log = $("log"), users = $("users"), topic = $("topic"), input = $("input");
 
+  // Highest prefix first (the server's PREFIX=(qaohv)~&@%+); "" is a regular user.
+  var GROUPS = [{ prefix: "~", name: "Owners" }, { prefix: "&", name: "Admins" }, { prefix: "@", name: "Operators" },
+                { prefix: "%", name: "Half-ops" }, { prefix: "+", name: "Voiced" }, { prefix: "", name: "Users" }];
   var AWAY_AFTER = 30 * 60 * 1000; // idle time before auto-away
   var CLIENT_VERSION = "SekurNet web chat";
   var ws, nick, wantChan, registered, tries = 0, closing = false, timer, away = false, awayTimer;
@@ -55,10 +58,16 @@
     log.textContent = ""; b.lines.forEach(addLine); log.scrollTop = log.scrollHeight;
     topic.textContent = b.topic || (b.name === "*" ? "SekurNet web chat" : "");
     users.textContent = "";
-    Object.keys(b.users).sort(function (x, y) { return x.toLowerCase() < y.toLowerCase() ? -1 : 1; }).forEach(function (n) {
-      var d = document.createElement("div"); d.textContent = b.users[n] + n; d.title = "Double-click to message " + n;
-      d.ondblclick = function () { if (n !== nick) { buf(n); active = n; buf(n).unread = false; draw(); input.focus(); } };
-      users.appendChild(d);
+    GROUPS.forEach(function (g) {
+      var names = Object.keys(b.users).filter(function (n) { return b.users[n] === g.prefix; })
+        .sort(function (x, y) { return x.toLowerCase() < y.toLowerCase() ? -1 : 1; });
+      if (!names.length) return;
+      var h = document.createElement("div"); h.className = "grp"; h.textContent = g.name + " (" + names.length + ")"; users.appendChild(h);
+      names.forEach(function (n) {
+        var d = document.createElement("div"); d.textContent = g.prefix + n; d.title = "Double-click to message " + n;
+        d.ondblclick = function () { if (n !== nick) { buf(n); active = n; buf(n).unread = false; draw(); input.focus(); } };
+        users.appendChild(d);
+      });
     });
     users.parentNode.hidden = b.name[0] !== "#" && b.name[0] !== "&";
   }
@@ -87,11 +96,12 @@
     if (c === "305" || c === "306") away = c === "306";
     if (c === "433" && !registered) { nick = nick + "_"; return send("NICK " + nick); }
     if (c === "353") { // names
-      var b = buf(p[2]);
-      p[3].split(" ").forEach(function (n) { var mm = /^([~&@%+]*)(.+)$/.exec(n); if (mm) b.users[mm[2]] = mm[1].charAt(0); });
-      return key(p[2]) === key(active) && draw();
+      var b = buf(p[2]); b.pending = b.pending || {}; // a NAMES reply spans several 353s, swapped in at 366
+      p[3].split(" ").forEach(function (n) { var mm = /^([~&@%+]*)(.+)$/.exec(n); if (mm) b.pending[mm[2]] = mm[1].charAt(0); });
+      return;
     }
-    if (c === "366") return;
+    if (c === "366") { var nb = buf(p[1]); if (nb.pending) { nb.users = nb.pending; nb.pending = null; } return key(p[1]) === key(active) && draw(); }
+    if (c === "MODE" && /^[#&]/.test(p[0]) && /[qaohv]/.test(p[1] || "")) return send("NAMES " + p[0]); // privilege changed: re-read the list
     if (c === "332") { buf(p[1]).topic = p[2]; return key(p[1]) === key(active) && draw(); }
     if (c === "TOPIC") { buf(p[0]).topic = p[1]; say(p[0], m.nick + " set the topic: " + p[1], "evt"); return key(p[0]) === key(active) && draw(); }
     if (c === "JOIN") {
