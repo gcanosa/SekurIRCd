@@ -846,10 +846,6 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
             snprintf(errbuf, errbufsz, "websocket.port must be in 1-65535");
             return -1;
         }
-        if (out->websocket.enabled && out->websocket.tls && !out->tls.enabled) {
-            snprintf(errbuf, errbufsz, "websocket.tls needs [tls] enabled (it reuses that certificate)");
-            return -1;
-        }
     }
 
     /* [tls] */
@@ -874,6 +870,11 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
             snprintf(errbuf, errbufsz, "tls.enabled is true but tls.cert_file/tls.key_file are not both set");
             return -1;
         }
+    }
+    /* Checked here, not in the [websocket] block above: that block runs before [tls] is parsed. */
+    if (out->websocket.enabled && out->websocket.tls && !out->tls.enabled) {
+        snprintf(errbuf, errbufsz, "websocket.tls needs [tls] enabled (it reuses that certificate)");
+        return -1;
     }
 
     /* [links] */

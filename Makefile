@@ -90,7 +90,7 @@ $(OBJ_DIR)/$(SRC_DIR)/build.o: $(filter-out $(OBJ_DIR)/$(SRC_DIR)/build.o,$(ALL_
 build-debug/$(SRC_DIR)/build.o: CPPFLAGS += -DSEKURIRCD_BUILD='"$(BUILD_ID)-asan"'
 
 .DEFAULT_GOAL := all
-.PHONY: all debug check clean
+.PHONY: all debug check itest clean
 all: $(BIN_DIR)/sekurircd $(BIN_DIR)/chanserv
 
 $(OBJ_DIR)/%.o: %.c
@@ -120,6 +120,10 @@ check: $(BIN_DIR)/unit
 	./$(BIN_DIR)/unit
 
 # These two compile straight from sources (no .o/.d files), so list the headers explicitly.
+# End-to-end tests: real ircd/chanserv processes on localhost ports (tests/itest/).
+itest: all
+	python3 tests/itest/run.py
+
 $(BIN_DIR)/unit: $(UNIT_SRCS) $(HEADERS)
 	@mkdir -p $(BIN_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(UNIT_SRCS) $(LDLIBS)
