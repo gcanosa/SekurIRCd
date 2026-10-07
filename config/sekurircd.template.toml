@@ -619,6 +619,11 @@ tls = false
 # a link exposed to the public internet without also trusting the exact peer.
 tls_insecure_skip_verify = false
 
+# Dial the [[links.peers]] that have a `host` at startup and again whenever the
+# link drops (with the backoff below). false = only when an oper runs
+# /CONNECT <peer-name>.
+#autoconnect = true
+
 ping_interval = 60.0
 ping_timeout = 180.0
 

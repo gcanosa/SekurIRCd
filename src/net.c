@@ -1186,7 +1186,7 @@ int net_run(server_t *srv) {
     if (srv->ws_listen_fd >= 0) { snprintf(srv->bound_ws.bind, sizeof srv->bound_ws.bind, "%s", srv->cfg.server.bind); srv->bound_ws.port = srv->cfg.websocket.port; }
     link_start_hub(srv);
     if (srv->link_listen_fd >= 0) { snprintf(srv->bound_link.bind, sizeof srv->bound_link.bind, "%s", srv->cfg.links.bind); srv->bound_link.port = srv->cfg.links.port; }
-    link_dial_peers(srv, 1, NULL); /* every dial-out peer, now (later attempts back off per peer in link_leaf_tick) */
+    if (srv->cfg.links.autoconnect) link_dial_peers(srv, 1, NULL); /* every dial-out peer, now (later attempts back off per peer in link_leaf_tick) */
 
     server_install_debug_log_hook(srv);
     time_t last_tick = time(NULL);

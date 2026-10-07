@@ -409,6 +409,17 @@ static void handle_squit(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
 
 /* --- receiving: users --------------------------------------------------------------------------------- */
 
+/* A local user loses a nick collision: free the nick in the table right now (so the winner can take it without two
+ * entries sharing a key) and let net.c's teardown close the connection. Its QUIT still reaches everyone. */
+static void evict_local_for_collision(server_t *srv, client_t *old) {
+    client_t *found;
+    HASH_FIND_STR(srv->users, old->casefold_nick, found);
+    if (found == old) HASH_DEL(srv->users, old);
+    old->casefold_nick[0] = '\0';
+    snprintf(old->quit_reason, sizeof old->quit_reason, "Nick collision");
+    old->quitting = 1;
+}
+
 /* Settles a nick that is already in use when `ts`/`from` wants it. Returns 1 if the newcomer may proceed. */
 static int resolve_collision(server_t *srv, link_conn_t *lc, const char *nick, long ts, const char *newcomer_uid) {
     client_t *old = server_find_user(srv, nick);
@@ -423,8 +434,7 @@ static int resolve_collision(server_t *srv, link_conn_t *lc, const char *nick, l
             flood(srv, NULL, line);
             server_remove_client(srv, old, "Nick collision");
         } else {
-            snprintf(old->quit_reason, sizeof old->quit_reason, "Nick collision");
-            old->quitting = 1;
+            evict_local_for_collision(srv, old);
         }
     }
     return newcomer_wins && !tie;
@@ -498,7 +508,7 @@ static void handle_nick(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
                 irc_build(kl, sizeof kl, NULL, 0, self_sid(srv), "KILL", kp, 1, "Nick collision");
                 flood(srv, NULL, kl);
                 server_remove_client(srv, clash, "Nick collision");
-            } else { snprintf(clash->quit_reason, sizeof clash->quit_reason, "Nick collision"); clash->quitting = 1; }
+            } else evict_local_for_collision(srv, clash);
         } else { /* the renamer loses (or ties): kill it everywhere */
             kill_back(srv, lc, u->uid, "Nick collision");
             char kl[300];
@@ -1135,6 +1145,23 @@ static void handle_ungline(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     flood(srv, lc, fl);
 }
 
+/* :<sid> RSQUIT <sid> :reason -- somebody asked for a server to be squit. Executed by the server directly linked to it;
+ * everyone else passes the request along toward it. */
+static void handle_rsquit(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
+    if (msg->nparams < 1) return;
+    netserver_t *s = netsync_find_sid(srv, msg->params[0]);
+    if (!s || s == srv->self_srv) return;
+    if (s->route && s == s->route->nserver) {
+        log_info("netsync", "RSQUIT: closing the link to %s on request", s->name);
+        link_close(srv, s->route);
+        return;
+    }
+    char fl[300];
+    irc_build(fl, sizeof fl, NULL, 0, msg->prefix, "RSQUIT", (const char *[]){msg->params[0]}, 1, msg->nparams > 1 ? msg->params[msg->nparams - 1] : "SQUIT");
+    route_to(srv, s, fl);
+    (void)lc;
+}
+
 static void handle_rename(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     client_t *u = src_user(srv, lc, msg->prefix);
     if (!u || msg->nparams < 2) return;
@@ -1175,6 +1202,7 @@ void netsync_handle(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     else if (!strcmp(c, "GLINE")) handle_gline(srv, lc, msg);
     else if (!strcmp(c, "UNGLINE")) handle_ungline(srv, lc, msg);
     else if (!strcmp(c, "RENAME")) handle_rename(srv, lc, msg);
+    else if (!strcmp(c, "RSQUIT")) handle_rsquit(srv, lc, msg);
     else if (!strcmp(c, "EOB")) log_info("netsync", "end of burst from %s", lc->peer_name);
     /* PING/PONG are answered in link.c; anything unknown is ignored (forward compatibility). */
 }
@@ -1377,12 +1405,10 @@ void netsync_squit_command(server_t *srv, client_t *oper, const char *name, cons
         link_close(srv, s->route);
         return;
     }
-    /* a server further away: remove it here and tell everyone, including the link toward it so it drops the subtree */
-    char sid[SID_LEN + 1], line[300];
-    snprintf(sid, sizeof sid, "%s", s->sid);
-    link_conn_t *toward = s->route;
-    remove_server_tree(srv, s);
-    irc_build(line, sizeof line, NULL, 0, self_sid(srv), "SQUIT", (const char *[]){sid}, 1, reason);
-    flood(srv, NULL, line);
-    (void)toward;
+    /* a server further away: ask the server it hangs off (hop 1 from there) to close that link -- routed, not flooded,
+     * because only its own uplink may remove it; the netsplit then propagates normally. */
+    char line[300];
+    irc_build(line, sizeof line, NULL, 0, self_sid(srv), "RSQUIT", (const char *[]){s->sid}, 1, reason);
+    route_to(srv, s, line);
+    notice_self(srv, oper, "SQUIT request sent toward that server");
 }

@@ -902,6 +902,7 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
         if (e) return -1;
         if (cfg_get_bool(lk, "enabled", 0, &out->links.enabled, errbuf, errbufsz, "links.enabled")) return -1;
         if (cfg_get_str(lk, "mode", "hub", out->links.mode, sizeof out->links.mode, errbuf, errbufsz, "links.mode")) return -1;
+        if (cfg_get_bool(lk, "autoconnect", 1, &out->links.autoconnect, errbuf, errbufsz, "links.autoconnect")) return -1;
         if (cfg_get_str(lk, "bind", "0.0.0.0", out->links.bind, CFG_STR, errbuf, errbufsz, "links.bind")) return -1;
         if (cfg_get_int(lk, "port", 7000, &out->links.port, errbuf, errbufsz, "links.port")) return -1;
         if (cfg_get_bool(lk, "tls", 0, &out->links.tls, errbuf, errbufsz, "links.tls")) return -1;

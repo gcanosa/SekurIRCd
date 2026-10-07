@@ -345,4 +345,6 @@ class Network:
         self.stop()
 
     def client(self, server, nick, **kw):
-        return self.servers[server].client(nick, **kw)
+        c = self.servers[server].client(nick, **kw)
+        time.sleep(0.3)  # let the new user's UID reach the rest of the tree before a test addresses them
+        return c
