@@ -1,7 +1,7 @@
 // SekurNet web chat: a small IRC-over-WebSocket client locked to ONE network.
 // The endpoint is a constant on purpose: there is no host field and no URL parameter that can change it.
 (function () {
-  var WS_URL = "wss://sekurnet.duckdns.org:12155"; // [websocket] port with tls = true in sekurircd.toml
+  var WS_URL = "wss://ircsekurnet.duckdns.org:12155"; // [websocket] port with tls = true in sekurircd.toml
   var DEFAULT_CHAN = "#SekurNet";
   var NICK_RE = /^[A-Za-z\[\]\\`_^{|}][A-Za-z0-9\[\]\\`_^{|}-]{0,29}$/;
   var CHAN_RE = /^[#&][^\s,\x07]{1,49}$/;
@@ -144,7 +144,7 @@
 
   function connect() {
     clearTimeout(timer); registered = false;
-    say("*", "Connecting to sekurnet.duckdns.org ...");
+    say("*", "Connecting to ircsekurnet.duckdns.org ...");
     try { ws = new WebSocket(WS_URL); } catch (e) { return fail(); }
     var opened = false;
     ws.onopen = function () { opened = true; send("NICK " + nick); send("USER webchat 0 * :SekurNet web chat"); };
