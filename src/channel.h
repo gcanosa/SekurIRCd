@@ -78,15 +78,6 @@ typedef struct {
     int dynamic;        /* holds a ~j: extban, whose verdict depends on other channels -> never cached */
 } masklist_t;
 
-/* One remembered PRIVMSG/NOTICE (CHATHISTORY). Fixed-size so a ring of them is one allocation. */
-typedef struct {
-    char msgid[48];
-    long long ms;       /* epoch milliseconds */
-    char sender[160];   /* nick!user@host at send time */
-    char account[32];
-    char verb[8];       /* "PRIVMSG" / "NOTICE" */
-    char text[420];
-} hist_entry_t;
 
 typedef struct channel {
     char name[CHAN_NAMELEN];          /* display case */
@@ -108,8 +99,6 @@ typedef struct channel {
     masklist_t invex;                 /* +I */
     char invited[CHAN_MAX_INVITED][64]; /* client_invite_key()s /INVITE has admitted past +i */
     int n_invited;
-    hist_entry_t *hist;               /* ring, allocated on the first remembered message */
-    int hist_cap, hist_head, hist_n;  /* capacity, index of the oldest entry, entries held */
     member_t *members;                /* uthash, keyed by client ptr */
     UT_hash_handle hh;                /* server->channels, keyed by casefold_name */
 } channel_t;
@@ -178,11 +167,6 @@ int channel_rank_level(int rank);
  * and under +u for an unranked member seen by an unranked viewer. A member always sees themself. */
 int channel_member_visible(const channel_t *chan, const member_t *subject, const member_t *viewer);
 
-/* Remember a message (no-op when cap <= 0). Oldest entries fall off. */
-void channel_history_add(channel_t *chan, int cap, const char *msgid, long long ms, const char *sender,
-                         const char *account, const char *verb, const char *text);
-/* i-th oldest remembered entry (0 = oldest), or NULL. */
-const hist_entry_t *channel_history_at(const channel_t *chan, int i);
 void masklist_free(masklist_t *ml);
 int masklist_add(masklist_t *ml, const char *mask); /* 0 ok, -1 dup/full */
 int masklist_del(masklist_t *ml, const char *mask); /* 0 removed, -1 not found */

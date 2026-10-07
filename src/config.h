@@ -120,7 +120,9 @@ typedef struct {
     char oper_motd[CFG_PATH];
     char rules[CFG_PATH];
     int max_message_length;
-    int history_size; /* PRIVMSG/NOTICE lines kept per channel for CHATHISTORY; 0 = off */
+    int history_size; /* PRIVMSG/NOTICE lines kept per conversation for CHATHISTORY; 0 = off */
+    char history_file[CFG_PATH]; /* "" = memory only; else saved here and reloaded at startup */
+    int history_dm;   /* also keep private messages between logged-in accounts */
     char censor_words[32][CFG_STR]; /* words channel mode +G stars out */
     int n_censor_words;
 } cfg_messages_t;
@@ -363,6 +365,7 @@ int config_protection_path(const config_t *cfg, char *out, size_t outsz);
 int config_scan_proto_parse(const char *name);
 const char *config_scan_proto_name(int type);
 /* Returns 1 and fills `out`, or 0 (out untouched) if accounts are disabled. */
+int config_history_path(const config_t *cfg, char *out, size_t outsz);
 int config_accounts_path(const config_t *cfg, char *out, size_t outsz);
 void config_tls_cert_path(const config_t *cfg, char *out, size_t outsz);
 void config_tls_key_path(const config_t *cfg, char *out, size_t outsz);

@@ -49,6 +49,9 @@ typedef struct server {
      * doesn't recloak every connected user on every SIGHUP -- it's just not
      * stable across a full restart. */
     char cloak_secret[65];
+    struct hist_buf *history;         /* CHATHISTORY: conversation key -> ring (history.c) */
+    int history_dirty;
+    time_t history_last_save;
     struct marker *markers;           /* draft/read-marker: account+target -> last-read time (ms) */
     int class_count[CFG_MAX_CLASSES]; /* live connections per [[classes]] entry */
     int n_watchers;        /* clients with a non-empty MONITOR/WATCH list */
@@ -122,6 +125,7 @@ typedef struct server {
  * strlen("SekurIRCd-") + sizeof(cfg.server.version). */
 extern const char sekurircd_build[]; /* build.c */
 /* Fills `out` with a fresh, unique message id (IRCv3 msgid tag). */
+struct marker { char key[200]; long long ms; UT_hash_handle hh; };
 /* draft/read-marker store. Keys are casefolded "account\x01target". set only moves forward. Returns the stored value (0 = none). */
 long long server_marker_get(server_t *srv, const char *account, const char *target);
 long long server_marker_set(server_t *srv, const char *account, const char *target, long long ms);

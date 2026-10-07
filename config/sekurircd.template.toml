@@ -396,6 +396,16 @@ max_message_length = 400
 # 0 turns history off (the cap is then not advertised). Max 500.
 history_size = 50
 
+# Save the history (and read markers) to this file -- resolved relative to this
+# config file's directory -- so it survives restarts. Written at most every 30
+# seconds and on shutdown, readable only by the ircd's user (it can hold private
+# messages). "" (the default) keeps history in memory only.
+#history_file = "history.json"
+
+# Also remember private messages between two logged-in accounts, so each side
+# can CHATHISTORY the conversation. Only used when history_size > 0.
+#history_dm = true
+
 # Channel mode +G ("censor"): these words (case-insensitive, matched anywhere in
 # the text) are replaced with asterisks in messages to that channel.
 #censor_words = ["badword", "otherword"]

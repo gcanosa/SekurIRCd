@@ -1,6 +1,7 @@
 /* Messaging and lookups: PRIVMSG, NOTICE, WHOIS, WHO, WHOWAS, AWAY, SETNAME,
  * USERHOST, ISON, MONITOR, SILENCE, GLOB. Ported from commands.py. */
 #include "cmd.h"
+#include "history.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -349,10 +350,20 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
             deliver(mm->client, cl, lines, &x);
         }
         if (!is_tagmsg && srv->cfg.messages.history_size > 0) {
+            hist_entry_t h;
+            memset(&h, 0, sizeof h);
             struct timespec ts;
             clock_gettime(CLOCK_REALTIME, &ts);
-            channel_history_add(chan, srv->cfg.messages.history_size, x.msgid,
-                                (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000, prefix, cl->account, verb, outtext);
+            snprintf(h.msgid, sizeof h.msgid, "%s", x.msgid);
+            h.ms = (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+            snprintf(h.sender, sizeof h.sender, "%s", prefix);
+            snprintf(h.account, sizeof h.account, "%s", cl->account);
+            snprintf(h.verb, sizeof h.verb, "%s", verb);
+            snprintf(h.target, sizeof h.target, "%s", chan->name);
+            snprintf(h.text, sizeof h.text, "%s", outtext);
+            char hkey[160];
+            history_key_channel(hkey, sizeof hkey, chan->name);
+            history_add(srv, hkey, srv->cfg.messages.history_size, &h);
         }
         delivered = 1;
     } else {
@@ -417,6 +428,24 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
         build_lines(lines, cl, prefix, verb, p, is_tagmsg ? NULL : textbuf, &x);
         deliver(dst, cl, lines, &x);
         delivered = 1;
+        /* Private-message history, only between two logged-in accounts (so each side can ask for it by account). */
+        if (!is_tagmsg && srv->cfg.messages.history_size > 0 && srv->cfg.messages.history_dm &&
+            cl->account[0] && dst->account[0] && cl != dst) {
+            hist_entry_t h;
+            memset(&h, 0, sizeof h);
+            struct timespec ts;
+            clock_gettime(CLOCK_REALTIME, &ts);
+            snprintf(h.msgid, sizeof h.msgid, "%s", x.msgid);
+            h.ms = (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+            snprintf(h.sender, sizeof h.sender, "%s", prefix);
+            snprintf(h.account, sizeof h.account, "%s", cl->account);
+            snprintf(h.verb, sizeof h.verb, "%s", verb);
+            snprintf(h.target, sizeof h.target, "%s", dst->nick);
+            snprintf(h.text, sizeof h.text, "%s", textbuf);
+            char hkey[160];
+            history_key_dm(hkey, sizeof hkey, cl->account, dst->account);
+            history_add(srv, hkey, srv->cfg.messages.history_size, &h);
+        }
     }
     /* IRCv3 echo-message: the sender gets its own message back too, once
      * delivery actually happened. */
@@ -1084,27 +1113,26 @@ static void chathistory_fail(server_t *srv, client_t *cl, const char *code, cons
     client_send(cl, line);
 }
 
-/* Positions of a reference in the channel's history: `before` = index of the
- * first entry not strictly older than it, `after` = index of the first entry
- * strictly newer. "msgid=X" pins both to that entry; "timestamp=T" counts by
+/* Positions of a reference in a conversation: `before` = index of the first entry not strictly older than it,
+ * `after` = index of the first entry strictly newer. "msgid=X" pins both to that entry; "timestamp=T" counts by
  * time. Returns 0 on a malformed/unknown reference. */
-static int history_ref(const channel_t *chan, const char *ref, int *before, int *after) {
+static int history_ref(const hist_buf_t *b, const char *ref, int *before, int *after) {
     if (strncmp(ref, "msgid=", 6) == 0) {
-        for (int i = 0; i < chan->hist_n; i++) {
-            if (strcmp(channel_history_at(chan, i)->msgid, ref + 6) == 0) { *before = i; *after = i + 1; return 1; }
+        for (int i = 0; i < b->n; i++) {
+            if (strcmp(hist_buf_at(b, i)->msgid, ref + 6) == 0) { *before = i; *after = i + 1; return 1; }
         }
         return 0;
     }
     if (strncmp(ref, "timestamp=", 10) == 0) {
         long long ms = irc_parse_iso8601_ms(ref + 10);
         if (ms < 0) return 0;
-        int b = 0, a = 0;
-        for (int i = 0; i < chan->hist_n; i++) {
-            long long e = channel_history_at(chan, i)->ms;
-            if (e < ms) b++;
-            if (e <= ms) a++;
+        int bi = 0, ai = 0;
+        for (int i = 0; i < b->n; i++) {
+            long long e = hist_buf_at(b, i)->ms;
+            if (e < ms) bi++;
+            if (e <= ms) ai++;
         }
-        *before = b; *after = a;
+        *before = bi; *after = ai;
         return 1;
     }
     return 0;
@@ -1112,41 +1140,133 @@ static int history_ref(const channel_t *chan, const char *ref, int *before, int 
 
 #define CHATHISTORY_MAX 100
 
+/* Sends "BATCH +id <type> [arg]" and returns the batch id (static, valid until the next call). */
+static const char *batch_open(server_t *srv, client_t *cl, const char *type, const char *arg) {
+    static unsigned long seq = 0;
+    static char bid[24];
+    char start[40], line[300];
+    snprintf(bid, sizeof bid, "ch%lu", ++seq);
+    snprintf(start, sizeof start, "+%s", bid);
+    const char *bp[] = {start, type, arg};
+    irc_build(line, sizeof line, NULL, 0, srv->cfg.server.name, "BATCH", bp, arg ? 3 : 2, NULL);
+    client_send(cl, line);
+    return bid;
+}
+
+static void batch_close(server_t *srv, client_t *cl, const char *bid) {
+    char end[40], line[200];
+    snprintf(end, sizeof end, "-%s", bid);
+    const char *ep[] = {end};
+    irc_build(line, sizeof line, NULL, 0, srv->cfg.server.name, "BATCH", ep, 1, NULL);
+    client_send(cl, line);
+}
+
+/* CHATHISTORY TARGETS <ts> <ts> <limit>: conversations (channels you are in, DM partners) with their newest message
+ * time inside the window, newest first. */
+static void chathistory_targets(server_t *srv, client_t *cl, irc_message_t *msg) {
+    long long t1 = msg->nparams > 1 && strncmp(msg->params[1], "timestamp=", 10) == 0 ? irc_parse_iso8601_ms(msg->params[1] + 10) : -1;
+    long long t2 = msg->nparams > 2 && strncmp(msg->params[2], "timestamp=", 10) == 0 ? irc_parse_iso8601_ms(msg->params[2] + 10) : -1;
+    int limit = msg->nparams > 3 ? atoi(msg->params[3]) : 0;
+    if (t1 < 0 || t2 < 0 || limit < 1) { chathistory_fail(srv, cl, "INVALID_PARAMS", "TARGETS", "Invalid timestamps or limit"); return; }
+    if (limit > CHATHISTORY_MAX) limit = CHATHISTORY_MAX;
+    long long lo = t1 < t2 ? t1 : t2, hi = t1 < t2 ? t2 : t1;
+    typedef struct { char name[72]; long long ms; } tgt_t;
+    tgt_t found[CHATHISTORY_MAX * 2];
+    int nf = 0;
+    for (chan_node_t *n = cl->channels; n && nf < CHATHISTORY_MAX * 2; n = n->next) {
+        char key[160];
+        history_key_channel(key, sizeof key, n->chan->name);
+        hist_buf_t *b = history_get(srv, key);
+        if (b && b->n && b->last_ms >= lo && b->last_ms <= hi) { snprintf(found[nf].name, sizeof found[nf].name, "%s", n->chan->name); found[nf++].ms = b->last_ms; }
+    }
+    if (cl->account[0]) {
+        char mine[72];
+        irc_casefold(mine, sizeof mine, cl->account);
+        hist_buf_t *b, *tmp;
+        HASH_ITER(hh, srv->history, b, tmp) {
+            if (!history_key_is_dm(b->key) || !b->n || b->last_ms < lo || b->last_ms > hi || nf >= CHATHISTORY_MAX * 2) continue;
+            char k[160], *a = k + 1, *sep;
+            snprintf(k, sizeof k, "%s", b->key);
+            sep = strchr(a, '\x01');
+            if (!sep) continue;
+            *sep = '\0';
+            const char *other = strcmp(a, mine) == 0 ? sep + 1 : strcmp(sep + 1, mine) == 0 ? a : NULL;
+            if (!other) continue;
+            snprintf(found[nf].name, sizeof found[nf].name, "%s", other);
+            found[nf++].ms = b->last_ms;
+        }
+    }
+    for (int i = 0; i < nf; i++) /* newest first */
+        for (int j = i + 1; j < nf; j++)
+            if (found[j].ms > found[i].ms) { tgt_t t = found[i]; found[i] = found[j]; found[j] = t; }
+    const char *bid = batch_open(srv, cl, "draft/chathistory-targets", NULL);
+    for (int i = 0; i < nf && i < limit; i++) {
+        char ts[40], line[300], val[48];
+        irc_iso8601_from_ms(ts, sizeof ts, found[i].ms);
+        snprintf(val, sizeof val, "timestamp=%s", ts);
+        irc_tag_t bt = {"batch", bid};
+        const char *p[] = {"TARGETS", found[i].name, val};
+        irc_build(line, sizeof line, &bt, 1, srv->cfg.server.name, "CHATHISTORY", p, 3, NULL);
+        client_send(cl, line);
+    }
+    batch_close(srv, cl, bid);
+}
+
 void cmd_chathistory(server_t *srv, client_t *cl, irc_message_t *msg) {
     if (!(cl->caps & CAP_CHATHISTORY) || !(cl->caps & CAP_BATCH) || srv->cfg.messages.history_size <= 0) return;
     const char *sub = msg->params[0];
+    if (strcasecmp(sub, "TARGETS") == 0) { chathistory_targets(srv, cl, msg); return; }
     int nneed = strcasecmp(sub, "BETWEEN") == 0 ? 5 : 4; /* sub target ref [ref2] limit */
     if (msg->nparams < nneed) { chathistory_fail(srv, cl, "NEED_MORE_PARAMS", sub, "Missing parameters"); return; }
     const char *target = msg->params[1];
-    channel_t *chan = target[0] == '#' ? server_find_channel(srv, target) : NULL;
-    if (!chan || !(channel_find_member(chan, cl) || (cl->umodes & UMODE_O))) {
-        chathistory_fail(srv, cl, "INVALID_TARGET", target, "Messages could not be retrieved"); /* same answer for "no such" and "not on it" */
-        return;
+
+    /* Which conversation? A channel you are in (or any, as an oper), or a private chat with another account. */
+    char key[160];
+    const hist_buf_t *b = NULL;
+    const char *shown = target;
+    if (target[0] == '#') {
+        channel_t *chan = server_find_channel(srv, target);
+        if (!chan || !(channel_find_member(chan, cl) || (cl->umodes & UMODE_O))) {
+            chathistory_fail(srv, cl, "INVALID_TARGET", target, "Messages could not be retrieved"); /* same answer for "no such" and "not on it" */
+            return;
+        }
+        history_key_channel(key, sizeof key, chan->name);
+        shown = chan->name;
+    } else {
+        if (!cl->account[0] || !srv->cfg.messages.history_dm) { chathistory_fail(srv, cl, "INVALID_TARGET", target, "Messages could not be retrieved"); return; }
+        client_t *other = server_find_user(srv, target);
+        const char *oacct = (other && other->registered && other->account[0]) ? other->account : (accounts_exists(&srv->accounts, target) ? target : NULL);
+        if (!oacct) { chathistory_fail(srv, cl, "INVALID_TARGET", target, "Messages could not be retrieved"); return; }
+        history_key_dm(key, sizeof key, cl->account, oacct);
     }
+    b = history_get(srv, key);
+    static const hist_buf_t empty = {0};
+    if (!b) b = &empty;
+
     int limit = atoi(msg->params[nneed - 1]);
     if (limit < 1) { chathistory_fail(srv, cl, "INVALID_PARAMS", sub, "Invalid limit"); return; }
     if (limit > CHATHISTORY_MAX) limit = CHATHISTORY_MAX;
-    int n = chan->hist_n, lo = 0, hi = n;
+    int n = b->n, lo = 0, hi = n;
     int b1 = 0, a1 = 0, b2 = 0, a2 = 0;
     const char *ref = msg->params[2];
     int is_star = strcmp(ref, "*") == 0;
     if (strcasecmp(sub, "LATEST") == 0) {
-        if (!is_star && !history_ref(chan, ref, &b1, &a1)) { chathistory_fail(srv, cl, "INVALID_PARAMS", ref, "Invalid reference"); return; }
+        if (!is_star && !history_ref(b, ref, &b1, &a1)) { chathistory_fail(srv, cl, "INVALID_PARAMS", ref, "Invalid reference"); return; }
         lo = is_star ? 0 : a1;
         if (n - lo > limit) lo = n - limit;
     } else if (strcasecmp(sub, "BEFORE") == 0) {
-        if (!history_ref(chan, ref, &b1, &a1)) { chathistory_fail(srv, cl, "INVALID_PARAMS", ref, "Invalid reference"); return; }
+        if (!history_ref(b, ref, &b1, &a1)) { chathistory_fail(srv, cl, "INVALID_PARAMS", ref, "Invalid reference"); return; }
         hi = b1; lo = hi - limit < 0 ? 0 : hi - limit;
     } else if (strcasecmp(sub, "AFTER") == 0) {
-        if (!history_ref(chan, ref, &b1, &a1)) { chathistory_fail(srv, cl, "INVALID_PARAMS", ref, "Invalid reference"); return; }
+        if (!history_ref(b, ref, &b1, &a1)) { chathistory_fail(srv, cl, "INVALID_PARAMS", ref, "Invalid reference"); return; }
         lo = a1; hi = lo + limit > n ? n : lo + limit;
     } else if (strcasecmp(sub, "AROUND") == 0) {
-        if (!history_ref(chan, ref, &b1, &a1)) { chathistory_fail(srv, cl, "INVALID_PARAMS", ref, "Invalid reference"); return; }
+        if (!history_ref(b, ref, &b1, &a1)) { chathistory_fail(srv, cl, "INVALID_PARAMS", ref, "Invalid reference"); return; }
         int half = limit / 2;
         lo = b1 - half < 0 ? 0 : b1 - half;
         hi = b1 + (limit - half) > n ? n : b1 + (limit - half);
     } else if (strcasecmp(sub, "BETWEEN") == 0) {
-        if (!history_ref(chan, ref, &b1, &a1) || !history_ref(chan, msg->params[3], &b2, &a2)) {
+        if (!history_ref(b, ref, &b1, &a1) || !history_ref(b, msg->params[3], &b2, &a2)) {
             chathistory_fail(srv, cl, "INVALID_PARAMS", sub, "Invalid reference"); return;
         }
         if (b1 > b2) { int t = a1; a1 = a2; a2 = t; t = b1; b1 = b2; b2 = t; } /* either order */
@@ -1158,16 +1278,10 @@ void cmd_chathistory(server_t *srv, client_t *cl, irc_message_t *msg) {
     }
     if (hi < lo) hi = lo;
 
-    static unsigned long batch_seq = 0;
-    char bid[24], line[1100];
-    snprintf(bid, sizeof bid, "ch%lu", ++batch_seq);
-    char start[40];
-    snprintf(start, sizeof start, "+%s", bid);
-    const char *bp[] = {start, "chathistory", chan->name};
-    irc_build(line, sizeof line, NULL, 0, srv->cfg.server.name, "BATCH", bp, 3, NULL);
-    client_send(cl, line);
+    const char *bid = batch_open(srv, cl, "chathistory", shown);
+    char line[1100];
     for (int i = lo; i < hi; i++) {
-        const hist_entry_t *e = channel_history_at(chan, i);
+        const hist_entry_t *e = hist_buf_at(b, i);
         char ts[40];
         irc_iso8601_from_ms(ts, sizeof ts, e->ms);
         irc_tag_t tags[4];
@@ -1176,15 +1290,11 @@ void cmd_chathistory(server_t *srv, client_t *cl, irc_message_t *msg) {
         tags[nt++] = (irc_tag_t){"time", ts};
         tags[nt++] = (irc_tag_t){"msgid", e->msgid};
         if (e->account[0] && (cl->caps & CAP_ACCOUNT_TAG)) tags[nt++] = (irc_tag_t){"account", e->account};
-        const char *mp[] = {chan->name};
+        const char *mp[] = {target[0] == '#' ? shown : e->target};
         irc_build(line, sizeof line, tags, nt, e->sender, e->verb, mp, 1, e->text);
         client_send(cl, line);
     }
-    char end[40];
-    snprintf(end, sizeof end, "-%s", bid);
-    const char *ep[] = {end};
-    irc_build(line, sizeof line, NULL, 0, srv->cfg.server.name, "BATCH", ep, 1, NULL);
-    client_send(cl, line);
+    batch_close(srv, cl, bid);
 }
 
 /* srv->n_watchers counts clients with a non-empty MONITOR/WATCH list, so

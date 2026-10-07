@@ -11,6 +11,7 @@
 #include "cmd.h"
 #include "config.h"
 #include "crypto.h"
+#include "history.h"
 #include "link.h"
 #include "log.h"
 #include "server.h"
@@ -1087,6 +1088,7 @@ static void tick(server_t *srv) {
     protection_tick(srv);
     server_kline_prune_expired(srv);
     server_kline_flush(srv); /* batched: see server_kline_flush */
+    history_maybe_save(srv, 0);
 
     if (srv->cfg.debug_channel.stats_interval > 0) {
         static time_t last_stats = 0;
