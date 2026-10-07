@@ -37,6 +37,10 @@ realname = "Channel Registration Service"
 # it on can't expire anything immediately.
 #expire_days = 0
 
+# Rank the channel founder gets when they IDENTIFY (or CLAIM): "o" = channel op
+# (@, the default and the old behaviour) or "q" = channel owner (~).
+#founder_mode = "o"
+
 [storage]
 # Where channel registrations are persisted (JSON, rewritten on every
 # REGISTER/DROP). Relative to the current working directory chanserv is run

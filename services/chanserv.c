@@ -55,6 +55,7 @@ typedef struct {
     char storage_path[512];
     int backup_count;
     int expire_days; /* drop a registration unused this long (0 = never) */
+    char founder_mode; /* 'o' (default) or 'q': the rank IDENTIFY/CLAIM grants the founder */
 } app_cfg_t;
 
 static volatile sig_atomic_t g_term = 0;
@@ -130,6 +131,8 @@ static int load_app_config(const char *path, app_cfg_t *cfg, char *errbuf, size_
     toml_str(cs, "user", cfg->user, cfg->user, sizeof cfg->user);
     toml_str(cs, "host", cfg->host, cfg->host, sizeof cfg->host);
     toml_str(cs, "realname", cfg->realname, cfg->realname, sizeof cfg->realname);
+    cfg->founder_mode = 'o';
+    { char fm[8] = "o"; toml_str(cs, "founder_mode", fm, fm, sizeof fm); if (strcmp(fm, "q") == 0 || strcmp(fm, "o") == 0) cfg->founder_mode = fm[0]; }
     cfg->expire_days = toml_int(cs, "expire_days", 0);
     if (cfg->expire_days < 0) cfg->expire_days = 0;
     if (cfg->expire_days > 3650) cfg->expire_days = 3650;
@@ -339,6 +342,8 @@ static int access_level_rank(const char *level) {
     if (strcmp(level, "v") == 0) return 0;
     if (strcmp(level, "h") == 0) return 1;
     if (strcmp(level, "o") == 0) return 2;
+    if (strcmp(level, "a") == 0) return 3; /* admin (+a, &) */
+    if (strcmp(level, "q") == 0) return 4; /* owner (+q, ~) */
     return -1;
 }
 
@@ -750,8 +755,8 @@ static void cmd_identify(const char *from_nick, char *args) {
     mark_identified(chan, from_nick);
     /* Trusted MODE (see link.c's `lc->service` branch) -- applies even if
      * ChanServ itself isn't sitting in the channel (no GUARD needed). */
-    wire_mode(chan, "+o", from_nick);
-    reply(from_nick, "Password correct -- you have been re-opped.");
+    { char fm[3] = {'+', g_cfg.founder_mode, '\0'}; wire_mode(chan, fm, from_nick); }
+    reply(from_nick, g_cfg.founder_mode == 'q' ? "Password correct -- you have been made channel owner." : "Password correct -- you have been re-opped.");
 }
 
 /* Drops registrations nobody has authenticated against for [chanserv] expire_days.
@@ -918,9 +923,9 @@ static void cmd_access(const char *from_nick, char *args) {
         char *mask = strtok_r(NULL, " ", &save);
         char *level = strtok_r(NULL, " ", &save);
         char *password = strtok_r(NULL, " ", &save);
-        if (!mask || !level || !password) { reply(from_nick, "Syntax: ACCESS <#channel> ADD <mask> <v|h|o> <password>"); return; }
+        if (!mask || !level || !password) { reply(from_nick, "Syntax: ACCESS <#channel> ADD <mask> <v|h|o|a|q> <password>"); return; }
         char levelbuf[2]; levelbuf[0] = (char)tolower((unsigned char)level[0]); levelbuf[1] = '\0';
-        if (access_level_rank(levelbuf) < 0) { reply(from_nick, "Level must be one of: v h o"); return; }
+        if (access_level_rank(levelbuf) < 0) { reply(from_nick, "Level must be one of: v h o a q"); return; }
         if (!check_password(from_nick, chan, password)) return;
         char norm[300];
         if (normalize_mask(mask, norm, sizeof norm) != 0) { reply(from_nick, "That mask needs a host (a nick alone never grants access) -- see HELP ACCESS"); return; }
@@ -1090,7 +1095,7 @@ static void finish_claim(const char *user, const char *host, const char *account
     rec_set_str(rec, "successor", "");
     store_save();
     mark_identified(chan, from_nick);
-    wire_mode(chan, "+o", from_nick);
+    { char fm[3] = {'+', g_cfg.founder_mode, '\0'}; wire_mode(chan, fm, from_nick); }
     char msg[300]; snprintf(msg, sizeof msg, "You are now founder of %s -- SETPASS/ACCESS as needed", chan);
     reply(from_nick, msg);
     log_info("chanserv", "%s claimed founder of %s via SUCCESSOR", from_nick, chan);
@@ -1256,8 +1261,8 @@ static void cmd_help(const char *from_nick, char *args) {
     reply(from_nick, "                                   ChanServ (re)joins (server restart, channel");
     reply(from_nick, "                                   emptied out, etc.)");
     reply(from_nick, "  INFO #channel                 -- show registration/GUARD/TOPICLOCK status");
-    reply(from_nick, "  ACCESS #channel ADD <mask> <v|h|o> <password>");
-    reply(from_nick, "                                -- auto-grant +v/+h/+o on every JOIN matching");
+    reply(from_nick, "  ACCESS #channel ADD <mask> <v|h|o|a|q> <password>");
+    reply(from_nick, "                                -- auto-grant +v/+h/+o/+a(admin)/+q(owner) on every JOIN matching");
     reply(from_nick, "                                   <mask>, without sharing the password. Accepts");
     reply(from_nick, "                                   a bare host (*.example.com), user@host, or a");
     reply(from_nick, "                                   full nick!user@host mask -- host is always");
@@ -1288,7 +1293,7 @@ static void cmd_help(const char *from_nick, char *args) {
     reply(from_nick, "  SET #channel DESC|URL|ENTRYMSG <text> <password>");
     reply(from_nick, "                                -- free-text metadata (DESC/URL shown by INFO,");
     reply(from_nick, "                                   ENTRYMSG sent to whoever JOINs); empty clears");
-    reply(from_nick, "  OP|DEOP|VOICE|DEVOICE|HALFOP|DEHALFOP #channel [nick] <password>");
+    reply(from_nick, "  OP|DEOP|VOICE|DEVOICE|HALFOP|DEHALFOP|ADMIN|DEADMIN|OWNER|DEOWNER #channel [nick] <password>");
     reply(from_nick, "                                -- set/remove that rank; nick defaults to yourself");
     reply(from_nick, "  INVITE #channel [nick] <password>  -- invite yourself or someone else in");
     reply(from_nick, "  UNBAN #channel [nick] <password>   -- remove any ban matching yourself/someone");
@@ -1343,6 +1348,10 @@ static void dispatch_privmsg(const char *from_nick, const char *from_prefix, con
     else if (strcasecmp(verb, "AKICK") == 0) cmd_akick(from_nick, rest);
     else if (strcasecmp(verb, "SUCCESSOR") == 0) cmd_successor(from_nick, from_prefix, rest);
     else if (strcasecmp(verb, "SET") == 0) cmd_set(from_nick, rest);
+    else if (strcasecmp(verb, "OWNER") == 0) cmd_chanmode_one(from_nick, rest, "OWNER", '+', 'q');
+    else if (strcasecmp(verb, "DEOWNER") == 0) cmd_chanmode_one(from_nick, rest, "DEOWNER", '-', 'q');
+    else if (strcasecmp(verb, "ADMIN") == 0) cmd_chanmode_one(from_nick, rest, "ADMIN", '+', 'a');
+    else if (strcasecmp(verb, "DEADMIN") == 0) cmd_chanmode_one(from_nick, rest, "DEADMIN", '-', 'a');
     else if (strcasecmp(verb, "OP") == 0) cmd_chanmode_one(from_nick, rest, "OP", '+', 'o');
     else if (strcasecmp(verb, "DEOP") == 0) cmd_chanmode_one(from_nick, rest, "DEOP", '-', 'o');
     else if (strcasecmp(verb, "VOICE") == 0) cmd_chanmode_one(from_nick, rest, "VOICE", '+', 'v');

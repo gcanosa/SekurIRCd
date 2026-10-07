@@ -94,6 +94,11 @@ Website & docs: <https://gcanosa.github.io/SekurIRCd/> (source in [`web/`](web/)
   `~j:#chan`; caller-ID (`+g` with `/ACCEPT`); `[[classes]]` connection classes
   (per-IP-range client caps, sendq and flood limits); NickServ `GHOST` and optional
   nick-ownership enforcement (`[accounts] enforce_nicks`).
+  Caller-ID `/ACCEPT` entries bind to the person's account (or connection), so
+  renaming keeps access and a stranger taking the nick doesn't inherit it.
+  ChanServ can grant the new ranks: `ACCESS ... <v|h|o|a|q>`, `ADMIN`/`DEADMIN`/
+  `OWNER`/`DEOWNER`, and `[chanserv] founder_mode = "q"` makes a founder's
+  IDENTIFY give owner (`~`) instead of op. A channel's creator still gets `@`.
 - IRCv3 capabilities: `away-notify` (live `AWAY` updates for channel-mates
   who request it), `multi-prefix` (all rank prefixes in `NAMES`/`WHO`, not
   just the highest), `userhost-in-names` (full `nick!user@host` in
