@@ -188,7 +188,13 @@ static void scan_hit(struct server *srv, protection_scan_t *s) {
     long dur = p->scan_ban_duration[0] ? irc_parse_duration(p->scan_ban_duration) : 0;
     if (dur < 0) dur = 0;
     int reject = strcmp(p->scan_action, "reject") == 0;
-    if (!reject) server_kline_add(srv, ip, reason, "protection", strcmp(p->scan_action, "kline") == 0 ? "K" : "Z", dur);
+    if (!reject) {
+        server_kline_add(srv, ip, reason, "protection", strcmp(p->scan_action, "kline") == 0 ? "K" : "Z", dur);
+    } else {
+        char snote[400];
+        snprintf(snote, sizeof snote, "Rejected connection from %s: %s", ip, reason);
+        server_notify_opers(srv, snote);
+    }
     char quit[400];
     snprintf(quit, sizeof quit, reject ? "%s" : "Z-Lined: %s", reason);
     int killed = server_kline_enforce(srv, ip, "Z", quit, NULL);
