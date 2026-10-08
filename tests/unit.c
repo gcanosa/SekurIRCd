@@ -867,6 +867,11 @@ static void test_websocket_helpers(void) {
     assert(ws_parse_request("GET / HTTP/1.1\r\nHost: x\r\nUpgrade: WebSocket\r\nConnection: Upgrade\r\n"
                             "sec-websocket-key: abc==\r\nOrigin: https://a.b\r\nX-Forwarded-For: 198.51.100.4, 10.0.0.1", &r) == 0);
     assert(strcmp(r.key, "abc==") == 0 && strcmp(r.origin, "https://a.b") == 0 && strcmp(r.forwarded, "198.51.100.4") == 0);
+    assert(!r.text_proto);
+    assert(ws_parse_request("GET / HTTP/1.1\r\nUpgrade: websocket\r\nSec-WebSocket-Key: k\r\nSec-WebSocket-Protocol: binary.ircv3.net, text.ircv3.net", &r) == 0 && r.text_proto);
+    char resp[256];
+    assert(ws_build_response("k", 1, resp, sizeof resp) > 0 && strstr(resp, "Sec-WebSocket-Protocol: text.ircv3.net\r\n\r\n"));
+    assert(ws_build_response("k", 0, resp, sizeof resp) > 0 && !strstr(resp, "Sec-WebSocket-Protocol"));
     assert(ws_parse_request("GET / HTTP/1.1\r\nHost: x", &r) == -1);
     /* a masked client text frame "hi" */
     unsigned char f[] = {0x81, 0x82, 1, 2, 3, 4, 'h' ^ 1, 'i' ^ 2};

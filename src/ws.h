@@ -14,6 +14,7 @@ int ws_accept_key(const char *client_key, char *out, size_t outsz);
 typedef struct {
     char key[64];       /* Sec-WebSocket-Key */
     char origin[256];   /* "" if absent */
+    int text_proto;     /* client offered the text.ircv3.net subprotocol */
     char forwarded[64]; /* first X-Forwarded-For / X-Real-IP address, "" if absent */
 } ws_request_t;
 
@@ -21,8 +22,8 @@ typedef struct {
  * as a WebSocket upgrade. 0 if it is one (key present, Upgrade: websocket), else -1. */
 int ws_parse_request(const char *req, ws_request_t *out);
 
-/* Builds the "101 Switching Protocols" response. Returns its length, or -1. */
-int ws_build_response(const char *client_key, char *out, size_t outsz);
+/* Builds the "101 Switching Protocols" response; echoes Sec-WebSocket-Protocol: text.ircv3.net when text_proto (Kiwi IRC requires it). Returns its length, or -1. */
+int ws_build_response(const char *client_key, int text_proto, char *out, size_t outsz);
 
 /* Encodes one unmasked server->client frame. `out` needs len + 10 bytes. Returns the frame length. */
 size_t ws_encode_frame(unsigned char *out, int opcode, const unsigned char *payload, size_t len);

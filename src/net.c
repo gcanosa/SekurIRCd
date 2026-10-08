@@ -356,7 +356,7 @@ static ssize_t ws_read(client_t *cl, void *buf, size_t len) {
         char resp[256];
         if (ws_parse_request(req, &wr) != 0) ws_reject(cl, "400 Bad Request");
         else if (!ws_origin_ok(srv, wr.origin)) ws_reject(cl, "403 Forbidden");
-        else if (ws_build_response(wr.key, resp, sizeof resp) < 0) ws_reject(cl, "500 Internal Server Error");
+        else if (ws_build_response(wr.key, wr.text_proto, resp, sizeof resp) < 0) ws_reject(cl, "500 Internal Server Error");
         else {
             ws_out_append(cl, (const unsigned char *)resp, strlen(resp));
             cl->ws = 2;
