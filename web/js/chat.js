@@ -139,7 +139,10 @@
     if (c === "PING") return send("PONG :" + (p[0] || ""));
     if (c === "001") { registered = true; tries = 0; armAway(); nick = p[0]; say("*", p[1]); if (wantChan) send("JOIN " + wantChan); return; }
     if (c === "305" || c === "306") away = c === "306";
-    if (c === "433" && !registered) { nick = nick + "_"; return send("NICK " + nick); }
+    if ((c === "433" || c === "432") && !registered) { // taken or refused: keep trying, never past NICKLEN
+      nick = c === "433" && nick.length < 30 ? nick + "_" : "Guest" + Math.floor(1000 + Math.random() * 9000);
+      return send("NICK " + nick);
+    }
     if (c === "353") { // names
       var b = buf(p[2]); b.pending = b.pending || {}; // a NAMES reply spans several 353s, swapped in at 366
       p[3].split(" ").forEach(function (n) { var mm = /^([~&@%+]*)(.+)$/.exec(n); if (mm) b.pending[mm[2]] = mm[1].charAt(0); });

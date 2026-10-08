@@ -364,7 +364,9 @@ static ssize_t ws_read(client_t *cl, void *buf, size_t len) {
             if (wr.forwarded[0]) {
                 for (int i = 0; i < srv->cfg.websocket.n_trusted_proxies; i++) {
                     if (irc_glob_match(srv->cfg.websocket.trusted_proxies[i], cl->ip)) {
-                        client_apply_real_address(srv, cl, wr.forwarded, NULL);
+                        char real[64];
+                        if (ws_forwarded_client(wr.forwarded, srv->cfg.websocket.trusted_proxies, srv->cfg.websocket.n_trusted_proxies, real, sizeof real) == 0)
+                            client_apply_real_address(srv, cl, real, NULL);
                         break;
                     }
                 }

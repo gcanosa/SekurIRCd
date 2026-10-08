@@ -130,6 +130,8 @@ static const cmd_entry_t DISPATCH[] = {
     {"ADMIN", cmd_admin, 0, 1, 0},
 };
 #define N_DISPATCH (int)(sizeof DISPATCH / sizeof DISPATCH[0])
+_Static_assert(sizeof DISPATCH / sizeof DISPATCH[0] <= sizeof ((server_t *)0)->command_counts / sizeof ((server_t *)0)->command_counts[0],
+               "STATS m: grow server_t.command_counts");
 
 void err_need_more_params(client_t *cl, const char *cmdname) {
     const char *p[] = {cmdname};
@@ -169,6 +171,7 @@ void notice_self(server_t *srv, client_t *cl, const char *text) {
 void cmd_send_welcome_if_ready(server_t *srv, client_t *cl) {
     if (cl->registered || !cl->got_nick || !cl->got_user || cl->cap_negotiating) return;
     if (cl->rdns_pending || cl->ident_pending || cl->auth_pending) return; /* net.c's worker-result tick retries this once they clear */
+    if (cmd_pass_login(srv, cl)) return; /* PASS login now in flight: same hold as a SASL one */
 
     /* Only now are user/host final (USER, identd and rDNS have all landed),
      * so this is the first point a hostname K/G-line can be evaluated at all
@@ -284,7 +287,7 @@ static void dispatch_inner(server_t *srv, client_t *cl, irc_message_t *msg) {
             cs = -1;
             for (int c = 0; c < srv->n_command_counts; c++)
                 if (strcmp(srv->command_counts[c].name, DISPATCH[i].name) == 0) { cs = c; break; }
-            if (cs < 0 && srv->n_command_counts < 64) {
+            if (cs < 0 && srv->n_command_counts < (int)(sizeof srv->command_counts / sizeof srv->command_counts[0])) {
                 cs = srv->n_command_counts++;
                 snprintf(srv->command_counts[cs].name, sizeof srv->command_counts[0].name, "%s", DISPATCH[i].name);
                 srv->command_counts[cs].count = 0;

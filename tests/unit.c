@@ -866,7 +866,13 @@ static void test_websocket_helpers(void) {
     ws_request_t r;
     assert(ws_parse_request("GET / HTTP/1.1\r\nHost: x\r\nUpgrade: WebSocket\r\nConnection: Upgrade\r\n"
                             "sec-websocket-key: abc==\r\nOrigin: https://a.b\r\nX-Forwarded-For: 198.51.100.4, 10.0.0.1", &r) == 0);
-    assert(strcmp(r.key, "abc==") == 0 && strcmp(r.origin, "https://a.b") == 0 && strcmp(r.forwarded, "198.51.100.4") == 0);
+    assert(strcmp(r.key, "abc==") == 0 && strcmp(r.origin, "https://a.b") == 0 && strcmp(r.forwarded, "198.51.100.4, 10.0.0.1") == 0);
+    /* the client controls the left of the list: only the rightmost non-proxy entry counts */
+    char fwd[64];
+    const char proxies[2][CFG_MASK] = {"127.0.0.1", "10.*"};
+    assert(ws_forwarded_client("6.6.6.6, 198.51.100.4", proxies, 1, fwd, sizeof fwd) == 0 && strcmp(fwd, "198.51.100.4") == 0);
+    assert(ws_forwarded_client("6.6.6.6, 198.51.100.4, 10.0.0.1", proxies, 2, fwd, sizeof fwd) == 0 && strcmp(fwd, "198.51.100.4") == 0);
+    assert(ws_forwarded_client(" 203.0.113.9 ", proxies, 2, fwd, sizeof fwd) == 0 && strcmp(fwd, "203.0.113.9") == 0);
     assert(!r.text_proto);
     assert(ws_parse_request("GET / HTTP/1.1\r\nUpgrade: websocket\r\nSec-WebSocket-Key: k\r\nSec-WebSocket-Protocol: binary.ircv3.net, text.ircv3.net", &r) == 0 && r.text_proto);
     char resp[256];

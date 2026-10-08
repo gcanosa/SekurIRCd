@@ -26,6 +26,7 @@
 
 static int valid_email(const char *e);
 static void ns_begin_email(server_t *srv, client_t *cl, const char *email);
+static int start_plain_login(server_t *srv, client_t *cl, const char *authcid, const char *passwd, int style);
 
 void cmd_nick(server_t *srv, client_t *cl, irc_message_t *msg) {
     if (msg->nparams < 1) {
@@ -132,14 +133,17 @@ void cmd_user(server_t *srv, client_t *cl, irc_message_t *msg) {
         client_reply(cl, N_ALREADYREGISTERED, NULL, 0, "You may not reregister");
         return;
     }
-    const char *user = msg->params[0];
-    const char *realname = msg->params[msg->nparams - 1];
-    if (!irc_valid_user(user, srv->cfg.security.max_nick_length)) {
-        client_send(cl, "NOTICE * :Invalid username");
-        cl->quitting = 1;
-        snprintf(cl->quit_reason, sizeof cl->quit_reason, "Invalid username");
-        return;
+    /* Clients send the OS login name by default (irssi, WeeChat, HexChat), and "john.doe" or "Jöhn" are normal there:
+     * keep the characters an ident may hold and truncate, as other ircds do, instead of refusing the connection. */
+    char user[USERLEN];
+    size_t ul = 0;
+    for (const char *s = msg->params[0]; *s && ul + 1 < sizeof user && (int)ul < srv->cfg.security.max_nick_length; s++) {
+        unsigned char c = (unsigned char)*s;
+        if (isalnum(c) || c == '_' || (c == '-' && ul > 0)) user[ul++] = (char)c;
     }
+    user[ul] = '\0';
+    if (!ul) snprintf(user, sizeof user, "user");
+    const char *realname = msg->params[msg->nparams - 1];
     /* An identd that already answered is authoritative -- confirmed ident
      * overrides whatever the client itself claims in USER, same convention
      * every ircd follows. */
@@ -149,19 +153,36 @@ void cmd_user(server_t *srv, client_t *cl, irc_message_t *msg) {
     cmd_send_welcome_if_ready(srv, cl);
 }
 
+/* No server-wide connect password exists, so PASS doubles as an account login for clients without SASL (mIRC,
+ * bouncers): "PASS account:password", or "PASS password" for the account named like the nick. Tried at welcome time. */
 void cmd_pass(server_t *srv, client_t *cl, irc_message_t *msg) {
-    /* v1.0.1 has no server-wide connect password (only [[operators]] logins)
-     * -- accepted and ignored, same as most ircds do for a client that sends
-     * one unprompted. */
-    (void)srv; (void)cl; (void)msg;
+    if (cl->registered || msg->nparams < 1 || !srv->cfg.accounts.enabled) return;
+    snprintf(cl->pass, sizeof cl->pass, "%s", msg->params[msg->nparams - 1]);
 }
 
-static void cap_notify_send(server_t *srv, const char *verb, const char *tokens, unsigned drop_bit) {
+int cmd_pass_login(server_t *srv, client_t *cl) {
+    if (!cl->pass[0]) return 0;
+    char pass[sizeof cl->pass];
+    snprintf(pass, sizeof pass, "%s", cl->pass);
+    OPENSSL_cleanse(cl->pass, sizeof cl->pass);
+    if (cl->account[0] || !srv->cfg.accounts.enabled) return 0; /* SASL already did it */
+    char *colon = strchr(pass, ':');
+    const char *account = colon ? pass : cl->nick, *password = colon ? colon + 1 : pass;
+    if (colon) *colon = '\0';
+    int rc = (account[0] && password[0] && strlen(password) < sizeof ((job_t *)0)->secret)
+                 ? start_plain_login(srv, cl, account, password, AUTH_STYLE_PASS) : -1;
+    OPENSSL_cleanse(pass, sizeof pass);
+    if (rc != 0) notice_self(srv, cl, "PASS login refused (try again later or use SASL) -- continuing unidentified");
+    return rc == 0;
+}
+
+/* `tokens302` goes to clients that negotiated CAP 302 (cap values allowed), `tokens` to the rest (bare names). */
+static void cap_notify_send(server_t *srv, const char *verb, const char *tokens302, const char *tokens, unsigned drop_bit) {
     for (client_t *c = srv->all_clients; c; c = c->all_next) {
         if (c->fd < 0 || c->quitting || !(c->caps & CAP_CAP_NOTIFY)) continue;
         char line[500];
         const char *p[] = {c->nick[0] ? c->nick : "*", verb};
-        irc_build(line, sizeof line, NULL, 0, srv->cfg.server.name, "CAP", p, 2, tokens);
+        irc_build(line, sizeof line, NULL, 0, srv->cfg.server.name, "CAP", p, 2, c->cap_version >= 302 ? tokens302 : tokens);
         client_send(c, line);
         if (drop_bit) c->caps &= ~drop_bit; /* a removed cap is no longer in effect */
     }
@@ -170,12 +191,18 @@ static void cap_notify_send(server_t *srv, const char *verb, const char *tokens,
 void cmd_cap_notify_changes(server_t *srv, int old_accounts, int old_history) {
     int accounts = srv->cfg.accounts.enabled, history = srv->cfg.messages.history_size > 0;
     if (accounts != old_accounts) {
-        if (accounts) cap_notify_send(srv, "NEW", "sasl=PLAIN,SCRAM-SHA-256 draft/account-registration=custom-account-name", 0);
-        else cap_notify_send(srv, "DEL", "sasl draft/account-registration", 0);
+        if (accounts) {
+            int external = srv->cfg.tls.enabled && srv->cfg.tls.request_client_cert; /* same rule as CAP LS */
+            cap_notify_send(srv, "NEW", external ? "sasl=PLAIN,SCRAM-SHA-256,EXTERNAL draft/account-registration=custom-account-name"
+                                                 : "sasl=PLAIN,SCRAM-SHA-256 draft/account-registration=custom-account-name",
+                            "sasl draft/account-registration", 0);
+        } else {
+            cap_notify_send(srv, "DEL", "sasl draft/account-registration", "sasl draft/account-registration", 0);
+        }
     }
     if (history != old_history) {
-        if (history) cap_notify_send(srv, "NEW", "draft/chathistory", 0);
-        else cap_notify_send(srv, "DEL", "draft/chathistory", CAP_CHATHISTORY);
+        if (history) cap_notify_send(srv, "NEW", "draft/chathistory", "draft/chathistory", 0);
+        else cap_notify_send(srv, "DEL", "draft/chathistory", "draft/chathistory", CAP_CHATHISTORY);
     }
 }
 
@@ -349,12 +376,13 @@ void cmd_cap(server_t *srv, client_t *cl, irc_message_t *msg) {
         /* All-or-nothing (IRCv3): ACK only if every requested token (minus
          * an optional leading '-') names a cap we grant. */
         const char *requested = msg->nparams > 1 ? msg->params[msg->nparams - 1] : "";
-        int ok = requested[0] != '\0' && strlen(requested) < 256; /* longer would be truncated yet ACKed in full */
+        /* Up to a whole line: gamja/Kiwi/Halloy request everything they know in one REQ, which is ~360 bytes here. */
+        int ok = requested[0] != '\0' && strlen(requested) < 512; /* longer would be truncated yet ACKed in full */
         if (!cl->registered) cl->cap_negotiating = 1; /* IRCv3: a REQ also holds registration until CAP END */
-        char buf[256];
+        char buf[512];
         snprintf(buf, sizeof buf, "%s", requested);
         if (ok) {
-            char probe[256];
+            char probe[512];
             snprintf(probe, sizeof probe, "%s", requested);
             char *save = NULL;
             for (char *tok = strtok_r(probe, " ", &save); tok; tok = strtok_r(NULL, " ", &save)) {
@@ -377,7 +405,7 @@ void cmd_cap(server_t *srv, client_t *cl, irc_message_t *msg) {
                 }
             }
         }
-        char line[512];
+        char line[700];
         const char *p[] = {target, ok ? "ACK" : "NAK"};
         irc_build(line, sizeof line, NULL, 0, srv->cfg.server.name, "CAP", p, 2, requested);
         client_send(cl, line);
@@ -1196,10 +1224,10 @@ void cmd_finish_auth(server_t *srv, client_t *cl, int is_register, int success, 
             if (cl->pending_scram[0] && !accounts_scram(&srv->accounts, account)) accounts_set_scram(&srv->accounts, account, cl->pending_scram);
             cl->pending_scram[0] = '\0';
             server_login(srv, cl, account);
-            if (style == AUTH_STYLE_NICKSERV) {
+            if (style == AUTH_STYLE_NICKSERV || style == AUTH_STYLE_PASS) {
                 char m[200];
                 snprintf(m, sizeof m, "You are now identified for %s", account);
-                ns_say(srv, cl, m);
+                if (style == AUTH_STYLE_PASS) notice_self(srv, cl, m); else ns_say(srv, cl, m);
             } else {
                 client_reply(cl, N_SASLSUCCESS, NULL, 0, "SASL authentication successful");
             }
@@ -1207,6 +1235,7 @@ void cmd_finish_auth(server_t *srv, client_t *cl, int is_register, int success, 
         } else {
             auth_fail_record(cl->ip);
             if (style == AUTH_STYLE_NICKSERV) ns_say(srv, cl, "Invalid account or password");
+            else if (style == AUTH_STYLE_PASS) notice_self(srv, cl, "PASS login failed: invalid account or password -- continuing unidentified");
             else client_reply(cl, N_SASLFAIL, NULL, 0, "SASL authentication failed");
         }
         return;

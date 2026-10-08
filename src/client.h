@@ -51,6 +51,7 @@ typedef struct chan_node {
 #define AUTH_STYLE_LEGACY 0   /* SASL numerics / plain /REGISTER notice */
 #define AUTH_STYLE_NICKSERV 1 /* NOTICE from NickServ */
 #define AUTH_STYLE_DRAFT 2    /* draft/account-registration REGISTER SUCCESS */
+#define AUTH_STYLE_PASS 3     /* PASS account:password at connect: a server NOTICE */
 
 typedef struct client {
     int fd;                       /* -1 for a service pseudo-client (see link.h) */
@@ -139,6 +140,7 @@ typedef struct client {
     uint64_t auth_gen;      /* bumped on every SASL/REGISTER/OPER/DIE/RESTART job submitted -- see worker.h job_t.gen */
     char pending_account[64];
     char pending_newpw[256]; /* NickServ SET PASSWORD: the new password while the old one is being verified */
+    char pass[256];         /* PASS given before registration, tried as an account login once NICK+USER are in (then wiped) */
     char pending_email[160]; /* email given at REGISTER, stored once the account exists */
     char pending_scram[160]; /* SCRAM verifier derived from the password in flight; stored if the login/registration succeeds */
     struct scram_sess *scram; /* SASL SCRAM-SHA-256 exchange in progress (cmd_reg.c) */

@@ -42,6 +42,8 @@ const hist_entry_t *hist_buf_at(const hist_buf_t *b, int i);
 /* Store (hangs off server_t). `cap` is [messages] history_size. */
 hist_buf_t *history_get(struct server *srv, const char *key);
 void history_add(struct server *srv, const char *key, int cap, const hist_entry_t *entry);
+/* A channel RENAME: its conversation moves to the new name (replacing any stale history kept under that name). */
+void history_rename_channel(struct server *srv, const char *oldname, const char *newname);
 void history_free(struct server *srv);
 
 /* Persistence ([messages] history_file). load: at startup; maybe_save: from the 1-second tick (debounced) or force=1. */

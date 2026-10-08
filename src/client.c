@@ -35,6 +35,7 @@ void client_free(client_t *cl) {
     free(cl->ml);
     free(cl->label_buf);
     free(cl->scram);
+    OPENSSL_cleanse(cl->pass, sizeof cl->pass); /* a PASS never tried (gone before registering) */
     free(cl->ws_in);
     free(cl->ws_out);
     free(cl);
@@ -179,6 +180,12 @@ static void line_add_tag(const char *tag, const char *line, char *out, size_t ou
     else snprintf(out, outsz, "@%s %s", tag, line);
 }
 
+static int has_batch_tag(const char *line) {
+    if (line[0] != '@') return 0;
+    const char *sp = strchr(line, ' '), *b = strstr(line, ";batch=");
+    return strncmp(line, "@batch=", 7) == 0 || (b && sp && b < sp);
+}
+
 void client_label_end(client_t *cl) {
     if (!cl->label_capture) return; /* overflowed and already released */
     cl->label_capture = 0;
@@ -219,8 +226,10 @@ void client_label_end(client_t *cl) {
             char *nl = memchr(p, '\n', (size_t)(end - p));
             if (!nl) break;
             *nl = '\0';
-            line_add_tag(tagb, p, out, sizeof out);
-            client_send(cl, out);
+            /* A line inside a nested batch (CHATHISTORY, multiline echo) keeps only its own batch tag -- that batch's
+             * opening BATCH line is the one that joins this labeled-response batch. */
+            if (has_batch_tag(p)) client_send(cl, p);
+            else { line_add_tag(tagb, p, out, sizeof out); client_send(cl, out); }
             p = nl + 1;
         }
         char minus[40], endl[300];

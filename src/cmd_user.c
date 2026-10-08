@@ -296,6 +296,23 @@ static int pm_target_ok(client_t *cl, client_t *dst, const char *textbuf, int is
     return 1;
 }
 
+/* Appends one delivered PRIVMSG/NOTICE to the CHATHISTORY conversation `key`, stamped now. */
+static void record_history(server_t *srv, const char *key, const char *msgid, const char *sender, const char *account,
+                           const char *verb, const char *target, const char *text) {
+    hist_entry_t h;
+    memset(&h, 0, sizeof h);
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    h.ms = (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+    snprintf(h.msgid, sizeof h.msgid, "%s", msgid);
+    snprintf(h.sender, sizeof h.sender, "%s", sender);
+    snprintf(h.account, sizeof h.account, "%s", account);
+    snprintf(h.verb, sizeof h.verb, "%s", verb);
+    snprintf(h.target, sizeof h.target, "%s", target);
+    snprintf(h.text, sizeof h.text, "%s", text);
+    history_add(srv, key, srv->cfg.messages.history_size, &h);
+}
+
 static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char *verb, int is_notice) {
     const char *target = msg->params[0];
     int is_tagmsg = strcmp(verb, "TAGMSG") == 0;
@@ -410,7 +427,8 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
                 if (channel_rank_level(mm->rank) >= min_level) deliver(mm->client, cl, lines, &x);
             }
             { irc_tag_t wt[1 + MAX_CLIENT_TAGS]; int nwt = wire_tags(&x, wt); netsync_message(srv, cl, verb, target, NULL, is_tagmsg ? NULL : outtext, wt, nwt); }
-            return; /* STATUSMSG has no echo-message in upstream either */
+            if (cl->caps & CAP_ECHO_MESSAGE) deliver(cl, cl, lines, &x); /* echo-message clients (The Lounge, gamja, Kiwi) only show what comes back */
+            return;
         }
 
         HASH_ITER(hh, chan->members, mm, tmp) {
@@ -421,20 +439,9 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
         }
         { irc_tag_t wt[1 + MAX_CLIENT_TAGS]; int nwt = wire_tags(&x, wt); netsync_message(srv, cl, verb, target, NULL, is_tagmsg ? NULL : outtext, wt, nwt); }
         if (!is_tagmsg && srv->cfg.messages.history_size > 0) {
-            hist_entry_t h;
-            memset(&h, 0, sizeof h);
-            struct timespec ts;
-            clock_gettime(CLOCK_REALTIME, &ts);
-            snprintf(h.msgid, sizeof h.msgid, "%s", x.msgid);
-            h.ms = (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-            snprintf(h.sender, sizeof h.sender, "%s", prefix);
-            snprintf(h.account, sizeof h.account, "%s", cl->account);
-            snprintf(h.verb, sizeof h.verb, "%s", verb);
-            snprintf(h.target, sizeof h.target, "%s", chan->name);
-            snprintf(h.text, sizeof h.text, "%s", outtext);
             char hkey[160];
             history_key_channel(hkey, sizeof hkey, chan->name);
-            history_add(srv, hkey, srv->cfg.messages.history_size, &h);
+            record_history(srv, hkey, x.msgid, prefix, cl->account, verb, chan->name, outtext);
         }
         delivered = 1;
     } else {
@@ -467,20 +474,9 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
         /* Private-message history, only between two logged-in accounts (so each side can ask for it by account). */
         if (!is_tagmsg && srv->cfg.messages.history_size > 0 && srv->cfg.messages.history_dm &&
             cl->account[0] && dst->account[0] && cl != dst) {
-            hist_entry_t h;
-            memset(&h, 0, sizeof h);
-            struct timespec ts;
-            clock_gettime(CLOCK_REALTIME, &ts);
-            snprintf(h.msgid, sizeof h.msgid, "%s", x.msgid);
-            h.ms = (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-            snprintf(h.sender, sizeof h.sender, "%s", prefix);
-            snprintf(h.account, sizeof h.account, "%s", cl->account);
-            snprintf(h.verb, sizeof h.verb, "%s", verb);
-            snprintf(h.target, sizeof h.target, "%s", dst->nick);
-            snprintf(h.text, sizeof h.text, "%s", textbuf);
             char hkey[160];
             history_key_dm(hkey, sizeof hkey, cl->account, dst->account);
-            history_add(srv, hkey, srv->cfg.messages.history_size, &h);
+            record_history(srv, hkey, x.msgid, prefix, cl->account, verb, dst->nick, textbuf);
         }
     }
     /* IRCv3 echo-message: the sender gets its own message back too, once
@@ -721,6 +717,37 @@ static void send_who_classic(client_t *cl, client_t *u, channel_t *chan, int mul
     client_reply(cl, N_WHOREPLY, p, 6, trailing);
 }
 
+static int shares_channel(const client_t *a, const client_t *b) {
+    for (const chan_node_t *x = a->channels; x; x = x->next)
+        for (const chan_node_t *y = b->channels; y; y = y->next)
+            if (x->chan == y->chan) return 1;
+    return 0;
+}
+
+/* +i: hidden from anyone who isn't the user, an oper, or sharing a channel with them. */
+static int invisible_to(const client_t *u, const client_t *viewer) {
+    return (u->umodes & UMODE_I) && u != viewer && !(viewer->umodes & UMODE_O) && !shares_channel(u, viewer);
+}
+
+/* The channel a WHO reply shows for `u`: the first one the asker may see, else NULL ("*"). */
+static channel_t *who_channel_for(client_t *u, client_t *cl) {
+    for (chan_node_t *n = u->channels; n; n = n->next)
+        if (!(n->chan->modes & (CMODE_S | CMODE_P)) || channel_find_member(n->chan, cl)) return n->chan;
+    return NULL;
+}
+
+/* WHO <mask>: a glob over nick, user, host, server and realname ("0" / "*" = everyone visible); opers also match the
+ * real host and IP. */
+static int who_mask_hit(server_t *srv, client_t *cl, client_t *u, const char *mask) {
+    if (!strcmp(mask, "0") || !strcmp(mask, "*")) return 1;
+    if (irc_glob_match(mask, u->nick) || irc_glob_match(mask, u->user) || irc_glob_match(mask, u->host) ||
+        irc_glob_match(mask, netsync_server_name_of(srv, u)) || irc_glob_match(mask, u->realname)) return 1;
+    char full[400];
+    client_prefix(u, full, sizeof full);
+    if (irc_glob_match(mask, full)) return 1;
+    return (cl->umodes & UMODE_O) && (irc_glob_match(mask, u->realhost) || irc_glob_match(mask, u->ip));
+}
+
 void cmd_who(server_t *srv, client_t *cl, irc_message_t *msg) {
     if (msg->nparams < 1 || !msg->params[0][0]) {
         const char *p[] = {"WHO"};
@@ -730,20 +757,23 @@ void cmd_who(server_t *srv, client_t *cl, irc_message_t *msg) {
     const char *target = msg->params[0];
     int multi = cl->caps & CAP_MULTI_PREFIX;
 
+    /* Second parameter: "[flags][%fields[,token]]" -- flag 'o' keeps only opers, %... is WHOX. */
     const char *whox_fields = NULL;
     char whox_token[64] = "";
     char fieldbuf[32];
-    if (msg->nparams > 1 && msg->params[1][0] == '%') {
-        char *comma = strchr(msg->params[1] + 1, ',');
+    const char *pct = msg->nparams > 1 ? strchr(msg->params[1], '%') : NULL;
+    int opers_only = msg->nparams > 1 && memchr(msg->params[1], 'o', pct ? (size_t)(pct - msg->params[1]) : strlen(msg->params[1])) != NULL;
+    if (pct) {
+        char *comma = strchr(pct + 1, ',');
         if (comma) {
-            size_t flen = (size_t)(comma - (msg->params[1] + 1));
+            size_t flen = (size_t)(comma - (pct + 1));
             if (flen >= sizeof fieldbuf) flen = sizeof fieldbuf - 1;
-            memcpy(fieldbuf, msg->params[1] + 1, flen);
+            memcpy(fieldbuf, pct + 1, flen);
             fieldbuf[flen] = '\0';
             whox_fields = fieldbuf;
             snprintf(whox_token, sizeof whox_token, "%s", comma + 1);
         } else {
-            whox_fields = msg->params[1] + 1;
+            whox_fields = pct + 1;
         }
     }
 
@@ -763,27 +793,34 @@ void cmd_who(server_t *srv, client_t *cl, irc_message_t *msg) {
         member_t *viewer = channel_find_member(chan, cl);
         HASH_ITER(hh, chan->members, m, tmp) {
             if (!channel_member_visible(chan, m, viewer)) continue; /* +D hidden / +u audience */
+            if (!viewer && invisible_to(m->client, cl)) continue; /* outsiders don't see +i members */
+            if (opers_only && !visible_oper(m->client, cl)) continue;
             if (whox_fields) send_whox_reply(cl, whox_fields, whox_token, m->client, chan);
             else send_who_classic(cl, m->client, chan, multi);
         }
     } else {
         client_t *u = server_find_user(srv, target);
-        if (!u) {
-            const char *p[] = {target};
-            client_reply(cl, N_NOSUCHNICK, p, 1, "No such nick/channel");
-            client_reply(cl, N_ENDOFWHO, p, 1, "End of /WHO list.");
-            return;
+        if (u && !u->registered) u = NULL;
+        if (u) { /* an exact nick: that user, +i or not (as WHOIS would show) */
+            if (!opers_only || visible_oper(u, cl)) {
+                if (whox_fields) send_whox_reply(cl, whox_fields, whox_token, u, who_channel_for(u, cl));
+                else send_who_classic(cl, u, who_channel_for(u, cl), multi);
+            }
+        } else { /* otherwise a mask over everyone the asker may see -- one reply per user */
+            client_t *it, *tmp;
+            int hits = 0;
+            HASH_ITER(hh, srv->users, it, tmp) {
+                if (!it->registered || invisible_to(it, cl) || (opers_only && !visible_oper(it, cl))) continue;
+                if (!who_mask_hit(srv, cl, it, target)) continue;
+                hits++;
+                if (whox_fields) send_whox_reply(cl, whox_fields, whox_token, it, who_channel_for(it, cl));
+                else send_who_classic(cl, it, who_channel_for(it, cl), multi);
+            }
+            if (!hits && !strpbrk(target, "*?") && strcmp(target, "0") != 0) { /* looked like a nick: say so, as before */
+                const char *p[] = {target};
+                client_reply(cl, N_NOSUCHNICK, p, 1, "No such nick/channel");
+            }
         }
-        /* Exactly one reply per user: the first channel the asker can see them in, else "*". */
-        channel_t *shown = NULL;
-        for (chan_node_t *n = u->channels; n; n = n->next) {
-            channel_t *chan = n->chan;
-            if ((chan->modes & (CMODE_S | CMODE_P)) && !channel_find_member(chan, cl)) continue;
-            shown = chan;
-            break;
-        }
-        if (whox_fields) send_whox_reply(cl, whox_fields, whox_token, u, shown);
-        else send_who_classic(cl, u, shown, multi);
     }
     const char *pe[] = {target};
     client_reply(cl, N_ENDOFWHO, pe, 1, "End of /WHO list.");
@@ -930,6 +967,13 @@ void cmd_ison(server_t *srv, client_t *cl, irc_message_t *msg) {
 
 #define MAX_MONITOR 100
 
+/* Appends `item` to a comma-separated MONITOR reply, first sending what's there if it would push the line past 512. */
+static void mon_append(client_t *cl, const char *code, char *buf, size_t bufsz, const char *item) {
+    size_t l = strlen(buf), il = strlen(item);
+    if (l && l + 1 + il > 400) { client_reply(cl, code, NULL, 0, buf); buf[0] = '\0'; l = 0; }
+    snprintf(buf + l, bufsz - l, "%s%s", l ? "," : "", item);
+}
+
 static void monitor_discard(client_t *cl, const char *cf) {
     for (int i = 0; i < cl->n_monitor; i++) {
         if (strcmp(cl->monitor[i], cf) == 0) {
@@ -969,11 +1013,9 @@ static void monitor_impl(server_t *srv, client_t *cl, irc_message_t *msg) {
             int dup = 0;
             for (int i = 0; i < cl->n_monitor; i++) if (strcmp(cl->monitor[i], cf) == 0) { dup = 1; break; }
             if (!dup) { snprintf(cl->monitor[cl->n_monitor], NICKLEN, "%s", cf); cl->n_monitor++; }
-            client_t *u = server_find_user(srv, t);
-            char *dstbuf = u ? online : offline;
-            if (dstbuf[0]) strncat(dstbuf, ",", sizeof online - strlen(dstbuf) - 1);
-            if (u) { char pfx[320]; client_prefix(u, pfx, sizeof pfx); strncat(online, pfx, sizeof online - strlen(online) - 1); }
-            else strncat(offline, t, sizeof offline - strlen(offline) - 1);
+            client_t *u = find_registered(srv, t);
+            if (u) { char pfx[320]; client_prefix(u, pfx, sizeof pfx); mon_append(cl, N_MONONLINE, online, sizeof online, pfx); }
+            else mon_append(cl, N_MONOFFLINE, offline, sizeof offline, t);
         }
         if (online[0]) client_reply(cl, N_MONONLINE, NULL, 0, online);
         if (offline[0]) client_reply(cl, N_MONOFFLINE, NULL, 0, offline);
@@ -982,25 +1024,16 @@ static void monitor_impl(server_t *srv, client_t *cl, irc_message_t *msg) {
     } else if (strcmp(sub, "L") == 0) {
         if (cl->n_monitor > 0) {
             char out[600] = "";
-            for (int i = 0; i < cl->n_monitor; i++) {
-                if (out[0]) strncat(out, ",", sizeof out - strlen(out) - 1);
-                strncat(out, cl->monitor[i], sizeof out - strlen(out) - 1);
-            }
+            for (int i = 0; i < cl->n_monitor; i++) mon_append(cl, N_MONLIST, out, sizeof out, cl->monitor[i]);
             client_reply(cl, N_MONLIST, NULL, 0, out);
         }
         client_reply(cl, N_ENDOFMONLIST, NULL, 0, "End of MONITOR list");
     } else if (strcmp(sub, "S") == 0) {
         char online[600] = "", offline[600] = "";
         for (int i = 0; i < cl->n_monitor; i++) {
-            client_t *u = server_find_user(srv, cl->monitor[i]);
-            if (u) {
-                char pfx[320]; client_prefix(u, pfx, sizeof pfx);
-                if (online[0]) strncat(online, ",", sizeof online - strlen(online) - 1);
-                strncat(online, pfx, sizeof online - strlen(online) - 1);
-            } else {
-                if (offline[0]) strncat(offline, ",", sizeof offline - strlen(offline) - 1);
-                strncat(offline, cl->monitor[i], sizeof offline - strlen(offline) - 1);
-            }
+            client_t *u = find_registered(srv, cl->monitor[i]);
+            if (u) { char pfx[320]; client_prefix(u, pfx, sizeof pfx); mon_append(cl, N_MONONLINE, online, sizeof online, pfx); }
+            else mon_append(cl, N_MONOFFLINE, offline, sizeof offline, cl->monitor[i]);
         }
         if (online[0]) client_reply(cl, N_MONONLINE, NULL, 0, online);
         if (offline[0]) client_reply(cl, N_MONOFFLINE, NULL, 0, offline);
@@ -1123,14 +1156,7 @@ void cmd_glob(server_t *srv, client_t *cl, irc_message_t *msg) {
         if (!u->registered) continue;
         char cf[NICKLEN]; irc_casefold(cf, sizeof cf, u->nick);
         if (!irc_glob_match(pattern, cf)) continue;
-        if ((u->umodes & UMODE_I) && !(cl->umodes & UMODE_O) && u != cl) {
-            /* +i: hidden from a server-wide search unless a channel is shared */
-            int shared = 0;
-            for (chan_node_t *a = u->channels; a && !shared; a = a->next)
-                for (chan_node_t *b = cl->channels; b; b = b->next)
-                    if (a->chan == b->chan) { shared = 1; break; }
-            if (!shared) continue;
-        }
+        if (invisible_to(u, cl)) continue;
         char flags[8];
         snprintf(flags, sizeof flags, "%s%s%s", u->is_away ? "G" : "H", visible_oper(u, cl) ? "*" : "", (u->umodes & UMODE_B) ? "B" : "");
         const char *p[] = {"*", u->user, u->host, netsync_server_name_of(srv, u), u->nick, flags};
@@ -1457,20 +1483,9 @@ void cmd_deliver_remote_message(server_t *srv, client_t *from, const char *verb,
         build_lines(lines, from, prefix, verb, p, is_tagmsg ? NULL : text, &x);
         deliver(dst, from, lines, &x);
         if (!is_tagmsg && srv->cfg.messages.history_size > 0 && srv->cfg.messages.history_dm && from->account[0] && dst->account[0]) {
-            hist_entry_t h;
-            memset(&h, 0, sizeof h);
-            struct timespec ts;
-            clock_gettime(CLOCK_REALTIME, &ts);
-            snprintf(h.msgid, sizeof h.msgid, "%s", x.msgid);
-            h.ms = (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-            snprintf(h.sender, sizeof h.sender, "%s", prefix);
-            snprintf(h.account, sizeof h.account, "%s", from->account);
-            snprintf(h.verb, sizeof h.verb, "%s", verb);
-            snprintf(h.target, sizeof h.target, "%s", dst->nick);
-            snprintf(h.text, sizeof h.text, "%s", text);
             char hkey[160];
             history_key_dm(hkey, sizeof hkey, from->account, dst->account);
-            history_add(srv, hkey, srv->cfg.messages.history_size, &h);
+            record_history(srv, hkey, x.msgid, prefix, from->account, verb, dst->nick, text);
         }
         return;
     }
@@ -1496,19 +1511,8 @@ void cmd_deliver_remote_message(server_t *srv, client_t *from, const char *verb,
         deliver(mm->client, from, lines, &x);
     }
     if (!is_tagmsg && !status_prefix && srv->cfg.messages.history_size > 0) {
-        hist_entry_t h;
-        memset(&h, 0, sizeof h);
-        struct timespec ts;
-        clock_gettime(CLOCK_REALTIME, &ts);
-        snprintf(h.msgid, sizeof h.msgid, "%s", x.msgid);
-        h.ms = (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-        snprintf(h.sender, sizeof h.sender, "%s", prefix);
-        snprintf(h.account, sizeof h.account, "%s", from->account);
-        snprintf(h.verb, sizeof h.verb, "%s", verb);
-        snprintf(h.target, sizeof h.target, "%s", chan->name);
-        snprintf(h.text, sizeof h.text, "%s", text);
         char hkey[160];
         history_key_channel(hkey, sizeof hkey, chan->name);
-        history_add(srv, hkey, srv->cfg.messages.history_size, &h);
+        record_history(srv, hkey, x.msgid, prefix, from->account, verb, chan->name, text);
     }
 }

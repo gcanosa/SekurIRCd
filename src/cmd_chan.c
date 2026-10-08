@@ -3,6 +3,7 @@
  * handlers. Not yet ported: STATUSMSG delivery lives in cmd_user.c
  * (PRIVMSG/NOTICE); EXTBAN a: lives in channel.c's mask matcher. */
 #include "cmd.h"
+#include "history.h"
 #include "link.h"
 #include "log.h"
 
@@ -19,9 +20,13 @@
 #define invite_key_of(c) client_invite_key(c)
 
 static void send_names(client_t *cl, channel_t *chan) {
-    char line[400]; /* + ":server 353 nick = #chan :" must stay under 512 */
+    char line[400];
     size_t pos = 0;
     line[0] = '\0';
+    /* ":server 353 nick = #chan :" + the names + CRLF must fit in 512 */
+    size_t overhead = strlen(cl->srv->cfg.server.name) + strlen(cl->nick) + strlen(chan->name) + 16;
+    size_t budget = overhead < 510 - 64 ? 510 - overhead : 64;
+    if (budget > sizeof line - 1) budget = sizeof line - 1;
     const char *chantype = "=";
     if (chan->modes & CMODE_S) chantype = "@"; /* secret wins over private */
     else if (chan->modes & CMODE_P) chantype = "*";
@@ -39,7 +44,7 @@ static void send_names(client_t *cl, channel_t *chan) {
         if (userhost) snprintf(nickbuf, sizeof nickbuf, "%s%s!%s@%s", rankch, m->client->nick, m->client->user, m->client->host);
         else snprintf(nickbuf, sizeof nickbuf, "%s%s", rankch, m->client->nick);
         size_t nl = strlen(nickbuf);
-        if (pos + nl + 1 >= sizeof line - 1) {
+        if (pos && pos + nl + 1 > budget) {
             const char *p[] = {chantype, chan->name};
             client_reply(cl, N_NAMEREPLY, p, 2, line);
             pos = 0;
@@ -280,6 +285,17 @@ static void do_join_one(server_t *srv, client_t *cl, const char *chan_name, cons
 }
 
 void cmd_join(server_t *srv, client_t *cl, irc_message_t *msg) {
+    if (strcmp(msg->params[0], "0") == 0) { /* RFC 2812: JOIN 0 leaves every channel */
+        char names[MAX_CHANNELS_PER_CLIENT][CHAN_NAMELEN];
+        int n = 0;
+        for (chan_node_t *c = cl->channels; c && n < MAX_CHANNELS_PER_CLIENT; c = c->next) snprintf(names[n++], CHAN_NAMELEN, "%s", c->chan->name);
+        for (int i = 0; i < n; i++) { /* one at a time: cmd_part copies its list into a fixed buffer */
+            irc_message_t part = {.command = "PART", .nparams = 1};
+            part.params[0] = names[i];
+            cmd_part(srv, cl, &part);
+        }
+        return;
+    }
     char chanlist[600];
     snprintf(chanlist, sizeof chanlist, "%s", msg->params[0]);
     char keylist[600];
@@ -382,6 +398,7 @@ void cmd_channel_rename_apply(server_t *srv, channel_t *chan, client_t *by, cons
     irc_build(rename_line, sizeof rename_line, NULL, 0, prefix, "RENAME", rp, 2, reason);
 
     HASH_DEL(srv->channels, chan);
+    history_rename_channel(srv, old_display, newname);
     snprintf(chan->name, sizeof chan->name, "%s", newname);
     snprintf(chan->casefold_name, sizeof chan->casefold_name, "%s", ncf);
     HASH_ADD_STR(srv->channels, casefold_name, chan);

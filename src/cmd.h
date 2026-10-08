@@ -28,6 +28,8 @@ void cmd_dispatch(server_t *srv, client_t *cl, irc_message_t *msg);
 
 /* Shared helpers used across cmd_*.c */
 void cmd_send_welcome_if_ready(server_t *srv, client_t *cl);
+/* PASS [account:]password from before registration: starts that login (1 = now pending, hold the welcome). */
+int cmd_pass_login(server_t *srv, client_t *cl);
 void err_need_more_params(client_t *cl, const char *cmdname);
 void err_no_such_nick(client_t *cl, const char *nick);
 void err_no_such_channel(client_t *cl, const char *chan);
