@@ -1,5 +1,17 @@
 [
   {
+    "tag": "v1.2.1",
+    "date": "2026-10-08",
+    "changes": [
+      "Security: fixed a use-after-free when a netsplit removed a chain of three or more servers, and IP spoofing through a WebSocket reverse proxy (X-Forwarded-For is now read right-to-left, skipping trusted proxies, instead of trusting the client-supplied leftmost entry)",
+      "Client compatibility: usernames like john.doe (the OS login irssi, WeeChat and HexChat send) are cleaned up instead of disconnecting the client; a full-length CAP REQ (gamja, Kiwi, Halloy) is no longer refused; MONITOR lists are split across lines instead of truncated; labeled responses no longer double-tag lines inside CHATHISTORY/multiline batches; STATUSMSG (@#chan) is echoed to echo-message clients; NAMES lines always fit in 512 bytes",
+      "New: WHO <mask> (nick, user, host, server, realname; 'o' for opers only), PASS account:password login for clients without SASL, and JOIN 0",
+      "Privacy: +i users no longer appear in WHO masks or in WHO #channel for people outside the channel",
+      "Fixes: RENAME keeps the channel's chat history; cap-notify sends correct SASL values (EXTERNAL when available, bare names to pre-302 clients); read markers and STATS m counters are bounded correctly; web chat nick fallback can no longer stall registration",
+      "Testing: 98 end-to-end integration tests (10 new client-compatibility tests)"
+    ]
+  },
+  {
     "tag": "v1.2.0",
     "date": "2026-10-07",
     "changes": [

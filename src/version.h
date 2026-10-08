@@ -2,5 +2,5 @@
  * role in the Python daemon: bump this, nothing else). */
 #ifndef SEKURIRCD_VERSION_H
 #define SEKURIRCD_VERSION_H
-#define SEKURIRCD_VERSION "1.2.0"
+#define SEKURIRCD_VERSION "1.2.1"
 #endif
