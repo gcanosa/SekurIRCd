@@ -134,6 +134,7 @@ int server_rehash(server_t *srv, char *errbuf, size_t errbufsz) {
     int old_accounts = srv->cfg.accounts.enabled, old_history = srv->cfg.messages.history_size > 0;
     srv->cfg = tmp;
     server_apply_cloak_secret(srv);
+    if (srv->self_srv) snprintf(srv->self_srv->desc, sizeof srv->self_srv->desc, "%s", srv->cfg.server.network); /* LINKS/MAP description follows the network name */
     cmd_cap_notify_changes(srv, old_accounts, old_history);
     net_reclass_all(srv);
     net_apply_listeners(srv);
