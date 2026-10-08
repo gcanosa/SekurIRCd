@@ -1,7 +1,7 @@
 // SekurNet web chat: a small IRC-over-WebSocket client locked to ONE network.
 // The endpoint is a constant on purpose: there is no host field and no URL parameter that can change it.
 (function () {
-  var WS_URL = "wss://ircsekurnet.duckdns.org:12155"; // [websocket] port with tls = true in sekurircd.toml
+  var WS_URL = "wss://irc.sekurnet.org:12155"; // [websocket] port with tls = true in sekurircd.toml
   var DEFAULT_CHAN = "#SekurNet";
   var NICK_RE = /^[A-Za-z\[\]\\`_^{|}][A-Za-z0-9\[\]\\`_^{|}-]{0,29}$/;
   var CHAN_RE = /^[#&][^\s,\x07]{1,49}$/;
@@ -233,7 +233,7 @@
 
   function connect() {
     clearTimeout(timer); registered = false; away = false; // a new connection starts un-away
-    say("*", "Connecting to ircsekurnet.duckdns.org ...");
+    say("*", "Connecting to irc.sekurnet.org ...");
     var sock;
     try { sock = ws = new WebSocket(WS_URL); } catch (e) { return fail(); }
     var opened = false;
@@ -255,7 +255,7 @@
   }
   function fail() {
     app.hidden = true; form.hidden = false;
-    err.textContent = "Could not connect. The server may be down, or something is blocking the connection. If you use an ad or content blocker (uBlock, Privacy Badger, a firewall extension), allow ircsekurnet.duckdns.org for this page or turn the blocker off for this site, then try again.";
+    err.textContent = "Could not connect. The server may be down, or something is blocking the connection. If you use an ad or content blocker (uBlock, Privacy Badger, a firewall extension), allow irc.sekurnet.org for this page or turn the blocker off for this site, then try again.";
   }
 
   form.addEventListener("submit", function (e) {
