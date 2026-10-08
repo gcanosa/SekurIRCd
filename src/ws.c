@@ -52,6 +52,10 @@ int ws_parse_request(const char *req, ws_request_t *out) {
     if (!header_value(req, "Upgrade", upgrade, sizeof upgrade) || strcasecmp(upgrade, "websocket") != 0) return -1;
     if (!header_value(req, "Sec-WebSocket-Key", out->key, sizeof out->key) || !out->key[0]) return -1;
     header_value(req, "Origin", out->origin, sizeof out->origin);
+    char sub[128] = "";
+    if (header_value(req, "Sec-WebSocket-Protocol", sub, sizeof sub))
+        for (char *save, *t = strtok_r(sub, ", \t", &save); t; t = strtok_r(NULL, ", \t", &save))
+            if (strcasecmp(t, "text.ircv3.net") == 0) out->text_proto = 1;
     char fwd[128] = "";
     if (header_value(req, "X-Forwarded-For", fwd, sizeof fwd) || header_value(req, "X-Real-IP", fwd, sizeof fwd)) {
         size_t n = strcspn(fwd, ", ");
@@ -62,12 +66,13 @@ int ws_parse_request(const char *req, ws_request_t *out) {
     return 0;
 }
 
-int ws_build_response(const char *client_key, char *out, size_t outsz) {
+int ws_build_response(const char *client_key, int text_proto, char *out, size_t outsz) {
     char acc[64];
     if (ws_accept_key(client_key, acc, sizeof acc) != 0) return -1;
     int n = snprintf(out, outsz,
                      "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
-                     "Sec-WebSocket-Accept: %s\r\n\r\n", acc);
+                     "Sec-WebSocket-Accept: %s\r\n%s\r\n", acc,
+                     text_proto ? "Sec-WebSocket-Protocol: text.ircv3.net\r\n" : "");
     return (n > 0 && (size_t)n < outsz) ? n : -1;
 }
 
