@@ -11,6 +11,13 @@ over a gateway).
 
 Website & docs: <https://gcanosa.github.io/SekurIRCd/> (source in [`web/`](web/)). Licensed under the [MIT License](LICENSE).
 
+## Support & community
+
+- **Get support:** join **`irc.sekurnet.org`** (port `6667` plain, `6697` TLS) and ask in
+  `#SekurNet` -- the project's support server, run on SekurIRCd itself.
+- **SekurNet:** the IRC network that uses and sponsors SekurIRCd -- official website
+  <https://www.sekurnet.org>.
+
 ## Features (v1.0.2)
 
 - Client connect + full registration (NICK/USER, CAP negotiation, welcome + MOTD)
