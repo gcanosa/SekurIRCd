@@ -69,7 +69,9 @@ static void on_term(int sig) { (void)sig; g_term = 1; }
  * so [storage] path in services.toml can be a plain relative filename that
  * always means "next to this config file", regardless of the daemon's cwd. */
 static void resolve_against_dir(const char *base_path, const char *rel, char *out, size_t outsz) {
-    if (rel[0] == '\0' || rel[0] == '/') { snprintf(out, outsz, "%s", rel); return; }
+    /* Callers pass the same buffer as `rel` and `out`; snprintf with overlapping
+     * source and destination is undefined behaviour, so bail out when it's absolute/empty. */
+    if (rel[0] == '\0' || rel[0] == '/') { if (out != rel) snprintf(out, outsz, "%s", rel); return; }
     const char *slash = strrchr(base_path, '/');
     char resolved[512];
     if (!slash) snprintf(resolved, sizeof resolved, "%s", rel);
