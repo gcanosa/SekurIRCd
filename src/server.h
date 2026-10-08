@@ -108,7 +108,7 @@ typedef struct server {
 
     /* STATS m: per-command invocation counts. Linear array, fine at this
      * daemon's scale (a few dozen distinct command names). */
-    struct { char name[32]; int count; } command_counts[64];
+    struct { char name[32]; int count; } command_counts[128]; /* >= the number of DISPATCH entries in cmd.c */
     int n_command_counts;
 
     uint64_t fanout_gen;   /* see server_send_common_channels */

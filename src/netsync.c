@@ -355,9 +355,12 @@ static void remove_server_tree(server_t *srv, netserver_t *root) {
     client_t *u, *utmp;
     HASH_ITER(hh, srv->users, u, utmp)
         if (u->remote && u->nserver && netsync_is_behind(u->nserver, root)) server_remove_client(srv, u, reason);
-    netserver_t *s, *tmp;
+    /* Unlink first, free after: netsync_is_behind walks ->uplink, which may point at a server already removed in this
+     * pass (hash order is arbitrary), so nothing can be freed until every server has been tested. */
+    netserver_t *s, *tmp, *dead = NULL;
     HASH_ITER(hh, srv->servers, s, tmp)
-        if (s != srv->self_srv && netsync_is_behind(s, root)) { HASH_DEL(srv->servers, s); free(s); }
+        if (s != srv->self_srv && netsync_is_behind(s, root)) { HASH_DEL(srv->servers, s); s->hh.next = dead; dead = s; }
+    while (dead) { s = dead; dead = s->hh.next; free(s); }
 }
 
 void netsync_link_down(server_t *srv, link_conn_t *lc, const char *reason) {

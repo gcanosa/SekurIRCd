@@ -60,6 +60,9 @@ long long server_marker_set(server_t *srv, const char *account, const char *targ
     marker_t *m;
     HASH_FIND_STR(srv->markers, key, m);
     if (!m) {
+        /* MARKREAD takes any valid nick as a target, so one account could otherwise grow this forever.
+         * ponytail: global cap, a per-account cap if one account crowding out the rest ever matters */
+        if (HASH_COUNT(srv->markers) >= 100000) return 0;
         m = calloc(1, sizeof *m);
         if (!m) return 0;
         snprintf(m->key, sizeof m->key, "%s", key);

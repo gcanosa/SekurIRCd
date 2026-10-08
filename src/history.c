@@ -70,6 +70,19 @@ void history_add(server_t *srv, const char *key, int cap, const hist_entry_t *en
     srv->history_dirty = 1;
 }
 
+void history_rename_channel(server_t *srv, const char *oldname, const char *newname) {
+    char ok[160], nk[160];
+    history_key_channel(ok, sizeof ok, oldname);
+    history_key_channel(nk, sizeof nk, newname);
+    hist_buf_t *b = history_get(srv, ok), *stale = history_get(srv, nk);
+    if (!b || b == stale) return;
+    if (stale) { HASH_DEL(srv->history, stale); free(stale->e); free(stale); }
+    HASH_DEL(srv->history, b);
+    snprintf(b->key, sizeof b->key, "%s", nk);
+    HASH_ADD_STR(srv->history, key, b);
+    srv->history_dirty = 1;
+}
+
 void history_free(server_t *srv) {
     hist_buf_t *b, *tmp;
     HASH_ITER(hh, srv->history, b, tmp) { HASH_DEL(srv->history, b); free(b->e); free(b); }

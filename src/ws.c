@@ -1,4 +1,5 @@
 #include "ws.h"
+#include "proto.h"
 
 #include <openssl/evp.h>
 
@@ -56,14 +57,28 @@ int ws_parse_request(const char *req, ws_request_t *out) {
     if (header_value(req, "Sec-WebSocket-Protocol", sub, sizeof sub))
         for (char *save, *t = strtok_r(sub, ", \t", &save); t; t = strtok_r(NULL, ", \t", &save))
             if (strcasecmp(t, "text.ircv3.net") == 0) out->text_proto = 1;
-    char fwd[128] = "";
-    if (header_value(req, "X-Forwarded-For", fwd, sizeof fwd) || header_value(req, "X-Real-IP", fwd, sizeof fwd)) {
-        size_t n = strcspn(fwd, ", ");
-        if (n >= sizeof out->forwarded) n = sizeof out->forwarded - 1;
-        memcpy(out->forwarded, fwd, n);
-        out->forwarded[n] = '\0';
-    }
+    if (!header_value(req, "X-Forwarded-For", out->forwarded, sizeof out->forwarded))
+        header_value(req, "X-Real-IP", out->forwarded, sizeof out->forwarded);
     return 0;
+}
+
+/* X-Forwarded-For is "client, proxy1, proxy2": the client can seed any prefix it likes and each proxy appends the peer
+ * it saw. So walk from the right, skipping our own trusted proxies; the first address that isn't one is the client. */
+int ws_forwarded_client(const char *list, const char globs[][CFG_MASK], int nglobs, char *out, size_t outsz) {
+    char buf[256];
+    snprintf(buf, sizeof buf, "%s", list);
+    out[0] = '\0';
+    for (;;) {
+        char *comma = strrchr(buf, ',');
+        char *v = comma ? comma + 1 : buf;
+        v += strspn(v, " \t");
+        v[strcspn(v, " \t")] = '\0';
+        snprintf(out, outsz, "%s", v);
+        int trusted = 0;
+        for (int i = 0; i < nglobs && !trusted; i++) trusted = irc_glob_match(globs[i], v);
+        if (!trusted || !comma) return out[0] ? 0 : -1;
+        *comma = '\0';
+    }
 }
 
 int ws_build_response(const char *client_key, int text_proto, char *out, size_t outsz) {
