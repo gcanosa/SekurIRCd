@@ -202,7 +202,7 @@ void cmd_send_welcome_if_ready(server_t *srv, client_t *cl) {
     }
 
     char snote[300];
-    snprintf(snote, sizeof snote, "Client connecting: %s (%s@%s) [%s] {users}", cl->nick, cl->user, cl->host, cl->ip);
+    snprintf(snote, sizeof snote, "Client connecting: %s (%s@%s) [%s] {users}", cl->nick, cl->user, cl->realhost[0] ? cl->realhost : cl->host, cl->ip);
     server_notify_opers(srv, snote);
 
     server_send_welcome(srv, cl);

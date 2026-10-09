@@ -32,7 +32,7 @@ static void finish_oper(server_t *srv, client_t *cl, const char *op_name, int pw
     if (!pw_ok) {
         cl->oper_fails++;
         char snote[300];
-        snprintf(snote, sizeof snote, "Failed OPER attempt by %s (%s@%s)", cl->nick, cl->user, cl->host);
+        snprintf(snote, sizeof snote, "Failed OPER attempt by %s (%s@%s)", cl->nick, cl->user, cl->realhost[0] ? cl->realhost : cl->host);
         server_notify_opers(srv, snote);
         if (cl->oper_fails >= MAX_OPER_FAILS) {
             snprintf(cl->quit_reason, sizeof cl->quit_reason, "Too many failed OPER attempts");
@@ -132,7 +132,7 @@ void cmd_oper(server_t *srv, client_t *cl, irc_message_t *msg) {
     }
     client_reply(cl, N_NOOPERHOST, NULL, 0, "No O-lines for your host");
     char snote[300];
-    snprintf(snote, sizeof snote, "Failed OPER attempt by %s (%s@%s)", cl->nick, cl->user, cl->host);
+    snprintf(snote, sizeof snote, "Failed OPER attempt by %s (%s@%s)", cl->nick, cl->user, cl->realhost[0] ? cl->realhost : cl->host);
     server_notify_opers(srv, snote);
 }
 

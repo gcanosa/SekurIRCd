@@ -478,7 +478,7 @@ void server_remove_client(server_t *srv, client_t *cl, const char *quit_reason) 
 
         /* ircd-hybrid format, so HOPM-style bots can track exits. */
         char snote[400];
-        snprintf(snote, sizeof snote, "Client exiting: %s (%s@%s) [%s] [%s]", cl->nick, cl->user, cl->host,
+        snprintf(snote, sizeof snote, "Client exiting: %s (%s@%s) [%s] [%s]", cl->nick, cl->user, cl->realhost[0] ? cl->realhost : cl->host,
                  quit_reason ? quit_reason : "", cl->ip);
         server_notify_opers(srv, snote);
     }
