@@ -209,6 +209,12 @@ static SSL_CTX *tls_setup(server_t *srv) {
      * RELEASE_BUFFERS: idle TLS connections don't pin ~34KB of I/O buffers. */
     SSL_CTX_set_mode(ctx, SSL_MODE_ENABLE_PARTIAL_WRITE | SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER |
                           SSL_MODE_RELEASE_BUFFERS);
+#ifdef SSL_OP_IGNORE_UNEXPECTED_EOF
+    /* OpenSSL 3 reports a peer that just closes TCP without a close_notify
+     * (most IRC clients, browsers, scanners) as a hard SSL error -> "Read
+     * error". Treat it as the plain EOF it is. */
+    SSL_CTX_set_options(ctx, SSL_OP_IGNORE_UNEXPECTED_EOF);
+#endif
     /* SSL_VERIFY_PEER alone (no _FAIL_IF_NO_PEER_CERT) *requests* a client
      * certificate without requiring one -- a client with no cert still
      * connects normally, just can't use SASL EXTERNAL. */
