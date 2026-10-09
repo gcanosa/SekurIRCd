@@ -1,5 +1,14 @@
 [
   {
+    "tag": "v1.2.2",
+    "date": "2026-10-09",
+    "changes": [
+      "Fix: registered channels now get +r, MLOCK and GUARD back when they are recreated after dying or after a restart (services only restored them for channels that already existed when they linked)",
+      "Security: with SECUREOPS on, ChanServ strips ops/voice from anyone with no claim to them when a registered channel is recreated, and when services reconnect (channels recreated while services were down no longer keep their creator as op); new registrations have SECUREOPS on by default",
+      "Testing: 101 end-to-end integration tests"
+    ]
+  },
+  {
     "tag": "v1.2.1",
     "date": "2026-10-08",
     "changes": [
