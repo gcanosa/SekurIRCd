@@ -235,6 +235,10 @@ int main(int argc, char **argv) {
     log_info("main", "sekurircd %s starting (config: %s)", SEKURIRCD_VERSION,
               cfg.path[0] ? cfg.path : "<built-in defaults>");
 
+    if (geteuid() == 0)
+        log_warn("main", "running as root is not recommended: sekurircd never needs it "
+                         "(ports are >1024); use a dedicated unprivileged user");
+
     server_t srv;
     server_init(&srv, &cfg);
 

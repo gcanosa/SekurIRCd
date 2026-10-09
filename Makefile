@@ -171,6 +171,7 @@ UNITDIR    ?= $(shell echo "$${XDG_CONFIG_HOME:-$$HOME/.config}/systemd/user")
 .PHONY: install uninstall
 install: all
 	@[ "$$(uname -s)" = Linux ] || { echo "make install: Linux + systemd only" >&2; exit 1; }
+	@[ "$$(id -u)" != 0 ] || echo "WARNING: running as root is not recommended -- the daemons never need it (ports 6667/6697 are >1024). Use a dedicated unprivileged user." >&2
 	install -d $(PREFIX)/bin
 	install -m755 $(BIN_DIR)/sekurircd $(BIN_DIR)/chanserv $(PREFIX)/bin/
 	install -d $(SYSCONFDIR) $(STATEDIR)/ircd/logs $(STATEDIR)/chanserv $(UNITDIR)
@@ -189,6 +190,9 @@ install: all
 	@echo "next: cp $(SYSCONFDIR)/sekurircd.template.toml $(SYSCONFDIR)/sekurircd.toml (edit it), then:"
 	@echo "  optional Protection bundle (DNSBL, proxy scanner, limits, spam): cp $(SYSCONFDIR)/protection.template.toml $(SYSCONFDIR)/protection.toml"
 	@echo "  systemctl --user enable --now sekurircd chanserv"
+	@echo "firewall: allow the ports you enable in sekurircd.toml (plain 6667, TLS 6697, WebSocket 8080, server-link 7000 only for remote servers;"
+	@echo "  chanserv links over loopback so it needs none). ufw: sudo ufw allow 6667,6697/tcp | firewalld: sudo firewall-cmd --permanent --add-port=6697/tcp && sudo firewall-cmd --reload"
+	@echo "  BSD pf: add 'pass in proto tcp to port { 6667 6697 }' to /etc/pf.conf, then 'pfctl -f /etc/pf.conf' | cloud hosts: also open them in the provider's security group"
 	@echo "to keep running after logout / before login: loginctl enable-linger \$$(whoami)  (no sudo; may prompt for your own password)"
 
 uninstall:

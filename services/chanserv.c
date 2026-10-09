@@ -2091,6 +2091,9 @@ int main(int argc, char **argv) {
 
     if (store_load() != 0) return 1;
     log_info("chanserv", "starting (v%s), storage=%s", CHANSERV_VERSION, g_cfg.storage_path);
+    if (geteuid() == 0)
+        log_warn("chanserv", "running as root is not recommended: chanserv never needs it; "
+                             "use a dedicated unprivileged user");
 
     int backoff = 2;
     while (!g_term) {
