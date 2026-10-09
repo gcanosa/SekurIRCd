@@ -31,6 +31,7 @@
  * Leaf side dials out as a TLS client, honoring tls_insecure_skip_verify;
  * its SSL_CTX is created once, lazily, and freed at shutdown. */
 
+static void sync_ranks_to(server_t *srv, link_conn_t *lc);
 static ssize_t link_io_read(link_conn_t *lc, void *buf, size_t len) {
     if (!lc->ssl) return read(lc->fd, buf, len);
     ERR_clear_error();
@@ -641,6 +642,7 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
         snprintf(svc->realname, sizeof svc->realname, "%s", realname);
         server_add_user(srv, svc);
         lc->service = svc;
+        sync_ranks_to(srv, lc);
         netsync_introduce_user(srv, svc); /* a service nick is a user to the rest of the network too */
         log_info("link", "link '%s' introduced service nick '%s'", lc->peer_name, nick);
         return 0;
@@ -854,7 +856,46 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
     return 0;
 }
 
+/* SVCSYNC <chan> <nick> <user> <realhost> <account|*> <ident 0|1> <ranks qaohv>: a ranked member, for ChanServ to vet. */
+static void send_svcsync(link_conn_t *lc, channel_t *chan, client_t *u, int rank) {
+    char ranks[8] = "";
+    if (rank & RANK_OWNER) strcat(ranks, "q");
+    if (rank & RANK_ADMIN) strcat(ranks, "a");
+    if (rank & RANK_OP) strcat(ranks, "o");
+    if (rank & RANK_HALFOP) strcat(ranks, "h");
+    if (rank & RANK_VOICE) strcat(ranks, "v");
+    if (!ranks[0]) return;
+    char line[500];
+    const char *p[] = {chan->name, u->nick, u->user, u->realhost, u->account[0] ? u->account : "*", u->ident_confirmed ? "1" : "0", ranks};
+    irc_build(line, sizeof line, NULL, 0, NULL, "SVCSYNC", p, 7, NULL);
+    link_forward_line(lc, line);
+}
+
+/* A new service link: let it vet every rank already handed out while it was away. */
+static void sync_ranks_to(server_t *srv, link_conn_t *lc) {
+    channel_t *chan, *ctmp;
+    HASH_ITER(hh, srv->channels, chan, ctmp) {
+        member_t *m, *mtmp;
+        HASH_ITER(hh, chan->members, m, mtmp)
+            if (!m->client->is_service) send_svcsync(lc, chan, m->client, m->rank);
+    }
+}
+
+/* A channel just appeared (created by a local JOIN, or by a remote SJOIN/JOIN): services restore +r/MLOCK/GUARD on it. */
+void link_notify_channel_new(server_t *srv, channel_t *chan, client_t *creator) {
+    char line[300];
+    const char *p[] = {chan->name};
+    irc_build(line, sizeof line, NULL, 0, NULL, "SVCNEW", p, 1, NULL);
+    for (link_conn_t *lc = srv->links; lc; lc = lc->next) {
+        if (!lc->service || lc->closing || !lc->authenticated) continue;
+        link_forward_line(lc, line);
+        member_t *m = creator ? channel_find_member(chan, creator) : NULL;
+        if (m) send_svcsync(lc, chan, creator, m->rank);
+    }
+}
+
 void link_notify_channel_join(channel_t *chan, client_t *joiner) {
+    if (channel_member_count(chan) == 1 && joiner->srv && !joiner->remote) link_notify_channel_new(joiner->srv, chan, joiner);
     member_t *m, *tmp;
     HASH_ITER(hh, chan->members, m, tmp) {
         client_t *svc = m->client;
