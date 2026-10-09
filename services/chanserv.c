@@ -2024,7 +2024,7 @@ int main(int argc, char **argv) {
     const char *config_path = "services/services.toml";
     const char *pidfile = getenv("CHANSERV_PIDFILE");
     if (!pidfile) pidfile = "chanserv.pid";
-    int do_daemon = 0, do_stop = 0;
+    int do_daemon = 0, do_stop = 0, do_check = 0;
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -2032,6 +2032,7 @@ int main(int argc, char **argv) {
         else if (strcmp(a, "-d") == 0 || strcmp(a, "--daemon") == 0) do_daemon = 1;
         else if (strcmp(a, "--pidfile") == 0 && i + 1 < argc) pidfile = argv[++i];
         else if (strcmp(a, "--stop") == 0) do_stop = 1;
+        else if (strcmp(a, "-t") == 0 || strcmp(a, "--check") == 0) do_check = 1;
         else if (strcmp(a, "--version") == 0) { printf("chanserv %s\n", CHANSERV_VERSION); return 0; }
         else { fprintf(stderr, "unrecognized argument: %s\n", a); return 2; }
     }
@@ -2043,6 +2044,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "chanserv: %s\n", errbuf);
         return 2;
     }
+    if (do_check) { printf("chanserv: configuration OK (%s)\n", config_path); return 0; }
 
     /* Unlike sekurircd's own main.c (see its pidfile_is_live), this was
      * missing entirely -- starting chanserv twice against the same pidfile

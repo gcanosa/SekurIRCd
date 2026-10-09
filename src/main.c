@@ -46,7 +46,7 @@ static int exe_path(char *out, size_t outsz) {
 
 static void usage(const char *prog) {
     printf("usage: %s [-c|--config PATH] [-v|--verbose] [--hash-password] [--version]\n"
-           "       %*s [-d|--daemon] [--pidfile PATH] [--stop] [--rehash]\n",
+           "       %*s [-d|--daemon] [--pidfile PATH] [--stop] [--rehash] [-t|--check]\n",
            prog, (int)strlen(prog), "");
 }
 
@@ -168,7 +168,7 @@ int main(int argc, char **argv) {
     const char *config_path = getenv("SEKURIRCD_CONFIG");
     const char *pidfile = getenv("SEKURIRCD_PIDFILE");
     if (!pidfile) pidfile = "sekurircd.pid";
-    int verbose = 0, do_hash = 0, do_daemon = 0, do_stop = 0, do_rehash = 0;
+    int verbose = 0, do_hash = 0, do_daemon = 0, do_stop = 0, do_rehash = 0, do_check = 0;
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -179,6 +179,7 @@ int main(int argc, char **argv) {
         else if (strcmp(a, "--pidfile") == 0 && i + 1 < argc) pidfile = argv[++i];
         else if (strcmp(a, "--stop") == 0) do_stop = 1;
         else if (strcmp(a, "--rehash") == 0) do_rehash = 1;
+        else if (strcmp(a, "-t") == 0 || strcmp(a, "--check") == 0) do_check = 1;
         else if (strcmp(a, "--version") == 0) { printf("sekurircd %s\n", SEKURIRCD_VERSION); return 0; }
         else if (strcmp(a, "-h") == 0 || strcmp(a, "--help") == 0) { usage(argv[0]); return 0; }
         else { fprintf(stderr, "unrecognized argument: %s\n", a); usage(argv[0]); return 2; }
@@ -193,6 +194,10 @@ int main(int argc, char **argv) {
     if (config_load(config_path, &cfg, errbuf, sizeof errbuf) != 0) {
         fprintf(stderr, "sekurircd: configuration error: %s\n", errbuf);
         return 2;
+    }
+    if (do_check) { /* parse + validate (incl. the Protection bundle) and exit, like nginx -t */
+        printf("sekurircd: configuration OK (%s)\n", cfg.path[0] ? cfg.path : "<built-in defaults>");
+        return 0;
     }
 
     if (pidfile[0] && pidfile_is_live(pidfile)) {
