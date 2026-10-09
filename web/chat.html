@@ -16,6 +16,11 @@
 <script>(function(){var t;try{t=localStorage.getItem("theme")}catch(e){}if(t!=="light"&&t!=="dark")t=matchMedia("(prefers-color-scheme: light)").matches?"light":"dark";document.documentElement.dataset.theme=t})()</script>
 <link rel="stylesheet" href="css/site.css">
 <link rel="stylesheet" href="css/chat.css">
+<link rel="manifest" href="chat.webmanifest">
+<link rel="apple-touch-icon" href="img/chat-icon-180.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="SekurNet">
 </head>
 <body data-root="./" data-page="chat">
 <header id="site-header"></header>
