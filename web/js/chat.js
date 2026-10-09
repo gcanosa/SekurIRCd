@@ -194,9 +194,6 @@
       if (i === newAt) { var nd = document.createElement("div"); nd.className = "ln new"; nd.textContent = "── new messages ──"; log.appendChild(nd); }
       addLine(l);
     });
-    log.scrollTop = log.scrollHeight;
-    var nl = log.querySelector(".new");
-    if (nl && nl.offsetTop < log.scrollTop) log.scrollTop = nl.offsetTop - 8; // a long backlog: start at the first unread line
     topic.textContent = ""; topic.appendChild(fmt(b.topic || (b.name === "*" ? "SekurNet web chat" + (account ? " · logged in as " + account : "") : "")));
     users.textContent = "";
     GROUPS.forEach(function (g) {
@@ -213,6 +210,15 @@
       });
     });
     usersPane.hidden = usersBtn.hidden = !isChan(b.name);
+    toBottom(); // last: the topic bar and the user list above change the log's size
+  }
+  function toBottom() { // the newest line, or the first unread one when there is a long backlog
+    function go() {
+      log.scrollTop = log.scrollHeight;
+      var nl = log.querySelector(".new");
+      if (nl && nl.offsetTop < log.scrollTop) log.scrollTop = nl.offsetTop - 8;
+    }
+    go(); requestAnimationFrame(go); // again after the browser has laid the tab out
   }
   // --- nick menu: right click (or tap on phones) a nick in the user list or the log ---
   // Small outline icons (24x24, drawn in the text color).
@@ -708,7 +714,7 @@
   // Phones: keep the full-screen chat inside the visible area, above the on-screen keyboard.
   var vv = window.visualViewport;
   if (vv) {
-    var fit = function () { app.style.setProperty("--chat-h", vv.height + "px"); app.style.setProperty("--chat-top", vv.offsetTop + "px"); if (!app.hidden) log.scrollTop = log.scrollHeight; };
+    var fit = function () { app.style.setProperty("--chat-h", vv.height + "px"); app.style.setProperty("--chat-top", vv.offsetTop + "px"); if (!app.hidden) toBottom(); };
     vv.addEventListener("resize", fit); vv.addEventListener("scroll", fit); fit();
   }
   function fail() {
