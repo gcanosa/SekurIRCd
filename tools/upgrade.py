@@ -666,6 +666,14 @@ def upgrade(cur, st, tgt):
     systemd_step()
 
     step("Restart")
+    # The new binaries validate the live config exactly as they will at start; a config they reject
+    # must never reach a restart (that would take the network down). Also lists new/moved options.
+    chk = run([sys.executable, "tools/confcheck.py", "-q", "--no-banner"], check=False, log_out=False)
+    for l in chk.stdout.rstrip().splitlines(): out(l)
+    if chk.returncode != 0:
+        fail("The new version rejects your config -- NOT restarting (the old daemons keep running).")
+        info(f"Fix it (see {bold('tools/confcheck.py')}), then ./sekurircd restart -- or {bold('tools/upgrade.py --rollback')}")
+        LOG.w("RESULT: INSTALLED, config check failed, not restarted"); print(dim(f"  Log: {LOG.path}")); sys.exit(1)
     result = restart_daemons() if any(st.values()) else None
     if not any(st.values()): info("No daemons were running -- start them with ./sekurircd start")
     if result is None and any(st.values()) and not ARGS.no_restart and ask("The new ircd did not come up. Roll back now?", True):
@@ -676,7 +684,7 @@ def upgrade(cur, st, tgt):
     for b in backups: info(f"backup: {b}")
     info(f"log:    {LOG.path}")
     info(f"undo:   {bold('tools/upgrade.py --rollback')}")
-    info(dim("Reminder: review the 'config templates: what's new' section above / in the log."))
+    info(dim("Re-check your config any time with tools/confcheck.py (lists new, moved and unknown options)."))
     LOG.w("RESULT: SUCCESS")
 
 
