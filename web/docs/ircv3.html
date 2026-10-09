@@ -27,7 +27,7 @@
 <p>Negotiated with <code>CAP LS</code> / <code>CAP REQ</code>. Your client normally does this for you.</p>
 <div class="tablewrap"><table>
 <tr><th>Capability</th><th>Effect</th></tr>
-<tr><td><code>sasl</code></td><td>Login during connection. Advertised as <code>sasl=PLAIN</code>, or <code>sasl=PLAIN,EXTERNAL</code> when <code>request_client_cert</code> is on.</td></tr>
+<tr><td><code>sasl</code></td><td>Login during connection. Advertised as <code>sasl=PLAIN,SCRAM-SHA-256</code>, or <code>sasl=PLAIN,SCRAM-SHA-256,EXTERNAL</code> when <code>request_client_cert</code> is on.</td></tr>
 <tr><td><code>draft/account-registration</code></td><td>Create an account from your client. Advertised as <code>draft/account-registration=custom-account-name</code>. See <a href="#accounts">accounts</a>.</td></tr>
 <tr><td><code>account-notify</code> <code>account-tag</code></td><td>Account login/logout notices and the sender's account on messages.</td></tr>
 <tr><td><code>away-notify</code></td><td>Live <code>AWAY</code> updates for channel-mates.</td></tr>
@@ -36,8 +36,36 @@
 <tr><td><code>echo-message</code></td><td>Your own messages are echoed back to you.</td></tr>
 <tr><td><code>message-tags</code> <code>server-time</code></td><td>Message tags and server timestamps.</td></tr>
 <tr><td><code>invite-notify</code> <code>standard-replies</code></td><td>Invite visibility for ops; machine-readable <code>FAIL</code>/<code>WARN</code>/<code>NOTE</code> replies.</td></tr>
+<tr><td><code>batch</code> <code>labeled-response</code></td><td>Related lines grouped in a <code>BATCH</code>; replies tagged with the <code>label</code> of the command that caused them.</td></tr>
+<tr><td><code>draft/chathistory</code></td><td>Message history with <code>CHATHISTORY</code>. See <a href="#history">history</a>. Not advertised when <code>history_size = 0</code>.</td></tr>
+<tr><td><code>draft/read-marker</code></td><td><code>MARKREAD</code>: where you stopped reading, shared by every session of your account. See <a href="#history">history</a>.</td></tr>
+<tr><td><code>draft/multiline</code></td><td>One message over several lines, up to 24 lines and 4096 bytes (<code>draft/multiline=max-bytes=4096,max-lines=24</code>).</td></tr>
+<tr><td><code>cap-notify</code></td><td>Live <code>CAP NEW</code>/<code>CAP DEL</code> when capabilities change, for example history being turned on or off by a rehash.</td></tr>
+<tr><td><code>extended-monitor</code></td><td><code>MONITOR</code> targets also get away, account and host updates.</td></tr>
+<tr><td><code>draft/no-implicit-names</code> <code>draft/pre-away</code></td><td>No automatic <code>NAMES</code> after JOIN; <code>AWAY</code> can be set before registration finishes.</td></tr>
+<tr><td><code>draft/channel-rename</code></td><td><code>RENAME &lt;old&gt; &lt;new&gt; [:reason]</code>: a chanop renames a live channel, keeping members, modes and history.</td></tr>
 </table></div>
-<p>Also advertised in <code>005</code>: <code>MONITOR=100</code>, <code>ELIST=MNU</code>, <code>EXTBAN=,a</code>, <code>STATUSMSG=@%+</code>, <code>EXCEPTS</code>, <code>INVEX</code>.</p>
+<p>Also advertised in <code>005</code>: <code>MONITOR=100</code>, <code>ELIST=MNU</code>, <code>EXTBAN=,a</code>, <code>STATUSMSG=@%+</code>, <code>EXCEPTS</code>, <code>INVEX</code>, and <code>CHATHISTORY=&lt;n&gt;</code> (the most a single request returns, at most 100).</p>
+
+<h2 id="history">history</h2>
+<pre>[messages]
+history_size = 50                # messages kept per conversation; 0 turns history off, max 500
+#history_file = "history.json"   # survive restarts (history and read markers)
+#history_dm = true               # also keep private messages between two logged-in accounts</pre>
+<p>Clients with <code>draft/chathistory</code> and <code>batch</code> ask for what they missed. Replies come in a <code>BATCH</code> of type
+  <code>chathistory</code>, each message with its original <code>time</code> and <code>msgid</code> tags.</p>
+<div class="tablewrap"><table>
+<tr><th>Command</th><th>Returns</th></tr>
+<tr><td><code>CHATHISTORY LATEST &lt;target&gt; * &lt;limit&gt;</code></td><td>The newest messages. With a <code>timestamp=</code> or <code>msgid=</code> instead of <code>*</code>, only those newer than it.</td></tr>
+<tr><td><code>CHATHISTORY BEFORE|AFTER|AROUND &lt;target&gt; &lt;ref&gt; &lt;limit&gt;</code></td><td>Messages before, after or around a reference (<code>timestamp=2026-10-09T17:20:43.123Z</code> or <code>msgid=...</code>).</td></tr>
+<tr><td><code>CHATHISTORY BETWEEN &lt;target&gt; &lt;ref&gt; &lt;ref&gt; &lt;limit&gt;</code></td><td>Messages between two references, in either order.</td></tr>
+<tr><td><code>CHATHISTORY TARGETS &lt;ts&gt; &lt;ts&gt; &lt;limit&gt;</code></td><td>Your channels and private chats with activity in that window, newest first.</td></tr>
+</table></div>
+<p>A channel's history is readable by its members (and IRC operators) and is kept even when the channel empties.
+  Private history needs both sides to be logged in to an account. Requests are capped at 100 messages.</p>
+<p>With <code>draft/read-marker</code>, a logged-in client sends <code>MARKREAD &lt;target&gt; timestamp=&lt;time&gt;</code> as you read.
+  The server keeps the latest position per account and target, sends it on JOIN, and forwards every change to your other sessions,
+  so a conversation you read on one device shows as read on the others. <code>MARKREAD &lt;target&gt;</code> without a timestamp asks for the stored one.</p>
 
 <h2 id="accounts">accounts</h2>
 <pre>[accounts]
@@ -56,7 +84,15 @@ store_file = "accounts.json"</pre>
   The store is independent of ChanServ.</p>
 
 <h2>SASL PLAIN</h2>
-<p>Configure your client for SASL PLAIN with your account name and password. It sends <code>AUTHENTICATE PLAIN</code> during connection setup.</p>
+<p>Configure your client for SASL PLAIN with your account name and password. It sends <code>AUTHENTICATE PLAIN</code> during connection setup.
+  PLAIN sends the password itself, so use it only over TLS.</p>
+
+<h2>SASL SCRAM-SHA-256</h2>
+<p>SCRAM proves you know the password without sending it, and the server proves it knows it too, so a fake server cannot collect passwords.
+  The server stores only a salted SCRAM key derived from the password, never the password.</p>
+<p>The key is made when the account is registered or when you log in with a password (PLAIN or <code>IDENTIFY</code>).
+  An older account that has never done either has no key yet, and SCRAM fails for it once: log in with PLAIN one time, then SCRAM works.
+  Changing the password replaces the key. The SekurNet web chat uses SCRAM automatically and falls back to PLAIN only in that one case.</p>
 
 <h2>SASL EXTERNAL (certificate login)</h2>
 <p>EXTERNAL logs in with a TLS client certificate instead of a password. The server does not validate the certificate against a CA;

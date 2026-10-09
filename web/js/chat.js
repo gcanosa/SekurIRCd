@@ -37,7 +37,7 @@
   var CHAN_RE = /^[#&][^\s,\x07]{1,49}$/;
   var MAX_CHANS = 10;
   // IRCv3 capabilities we use when the server offers them ("sasl" is added only when logging in).
-  var WANT_CAPS = ["server-time", "message-tags", "batch", "draft/chathistory", "echo-message", "multi-prefix"];
+  var WANT_CAPS = ["server-time", "message-tags", "batch", "draft/chathistory", "echo-message", "multi-prefix", "userhost-in-names", "draft/read-marker"];
   var HISTORY_ON_JOIN = 50; // messages shown when you join; a reconnect fetches everything missed (server max 100)
 
   var $ = function (id) { return document.getElementById(id); };
@@ -50,10 +50,15 @@
                 { prefix: "%", name: "Half-ops", cls: "halfop" }, { prefix: "+", name: "Voiced", cls: "voice" }, { prefix: "", name: "Users", cls: "user" }];
   var AWAY_AFTER = 30 * 60 * 1000; // idle time before auto-away
   var CLIENT = "SekurNet WebChat", CLIENT_V = "2.0";
+  var BAR = " \x0314│\x0f ", SITE = "https://www.sekurnet.org/chat/";
+  var QUIT_MSG = "\x02" + CLIENT + "\x02 v" + CLIENT_V + BAR + SITE; // the default quit message, same branding as CTCP VERSION
   var ws, nick, wantChan, registered, tries = 0, closing = false, timer, away = false, awayTimer;
   var bufs = {}, active = "*";
   var avail = {}, caps = {}, auth = null, sasl = null, account = "", batches = {};
   var unseen = 0, baseTitle = document.title, sent = [], spos = 0;
+  var hosts = {}, ignored = {}; // hosts: nick -> host, for ban masks. ignored: kept in this browser only
+  try { JSON.parse(localStorage.getItem("chat-ignore") || "[]").forEach(function (n) { ignored[n] = 1; }); } catch (e) {}
+  var coarse = matchMedia("(pointer: coarse)").matches; // touch screens: a tap opens the nick menu (no right click there)
 
   var usersPane = users.parentNode, usersBtn = $("users-btn");
   function guest() { return "Guest" + Math.floor(1000 + Math.random() * 9000); }
@@ -127,26 +132,47 @@
     if (!bufs[k]) { bufs[k] = { name: name, lines: [], users: {}, topic: "", unread: false, ids: {}, last: "" }; draw(); }
     return bufs[k];
   }
-  // meta (optional): time = the server-time tag, id = msgid (a message already shown is skipped), hist = from CHATHISTORY.
+  // meta (optional): time = the server-time tag, id = msgid (a message already shown is skipped), hist = from CHATHISTORY,
+  // from + kind ("msg", "act", "notice") = a message from someone: the nick is drawn in its own color.
   function say(name, text, cls, meta) {
     meta = meta || {};
     var b = buf(name);
     if (meta.id) { if (b.ids[meta.id]) return; b.ids[meta.id] = 1; }
-    if (meta.time && meta.time > b.last) b.last = meta.time;
+    if (meta.time) { // seen live, with nothing unread above it: keep the "new messages" divider from jumping down to it
+      if (key(name) === key(active) && !document.hidden && (!b.mark || b.mark >= b.last)) b.mark = meta.time;
+      if (meta.time > b.last) b.last = meta.time;
+    }
     var d = meta.time ? new Date(meta.time) : new Date(), t = d.toTimeString().slice(0, 5);
     if (d.toDateString() !== new Date().toDateString()) t = d.toISOString().slice(5, 10) + " " + t; // older than today: show the date
-    b.lines.push({ t: t, text: text, cls: cls || "", id: meta.id });
+    b.lines.push({ t: t, text: text, cls: cls || "", id: meta.id, time: meta.time || "", from: meta.from, kind: meta.kind });
     if (b.lines.length > 500) { var old = b.lines.shift(); if (old.id) delete b.ids[old.id]; }
-    if (key(name) === key(active)) addLine(b.lines[b.lines.length - 1]); else if (!b.unread) { b.unread = true; drawTabs(); }
+    if (key(name) === key(active)) { addLine(b.lines[b.lines.length - 1]); if (meta.time) markSoon(); }
+    else if (!b.unread) { b.unread = true; drawTabs(); }
     if (document.hidden && !meta.hist && /\b(hl|msg)\b/.test(cls || "")) { unseen++; document.title = "(" + unseen + ") " + baseTitle; }
   }
   function addLine(l) {
     var stick = log.scrollTop + log.clientHeight >= log.scrollHeight - 30;
     var d = document.createElement("div"); d.className = "ln " + l.cls;
     var s = document.createElement("span"); s.className = "ts"; s.textContent = l.t + " ";
-    d.append(s, fmt(l.text)); log.appendChild(d);
+    d.appendChild(s);
+    if (l.from) { // <nick> text, * nick text, -nick- text
+      var nk = document.createElement("span"); nk.className = "nk"; nk.textContent = l.from; nk.style.setProperty("--h", hue(l.from));
+      d.append(l.kind === "act" ? "* " : l.kind === "notice" ? "-" : "<", nk, l.kind === "act" ? " " : l.kind === "notice" ? "- " : "> ");
+    }
+    d.appendChild(fmt(l.text)); log.appendChild(d);
     if (stick) log.scrollTop = log.scrollHeight;
   }
+  function hue(n) { // a stable color per nickname: the same nick always gets the same hue
+    for (var h = 0, i = 0, k = key(n); i < k.length; i++) h = (h * 31 + k.charCodeAt(i)) >>> 0;
+    return h % 360;
+  }
+  function nickAt(e) { var n = e.target.classList && e.target.classList.contains("nk") && e.target.textContent; return n && n.indexOf(".") < 0 ? n : ""; }
+  log.addEventListener("click", function (e) { // a nick in the log: click to message them, tap (phones) for the menu
+    var n = nickAt(e);
+    if (!n) return;
+    if (coarse) openMenu(n, e.clientX, e.clientY); else if (key(n) !== key(nick)) { query(n); input.focus(); }
+  });
+  log.addEventListener("contextmenu", function (e) { var n = nickAt(e); if (n) { e.preventDefault(); openMenu(n, e.clientX, e.clientY); } });
   function drawTabs() {
     tabs.textContent = "";
     Object.keys(bufs).forEach(function (k) {
@@ -154,14 +180,23 @@
       a.type = "button"; a.textContent = b.name === "*" ? "status" : b.name;
       if (k === key(active)) { a.setAttribute("aria-current", "true"); setTimeout(function () { a.scrollIntoView({ block: "nearest", inline: "nearest" }); }); }
       if (b.unread) a.className = "unread";
-      a.onclick = function () { active = b.name; b.unread = false; draw(); input.focus(); };
+      a.onclick = function () { active = b.name; b.unread = false; b.mark = b.read; draw(); markSoon(); input.focus(); };
       tabs.appendChild(a);
     });
   }
   function draw() {
     var b = buf(active);
     drawTabs();
-    log.textContent = ""; b.lines.forEach(addLine); log.scrollTop = log.scrollHeight;
+    log.textContent = "";
+    var newAt = b.mark ? b.lines.findIndex(function (l) { return l.from && l.time > b.mark && l.cls.indexOf("me") < 0; }) : -1;
+    b.lines.forEach(function (l, i) {
+      if (l.from && ignored[key(l.from)] && l.cls.indexOf("me") < 0) return; // ignoring someone also hides what they said before
+      if (i === newAt) { var nd = document.createElement("div"); nd.className = "ln new"; nd.textContent = "── new messages ──"; log.appendChild(nd); }
+      addLine(l);
+    });
+    log.scrollTop = log.scrollHeight;
+    var nl = log.querySelector(".new");
+    if (nl && nl.offsetTop < log.scrollTop) log.scrollTop = nl.offsetTop - 8; // a long backlog: start at the first unread line
     topic.textContent = ""; topic.appendChild(fmt(b.topic || (b.name === "*" ? "SekurNet web chat" + (account ? " · logged in as " + account : "") : "")));
     users.textContent = "";
     GROUPS.forEach(function (g) {
@@ -170,13 +205,94 @@
       if (!names.length) return;
       var h = document.createElement("div"); h.className = "grp g-" + g.cls; h.textContent = g.name + " (" + names.length + ")"; users.appendChild(h);
       names.forEach(function (n) {
-        var d = document.createElement("div"); d.className = "g-" + g.cls; d.textContent = g.prefix + n; d.title = "Message " + n;
-        d.onclick = function () { if (key(n) !== key(nick)) { query(n); showUsers(false); input.focus(); } };
+        var d = document.createElement("div"); d.className = "g-" + g.cls + (ignored[key(n)] ? " ign" : ""); d.textContent = g.prefix + n;
+        d.title = (ignored[key(n)] ? "Ignored. " : "") + (coarse ? "Tap for options" : "Click to message, right click for options");
+        d.onclick = function (e) { if (coarse) return openMenu(n, e.clientX, e.clientY); if (key(n) !== key(nick)) { query(n); showUsers(false); input.focus(); } };
+        d.oncontextmenu = function (e) { e.preventDefault(); openMenu(n, e.clientX, e.clientY); };
         users.appendChild(d);
       });
     });
     usersPane.hidden = usersBtn.hidden = !isChan(b.name);
   }
+  // --- nick menu: right click (or tap on phones) a nick in the user list or the log ---
+  // Small outline icons (24x24, drawn in the text color).
+  var ICON_SVG = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">%</svg>';
+  var ICONS = {
+    msg: '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
+    at: '<circle cx="12" cy="12" r="4"/><path d="M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-4 8"/>',
+    info: '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/>',
+    client: '<rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/>',
+    ping: '<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>',
+    eyeoff: '<path d="M17.94 17.94A10 10 0 0 1 12 20c-7 0-11-8-11-8a18 18 0 0 1 5.06-5.94M9.9 4.24A9 9 0 0 1 12 4c7 0 11 8 11 8a18 18 0 0 1-2.16 3.19M1 1l22 22"/>',
+    eye: '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>',
+    shield: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>',
+    mic: '<path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v4"/>',
+    kick: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>',
+    ban: '<circle cx="12" cy="12" r="10"/><path d="M4.93 4.93l14.14 14.14"/>',
+    kickban: '<path d="M7.86 2h8.28L22 7.86v8.28L16.14 22H7.86L2 16.14V7.86z"/><path d="M15 9l-6 6M9 9l6 6"/>'
+  };
+  var menu = document.createElement("div");
+  menu.className = "chat-menu"; menu.hidden = true; menu.setAttribute("role", "menu");
+  root.appendChild(menu);
+  function closeMenu() { menu.hidden = true; }
+  function openMenu(n, x, y) {
+    var b = bufs[key(active)], chan = b && isChan(b.name) ? b.name : "", self = key(n) === key(nick);
+    var myRank = chan ? b.users[Object.keys(b.users).filter(function (u) { return key(u) === key(nick); })[0]] || "" : "";
+    var theirs = chan ? b.users[n] || "" : "", op = "~&@".indexOf(myRank) >= 0 && myRank, half = op || myRank === "%";
+    var mask = hosts[key(n)] ? "*!*@" + hosts[key(n)] : n + "!*@*";
+    var groups = [ // [section, [icon, label, action, danger?] ...]; falsy entries are left out
+      ["Talk", [!self && ["msg", "Send private message", function () { query(n); showUsers(false); }],
+                !self && ["at", "Mention in message", function () { var v = input.value; input.value = v + (v && !/\s$/.test(v) ? " " : "") + n + (v ? " " : ": "); }]]],
+      ["Info", [["info", "Whois", function () { send("WHOIS " + n + " " + n); }], // asking the user's own server also returns idle time
+                !self && ["client", "Client version", function () { command("/ctcp " + n + " version"); }],
+                !self && ["ping", "Ping (lag)", function () { command("/ctcp " + n + " ping"); }]]],
+      ["Privacy", [!self && (ignored[key(n)] ? ["eye", "Unignore", function () { setIgnore(n, false); }] : ["eyeoff", "Ignore", function () { setIgnore(n, true); }])]],
+      ["Moderate " + chan, [op && !self && (theirs === "@" ? ["shield", "Remove op", function () { send("MODE " + chan + " -o " + n); }] : ["shield", "Give op", function () { send("MODE " + chan + " +o " + n); }]),
+                half && (theirs === "+" ? ["mic", "Remove voice", function () { send("MODE " + chan + " -v " + n); }] : ["mic", "Give voice", function () { send("MODE " + chan + " +v " + n); }]),
+                half && !self && ["kick", "Kick", function () { send("KICK " + chan + " " + n + " :Kicked"); }, 1],
+                op && !self && ["ban", "Ban " + mask, function () { send("MODE " + chan + " +b " + mask); }, 1],
+                op && !self && ["kickban", "Kick + ban", function () { send("MODE " + chan + " +b " + mask); send("KICK " + chan + " " + n + " :Banned"); }, 1]]]
+    ];
+    menu.textContent = "";
+    var h = document.createElement("div"); h.className = "mh"; h.textContent = n + (ignored[key(n)] ? " (ignored)" : ""); menu.appendChild(h);
+    groups.forEach(function (g) {
+      var its = g[1].filter(Boolean);
+      if (!its.length) return;
+      var sec = document.createElement("div"); sec.className = "ms"; sec.textContent = g[0]; menu.appendChild(sec);
+      its.forEach(function (it) {
+        var bt = document.createElement("button"); bt.type = "button"; bt.setAttribute("role", "menuitem");
+        if (it[3]) bt.className = "danger";
+        bt.innerHTML = ICON_SVG.replace("%", ICONS[it[0]]); // static icon markup; the label goes in as text below
+        bt.appendChild(document.createTextNode(it[1]));
+        bt.onclick = function () { closeMenu(); it[2](); if (!coarse) input.focus(); };
+        menu.appendChild(bt);
+      });
+    });
+    menu.hidden = false;
+    var r = menu.getBoundingClientRect(); // keep it on screen
+    menu.style.left = Math.max(4, Math.min(x, innerWidth - r.width - 4)) + "px";
+    menu.style.top = Math.max(4, Math.min(y, innerHeight - r.height - 4)) + "px";
+    menu.querySelector("button").focus({ preventScroll: true });
+  }
+  document.addEventListener("mousedown", function (e) { if (!menu.hidden && !menu.contains(e.target)) closeMenu(); }, true);
+  document.addEventListener("touchstart", function (e) { if (!menu.hidden && !menu.contains(e.target)) closeMenu(); }, true);
+  document.addEventListener("keydown", function (e) {
+    if (menu.hidden) return;
+    if (e.key === "Escape") { closeMenu(); input.focus(); }
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") { // move between items
+      var bs = [].slice.call(menu.querySelectorAll("button")), i = bs.indexOf(document.activeElement);
+      e.preventDefault(); bs[(i + (e.key === "ArrowDown" ? 1 : bs.length - 1)) % bs.length].focus();
+    }
+  });
+  log.addEventListener("scroll", closeMenu); users.parentNode.addEventListener("scroll", closeMenu); addEventListener("resize", closeMenu);
+
+  function setIgnore(n, on) {
+    if (on) ignored[key(n)] = 1; else delete ignored[key(n)];
+    try { localStorage.setItem("chat-ignore", JSON.stringify(Object.keys(ignored))); } catch (e) {}
+    draw();
+    say(active, on ? "Ignoring " + n + ": their messages, notices and CTCPs are hidden (in this browser). /unignore " + n + " to undo." : "No longer ignoring " + n + ".", "evt");
+  }
+
   function showUsers(on) { usersPane.classList.toggle("closed", !on); usersBtn.setAttribute("aria-pressed", on); }
   usersBtn.onclick = function () { showUsers(usersPane.classList.contains("closed")); };
   function query(n) { // open (or switch to) a private chat; a new one loads its history when you are logged in
@@ -215,6 +331,16 @@
     if (!isChan(name) && !account) return; // private history is kept only between logged-in accounts
     var b = buf(name);
     send(b.last ? "CHATHISTORY AFTER " + name + " timestamp=" + b.last + " 100" : "CHATHISTORY LATEST " + name + " * " + HISTORY_ON_JOIN);
+  }
+
+  // --- read markers (draft/read-marker): where you stopped reading, shared by every session of your account ---
+  var markTimer;
+  function markSoon() { clearTimeout(markTimer); markTimer = setTimeout(markRead, 1500); }
+  function markRead() {
+    var b = bufs[key(active)];
+    if (!b || b.name === "*" || !caps["draft/read-marker"] || !account || document.hidden || !b.last || b.last <= (b.read || "")) return;
+    b.read = b.last;
+    send("MARKREAD " + b.name + " timestamp=" + b.last);
   }
 
   // --- SASL: SCRAM-SHA-256 (the password itself never crosses the wire), PLAIN as the fallback ---
@@ -278,7 +404,7 @@
   }
   function ctcp(from, cmd, arg) {
     say("*", "CTCP " + cmd + " from " + from, "evt");
-    if (cmd === "VERSION") return ctcpReply(from, cmd, "\x02" + CLIENT + "\x02 v" + CLIENT_V + " \x0314│\x0f IRCv3 over TLS WebSocket \x0314│\x0f SASL SCRAM-SHA-256 \x0314│\x0f https://www.sekurnet.org/chat/");
+    if (cmd === "VERSION") return ctcpReply(from, cmd, "\x02" + CLIENT + "\x02 v" + CLIENT_V + BAR + "IRCv3 over TLS WebSocket" + BAR + "SASL SCRAM-SHA-256" + BAR + SITE);
     if (cmd === "PING") return ctcpReply(from, cmd, (arg || "").slice(0, 64));
     if (cmd === "TIME") return ctcpReply(from, cmd, new Date().toString().replace(/ \(.*\)$/, ""));
     if (cmd === "CLIENTINFO") return ctcpReply(from, cmd, "ACTION CLIENTINFO PING SOURCE TIME VERSION");
@@ -294,7 +420,7 @@
     say(active, "CTCP " + cmd + " reply from " + from + ": " + arg, "evt");
   }
 
-  // --- a soft two-note chime for private messages and notices, synthesized (no audio file) ---
+  // --- a soft two-note chime when someone else messages, notices, mentions or invites you; synthesized (no audio file) ---
   var actx, lastChime = 0, sound = true;
   try { sound = localStorage.getItem("chat-sound") !== "off"; } catch (e) {}
   function unlockAudio() { // browsers (iOS above all) only allow audio after a tap: called from Connect and Send
@@ -335,6 +461,14 @@
       return;
     }
     if (c === "AUTHENTICATE") return saslStep(p[0]);
+    if (c === "MARKREAD") {
+      var rb = bufs[key(p[0])], ts = (p[1] || "").replace(/^timestamp=/, "");
+      if (!rb) return;
+      rb.read = ts === "*" ? "" : ts;
+      if (!rb.marked || key(rb.name) !== key(active) || document.hidden) { rb.mark = rb.read; rb.marked = true; } // the divider stays put while you read
+      if (rb.unread && rb.read && rb.read >= rb.last) { rb.unread = false; drawTabs(); } // read on another device
+      return;
+    }
     if (c === "900") { account = p[2]; say("*", "Logged in as " + account + ".", "evt"); return; }
     if (c === "903") { sasl = null; return send("CAP END"); }
     if (c === "902" || c === "904" || c === "905") {
@@ -350,7 +484,10 @@
       if (p[0][0] === "+") batches[id] = { type: p[1], target: p[2], n: 0 };
       else if (batches[id]) {
         var done = batches[id]; delete batches[id];
-        if (done.type === "chathistory" && done.n) say(done.target, "── " + done.n + " message" + (done.n > 1 ? "s" : "") + " from history ──", "evt hist-end");
+        if (done.type === "chathistory" && done.n) {
+          say(done.target, "── " + done.n + " message" + (done.n > 1 ? "s" : "") + " from history ──", "evt hist-end");
+          if (key(done.target) === key(active)) { draw(); markSoon(); } // place the "new messages" divider
+        }
       }
       return;
     }
@@ -368,13 +505,21 @@
     }
     if (c === "353") { // names
       var b = buf(p[2]); b.pending = b.pending || {}; // a NAMES reply spans several 353s, swapped in at 366
-      p[3].split(" ").forEach(function (n) { var mm = /^([~&@%+]*)(.+)$/.exec(n); if (mm) b.pending[mm[2]] = mm[1].charAt(0); });
+      p[3].split(" ").forEach(function (n) { // "@nick", or "@nick!user@host" with userhost-in-names
+        var mm = /^([~&@%+]*)([^!]+)(?:!([^@]*)@(.*))?$/.exec(n);
+        if (mm) { b.pending[mm[2]] = mm[1].charAt(0); if (mm[4]) hosts[key(mm[2])] = mm[4]; }
+      });
       return;
     }
     if (c === "366") { var nb = buf(p[1]); if (nb.pending) { nb.users = nb.pending; nb.pending = null; } return key(p[1]) === key(active) && draw(); }
-    if (c === "MODE" && isChan(p[0]) && /[qaohv]/.test(p[1] || "")) return send("NAMES " + p[0]); // privilege changed: re-read the list
+    if (c === "MODE" && isChan(p[0])) {
+      say(p[0], m.nick + " sets mode " + p.slice(1).join(" "), "evt", meta);
+      if (/[qaohv]/.test(p[1] || "")) send("NAMES " + p[0]); // privilege changed: re-read the list
+      return;
+    }
     if (c === "332") { buf(p[1]).topic = p[2]; return key(p[1]) === key(active) && draw(); }
     if (c === "TOPIC") { buf(p[0]).topic = p[1]; say(p[0], m.nick + " set the topic: " + p[1], "evt", meta); return key(p[0]) === key(active) && draw(); }
+    if (m.prefix.indexOf("@") > 0) hosts[key(m.nick)] = m.prefix.split("@")[1]; // keep the latest host of everyone we hear from
     if (c === "JOIN") {
       var ch = p[0];
       if (isMe(m.nick)) { var again = !!bufs[key(ch)]; buf(ch); active = ch; draw(); if (!again) say(ch, "Joined " + ch, "evt"); history(ch); }
@@ -394,11 +539,13 @@
     }
     if (c === "NICK") {
       if (isMe(m.nick)) nick = p[0];
+      if (hosts[key(m.nick)]) hosts[key(p[0])] = hosts[key(m.nick)];
       Object.keys(bufs).forEach(function (k) { var u = bufs[k].users; if (m.nick in u) { u[p[0]] = u[m.nick]; delete u[m.nick]; say(bufs[k].name, m.nick + " is now " + p[0], "evt"); } });
       return draw();
     }
     if (c === "PRIVMSG" || c === "NOTICE") {
       var mine = isMe(m.nick), server = m.prefix.indexOf("!") < 0;
+      if (!mine && ignored[key(m.nick)]) return; // no line, no chime, no CTCP reply
       var target = isChan(p[0]) ? p[0] : server ? "*" : mine ? p[0] : m.nick; // our own echoed DM belongs in the recipient's tab
       var txt = p[1] || "", act = /^\x01ACTION (.*?)\x01?$/.exec(txt), cq = !act && /^\x01([^\s\x01]+) ?([^\x01]*)\x01?$/.exec(txt);
       if (cq) { // CTCP: never answered from history, never to ourselves
@@ -406,13 +553,40 @@
         return;
       }
       if (bt) bt.n++;
-      else if (!mine && !server && (c === "NOTICE" || !isChan(target))) chime();
+      // chime only for what others send you: a private message or action, a notice, or your nick in a channel. Never for your own lines.
+      else if (!mine && !server && (c === "NOTICE" || !isChan(target) || mentions(txt, me))) chime();
       var cls = mine ? "me" : (c === "NOTICE" ? "notice " : "") + (mentions(txt, me) ? "hl" : !isChan(target) && !server ? "msg" : "");
-      say(target, act ? "* " + m.nick + " " + act[1] : (c === "NOTICE" && !server ? "-" + m.nick + "- " : "<" + m.nick + "> ") + (mine ? masked(target, txt) : txt), cls, meta);
+      meta.from = m.nick; meta.kind = act ? "act" : c === "NOTICE" ? "notice" : "msg";
+      say(target, act ? act[1] : mine ? masked(target, txt) : txt, cls, meta);
       return;
     }
+    if (c === "INVITE" && isMe(p[0]) && !ignored[key(m.nick)]) {
+      say(active, m.nick + " invites you to " + p[1] + ". Type /join " + p[1] + " to accept.", "evt hl", meta);
+      return chime();
+    }
     if (c === "ERROR") return say("*", "Server error: " + p[0], "err");
+    if (/^(276|30[17]|31[1-9]|320|330|338|378|379|671)$/.test(c)) return say(active, whois(c, p), "evt whois", meta); // WHOIS: where you asked
     if (/^\d+$/.test(c)) say(+c >= 400 ? active : "*", p.slice(1).join(" "), +c >= 400 ? "err" : "", meta);
+  }
+
+  function ago(sec) { // 3725 -> "1h 2m 5s"
+    sec = +sec || 0;
+    var d = Math.floor(sec / 86400), h = Math.floor(sec % 86400 / 3600), m = Math.floor(sec % 3600 / 60), out = [];
+    if (d) out.push(d + "d"); if (h) out.push(h + "h"); if (m) out.push(m + "m"); if (!d && !h) out.push(sec % 60 + "s");
+    return out.join(" ");
+  }
+  function whois(c, p) { // the common WHOIS replies as sentences; anything else as the server sent it
+    var n = p[1];
+    if (c === "311") return n + " is " + p[2] + "@" + p[3] + " (" + p[p.length - 1] + ")";
+    if (c === "312") return n + " is on " + p[2] + " (" + p[3] + ")";
+    if (c === "319") return n + " is in " + p[2];
+    if (c === "317") return n + " has been idle " + ago(p[2]) + (+p[3] ? ", connected since " + new Date(p[3] * 1000).toLocaleString() : "");
+    if (c === "330") return n + " is logged in as " + p[2];
+    if (c === "301") return n + " is away: " + p[2];
+    if (c === "313") return n + " is an IRC operator";
+    if (c === "671") return n + " is using a secure connection";
+    if (c === "318") return "\u2500\u2500 end of whois \u2500\u2500";
+    return p.slice(1).join(" ");
   }
 
   function mentions(txt, n) { // the nick as a whole word, not inside another word
@@ -436,7 +610,8 @@
 
   function privmsg(to, text) { // with echo-message the server echoes it back (with its time and id), so show it then
     send("PRIVMSG " + to + " :" + text);
-    if (!caps["echo-message"]) say(to, /^\x01ACTION /.test(text) ? "* " + nick + " " + text.slice(8, -1) : "<" + nick + "> " + masked(to, text), "me");
+    var act = /^\x01ACTION /.test(text);
+    if (!caps["echo-message"]) say(to, act ? text.slice(8, -1) : masked(to, text), "me", { from: nick, kind: act ? "act" : "msg" });
   }
   function masked(to, text) { // what you tell NickServ (REGISTER, IDENTIFY ...) carries a password: show only the command
     return /^nickserv$/i.test(to) ? text.replace(/^(\S+)\s.*$/, "$1 ********") : text;
@@ -451,12 +626,17 @@
     }
     var a = text.slice(1).split(" "), cmd = a.shift().toLowerCase(), rest = a.join(" ");
     if (cmd === "help") return say(active, "Commands: /join #chan, /part, /close, /nick name, /me action, /msg nick text, /whois nick, /topic text, " +
-      "/away text, /ctcp nick version|time|ping, /sound on|off, /quit. Accounts: /msg NickServ REGISTER password. Tab completes nicknames, Up/Down recall what you sent.", "evt");
+      "/away text, /ctcp nick version|time|ping, /sound on|off, /ignore nick, /unignore nick, /quit. Right click a nick (tap on phones) for more. Accounts: /msg NickServ REGISTER password. Tab completes nicknames, Up/Down recall what you sent.", "evt");
     if (cmd === "sound") {
       sound = a[0] ? a[0].toLowerCase() !== "off" : !sound;
       try { localStorage.setItem("chat-sound", sound ? "on" : "off"); } catch (e) {}
       if (sound) { unlockAudio(); lastChime = 0; chime(); }
-      return say(active, "Sound for private messages and notices is " + (sound ? "on" : "off") + ".", "evt");
+      return say(active, "Sound for private messages, notices, mentions and invites is " + (sound ? "on" : "off") + ".", "evt");
+    }
+    if (cmd === "ignore" || cmd === "unignore") {
+      if (a[0]) return setIgnore(a[0], cmd === "ignore");
+      var list = Object.keys(ignored);
+      return say(active, list.length ? "Ignored: " + list.join(", ") : "You are not ignoring anyone.", "evt");
     }
     if (cmd === "join" && rest) return send("JOIN " + (/^[#&]/.test(rest) ? rest : "#" + rest));
     if (cmd === "part") return send("PART " + (a[0] || active));
@@ -481,7 +661,7 @@
     if (cmd === "quit") {
       closing = true; clearTimeout(awayTimer); clearTimeout(timer);
       if (!ws || ws.readyState > 1) { app.hidden = true; form.hidden = false; return; } // already disconnected: nothing to wait for
-      send("QUIT :" + (rest || "Web chat closed"));
+      send("QUIT :" + (rest ? rest + BAR + CLIENT : QUIT_MSG)); // your own reason keeps a short client tag
       var s = ws; setTimeout(function () { if (s && s.readyState < 2) s.close(); }, 1500); // the server normally closes first; this is the fallback
       return;
     }
@@ -520,7 +700,7 @@
   // Phones drop the socket when the tab is backgrounded or the screen locks: reconnect as soon as it is visible again.
   document.addEventListener("visibilitychange", function () {
     if (document.hidden) return;
-    unseen = 0; document.title = baseTitle;
+    unseen = 0; document.title = baseTitle; markSoon();
     if (dead()) { tries = 0; clearTimeout(timer); reconnect(); }
   });
   window.addEventListener("online", function () { if (dead()) { tries = 0; clearTimeout(timer); reconnect(); } });
@@ -583,5 +763,10 @@
     input.selectionStart = input.selectionEnd = at - w.length + ins.length;
   });
   $("quit-btn").onclick = function () { command("/quit"); };
-  window.addEventListener("beforeunload", function () { closing = true; if (ws) ws.close(); });
+  // Leaving the page: say goodbye with the quit message and let the server close the socket (closing it here would race the QUIT).
+  // pagehide, not beforeunload: iOS Safari never fires beforeunload.
+  window.addEventListener("pagehide", function () { if (ws && ws.readyState === 1 && !app.hidden) { closing = true; send("QUIT :" + QUIT_MSG); } });
+  window.addEventListener("pageshow", function (e) { // back from the browser's page cache: reconnect where we were
+    if (e.persisted && closing && !app.hidden) { closing = false; tries = 0; reconnect(); }
+  });
 })();
