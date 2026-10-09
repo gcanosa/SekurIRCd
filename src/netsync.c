@@ -764,6 +764,7 @@ static void handle_sjoin(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
         chan->modes = 0; /* a remote channel: its modes, not our defaults */
         chan->created = ts;
         set_state_modes(chan, modes, margs, nm, 1);
+        link_notify_channel_new(srv, chan, NULL);
     } else if (ts < chan->created) { /* theirs is older: it wins everything */
         reset_channel_for_ts(srv, chan);
         chan->created = ts;
@@ -869,6 +870,7 @@ static void handle_join(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
         if (!chan) return;
         chan->modes = 0;
         chan->created = ts;
+        link_notify_channel_new(srv, chan, NULL);
     }
     if (!channel_find_member(chan, u)) {
         member_t *m = channel_add_member(chan, u);

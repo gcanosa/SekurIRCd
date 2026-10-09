@@ -820,6 +820,7 @@ static void finish_register(void) {
     cJSON_AddStringToObject(rec, "pw_hash", hash);
     if (g_pending_register.account[0]) cJSON_AddStringToObject(rec, "founder", g_pending_register.account); /* registered while logged in: that account is the founder */
     cJSON_AddNumberToObject(rec, "registered_at", (double)time(NULL));
+    cJSON_AddBoolToObject(rec, "secureops", 1); /* new registrations are protected against takeover while services were away */
     char cf[128];
     irc_casefold(cf, sizeof cf, chan);
     cJSON_AddItemToObject(g_store, cf, rec);
@@ -1624,6 +1625,42 @@ static void handle_svcjoin(irc_message_t *msg) {
     }
 }
 
+/* SVCNEW: a channel was just created on the ircd. If it's registered, restore what the ircd forgets when a channel
+ * dies (+r, MLOCK, GUARD) -- guard_join_all only covers channels that already exist when the link comes up. */
+static void handle_svcnew(irc_message_t *msg) {
+    if (msg->nparams < 1) return;
+    const char *chan = msg->params[0];
+    cJSON *rec = store_get(chan);
+    if (!rec) return;
+    if (rec_bool(rec, "guard")) wire_join(chan);
+    wire_mode(chan, "+r", NULL);
+    apply_mlock(rec, chan);
+}
+
+/* SVCSYNC: a member holds ranks on a channel (just created, or already there when we linked). Anyone with no claim to
+ * them -- not the founder, not on the access list, not identified, not granted by us -- loses them (SECUREOPS). */
+static void handle_svcsync(irc_message_t *msg) {
+    if (msg->nparams < 7) return;
+    const char *chan = msg->params[0], *nick = msg->params[1], *user = msg->params[2], *host = msg->params[3];
+    const char *account = msg->params[4], *ranks = msg->params[6];
+    int ident_confirmed = msg->params[5][0] == '1';
+    cJSON *rec = store_get(chan);
+    if (!rec || !rec_bool(rec, "secureops") || strcasecmp(nick, g_cfg.nick) == 0) return;
+    const char *fa = rec_str(rec, "founder");
+    if (fa[0] && account[0] && account[0] != '*' && strcasecmp(fa, account) == 0) return;
+    if (access_level_for(rec, nick, user, host, account, ident_confirmed)[0]) return;
+    if (is_identified(chan, nick) || granted_has(chan, nick)) return;
+    char ms[16] = "-", args[512] = "";
+    size_t n = 1;
+    for (const char *c = ranks; *c && n < sizeof ms - 1; c++) {
+        ms[n++] = *c;
+        strncat(args, args[0] ? " " : "", sizeof args - strlen(args) - 1);
+        strncat(args, nick, sizeof args - strlen(args) - 1);
+    }
+    ms[n] = '\0';
+    if (n > 1) wire_mode_args(chan, ms, args);
+}
+
 /* --- link handshake + main loop --------------------------------------------- */
 
 static int connect_hub(void) {
@@ -1845,6 +1882,8 @@ static void process_line(char *line) {
         return;
     }
     if (strcasecmp(msg.command, "SVCJOIN") == 0) { handle_svcjoin(&msg); return; }
+    if (strcasecmp(msg.command, "SVCNEW") == 0) { handle_svcnew(&msg); return; }
+    if (strcasecmp(msg.command, "SVCSYNC") == 0) { handle_svcsync(&msg); return; }
     if (strcasecmp(msg.command, "WHOISCHANREPLY") == 0) {
         if (msg.nparams < 3 || !g_pending_register.active) return;
         char cf1[128], cf2[128];

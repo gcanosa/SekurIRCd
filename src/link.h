@@ -111,5 +111,6 @@ void link_forward_line(link_conn_t *lc, const char *line);
  * full network-wide state mirroring to work. Called from cmd_chan.c right
  * after a JOIN is announced locally. */
 void link_notify_channel_join(struct channel *chan, struct client *joiner);
+void link_notify_channel_new(struct server *srv, struct channel *chan, struct client *creator);
 
 #endif /* SEKURIRCD_LINK_H */
