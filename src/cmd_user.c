@@ -606,9 +606,12 @@ static void whois_one(server_t *srv, client_t *cl, const char *nick) {
         const char *pa[] = {target->nick};
         client_reply(cl, N_AWAY, pa, 1, target->away);
     }
-    if (strcmp(target->host, target->realhost) != 0 && ((cl->umodes & UMODE_O) || cl == target)) {
+    if ((strcmp(target->host, target->realhost) != 0 || strcmp(target->realhost, target->ip) != 0) && ((cl->umodes & UMODE_O) || cl == target)) {
         char m[300];
-        snprintf(m, sizeof m, "is actually connecting from %s", target->realhost);
+        if (strcmp(target->realhost, target->ip) != 0)
+            snprintf(m, sizeof m, "is actually connecting from %s [%s]", target->realhost, target->ip);
+        else
+            snprintf(m, sizeof m, "is actually connecting from %s", target->realhost);
         const char *p3h[] = {target->nick};
         client_reply(cl, N_WHOISHOST, p3h, 1, m);
     }
