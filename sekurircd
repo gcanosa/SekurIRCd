@@ -40,6 +40,7 @@ require_bin() {
 }
 
 cmd_start() {
+    [ "$(id -u)" != 0 ] || echo "WARNING: running as root is not recommended -- the daemons never need it (ports are >1024). Use an unprivileged user." >&2
     require_bin "$IRCD_BIN"
     # Don't bring chanserv up against an ircd that refused to start (port in use, bad config...).
     "$IRCD_BIN" --config "$IRCD_CONFIG" --daemon --pidfile "$IRCD_PIDFILE" || {
