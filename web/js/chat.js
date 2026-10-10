@@ -221,8 +221,17 @@
       if (k === key(active)) { a.setAttribute("aria-current", "true"); setTimeout(function () { a.scrollIntoView({ block: "nearest", inline: "nearest" }); }); }
       if (b.unread) a.className = "unread";
       a.onclick = function () { active = b.name; b.unread = false; b.mark = b.read; draw(); markSoon(); input.focus(); };
+      if (k !== "*") { // × closes the tab, same as /close
+        var x = document.createElement("span"); x.className = "x"; x.textContent = "\u00D7"; x.title = "Close"; x.setAttribute("aria-label", "Close " + b.name);
+        x.onclick = function (e) { e.stopPropagation(); closeBuf(b.name); };
+        a.appendChild(x);
+      }
       tabs.appendChild(a);
     });
+  }
+  function closeBuf(name) {
+    if (isChan(name)) return send("PART " + name); // the PART echo closes the tab
+    delete bufs[key(name)]; if (key(active) === key(name)) active = "*"; draw();
   }
   function draw() {
     var b = buf(active);
@@ -737,8 +746,7 @@
     if (cmd === "notice" && a[1]) return send("NOTICE " + a[0] + " :" + a.slice(1).join(" "));
     if (cmd === "close") {
       if (active === "*") return say("*", "The status tab cannot be closed.", "err");
-      if (isChan(active)) return send("PART " + active); // the PART echo closes the tab
-      delete bufs[key(active)]; active = "*"; return draw();
+      return closeBuf(active);
     }
     if (cmd === "me") { if (active === "*" || !rest) return; return privmsg(active, rest, true); }
     if ((cmd === "msg" || cmd === "query") && a[0]) {
