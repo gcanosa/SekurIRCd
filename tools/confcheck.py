@@ -131,6 +131,11 @@ def check_template(path, tpl, quiet):
         else:
             warn(f"{where}: not in the template -- typo or obsolete? (likely ignored)")
 
+    name = live.get(("server", "name"), {})
+    if name.get("active") and "." not in name["value"].split("#")[0]:
+        warn(f"[server] name = {name['value'].strip()}: has no dot -- clients (TheLounge, irc-framework) "
+             "read it as a nick, so oper notices land in the active channel; use a hostname like irc.example.org")
+
     missing_secs = sorted(ref_secs - live_secs)
     missing = [(s, k) for s, k in ref if (s, k) not in live and s not in missing_secs]
     if missing_secs:
@@ -156,7 +161,7 @@ def selftest():
             check_template(live, tpl, True)
         o = buf.getvalue()
     assert "did you mean port?" in o and "belongs in [link]" in o and "did you mean [server]?" in o, o
-    assert "[dnsbl]: deprecated" in o and "2 option(s)" in o and "[link]" in o and warnings == 4, o
+    assert "[dnsbl]: deprecated" in o and "2 option(s)" in o and "[link]" in o and "has no dot" in o and warnings == 5, o
     print("selftest ok")
 
 

@@ -40,8 +40,9 @@
 # -----------------------------------------------------------------------------
 [server]
 
-# Hostname reported in protocol prefixes (e.g. ":sekuri 001 ...").
-name = "sekuri"
+# Hostname reported in protocol prefixes (e.g. ":irc.example.org 001 ...").
+# Must contain a dot: clients treat a dotless prefix as a nick, not a server.
+name = "irc.example.org"
 
 # Human-friendly network name shown in the welcome message.
 network = "SekuriIRC Network"
