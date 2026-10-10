@@ -97,30 +97,30 @@ static void emit_stats_snote(server_t *srv) {
              * WorkingDirectory= and the pidfile then never resolves. Use an
              * absolute path matching chanserv's actual --pidfile/PIDFile=. */
             snprintf(chanserv_part, sizeof chanserv_part,
-                      ", chanserv: not running (pidfile %s not found -- check for a relative path)",
+                      " | chanserv: not running (pidfile %s not found -- check for a relative path)",
                       srv->cfg.debug_channel.chanserv_pidfile);
         }
         if (cs_pid > 0) {
             double cs_cpu = 0;
             long cs_rss = 0;
             if (kill((pid_t)cs_pid, 0) == 0 && proc_stats((pid_t)cs_pid, &cs_cpu, &cs_rss) == 0) {
-                snprintf(chanserv_part, sizeof chanserv_part, ", chanserv cpu=%.1f%% mem=%ldMB", cs_cpu, cs_rss / 1024);
+                snprintf(chanserv_part, sizeof chanserv_part, " | chanserv %.1f%% cpu %ldMB", cs_cpu, cs_rss / 1024);
             } else if (errno == ESRCH) {
-                snprintf(chanserv_part, sizeof chanserv_part, ", chanserv: not running (stale pidfile, pid %d)", cs_pid);
+                snprintf(chanserv_part, sizeof chanserv_part, " | chanserv: not running (stale pidfile, pid %d)", cs_pid);
             } else {
-                snprintf(chanserv_part, sizeof chanserv_part, ", chanserv: pid %d unreachable (%s)", cs_pid, strerror(errno));
+                snprintf(chanserv_part, sizeof chanserv_part, " | chanserv: pid %d unreachable (%s)", cs_pid, strerror(errno));
             }
         } else if (!chanserv_part[0]) {
-            snprintf(chanserv_part, sizeof chanserv_part, ", chanserv: not running (empty/invalid pidfile)");
+            snprintf(chanserv_part, sizeof chanserv_part, " | chanserv: not running (empty/invalid pidfile)");
         }
     }
 
     char scan_part[160] = "";
     if (srv->cfg.protection.scan_enabled)
-        snprintf(scan_part, sizeof scan_part, ", proxy scanner: scanned=%ld proxies=%ld in-flight=%d negcache=%d",
+        snprintf(scan_part, sizeof scan_part, " | scanner %ld scanned, %ld proxies, %d in flight, %d cached",
                  srv->prot.scanned, srv->prot.hits, srv->prot.n_scans, protection_negcache_count(srv));
-    log_info("stats", "users=%d (peak %d), channels=%d (%d registered), connections=%ld total, "
-              "lines active=%d K/%d G/%d Z (%d from DNSBL, %d from scanner), dnsbl hits=%ld total%s, ircd cpu=%.1f%% mem=%ldMB%s",
+    log_info("stats", "users %d (peak %d) | channels %d (%d registered) | connections %ld | "
+              "bans K%d G%d Z%d (%d DNSBL, %d scanner) | DNSBL hits %ld%s | ircd %.1f%% cpu %ldMB%s",
               HASH_COUNT(srv->users), srv->max_users_seen, n_chans, n_reg_chans, srv->total_connections,
               n_klines, n_glines, n_zlines, n_dnsbl_active, n_scan_active, srv->dnsbl_hits, scan_part,
               ircd_cpu, ircd_rss / 1024, chanserv_part);
@@ -232,7 +232,7 @@ static void tls_try_handshake(client_t *cl) {
         cl->tls_handshaking = 0;
         cl->tls_want_write = 0;
         cl->umodes |= UMODE_Z;
-        log_info("net", "TLS handshake complete for %s (fd=%d)", cl->ip, cl->fd);
+        log_debug("tls", "handshake complete for %s (%s)", cl->ip, SSL_get_version(cl->ssl));
         return;
     }
     int err = SSL_get_error(cl->ssl, rc);
@@ -245,9 +245,9 @@ static void tls_try_handshake(client_t *cl) {
         cl->tls_want_write = (err == SSL_ERROR_WANT_WRITE);
         return;
     }
-    char errbuf[256];
-    ERR_error_string_n(ERR_get_error(), errbuf, sizeof errbuf);
-    log_warn("tls", "handshake failed for %s: err=%d (%s)", cl->ip, err, errbuf);
+    /* Almost always a port scanner or an ancient client: DEBUG, not WARNING. */
+    const char *why = ERR_reason_error_string(ERR_get_error());
+    log_debug("tls", "handshake failed for %s: %s", cl->ip, why ? why : err == SSL_ERROR_SYSCALL ? "connection closed" : "unknown error");
     cl->quitting = 1;
     snprintf(cl->quit_reason, sizeof cl->quit_reason, "TLS handshake failed");
 }
@@ -759,8 +759,10 @@ static void write_client(client_t *cl);
 static void close_client(server_t *srv, client_t *cl) {
     /* Unregistered clients are almost always scanners/health-checks that
      * connect and reset before sending NICK/USER -- routine noise, not worth
-     * a #server-debug notice. A client that made it to a nick is real. */
-    log_write(cl->nick[0] ? LOG_INFO : LOG_DEBUG, "net", "disconnecting %s (%s): %s",
+     * a #server-debug notice. A client that made it to a nick is real, but
+     * opers already see it as a "Client exiting" snote, so the "conn" tag
+     * keeps it in the log file only (see debug_log_hook). */
+    log_write(cl->nick[0] ? LOG_INFO : LOG_DEBUG, "conn", "disconnecting %s (%s): %s",
               cl->nick[0] ? cl->nick : "*", cl->ip, cl->quit_reason);
     int fd = cl->fd;
     if (fd >= 0 && !cl->tls_handshaking) write_client(cl); /* best effort: ERROR/flood notice etc. */
