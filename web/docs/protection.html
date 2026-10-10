@@ -251,16 +251,15 @@ enabled = true
 name = "#server-debug"      # oper-only; JOIN is refused to everyone else
 min_level = "INFO"          # bans are WARNING, the startup summary and stats lines are INFO
 stats_interval = 300        # seconds between summary lines</pre>
-<pre>[WARNING] protection: 203.0.113.9 is an open socks5 proxy (port 1080) -- Z-lined for the configured duration, 3 client(s) disconnected
-[WARNING] dnsbl: 203.0.113.44 listed in rbl.efnetrbl.org (drones / flooding) -- Z-lined
-[INFO] protection: scanner: 8 probe(s) per client [http:80 ... socks5:1080], target 198.51.100.7:6667, action=zline, negcache 3600s, max 256 in flight
-[WARNING] protection: scanner.target.ip 10.0.0.5 is a private address -- proxies on the internet can't reach it ...</pre>
+<pre>WARN protection 203.0.113.9 is an open socks5 proxy (port 1080) -- Z-lined for the configured duration, 3 client(s) disconnected
+WARN dnsbl 203.0.113.44 listed in rbl.efnetrbl.org (drones / flooding) -- Z-lined
+protection scanner: 8 probe(s) per client [http:80 ... socks5:1080], target 198.51.100.7:6667, action=zline, negcache 3600s, max 256 in flight
+WARN protection scanner.target.ip 10.0.0.5 is a private address -- proxies on the internet can't reach it ...</pre>
 <p>The startup summary is logged at start and after every <code>/REHASH</code>, so you can confirm what a reload actually turned on. With <code>stats_interval</code> set, the
   periodic summary tells you how well protection is working (example output):</p>
-<pre>stats: users=142 (peak 190), channels=61 (18 registered), connections=9314 total,
-       lines active=0 K/0 G/38 Z (35 from DNSBL, 3 from scanner), dnsbl hits=412 total,
-       proxy scanner: scanned=8817 proxies=3 in-flight=2 negcache=641, ircd cpu=0.4% mem=21MB</pre>
-<p>Watch <code>dnsbl hits</code>, <code>proxies</code> and the count of active lines from each: a steady trickle is normal, and a sudden climb means an attack is being absorbed.
+<pre>stats users 142 (peak 190) | channels 61 (18 registered) | connections 9314 | bans K0 G0 Z38 (35 DNSBL, 3 scanner)
+      | DNSBL hits 412 | scanner 8817 scanned, 3 proxies, 2 in flight, 641 cached | ircd 0.4% cpu 21MB</pre>
+<p>Watch <code>DNSBL hits</code>, <code>proxies</code> and the count of active lines from each: a steady trickle is normal, and a sudden climb means an attack is being absorbed.
   If the hit count stays at zero on a public server for weeks, check that the zone still resolves with <code>dig</code>. Per-probe detail (<code>log_all_scans</code>)
   goes to the log file at DEBUG, deliberately not to the channel.</p>
 

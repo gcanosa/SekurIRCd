@@ -339,6 +339,8 @@ static void debug_log_hook(log_level_t level, const char *tag, const char *msg) 
     server_t *srv = g_log_srv;
     if (busy || !srv || !srv->cfg.debug_channel.enabled) return;
     if (level < log_level_from_name(srv->cfg.debug_channel.min_level)) return;
+    /* User quits: already a "Client exiting" snote, keep them in the log file only. */
+    if (level == LOG_INFO && strcmp(tag, "conn") == 0) return;
     channel_t *chan = server_find_channel(srv, srv->cfg.debug_channel.name);
     if (!chan) return;
 
@@ -362,14 +364,15 @@ static void debug_log_hook(log_level_t level, const char *tag, const char *msg) 
         return;
     }
 
-    char text[480], line[600];
+    /* INFO is the common case, so it gets no level badge: just a grey tag.
+     * WARNING/ERROR get a bold colored badge so they stand out on a scroll. */
+    static const char *badge[] = {"\00314DEBUG\017 ", "", "\002\00307WARN\017 ", "\002\00304ERROR\017 ", "\002\00300,04CRIT\017 "};
+    char text[480], line[600], more[64] = "";
     if (suppressed) {
-        snprintf(text, sizeof text, "[%s] %s: %s (+%d more log line(s) suppressed)",
-                  log_level_name(level), tag, msg, suppressed);
+        snprintf(more, sizeof more, " \00314(+%d more suppressed)\017", suppressed);
         suppressed = 0;
-    } else {
-        snprintf(text, sizeof text, "[%s] %s: %s", log_level_name(level), tag, msg);
     }
+    snprintf(text, sizeof text, "%s\00314%s\017 %s%s", badge[level], tag, msg, more);
     const char *p[] = {chan->name};
     irc_build(line, sizeof line, NULL, 0, srv->cfg.server.name, "NOTICE", p, 1, text);
     server_broadcast_channel(chan, line, NULL);
