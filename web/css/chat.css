@@ -63,7 +63,7 @@
 .chat-log { white-space: pre-wrap; overflow-y: auto; padding: 8px 12px; font-size: .88rem; line-height: 1.5; overflow-wrap: anywhere; -webkit-overflow-scrolling: touch; }
 .chat-log .ts { color: var(--c-muted); }
 .chat-log .hist-end { text-align: center; }
-.chat-log .hist-end .ts { float: left; }
+.chat-log .hist-end .ts, .chat-log .hist-end .ic { float: left; }
 .chat-log .evt, .chat-log .notice { color: var(--c-muted); }
 .chat-log .err { color: var(--link); }
 .chat-log .me { color: var(--ok); }
