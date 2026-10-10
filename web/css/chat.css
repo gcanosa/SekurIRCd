@@ -35,6 +35,18 @@
 .chat-menu .danger { color: var(--link); }
 .chat-menu button:hover svg, .chat-menu button:focus-visible svg { opacity: 1; }
 @media (pointer: coarse) { .chat-menu button { padding: 11px 14px; } }
+.chat-log .ic { display: inline-block; width: 1.4em; text-align: center; color: var(--c-muted); }
+.chat-log .join .ic { color: var(--ok); }
+.chat-log .part .ic, .chat-log .quit .ic, .chat-log .kick .ic, .chat-log .err .ic { color: var(--link); }
+.chat-dlg { max-width: min(440px, calc(100vw - 32px)); padding: 16px 18px; background: var(--c-panel2); color: var(--fg); border: 1px solid var(--c-border); border-radius: 6px; box-shadow: 0 8px 24px rgba(0, 0, 0, .35); }
+.chat-dlg::backdrop { background: rgba(0, 0, 0, .55); }
+.chat-dlg h3 { margin: 0 0 8px; font-size: 1rem; color: var(--c-ink); }
+.chat-dlg p { margin: 0 0 10px; font-size: .88rem; }
+.chat-dlg .host { color: var(--c-ink); font-weight: bold; font-size: 1rem; overflow-wrap: anywhere; }
+.chat-dlg .puny { color: var(--link); }
+.chat-dlg .url { color: var(--c-muted); font-size: .8rem; overflow-wrap: anywhere; max-height: 6em; overflow-y: auto; }
+.chat-dlg label { display: flex; gap: 8px; align-items: center; font-size: .85rem; color: var(--c-muted); }
+.chat-dlg .act { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
 .chat-log .new { color: var(--link); text-align: center; font-size: .8rem; margin: 4px 0; }
 /* 16px minimum: iOS Safari zooms the page when an input under 16px gets focus */
 .chat-form input, .chat-send input { background: var(--c-panel); color: var(--fg); border: 1px solid var(--c-border); border-radius: 4px; padding: 8px 10px; font: inherit; font-size: max(16px, 1em); min-width: 0; }

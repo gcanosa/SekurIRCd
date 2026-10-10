@@ -78,9 +78,11 @@
     URL_RE.lastIndex = 0;
     while ((m = URL_RE.exec(s))) {
       if (m.index > last) parent.appendChild(document.createTextNode(s.slice(last, m.index)));
+      var u = m[0]; // a ")" that closes a "(" inside the URL belongs to it: en.wikipedia.org/wiki/Foo_(bar)
+      if (s[m.index + u.length] === ")" && u.split("(").length > u.split(")").length) URL_RE.lastIndex = m.index + (u += ")").length;
       var a = document.createElement("a"); // the regex only ever matches http:// or https://, so no javascript: links
-      a.href = m[0]; a.textContent = m[0]; a.target = "_blank"; a.rel = "noopener noreferrer nofollow";
-      parent.appendChild(a); last = m.index + m[0].length;
+      a.href = u; a.textContent = u; a.target = "_blank"; a.rel = "noopener noreferrer nofollow";
+      parent.appendChild(a); last = m.index + u.length;
     }
     if (last < s.length) parent.appendChild(document.createTextNode(s.slice(last)));
   }
@@ -143,18 +145,27 @@
       if (meta.time > b.last) b.last = meta.time;
     }
     var d = meta.time ? new Date(meta.time) : new Date(), t = d.toTimeString().slice(0, 5);
-    if (d.toDateString() !== new Date().toDateString()) t = d.toISOString().slice(5, 10) + " " + t; // older than today: show the date
+    if (d.toDateString() !== new Date().toDateString()) t = ("0" + (d.getMonth() + 1)).slice(-2) + "-" + ("0" + d.getDate()).slice(-2) + " " + t; // older than today: show the date
     b.lines.push({ t: t, text: text, cls: cls || "", id: meta.id, time: meta.time || "", from: meta.from, kind: meta.kind });
     if (b.lines.length > 500) { var old = b.lines.shift(); if (old.id) delete b.ids[old.id]; }
-    if (key(name) === key(active)) { addLine(b.lines[b.lines.length - 1]); if (meta.time) markSoon(); }
+    if (key(name) === key(active)) {
+      addLine(b.lines[b.lines.length - 1]); if (meta.time) markSoon();
+      while (log.childElementCount > 500) log.removeChild(log.firstElementChild); // the shown log stays as short as the buffer
+    }
     else if (!b.unread) { b.unread = true; drawTabs(); }
     if (document.hidden && !meta.hist && /\b(hl|msg)\b/.test(cls || "")) { unseen++; document.title = "(" + unseen + ") " + baseTitle; }
   }
+  // a small glyph before each kind of event; the first class that matches wins, so specific kinds come before "evt"
+  var EVT_ICONS = [["join", "\u2192"], ["part", "\u2190"], ["quit", "\u21d0"], ["kick", "\u2715"], ["nick", "\u21bb"], ["mode", "\u00b1"],
+               ["topic", "\u270e"], ["invite", "\u2709"], ["away", "\u263e"], ["ctcp", "\u2699"], ["whois", "\u00bb"],
+               ["notice", "\u25b8"], ["err", "!"], ["evt", "\u2022"]];
   function addLine(l) {
     var stick = log.scrollTop + log.clientHeight >= log.scrollHeight - 30;
     var d = document.createElement("div"); d.className = "ln " + l.cls;
     var s = document.createElement("span"); s.className = "ts"; s.textContent = l.t + " ";
     d.appendChild(s);
+    var ic = EVT_ICONS.filter(function (i) { return d.classList.contains(i[0]); })[0];
+    if (ic) { var g = document.createElement("span"); g.className = "ic"; g.textContent = ic[1] + "\uFE0E"; d.appendChild(g); } // FE0E: text glyph, never an emoji
     if (l.from) { // <nick> text, * nick text, -nick- text
       var nk = document.createElement("span"); nk.className = "nk"; nk.textContent = l.from; nk.style.setProperty("--h", hue(l.from));
       d.append(l.kind === "act" ? "* " : l.kind === "notice" ? "-" : "<", nk, l.kind === "act" ? " " : l.kind === "notice" ? "- " : "> ");
@@ -171,6 +182,35 @@
     var n = nickAt(e);
     if (!n) return;
     if (coarse) openMenu(n, e.clientX, e.clientY); else if (key(n) !== key(nick)) { query(n); input.focus(); }
+  });
+  // External links: confirm first, showing the real host (punycode, so a look-alike domain shows as xn--...).
+  // Plain clicks only: ctrl/cmd/shift/middle click and "open in new tab" are a deliberate choice and go straight through.
+  var linkDlg = document.createElement("dialog"), linkUrl = "", linkOk = false;
+  linkDlg.className = "chat-dlg";
+  linkDlg.innerHTML = '<form method="dialog"><h3>Open external link?</h3>' + // static markup; the URL goes in with textContent below
+    '<p>This link was posted in the chat and leaves SekurNet. Check where it goes before you continue.</p>' +
+    '<p class="host"></p><p class="puny" hidden>This address uses international characters, which can imitate another site.</p>' +
+    '<p class="url"></p><label><input type="checkbox"> Don\'t ask again this session</label>' +
+    '<div class="act"><button class="btn" value="no">Cancel</button><button class="btn primary" value="open">Open link</button></div></form>';
+  app.appendChild(linkDlg);
+  try { linkOk = sessionStorage.getItem("chat-links") === "ok"; } catch (e) {}
+  linkDlg.addEventListener("close", function () {
+    if (linkDlg.returnValue !== "open") return;
+    if (linkDlg.querySelector("input").checked) { linkOk = true; try { sessionStorage.setItem("chat-links", "ok"); } catch (e) {} }
+    window.open(linkUrl, "_blank", "noopener,noreferrer");
+  });
+  log.addEventListener("click", function (e) {
+    var a = e.target.closest && e.target.closest("a[href]"), u;
+    if (!a || linkOk || e.button || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+    try { u = new URL(a.href); } catch (x) { return; }
+    if (/(^|\.)sekurnet\.org$/i.test(u.hostname)) return; // our own sites open without asking
+    e.preventDefault();
+    linkUrl = u.href;
+    linkDlg.querySelector(".host").textContent = u.hostname;
+    linkDlg.querySelector(".puny").hidden = !/(^|\.)xn--/i.test(u.hostname);
+    linkDlg.querySelector(".url").textContent = u.href;
+    linkDlg.querySelector("input").checked = false; linkDlg.returnValue = "";
+    linkDlg.showModal();
   });
   log.addEventListener("contextmenu", function (e) { var n = nickAt(e); if (n) { e.preventDefault(); openMenu(n, e.clientX, e.clientY); } });
   function drawTabs() {
@@ -194,7 +234,7 @@
       if (i === newAt) { var nd = document.createElement("div"); nd.className = "ln new"; nd.textContent = "── new messages ──"; log.appendChild(nd); }
       addLine(l);
     });
-    topic.textContent = ""; topic.appendChild(fmt(b.topic || (b.name === "*" ? "SekurNet web chat" + (account ? " · logged in as " + account : "") : "")));
+    topic.textContent = ""; topic.title = b.topicBy || ""; topic.appendChild(fmt(b.topic || (b.name === "*" ? "SekurNet web chat" + (account ? " · logged in as " + account : "") : "")));
     users.textContent = "";
     GROUPS.forEach(function (g) {
       var names = Object.keys(b.users).filter(function (n) { return b.users[n] === g.prefix; })
@@ -253,7 +293,7 @@
                 !self && ["client", "Client version", function () { command("/ctcp " + n + " version"); }],
                 !self && ["ping", "Ping (lag)", function () { command("/ctcp " + n + " ping"); }]]],
       ["Privacy", [!self && (ignored[key(n)] ? ["eye", "Unignore", function () { setIgnore(n, false); }] : ["eyeoff", "Ignore", function () { setIgnore(n, true); }])]],
-      ["Moderate " + chan, [op && !self && (theirs === "@" ? ["shield", "Remove op", function () { send("MODE " + chan + " -o " + n); }] : ["shield", "Give op", function () { send("MODE " + chan + " +o " + n); }]),
+      ["Moderate " + chan, [op && !self && "~&".indexOf(theirs || "x") < 0 && (theirs === "@" ? ["shield", "Remove op", function () { send("MODE " + chan + " -o " + n); }] : ["shield", "Give op", function () { send("MODE " + chan + " +o " + n); }]),
                 half && (theirs === "+" ? ["mic", "Remove voice", function () { send("MODE " + chan + " -v " + n); }] : ["mic", "Give voice", function () { send("MODE " + chan + " +v " + n); }]),
                 half && !self && ["kick", "Kick", function () { send("KICK " + chan + " " + n + " :Kicked"); }, 1],
                 op && !self && ["ban", "Ban " + mask, function () { send("MODE " + chan + " +b " + mask); }, 1],
@@ -409,7 +449,7 @@
     send("NOTICE " + to + " :\x01" + cmd + (arg ? " " + arg : "") + "\x01");
   }
   function ctcp(from, cmd, arg) {
-    say("*", "CTCP " + cmd + " from " + from, "evt");
+    say("*", "CTCP " + cmd + " from " + from, "evt ctcp");
     if (cmd === "VERSION") return ctcpReply(from, cmd, "\x02" + CLIENT + "\x02 v" + CLIENT_V + BAR + "IRCv3 over TLS WebSocket" + BAR + "SASL SCRAM-SHA-256" + BAR + SITE);
     if (cmd === "PING") return ctcpReply(from, cmd, (arg || "").slice(0, 64));
     if (cmd === "TIME") return ctcpReply(from, cmd, new Date().toString().replace(/ \(.*\)$/, ""));
@@ -419,11 +459,11 @@
   }
   function ctcpAnswer(from, cmd, arg) {
     if (cmd === "PING" && pings[key(from)] && arg === pings[key(from)].tok) {
-      say(active, "PING reply from " + from + ": " + ((Date.now() - pings[key(from)].at) / 1000).toFixed(3) + "s", "evt");
+      say(active, "PING reply from " + from + ": " + ((Date.now() - pings[key(from)].at) / 1000).toFixed(3) + "s", "evt ctcp");
       delete pings[key(from)];
       return;
     }
-    say(active, "CTCP " + cmd + " reply from " + from + ": " + arg, "evt");
+    say(active, "CTCP " + cmd + " reply from " + from + ": " + arg, "evt ctcp");
   }
 
   // --- a soft two-note chime when someone else messages, notices, mentions or invites you; synthesized (no audio file) ---
@@ -510,43 +550,64 @@
       return send("NICK " + nick);
     }
     if (c === "353") { // names
-      var b = buf(p[2]); b.pending = b.pending || {}; // a NAMES reply spans several 353s, swapped in at 366
+      var b = bufs[key(p[2])];
+      if (!b) return say(active, "Users in " + p[2] + ": " + p[3], "evt"); // /names of a channel you are not in: no tab for it
+      b.pending = b.pending || {}; // a NAMES reply spans several 353s, swapped in at 366
       p[3].split(" ").forEach(function (n) { // "@nick", or "@nick!user@host" with userhost-in-names
         var mm = /^([~&@%+]*)([^!]+)(?:!([^@]*)@(.*))?$/.exec(n);
         if (mm) { b.pending[mm[2]] = mm[1].charAt(0); if (mm[4]) hosts[key(mm[2])] = mm[4]; }
       });
       return;
     }
-    if (c === "366") { var nb = buf(p[1]); if (nb.pending) { nb.users = nb.pending; nb.pending = null; } return key(p[1]) === key(active) && draw(); }
+    if (c === "366") { var nb = bufs[key(p[1])]; if (!nb) return; if (nb.pending) { nb.users = nb.pending; nb.pending = null; } return key(p[1]) === key(active) && draw(); }
     if (c === "MODE" && isChan(p[0])) {
-      say(p[0], m.nick + " sets mode " + p.slice(1).join(" "), "evt", meta);
+      say(p[0], m.nick + " sets mode " + p.slice(1).join(" "), "evt mode", meta);
       if (/[qaohv]/.test(p[1] || "")) send("NAMES " + p[0]); // privilege changed: re-read the list
       return;
     }
-    if (c === "332") { buf(p[1]).topic = p[2]; return key(p[1]) === key(active) && draw(); }
-    if (c === "TOPIC") { buf(p[0]).topic = p[1]; say(p[0], m.nick + " set the topic: " + p[1], "evt", meta); return key(p[0]) === key(active) && draw(); }
+    if (c === "332") {
+      if (!bufs[key(p[1])]) return say(active, "Topic of " + p[1] + ": " + p[2], "evt topic");
+      buf(p[1]).topic = p[2]; return key(p[1]) === key(active) && draw();
+    }
+    if (c === "333") { // who set the topic, and when: shown on hover over the topic bar
+      if (bufs[key(p[1])]) bufs[key(p[1])].topicBy = "Set by " + p[2].split("!")[0] + (+p[3] ? " on " + new Date(p[3] * 1000).toLocaleString() : "");
+      return key(p[1]) === key(active) && draw();
+    }
+    if (c === "329") return; // channel creation time: not worth a line
+    if (c === "TOPIC") { buf(p[0]).topic = p[1]; buf(p[0]).topicBy = "Set by " + m.nick + " on " + new Date().toLocaleString(); say(p[0], m.nick + " set the topic: " + p[1], "evt topic", meta); return key(p[0]) === key(active) && draw(); }
     if (m.prefix.indexOf("@") > 0) hosts[key(m.nick)] = m.prefix.split("@")[1]; // keep the latest host of everyone we hear from
     if (c === "JOIN") {
       var ch = p[0];
-      if (isMe(m.nick)) { var again = !!bufs[key(ch)]; buf(ch); active = ch; draw(); if (!again) say(ch, "Joined " + ch, "evt"); history(ch); }
-      else { buf(ch).users[m.nick] = ""; say(ch, m.nick + " joined", "evt"); if (key(ch) === key(active)) draw(); }
+      if (isMe(m.nick)) { var again = !!bufs[key(ch)]; buf(ch); active = ch; draw(); if (!again) say(ch, "Joined " + ch, "evt join"); history(ch); }
+      else { buf(ch).users[m.nick] = ""; say(ch, m.nick + " joined", "evt join"); if (key(ch) === key(active)) draw(); }
       return;
     }
     if (c === "PART" || c === "KICK") {
       var who = c === "KICK" ? p[1] : m.nick, why = c === "KICK" ? p[2] : p[1];
-      say(p[0], who + (c === "KICK" ? " was kicked by " + m.nick : " left") + (why ? " (" + why + ")" : ""), "evt");
-      if (isMe(who)) { delete bufs[key(p[0])]; if (key(active) === key(p[0])) active = "*"; draw(); }
+      say(p[0], who + (c === "KICK" ? " was kicked by " + m.nick : " left") + (why ? " (" + why + ")" : ""), c === "KICK" ? "evt kick" : "evt part");
+      if (isMe(who)) {
+        delete bufs[key(p[0])]; if (key(active) === key(p[0])) active = "*";
+        if (c === "KICK") say(active, "You were kicked from " + p[0] + " by " + m.nick + (why ? " (" + why + ")" : ""), "err kick"); // its tab is gone
+        draw();
+      }
       else { delete buf(p[0]).users[who]; if (key(p[0]) === key(active)) draw(); }
       return;
     }
     if (c === "QUIT") {
-      Object.keys(bufs).forEach(function (k) { if (m.nick in bufs[k].users) { delete bufs[k].users[m.nick]; say(bufs[k].name, m.nick + " quit" + (p[0] ? " (" + p[0] + ")" : ""), "evt"); } });
+      Object.keys(bufs).forEach(function (k) { if (m.nick in bufs[k].users) { delete bufs[k].users[m.nick]; say(bufs[k].name, m.nick + " quit" + (p[0] ? " (" + p[0] + ")" : ""), "evt quit"); } });
+      if (bufs[key(m.nick)]) say(m.nick, m.nick + " quit" + (p[0] ? " (" + p[0] + ")" : ""), "evt quit"); // their private chat
       return draw();
     }
     if (c === "NICK") {
       if (isMe(m.nick)) nick = p[0];
       if (hosts[key(m.nick)]) hosts[key(p[0])] = hosts[key(m.nick)];
-      Object.keys(bufs).forEach(function (k) { var u = bufs[k].users; if (m.nick in u) { u[p[0]] = u[m.nick]; delete u[m.nick]; say(bufs[k].name, m.nick + " is now " + p[0], "evt"); } });
+      var q = bufs[key(m.nick)]; // a private chat follows the nick, so their next message lands in the same tab
+      if (q && (key(m.nick) === key(p[0]) || !bufs[key(p[0])])) {
+        delete bufs[key(m.nick)]; bufs[key(p[0])] = q; q.name = p[0];
+        if (key(active) === key(m.nick)) active = p[0];
+        say(p[0], m.nick + " is now " + p[0], "evt nick");
+      }
+      Object.keys(bufs).forEach(function (k) { var u = bufs[k].users; if (m.nick in u) { u[p[0]] = u[m.nick]; delete u[m.nick]; say(bufs[k].name, m.nick + " is now " + p[0], "evt nick"); } });
       return draw();
     }
     if (c === "PRIVMSG" || c === "NOTICE") {
@@ -567,12 +628,12 @@
       return;
     }
     if (c === "INVITE" && isMe(p[0]) && !ignored[key(m.nick)]) {
-      say(active, m.nick + " invites you to " + p[1] + ". Type /join " + p[1] + " to accept.", "evt hl", meta);
+      say(active, m.nick + " invites you to " + p[1] + ". Type /join " + p[1] + " to accept.", "evt hl invite", meta);
       return chime();
     }
     if (c === "ERROR") return say("*", "Server error: " + p[0], "err");
-    if (/^(276|30[17]|31[1-9]|320|330|338|378|379|671)$/.test(c)) return say(active, whois(c, p), "evt whois", meta); // WHOIS: where you asked
-    if (/^\d+$/.test(c)) say(+c >= 400 ? active : "*", p.slice(1).join(" "), +c >= 400 ? "err" : "", meta);
+    if (/^(276|30[17]|31[1-46-9]|320|330|338|378|379|671)$/.test(c)) return say(active, whois(c, p), c === "301" ? "evt whois away" : "evt whois", meta); // WHOIS: where you asked
+    if (/^\d+$/.test(c)) say(+c >= 400 ? active : "*", p.slice(1).join(" "), +c >= 400 ? "err" : c === "305" || c === "306" ? "evt away" : "", meta);
   }
 
   function ago(sec) { // 3725 -> "1h 2m 5s"
@@ -610,14 +671,33 @@
     awayTimer = setTimeout(function () {
       if (!registered || away) return;
       send("AWAY :Auto-away (idle 30 minutes)");
-      say("*", "You were marked away after 30 minutes without activity. Send any message to come back.", "evt");
+      say("*", "You were marked away after 30 minutes without activity. Send any message to come back.", "evt away");
     }, AWAY_AFTER);
   }
 
-  function privmsg(to, text) { // with echo-message the server echoes it back (with its time and id), so show it then
-    send("PRIVMSG " + to + " :" + text);
-    var act = /^\x01ACTION /.test(text);
-    if (!caps["echo-message"]) say(to, act ? text.slice(8, -1) : masked(to, text), "me", { from: nick, kind: act ? "act" : "msg" });
+  function privmsg(to, text, act) { // with echo-message the server echoes it back (with its time and id), so show it then
+    chunks(text).forEach(function (t) {
+      send("PRIVMSG " + to + " :" + (act ? "\x01ACTION " + t + "\x01" : t));
+      if (!caps["echo-message"]) say(to, act ? t : masked(to, t), "me", { from: nick, kind: act ? "act" : "msg" });
+    });
+  }
+  // The server drops a whole line over 512 bytes, and accents, emoji or CJK get there well before the input's 400 characters:
+  // long text goes out as several lines, cut at the last space unless that leaves a short line.
+  var MAX_BODY = 350; // bytes per line, leaving room for "PRIVMSG target :" and the nick!user@host the server adds when relaying
+  function chunks(text) {
+    var cps = Array.from(text), out = [], start = 0, bytes = 0, sp = -1, spAt = 0; // code points, so an emoji is never cut in half
+    for (var i = 0; i < cps.length; i++) {
+      var n = enc.encode(cps[i]).length;
+      if (bytes + n > MAX_BODY) {
+        var cut = sp > start && spAt > MAX_BODY / 2 ? sp : i;
+        out.push(cps.slice(start, cut).join("")); start = cut === sp ? sp + 1 : cut; sp = -1;
+        bytes = enc.encode(cps.slice(start, i).join("")).length;
+      }
+      if (cps[i] === " ") { sp = i; spAt = bytes; }
+      bytes += n;
+    }
+    out.push(cps.slice(start).join(""));
+    return out;
   }
   function masked(to, text) { // what you tell NickServ (REGISTER, IDENTIFY ...) carries a password: show only the command
     return /^nickserv$/i.test(to) ? text.replace(/^(\S+)\s.*$/, "$1 ********") : text;
@@ -632,7 +712,7 @@
     }
     var a = text.slice(1).split(" "), cmd = a.shift().toLowerCase(), rest = a.join(" ");
     if (cmd === "help") return say(active, "Commands: /join #chan, /part, /close, /nick name, /me action, /msg nick text, /whois nick, /topic text, " +
-      "/away text, /ctcp nick version|time|ping, /sound on|off, /ignore nick, /unignore nick, /quit. Right click a nick (tap on phones) for more. Accounts: /msg NickServ REGISTER password. Tab completes nicknames, Up/Down recall what you sent.", "evt");
+      "/notice nick text, /kick nick reason, /away text, /ctcp nick version|time|ping, /sound on|off, /ignore nick, /unignore nick, /quit. Right click a nick (tap on phones) for more. Accounts: /msg NickServ REGISTER password. Tab completes nicknames, Up/Down recall what you sent.", "evt");
     if (cmd === "sound") {
       sound = a[0] ? a[0].toLowerCase() !== "off" : !sound;
       try { localStorage.setItem("chat-sound", sound ? "on" : "off"); } catch (e) {}
@@ -644,14 +724,23 @@
       var list = Object.keys(ignored);
       return say(active, list.length ? "Ignored: " + list.join(", ") : "You are not ignoring anyone.", "evt");
     }
-    if (cmd === "join" && rest) return send("JOIN " + (/^[#&]/.test(rest) ? rest : "#" + rest));
-    if (cmd === "part") return send("PART " + (a[0] || active));
+    if (cmd === "join" && a[0]) return send("JOIN " + a[0].split(",").map(function (c) { return /^[#&]/.test(c) ? c : "#" + c; }).join(",") + (a[1] ? " " + a.slice(1).join(" ") : ""));
+    if (cmd === "part" || cmd === "topic" || cmd === "kick") { // /part [#chan] [reason], /topic [#chan] [text], /kick [#chan] nick [reason]
+      var ch = a[0] && isChan(a[0]) ? a.shift() : isChan(active) ? active : "", why = a.join(" "); // the channel defaults to the open tab
+      if (!ch) return say(active, "Use it in a channel tab, or name the channel: /" + cmd + " #channel ...", "err");
+      if (cmd === "part") return send("PART " + ch + (why ? " :" + why : ""));
+      if (cmd === "topic") return send("TOPIC " + ch + (why ? " :" + why : ""));
+      if (!a[0]) return say(active, "Usage: /kick [#channel] nick [reason]", "err");
+      return send("KICK " + ch + " " + a[0] + " :" + (a.slice(1).join(" ") || "Kicked"));
+    }
+    if (cmd === "away") return send(rest ? "AWAY :" + rest : "AWAY");
+    if (cmd === "notice" && a[1]) return send("NOTICE " + a[0] + " :" + a.slice(1).join(" "));
     if (cmd === "close") {
       if (active === "*") return say("*", "The status tab cannot be closed.", "err");
       if (isChan(active)) return send("PART " + active); // the PART echo closes the tab
       delete bufs[key(active)]; active = "*"; return draw();
     }
-    if (cmd === "me") { if (active === "*") return; return privmsg(active, "\x01ACTION " + rest + "\x01"); }
+    if (cmd === "me") { if (active === "*" || !rest) return; return privmsg(active, rest, true); }
     if ((cmd === "msg" || cmd === "query") && a[0]) {
       var body = a.slice(1).join(" ");
       if (!isChan(a[0])) query(a[0]);
@@ -662,7 +751,7 @@
       var what = a[1].toUpperCase(), arg = a.slice(2).join(" ");
       if (what === "PING") { arg = String(Date.now()); pings[key(a[0])] = { tok: arg, at: Date.now() }; }
       send("PRIVMSG " + a[0] + " :\x01" + what + (arg ? " " + arg : "") + "\x01");
-      return say(active, "CTCP " + what + " sent to " + a[0], "evt");
+      return say(active, "CTCP " + what + " sent to " + a[0], "evt ctcp");
     }
     if (cmd === "quit") {
       closing = true; clearTimeout(awayTimer); clearTimeout(timer);
