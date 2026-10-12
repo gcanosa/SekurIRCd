@@ -9,6 +9,20 @@
 :root[data-theme="light"] { --g-owner: #8e3aa8; --g-admin: #b3261e; --g-op: #2f6b3a; --g-halfop: #9a6a00; --g-voice: #1c5fa8; }
 
 .chat-form { max-width: 440px; display: grid; gap: 12px; }
+/* the Connect button: the host site's primary color, lightened to one side, with a soft glow and a sliding arrow */
+.chat-form .connect-btn {
+  --c-pri: var(--burgundy, var(--acc)); display: flex; align-items: center; justify-content: center; gap: 10px;
+  padding: 12px 20px; font: inherit; font-weight: bold; letter-spacing: .02em; cursor: pointer;
+  background: linear-gradient(135deg, var(--c-pri), color-mix(in srgb, var(--c-pri) 72%, white));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--c-pri) 40%, transparent), 0 6px 20px -6px color-mix(in srgb, var(--c-pri) 75%, transparent);
+  transition: transform .15s, box-shadow .15s, filter .15s;
+}
+.chat-form .connect-btn:hover { transform: translateY(-1px); filter: brightness(1.08); box-shadow: 0 0 0 1px var(--c-pri), 0 10px 28px -6px color-mix(in srgb, var(--c-pri) 90%, transparent); }
+.chat-form .connect-btn:active { transform: none; }
+.chat-form .connect-btn svg { flex: none; }
+.chat-form .connect-btn .go { transition: transform .2s; }
+.chat-form .connect-btn:hover .go { transform: translateX(4px); }
+@media (prefers-reduced-motion: reduce) { .chat-form .connect-btn, .chat-form .connect-btn .go { transition: none; transform: none; } }
 .chat-form label { display: grid; gap: 4px; color: var(--c-muted); font-size: .85rem; }
 .chat-form .err, .chat-form .hint { margin: 0; font-size: .85rem; color: var(--c-muted); }
 .chat-form .err { color: var(--link); }
