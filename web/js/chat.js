@@ -15,7 +15,10 @@
     '<label>Password <input id="pass" type="password" maxlength="200" autocomplete="current-password"></label>' +
     '<p class="hint">Logs in with SASL while connecting. The password goes only to irc.sekurnet.org, over TLS, and is never stored by this page. ' +
     'No account yet? Connect, then type <code>/msg NickServ REGISTER yourpassword</code>.</p></details>' +
-    '<button class="btn primary" type="submit">Connect</button>' +
+    '<button class="btn primary connect-btn" type="submit">' +
+    '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><path d="M8 9l2.5 2L8 13M13 13h3"/></svg>' +
+    'Connect<span class="go" aria-hidden="true">\u2192</span></button>' +
     '<p id="conn-err" class="err" role="alert"></p>' +
     '<p class="hint">Separate channels with spaces or commas. Prefer a desktop client? Connect to <code>irc.sekurnet.org</code> port 6697 (TLS) or 6667 (plain).</p>' +
     '</form>' +
