@@ -21,14 +21,21 @@
     '</form>' +
     '<section id="chat" class="chat" hidden>' +
     '<div class="chat-bar"><div id="tabs" class="chat-tabs" role="tablist"></div>' +
-    '<button id="users-btn" class="tool users-btn" type="button" aria-pressed="false" aria-label="Show users">users</button>' +
-    '<button id="quit-btn" class="tool" type="button" aria-label="Leave the chat">quit</button></div>' +
+    '<button id="size-btn" class="tool" type="button">Aa</button>' +
+    '<button id="users-btn" class="tool users-btn" type="button" aria-pressed="false" aria-label="User list">' +
+    '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg></button>' +
+    '<button id="quit-btn" class="tool" type="button" aria-label="Leave the chat" title="Leave the chat">' +
+    '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<path d="M18.36 6.64a9 9 0 1 1-12.73 0M12 2v10"/></svg></button></div>' +
     '<div id="topic" class="chat-topic"></div>' +
     '<div class="chat-body"><div id="log" class="chat-log" aria-live="polite"></div>' +
     '<aside class="chat-users closed" aria-label="Users"><div id="users"></div></aside></div>' +
     '<form id="send" class="chat-send">' +
     '<input id="input" maxlength="400" autocomplete="off" autocapitalize="off" autocorrect="off" enterkeyhint="send" aria-label="Message">' +
-    '<button class="btn" type="submit">Send</button></form>' +
+    '<button class="btn send-btn" type="submit" aria-label="Send" title="Send">' +
+    '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<path d="M22 2L11 13M22 2l-7 20-4-9-9-4z"/></svg></button></form>' +
     '</section>';
 
   var WS_URL = "wss://irc.sekurnet.org:12155"; // [websocket] port with tls = true in sekurircd.toml
@@ -61,6 +68,16 @@
   var coarse = matchMedia("(pointer: coarse)").matches; // touch screens: a tap opens the nick menu (no right click there)
 
   var usersPane = users.parentNode, usersBtn = $("users-btn");
+  // Text size, kept in this browser only. Scales the log, topic, user list and input through --fs (chat.css).
+  var SIZES = [["small", .9], ["normal", 1], ["large", 1.15], ["huge", 1.3]], sizeBtn = $("size-btn"), size = 1;
+  try { size = Math.max(0, SIZES.map(function (z) { return z[0]; }).indexOf(localStorage.getItem("chat-size") || "normal")); } catch (e) {}
+  function setSize(i) {
+    size = i; root.style.setProperty("--fs", SIZES[i][1]);
+    sizeBtn.title = "Text size: " + SIZES[i][0] + " (click to change)"; sizeBtn.setAttribute("aria-label", sizeBtn.title);
+    try { localStorage.setItem("chat-size", SIZES[i][0]); } catch (e) {}
+  }
+  setSize(size);
+  sizeBtn.onclick = function () { var stick = log.scrollTop + log.clientHeight >= log.scrollHeight - 30; setSize((size + 1) % SIZES.length); if (stick) log.scrollTop = log.scrollHeight; };
   function guest() { return "Guest" + Math.floor(1000 + Math.random() * 9000); }
   // A fresh nickname on every load, so a reload never retries a nick that is still held by the previous session.
   var guestNick = nickIn.value = guest();
@@ -243,7 +260,7 @@
       if (i === newAt) { var nd = document.createElement("div"); nd.className = "ln new"; nd.textContent = "── new messages ──"; log.appendChild(nd); }
       addLine(l);
     });
-    topic.textContent = ""; topic.title = b.topicBy || ""; topic.appendChild(fmt(b.topic || (b.name === "*" ? "SekurNet web chat" + (account ? " · logged in as " + account : "") : "")));
+    topic.textContent = ""; topic.title = [b.topicBy, b.modes && "Modes: " + b.modes].filter(Boolean).join("\n"); topic.appendChild(fmt(b.topic || (b.name === "*" ? "SekurNet web chat" + (account ? " · logged in as " + account : "") : "")));
     users.textContent = "";
     GROUPS.forEach(function (g) {
       var names = Object.keys(b.users).filter(function (n) { return b.users[n] === g.prefix; })
@@ -348,8 +365,28 @@
     say(active, on ? "Ignoring " + n + ": their messages, notices and CTCPs are hidden (in this browser). /unignore " + n + " to undo." : "No longer ignoring " + n + ".", "evt");
   }
 
-  function showUsers(on) { usersPane.classList.toggle("closed", !on); usersBtn.setAttribute("aria-pressed", on); }
-  usersBtn.onclick = function () { showUsers(usersPane.classList.contains("closed")); };
+  // Phones: the list is an overlay that opens on demand (.closed). Wider screens: a side column the user can hide (.no-users, kept in this browser).
+  var phone = matchMedia("(max-width: 640px)"), sideOff = false;
+  try { sideOff = localStorage.getItem("chat-users") === "off"; } catch (e) {}
+  function pressed() {
+    var on = phone.matches ? !usersPane.classList.contains("closed") : !sideOff;
+    usersBtn.setAttribute("aria-pressed", on); usersBtn.title = (on ? "Hide" : "Show") + " user list";
+  }
+  function showUsers(on) { usersPane.classList.toggle("closed", !on); pressed(); }
+  function showSide(on) {
+    sideOff = !on; usersPane.parentNode.classList.toggle("no-users", sideOff); pressed();
+    try { localStorage.setItem("chat-users", on ? "on" : "off"); } catch (e) {}
+  }
+  usersBtn.onclick = function () { if (phone.matches) showUsers(usersPane.classList.contains("closed")); else showSide(sideOff); };
+  phone.addEventListener("change", pressed);
+  showSide(!sideOff);
+  function askModes(ch) { bufs[key(ch)].askModes = true; send("MODE " + ch); }
+  // A long topic is cut to one line; a click (not on a link) shows all of it, another click folds it again.
+  topic.onclick = function (e) {
+    if (e.target.closest("a")) return;
+    var stick = log.scrollTop + log.clientHeight >= log.scrollHeight - 30;
+    topic.classList.toggle("full"); if (stick) log.scrollTop = log.scrollHeight;
+  };
   function query(n) { // open (or switch to) a private chat; a new one loads its history when you are logged in
     var fresh = !bufs[key(n)];
     buf(n).unread = false; active = n; draw();
@@ -568,10 +605,16 @@
       });
       return;
     }
+    if (c === "324" || c === "329") { // channel modes and creation time; 329 always follows 324 and ends the reply
+      var mb = bufs[key(p[1])];
+      if (mb && c === "324") { mb.modes = p.slice(2).join(" "); if (key(p[1]) === key(active)) draw(); }
+      if (mb && mb.askModes) { if (c === "329") mb.askModes = false; return; } // our own request: no status line
+    }
     if (c === "366") { var nb = bufs[key(p[1])]; if (!nb) return; if (nb.pending) { nb.users = nb.pending; nb.pending = null; } return key(p[1]) === key(active) && draw(); }
     if (c === "MODE" && isChan(p[0])) {
       say(p[0], m.nick + " sets mode " + p.slice(1).join(" "), "evt mode", meta);
       if (/[qaohv]/.test(p[1] || "")) send("NAMES " + p[0]); // privilege changed: re-read the list
+      if (/[^qaohvbeI+-]/.test(p[1] || "") && bufs[key(p[0])]) askModes(p[0]); // a channel mode changed: refresh the topic bar's tooltip
       return;
     }
     if (c === "332") {
@@ -587,7 +630,7 @@
     if (m.prefix.indexOf("@") > 0) hosts[key(m.nick)] = m.prefix.split("@")[1]; // keep the latest host of everyone we hear from
     if (c === "JOIN") {
       var ch = p[0];
-      if (isMe(m.nick)) { var again = !!bufs[key(ch)]; buf(ch); active = ch; draw(); if (!again) say(ch, "Joined " + ch, "evt join"); history(ch); }
+      if (isMe(m.nick)) { var again = !!bufs[key(ch)]; buf(ch); active = ch; draw(); if (!again) say(ch, "Joined " + ch, "evt join"); history(ch); askModes(ch); }
       else { buf(ch).users[m.nick] = ""; say(ch, m.nick + " joined", "evt join"); if (key(ch) === key(active)) draw(); }
       return;
     }
