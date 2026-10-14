@@ -34,7 +34,8 @@ endif
 # (server name, DNSBL URL, uplink name, ...) declared CFG_STR (256) snprintf'd
 # into smaller display buffers; snprintf always null-terminates safely, so
 # the worst case is a cosmetically truncated message, never a memory bug.
-WARN     := -Wall -Wextra -Wno-unused-parameter -Wno-format-truncation
+# -Wno-unknown-warning-option: clang (e.g. Debian's) doesn't know -Wno-format-truncation and would warn about it on every file.
+WARN     := -Wall -Wextra -Wno-unused-parameter -Wno-format-truncation -Wno-unknown-warning-option
 # -MMD -MP: emit a .d dependency file per .o listing the headers it included,
 # so editing a .h (e.g. adding a struct field) correctly triggers a rebuild
 # of every .c that includes it -- without this, `make` only looks at .c
