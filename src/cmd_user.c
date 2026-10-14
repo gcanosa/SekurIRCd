@@ -299,17 +299,10 @@ static int pm_target_ok(client_t *cl, client_t *dst, const char *textbuf, int is
 /* Appends one delivered PRIVMSG/NOTICE to the CHATHISTORY conversation `key`, stamped now. */
 static void record_history(server_t *srv, const char *key, const char *msgid, const char *sender, const char *account,
                            const char *verb, const char *target, const char *text) {
-    hist_entry_t h;
-    memset(&h, 0, sizeof h);
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
-    h.ms = (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-    snprintf(h.msgid, sizeof h.msgid, "%s", msgid);
-    snprintf(h.sender, sizeof h.sender, "%s", sender);
-    snprintf(h.account, sizeof h.account, "%s", account);
-    snprintf(h.verb, sizeof h.verb, "%s", verb);
-    snprintf(h.target, sizeof h.target, "%s", target);
-    snprintf(h.text, sizeof h.text, "%s", text);
+    hist_entry_t h = {.ms = (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000, .msgid = msgid, .sender = sender,
+                      .account = account, .verb = verb, .target = target, .text = text};
     history_add(srv, key, srv->cfg.messages.history_size, &h);
 }
 
@@ -980,6 +973,7 @@ static void mon_append(client_t *cl, const char *code, char *buf, size_t bufsz, 
 static void monitor_discard(client_t *cl, const char *cf) {
     for (int i = 0; i < cl->n_monitor; i++) {
         if (strcmp(cl->monitor[i], cf) == 0) {
+            server_watch_index_del(cl->srv, 0, cl, cf);
             memmove(cl->monitor[i], cl->monitor[i + 1], (size_t)(cl->n_monitor - i - 1) * sizeof cl->monitor[0]);
             cl->n_monitor--;
             return;
@@ -1015,7 +1009,15 @@ static void monitor_impl(server_t *srv, client_t *cl, irc_message_t *msg) {
             char cf[NICKLEN]; irc_casefold(cf, sizeof cf, t);
             int dup = 0;
             for (int i = 0; i < cl->n_monitor; i++) if (strcmp(cl->monitor[i], cf) == 0) { dup = 1; break; }
-            if (!dup) { snprintf(cl->monitor[cl->n_monitor], NICKLEN, "%s", cf); cl->n_monitor++; }
+            if (!dup) {
+                char (*nl)[NICKLEN] = client_list_grow(cl->monitor, cl->n_monitor, sizeof *nl);
+                if (nl) {
+                    cl->monitor = nl;
+                    snprintf(cl->monitor[cl->n_monitor], NICKLEN, "%s", cf);
+                    cl->n_monitor++;
+                    server_watch_index_add(srv, 0, cl, cf);
+                }
+            }
             client_t *u = find_registered(srv, t);
             if (u) { char pfx[320]; client_prefix(u, pfx, sizeof pfx); mon_append(cl, N_MONONLINE, online, sizeof online, pfx); }
             else mon_append(cl, N_MONOFFLINE, offline, sizeof offline, t);
@@ -1023,6 +1025,7 @@ static void monitor_impl(server_t *srv, client_t *cl, irc_message_t *msg) {
         if (online[0]) client_reply(cl, N_MONONLINE, NULL, 0, online);
         if (offline[0]) client_reply(cl, N_MONOFFLINE, NULL, 0, offline);
     } else if (strcmp(sub, "C") == 0) {
+        for (int i = 0; i < cl->n_monitor; i++) server_watch_index_del(srv, 0, cl, cl->monitor[i]);
         cl->n_monitor = 0;
     } else if (strcmp(sub, "L") == 0) {
         if (cl->n_monitor > 0) {
@@ -1048,6 +1051,7 @@ static void monitor_impl(server_t *srv, client_t *cl, irc_message_t *msg) {
 static void watch_discard(client_t *cl, const char *cf) {
     for (int i = 0; i < cl->n_watch; i++) {
         if (strcmp(cl->watch[i], cf) == 0) {
+            server_watch_index_del(cl->srv, 1, cl, cf);
             memmove(cl->watch[i], cl->watch[i + 1], (size_t)(cl->n_watch - i - 1) * sizeof cl->watch[0]);
             cl->n_watch--;
             return;
@@ -1074,8 +1078,12 @@ static void watch_impl(server_t *srv, client_t *cl, irc_message_t *msg) {
             for (int i = 0; i < cl->n_watch; i++) if (strcmp(cl->watch[i], cf) == 0) { dup = 1; break; }
             if (!dup) {
                 if (cl->n_watch >= MAX_WATCH) continue;
+                char (*nl)[NICKLEN] = client_list_grow(cl->watch, cl->n_watch, sizeof *nl);
+                if (!nl) continue;
+                cl->watch = nl;
                 snprintf(cl->watch[cl->n_watch], NICKLEN, "%s", cf);
                 cl->n_watch++;
+                server_watch_index_add(srv, 1, cl, cf);
             }
             client_t *u = server_find_user(srv, tok + 1);
             char timebuf[32];
@@ -1089,6 +1097,7 @@ static void watch_impl(server_t *srv, client_t *cl, irc_message_t *msg) {
                 client_reply(cl, N_NOWOFF, p, 4, "is offline");
             }
         } else if (strcasecmp(tok, "C") == 0) {
+            for (int i = 0; i < cl->n_watch; i++) server_watch_index_del(srv, 1, cl, cl->watch[i]);
             cl->n_watch = 0;
         } else if (strcasecmp(tok, "L") == 0) {
             for (int i = 0; i < cl->n_watch; i++) {
@@ -1144,11 +1153,15 @@ void cmd_silence(server_t *srv, client_t *cl, irc_message_t *msg) {
             }
         } else if (cl->n_silence < MAX_SILENCE) {
             const char *mask = entry[0] == '+' ? entry + 1 : entry;
+            char (*nl)[256] = client_list_grow(cl->silence, cl->n_silence, sizeof *nl);
+            if (!nl) continue;
+            cl->silence = nl;
             snprintf(cl->silence[cl->n_silence], sizeof cl->silence[0], "%s", mask);
             cl->n_silence++;
         }
         /* else: silently refuse past the cap, same as +b/+e/+I past CHAN_MAX_MASKLIST */
     }
+    cl->silence = client_list_idle(cl->silence, cl->n_silence);
 }
 
 void cmd_glob(server_t *srv, client_t *cl, irc_message_t *msg) {
@@ -1372,8 +1385,16 @@ static void refresh_watcher_flag(server_t *srv, client_t *cl) {
     if (now != cl->is_watcher) { srv->n_watchers += now ? 1 : -1; cl->is_watcher = now; }
 }
 
-void cmd_monitor(server_t *srv, client_t *cl, irc_message_t *msg) { monitor_impl(srv, cl, msg); refresh_watcher_flag(srv, cl); }
-void cmd_watch(server_t *srv, client_t *cl, irc_message_t *msg) { watch_impl(srv, cl, msg); refresh_watcher_flag(srv, cl); }
+void cmd_monitor(server_t *srv, client_t *cl, irc_message_t *msg) {
+    monitor_impl(srv, cl, msg);
+    cl->monitor = client_list_idle(cl->monitor, cl->n_monitor);
+    refresh_watcher_flag(srv, cl);
+}
+void cmd_watch(server_t *srv, client_t *cl, irc_message_t *msg) {
+    watch_impl(srv, cl, msg);
+    cl->watch = client_list_idle(cl->watch, cl->n_watch);
+    refresh_watcher_flag(srv, cl);
+}
 
 /* ACCEPT [nick[,nick...]] -- caller-ID (+g) allow list. "-nick" removes, "*" or no argument lists. */
 void cmd_accept(server_t *srv, client_t *cl, irc_message_t *msg) {
@@ -1402,7 +1423,10 @@ void cmd_accept(server_t *srv, client_t *cl, irc_message_t *msg) {
             cl->n_accept--;
         } else {
             if (at >= 0) { client_reply(cl, N_ACCEPTEXIST, NULL, 0, "is already on your accept list"); continue; }
-            if (cl->n_accept >= (int)(sizeof cl->accept / sizeof cl->accept[0])) { client_reply(cl, N_ACCEPTFULL, NULL, 0, "Accept list is full"); continue; }
+            if (cl->n_accept >= MAX_ACCEPT) { client_reply(cl, N_ACCEPTFULL, NULL, 0, "Accept list is full"); continue; }
+            struct accept_entry *na = client_list_grow(cl->accept, cl->n_accept, sizeof *na);
+            if (!na) { client_reply(cl, N_ACCEPTFULL, NULL, 0, "Accept list is full"); continue; }
+            cl->accept = na;
             /* Bind to the person currently using the nick (see client.h), not just the string. */
             client_t *who = server_find_user(srv, nick);
             int k = cl->n_accept++;
@@ -1415,6 +1439,7 @@ void cmd_accept(server_t *srv, client_t *cl, irc_message_t *msg) {
             }
         }
     }
+    cl->accept = client_list_idle(cl->accept, cl->n_accept);
 }
 
 /* --- MARKREAD (draft/read-marker) --------------------------------------------- */

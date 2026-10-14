@@ -10,19 +10,24 @@
 
 struct server;
 
+/* One stored message. The six strings live packed in a single heap block owned by the stored entry (most lines are
+ * ~100 bytes, so this costs a fraction of fixed char[] fields sized for the worst case). A hist_entry_t passed to
+ * history_add/hist_buf_add only borrows its strings (NULL = ""): they are copied, and clipped to the old field sizes. */
 typedef struct {
-    char msgid[48];
     long long ms;       /* epoch milliseconds */
-    char sender[160];   /* nick!user@host at send time */
-    char account[32];   /* sender's account, "" if none */
-    char verb[8];       /* "PRIVMSG" / "NOTICE" */
-    char target[72];    /* where it was sent: the channel, or the recipient's nick for a DM */
-    char text[420];
+    const char *msgid;
+    const char *sender; /* nick!user@host at send time */
+    const char *account;/* sender's account, "" if none */
+    const char *verb;   /* "PRIVMSG" / "NOTICE" */
+    const char *target; /* where it was sent: the channel, or the recipient's nick for a DM */
+    const char *text;
 } hist_entry_t;
 
+/* The ring grows on demand (`alloc` slots, doubling) up to `cap` = [messages] history_size, so a quiet channel
+ * doesn't hold a full-size ring. head stays 0 until the ring is full. */
 typedef struct hist_buf {
     char key[160];
-    int cap, head, n;
+    int cap, alloc, head, n;
     hist_entry_t *e;
     long long last_ms;
     UT_hash_handle hh;
@@ -38,6 +43,7 @@ int history_key_is_dm(const char *key);
 /* Ring operations on one buffer (no server needed -- tests/unit.c uses these directly). */
 void hist_buf_add(hist_buf_t *b, int cap, const hist_entry_t *entry);
 const hist_entry_t *hist_buf_at(const hist_buf_t *b, int i);
+void hist_buf_clear(hist_buf_t *b); /* drop every entry and the ring (not the hist_buf_t itself) */
 
 /* Store (hangs off server_t). `cap` is [messages] history_size. */
 hist_buf_t *history_get(struct server *srv, const char *key);

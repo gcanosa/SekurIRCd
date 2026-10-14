@@ -274,6 +274,99 @@ static void test_add_time_tag(void) {
     snprintf(before, sizeof before, "%s", line);
     irc_add_time_tag(line, sizeof line);
     assert(strcmp(line, before) == 0);
+
+    /* other tags: time= is appended to the tag section, and a tag merely ending in "time" is not a time tag */
+    snprintf(line, sizeof line, "%s", "@msgid=1;draft/time=x PRIVMSG #chan :hi");
+    irc_add_time_tag(line, sizeof line);
+    assert(strncmp(line, "@msgid=1;draft/time=x;time=", 27) == 0 && strstr(line, " PRIVMSG #chan :hi") != NULL);
+    snprintf(line, sizeof line, "%s", "@time PRIVMSG #chan :hi");
+    snprintf(before, sizeof before, "%s", line);
+    irc_add_time_tag(line, sizeof line);
+    assert(strcmp(line, before) == 0);
+}
+
+/* The server-time tag is spliced into the send queue; a partial write only advances the offset, and the sent
+ * prefix is reclaimed when the queue needs room. */
+static void test_client_send_queue(void) {
+    server_t srv;
+    memset(&srv, 0, sizeof srv);
+    config_defaults(&srv.cfg);
+    client_t *cl = client_new(1, &srv);
+    assert(cl != NULL);
+    cl->caps |= CAP_SERVER_TIME;
+    client_send(cl, "@msgid=a PRIVMSG #c :one");
+    assert(strncmp(cl->sbuf, "@msgid=a;time=", 14) == 0 && strstr(cl->sbuf, " PRIVMSG #c :one\r\n") != NULL);
+    cl->caps &= ~(unsigned)CAP_SERVER_TIME;
+    size_t first = cl->sbuf_len;
+    cl->sbuf_off = first; /* pretend the socket took it all but the reset hasn't run yet */
+    assert(client_sendq_len(cl) == 0);
+    char big[400];
+    memset(big, 'x', sizeof big - 1);
+    big[sizeof big - 1] = '\0';
+    for (int i = 0; i < 40; i++) client_send(cl, big); /* forces a reclaim, then growth */
+    assert(cl->sbuf_off == 0 && client_sendq_len(cl) == 40 * (sizeof big + 1));
+    assert(memcmp(cl->sbuf, big, sizeof big - 1) == 0 && cl->sbuf[sizeof big - 1] == '\r');
+    client_free(cl);
+}
+
+/* The lazily-allocated per-client arrays: capacity is implied by the count (4, then doubling), freed when empty. */
+static void test_lazy_list_helpers(void) {
+    int *list = NULL;
+    int n = 0;
+    for (int i = 0; i < 70; i++) {
+        int *grown = client_list_grow(list, n, sizeof *list);
+        assert(grown != NULL);
+        list = grown;
+        list[n++] = i * 3;
+    }
+    for (int i = 0; i < 70; i++) assert(list[i] == i * 3); /* nothing lost across the reallocations */
+    n = 5; /* shrinking the count keeps the block; growing again from there stays in bounds */
+    for (int i = 0; i < 40; i++) {
+        int *grown = client_list_grow(list, n, sizeof *list);
+        assert(grown != NULL);
+        list = grown;
+        list[n++] = -i;
+    }
+    assert(list[4] == 12 && list[5] == 0 && list[44] == -39);
+    n = 0;
+    list = client_list_idle(list, n);
+    assert(list == NULL);
+    assert(client_list_idle(NULL, 0) == NULL);
+
+    size_t cap = 20000;
+    char *buf = malloc(cap);
+    assert(client_buf_shrink(buf, 10, &cap, 8192, 4096) == buf && cap == 20000); /* not empty: left alone */
+    buf = client_buf_shrink(buf, 0, &cap, 8192, 4096);
+    assert(buf != NULL && cap == 4096);
+    assert(client_buf_shrink(buf, 0, &cap, 8192, 4096) == buf); /* already small */
+    buf = client_buf_shrink(buf, 0, &cap, 1024, 0);
+    assert(buf == NULL && cap == 0);
+}
+
+/* The account store's hash indexes (name, grouped nick, certificate fingerprint) stay in step with the records. */
+static void test_accounts_indexes(void) {
+    account_store_t st;
+    accounts_init(&st, NULL);
+    accounts_register_hashed(&st, "Alice", "h1");
+    accounts_register_hashed(&st, "Bob", "h2");
+    assert(accounts_exists(&st, "ALICE") && accounts_count(&st) == 2);
+    assert(accounts_group_add(&st, "alice", "Ally") == 0);
+    assert(accounts_group_add(&st, "bob", "ally") == -1 && accounts_group_add(&st, "bob", "ALICE") == -1);
+    assert(strcmp(accounts_owner_of_nick(&st, "ALLY"), "Alice") == 0 && strcmp(accounts_owner_of_nick(&st, "bob"), "Bob") == 0);
+    assert(accounts_owner_of_nick(&st, "nobody") == NULL);
+    accounts_set_fingerprint(&st, "bob", "ABCDEF0123");
+    assert(strcmp(accounts_find_by_fingerprint(&st, "abcdef0123"), "Bob") == 0);
+    accounts_set_fingerprint(&st, "bob", "");
+    assert(accounts_find_by_fingerprint(&st, "abcdef0123") == NULL);
+    accounts_set_fingerprint(&st, "alice", "feed");
+    assert(accounts_group_del(&st, "alice", "ally") == 0 && accounts_owner_of_nick(&st, "ally") == NULL);
+    assert(accounts_drop(&st, "ALICE") == 1 && !accounts_exists(&st, "alice") && accounts_find_by_fingerprint(&st, "feed") == NULL);
+    assert(accounts_apply_remote(&st, "Carol", 5, "{\"name\":\"Carol\",\"pw_hash\":\"x\",\"nicks\":[\"cc\"],\"cert_fp\":\"AA11\"}") == 1);
+    assert(strcmp(accounts_owner_of_nick(&st, "cc"), "Carol") == 0 && strcmp(accounts_find_by_fingerprint(&st, "aa11"), "Carol") == 0);
+    assert(accounts_apply_remote(&st, "carol", 9, "{\"name\":\"Carol\",\"pw_hash\":\"y\"}") == 1);
+    assert(accounts_owner_of_nick(&st, "cc") == NULL && strcmp(accounts_hash(&st, "carol"), "y") == 0);
+    assert(accounts_apply_remote_delete(&st, "carol", 20) == 1 && !accounts_exists(&st, "carol") && accounts_count(&st) == 1);
+    accounts_free(&st);
 }
 
 /* --- crypto ----------------------------------------------------------------- */
@@ -843,16 +936,22 @@ static void test_history_ring_and_timestamps(void) {
     hist_buf_t b;
     memset(&b, 0, sizeof b);
     for (int i = 0; i < 5; i++) {
-        hist_entry_t e;
-        memset(&e, 0, sizeof e);
-        snprintf(e.msgid, sizeof e.msgid, "m%d", i);
-        e.ms = 1000 + i;
-        snprintf(e.text, sizeof e.text, "x");
+        char id[8];
+        snprintf(id, sizeof id, "m%d", i);
+        hist_entry_t e = {.ms = 1000 + i, .msgid = id, .text = "x"};
         hist_buf_add(&b, 3, &e);
     }
     assert(b.n == 3 && strcmp(hist_buf_at(&b, 0)->msgid, "m2") == 0 && strcmp(hist_buf_at(&b, 2)->msgid, "m4") == 0);
     assert(hist_buf_at(&b, 3) == NULL && b.last_ms == 1004);
-    free(b.e);
+    assert(b.alloc == 3 && strcmp(hist_buf_at(&b, 1)->text, "x") == 0 && hist_buf_at(&b, 0)->account[0] == '\0');
+    hist_buf_clear(&b);
+    assert(b.n == 0 && b.e == NULL);
+    { /* grows on demand, never past the cap */
+        hist_entry_t e = {.ms = 1, .msgid = "a"};
+        for (int i = 0; i < 2; i++) hist_buf_add(&b, 50, &e);
+        assert(b.n == 2 && b.alloc == 4);
+        hist_buf_clear(&b);
+    }
     char k1[160], k2[160];
     history_key_dm(k1, sizeof k1, "Bob", "alice");
     history_key_dm(k2, sizeof k2, "ALICE", "bob");
@@ -982,6 +1081,9 @@ int main(void) {
     RUN(test_durations);
     RUN(test_prefix_for);
     RUN(test_add_time_tag);
+    RUN(test_client_send_queue);
+    RUN(test_accounts_indexes);
+    RUN(test_lazy_list_helpers);
     RUN(test_scrypt_roundtrip);
     RUN(test_scrypt_cross_compat_vector);
     RUN(test_random_hex);

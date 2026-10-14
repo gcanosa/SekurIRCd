@@ -34,7 +34,8 @@ typedef struct {
     int remote_port;   /* ident only: the client's own TCP port */
     int local_port;     /* ident only: our side's TCP port */
     double timeout;
-    char zones[WORKER_MAX_ZONES][256]; /* dnsbl only */
+    char (*zones)[256]; /* dnsbl only: n_zones strings in a malloc'd block (only DNSBL jobs pay for it).
+                         * worker_submit takes ownership -- it frees the block even when it returns -1. */
     int n_zones;
     char secret[256];  /* sasl/hash: plaintext password (cleansed after use) */
     char hash[256];    /* sasl only: stored scrypt string to verify against */

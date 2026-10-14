@@ -419,6 +419,23 @@ long long irc_parse_iso8601_ms(const char *s) {
     return ((days * 24 + h) * 60 + m) * 60000LL + (long long)sec * 1000 + msec;
 }
 
+void json_put_string(FILE *fp, const char *s) {
+    fputc('"', fp);
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+        switch (*p) {
+            case '"': fputs("\\\"", fp); break;
+            case '\\': fputs("\\\\", fp); break;
+            case '\n': fputs("\\n", fp); break;
+            case '\r': fputs("\\r", fp); break;
+            case '\t': fputs("\\t", fp); break;
+            default:
+                if (*p < 0x20) fprintf(fp, "\\u%04x", *p);
+                else fputc(*p, fp);
+        }
+    }
+    fputc('"', fp);
+}
+
 void irc_iso8601_now(char *out, size_t outsz) {
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
@@ -441,43 +458,31 @@ void irc_iso8601_now(char *out, size_t outsz) {
     snprintf(out, outsz, "%s", cached);
 }
 
-void irc_add_time_tag(char *line, size_t linesz) {
+size_t irc_time_tag_insert(const char *line, char *tag, size_t tagsz, size_t *at) {
     char ts[40];
     irc_iso8601_now(ts, sizeof ts);
-    size_t len = strlen(line);
-
-    if (line[0] == '@') {
-        char *space = strchr(line, ' ');
-        if (!space) return;
-        size_t tag_len = (size_t)(space - line - 1);
-        char tagbuf[1536], tagbuf_copy[1536];
-        if (tag_len >= sizeof tagbuf) return;
-        memcpy(tagbuf, line + 1, tag_len);
-        tagbuf[tag_len] = '\0';
-        memcpy(tagbuf_copy, tagbuf, tag_len + 1);
-
-        char *save = NULL;
-        char *tok = strtok_r(tagbuf_copy, ";", &save);
-        while (tok) {
-            if (strcmp(tok, "time") == 0 || strncmp(tok, "time=", 5) == 0) return;
-            tok = strtok_r(NULL, ";", &save);
-        }
-
-        char rest[1536];
-        size_t rest_len = len - (size_t)(space - line);
-        if (rest_len >= sizeof rest) return;
-        memcpy(rest, space, rest_len);
-        rest[rest_len] = '\0';
-        snprintf(line, linesz, "@%s;time=%s%s", tagbuf, ts, rest);
-    } else {
-        /* No existing tags (the hot path): shift in place, no scratch copies. */
-        size_t tl = strlen(ts), plen = 6 + tl + 1; /* "@time=" + ts + " " */
-        if (len + plen >= linesz) return;
-        memmove(line + plen, line, len + 1);
-        memcpy(line, "@time=", 6);
-        memcpy(line + 6, ts, tl);
-        line[6 + tl] = ' ';
+    if (line[0] != '@') { /* no tags yet (the common case): a whole "@time=... " section goes in front */
+        *at = 0;
+        return (size_t)snprintf(tag, tagsz, "@time=%s ", ts);
     }
+    const char *space = strchr(line, ' ');
+    if (!space) return 0;
+    for (const char *t = line + 1; t < space;) { /* an existing time tag wins (a relayed server-time stays as sent) */
+        if (strncmp(t, "time", 4) == 0 && (t + 4 >= space || t[4] == '=' || t[4] == ';')) return 0;
+        const char *semi = memchr(t, ';', (size_t)(space - t));
+        if (!semi) break;
+        t = semi + 1;
+    }
+    *at = (size_t)(space - line);
+    return (size_t)snprintf(tag, tagsz, ";time=%s", ts);
+}
+
+void irc_add_time_tag(char *line, size_t linesz) {
+    char tag[48];
+    size_t at = 0, tl = irc_time_tag_insert(line, tag, sizeof tag, &at), len = strlen(line);
+    if (!tl || len + tl >= linesz) return;
+    memmove(line + at + tl, line + at, len - at + 1);
+    memcpy(line + at, tag, tl);
 }
 
 int irc_proxy_v2_parse(const unsigned char *buf, size_t len, char *ip, size_t ipsz, int *port, size_t *consumed) {

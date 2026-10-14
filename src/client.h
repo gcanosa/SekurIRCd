@@ -24,6 +24,7 @@ struct link_conn;
 #define HOSTLEN     256
 #define REALNAMELEN 512
 #define SENDQ_MAX   (1 << 20)   /* 1 MiB, then disconnect: "SendQ exceeded" */
+#define RBUF_START  1024        /* a connection's receive buffer starts (and returns to, once drained) this size: IRC lines are ~100 bytes */
 #define RECVQ_MAX   (1 << 16)   /* defensive cap on an unterminated partial line */
 
 /* self-togglable via MODE, same letters as security.default_user_modes */
@@ -42,6 +43,9 @@ struct link_conn;
 #define UMODE_NOPM     0x1000 /* D: accept PMs from nobody except IRCOps */
 #define UMODE_G        0x4000 /* g: caller-ID -- only accept PMs from users on your /ACCEPT list (and opers) */
 #define UMODE_B        0x2000 /* B: marks the user as a bot -- self-settable; WHOIS 335, WHO flag B, @bot tag */
+
+struct accept_entry { char nick[NICKLEN]; char account[64]; uint64_t conn_id; };
+#define MAX_ACCEPT 20
 
 typedef struct chan_node {
     struct channel *chan;
@@ -78,7 +82,7 @@ typedef struct client {
     int shunned;
     int ws;               /* 0 plain IRC, 1 awaiting the WebSocket upgrade request, 2 framing active (net.c) */
     unsigned char *ws_in; /* raw bytes read from the transport, not yet decoded */
-    size_t ws_in_len;
+    size_t ws_in_len, ws_in_cap;
     unsigned char *ws_out; /* encoded frames / handshake reply waiting for the socket */
     size_t ws_out_len, ws_out_cap;
     int expect_proxy;     /* accepted from a [server] proxy_protocol_hosts peer: first line must be "PROXY ..." */
@@ -113,18 +117,20 @@ typedef struct client {
     char sasl_mech[16];   /* "" outside an AUTHENTICATE exchange; "PLAIN" mid-exchange */
     int oper_fails;       /* consecutive failed /OPER attempts -- see cmd_oper.c _MAX_OPER_FAILS */
 
-    char monitor[100][NICKLEN]; /* /MONITOR watch list, casefolded nicks -- MAX_MONITOR */
+    /* Per-client lists, allocated on the first entry and freed when they empty (client_list_grow/idle): a
+     * connection that never uses MONITOR/WATCH/SILENCE/ACCEPT pays four NULL pointers, not ~21 KB of arrays. */
+    char (*monitor)[NICKLEN];   /* /MONITOR watch list, casefolded nicks -- MAX_MONITOR */
     int n_monitor;
-    char watch[128][NICKLEN];   /* legacy /WATCH list, casefolded nicks -- MAX_WATCH */
+    char (*watch)[NICKLEN];     /* legacy /WATCH list, casefolded nicks -- MAX_WATCH */
     int n_watch;
-    char silence[15][256];      /* /SILENCE mask list -- _MAX_SILENCE */
+    char (*silence)[256];       /* /SILENCE mask list -- MAX_SILENCE */
+    int n_silence;
     /* caller-ID (+g) allow list. An entry binds to who the nick belonged to when it was added -- their
      * account (survives reconnects/renames), else their connection -- so a stranger who later takes the
      * nick isn't let through. Only for a nick nobody was using does it fall back to matching the nick. */
-    struct { char nick[NICKLEN]; char account[64]; uint64_t conn_id; } accept[20];
+    struct accept_entry *accept;
     int n_accept;
     time_t last_cid_notice;   /* when we last told this +g user that someone tried to message them */
-    int n_silence;
 
     unsigned int caps; /* CAP_* bitmask -- see cmd_reg.c's CAP_ATTRS table */
 
@@ -139,10 +145,10 @@ typedef struct client {
     time_t auth_started;    /* when auth_pending was set -- net.c's tick clears a result that never came back */
     uint64_t auth_gen;      /* bumped on every SASL/REGISTER/OPER/DIE/RESTART job submitted -- see worker.h job_t.gen */
     char pending_account[64];
-    char pending_newpw[256]; /* NickServ SET PASSWORD: the new password while the old one is being verified */
-    char pass[256];         /* PASS given before registration, tried as an account login once NICK+USER are in (then wiped) */
-    char pending_email[160]; /* email given at REGISTER, stored once the account exists */
-    char pending_scram[160]; /* SCRAM verifier derived from the password in flight; stored if the login/registration succeeds */
+    /* PASS password, NickServ SET PASSWORD's new password, REGISTER's email and the SCRAM verifier derived from a password in
+     * flight: ~1 KB that exists only mid-login, so it lives in one heap block (client_auth_*) that is wiped and freed as
+     * soon as every field is empty. */
+    struct auth_tmp *auth_tmp;
     struct scram_sess *scram; /* SASL SCRAM-SHA-256 exchange in progress (cmd_reg.c) */
     int auth_style;         /* AUTH_STYLE_*: how to word the result of the pending login/register */
     int register_attempts;  /* /REGISTER is unauthenticated account creation: cap it per connection */
@@ -167,7 +173,10 @@ typedef struct client {
     chan_node_t *channels;
 
     char *rbuf; size_t rbuf_len, rbuf_cap;
-    char *sbuf; size_t sbuf_len, sbuf_cap;
+    /* Send queue: sbuf[sbuf_off..sbuf_len) is waiting for the socket; [0..sbuf_off) was already written. Advancing an
+     * offset after a partial write (instead of shifting the rest down every time) keeps a slow reader's backlog from
+     * costing a memmove per write; client_send reclaims the sent prefix when it needs the room. */
+    char *sbuf; size_t sbuf_off, sbuf_len, sbuf_cap;
 
     struct server *srv;
 
@@ -183,6 +192,28 @@ typedef struct client {
 
 client_t *client_new(int fd, struct server *srv);
 void client_free(client_t *cl);
+/* Growable list helpers for the lazily-allocated arrays above. Capacity is implied by the count (4, then
+ * doubling), so a list needs no capacity field. client_list_grow returns `list` ready for entry number n
+ * (reallocated if full; NULL on out-of-memory, `list` untouched); client_list_idle frees an emptied list. */
+void *client_list_grow(void *list, int n, size_t elem);
+
+/* Fields of client_t.auth_tmp. */
+enum {
+    AUTHTMP_PASS,   /* PASS given before registration, tried as an account login once NICK+USER are in (then wiped) */
+    AUTHTMP_NEWPW,  /* NickServ SET PASSWORD: the new password while the old one is being verified */
+    AUTHTMP_EMAIL,  /* email given at REGISTER, stored once the account exists */
+    AUTHTMP_SCRAM,  /* SCRAM verifier derived from the password in flight; stored if the login/registration succeeds */
+    AUTHTMP_N
+};
+const char *client_auth_get(const client_t *cl, int field);       /* "" when unset; valid until the next set/clear */
+void client_auth_set(client_t *cl, int field, const char *value); /* "" clears; truncated to the field's size; dropped if out of memory */
+void client_auth_clear(client_t *cl, int field);                  /* wipes the field, and frees the block once all are empty */
+/* A buffer holding `len` bytes whose capacity `*cap` grew past `above` (for one big burst) goes back to `keep`
+ * bytes once it is empty (`keep` 0 frees it). Returns the buffer to store back; on realloc failure the big one stays. */
+void *client_buf_shrink(void *buf, size_t len, size_t *cap, size_t above, size_t keep);
+/* Bytes queued for the socket and not yet written. */
+static inline size_t client_sendq_len(const client_t *cl) { return cl->sbuf_len - cl->sbuf_off; }
+void *client_list_idle(void *list, int n);
 
 /* Compute the display prefix "nick!~user@host" (or "nick@host" pre-USER). */
 void client_prefix(const client_t *cl, char *out, size_t outsz);

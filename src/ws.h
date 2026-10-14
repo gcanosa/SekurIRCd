@@ -31,6 +31,9 @@ int ws_forwarded_client(const char *list, const char globs[][CFG_MASK], int nglo
 /* Builds the "101 Switching Protocols" response; echoes Sec-WebSocket-Protocol: text.ircv3.net when text_proto (Kiwi IRC requires it). Returns its length, or -1. */
 int ws_build_response(const char *client_key, int text_proto, char *out, size_t outsz);
 
+/* Writes just the header of an unmasked server->client frame carrying `len` payload bytes (`out` needs 10). Returns its length. */
+size_t ws_frame_header(unsigned char *out, int opcode, size_t len);
+
 /* Encodes one unmasked server->client frame. `out` needs len + 10 bytes. Returns the frame length. */
 size_t ws_encode_frame(unsigned char *out, int opcode, const unsigned char *payload, size_t len);
 

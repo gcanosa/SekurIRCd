@@ -86,3 +86,22 @@ def test_read_marker_persists_with_history_file():
         b.expect(r" 001 ")
         b.send("JOIN #rm")
         assert b.saw(r"MARKREAD #rm timestamp=2026-01-02T03:04:05.000Z", 1.5)
+
+
+def test_history_ring_grows_overflows_and_survives_odd_text():
+    odd = 'quotes " back\\slash tab\t unicode \u00e9\u4e2d\U0001F600 {"json": [1,2]}'
+    with Server(cfg={"messages": {"history_file": "history.json", "history_size": 8}}) as s:
+        a = s.client("hz")
+        a.say("JOIN #ring")
+        for i in range(12):  # past the 4-slot start, 8-slot cap: grows, then overwrites the oldest
+            a.send(f"PRIVMSG #ring :line {i}")
+        a.send("PRIVMSG #ring :" + odd)
+        a.drain(0.5)
+        b = s.client("hy", caps=CH)
+        b.say("JOIN #ring")
+        got = texts(fetch(b, "CHATHISTORY LATEST #ring * 20"))
+        assert got == [f"line {i}" for i in range(5, 12)] + [odd], got
+        s.restart()
+        c = s.client("hx", caps=CH)
+        c.say("JOIN #ring")
+        assert texts(fetch(c, "CHATHISTORY LATEST #ring * 20")) == got, "the streamed save reads back identically"

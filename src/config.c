@@ -289,6 +289,28 @@ int config_format_cloak(const char *fmt, const char *token, const char *network,
 
 /* --- defaults ----------------------------------------------------------------- */
 
+void config_free(config_t *cfg) {
+    free(cfg->operators);
+    free(cfg->vhosts);
+    free(cfg->webirc);
+    free(cfg->classes);
+    free(cfg->links.peers);
+    cfg->operators = NULL; cfg->vhosts = NULL; cfg->webirc = NULL; cfg->classes = NULL; cfg->links.peers = NULL;
+}
+
+/* Array `arr` of `elem`-byte entries grown to hold entry `i` (the new one zeroed), or NULL on out-of-memory with `arr` intact. */
+static void *cfg_grow(void *arr, int i, size_t elem) {
+    char *n = realloc(arr, elem * (size_t)(i + 1));
+    if (n) memset(n + elem * (size_t)i, 0, elem);
+    return n;
+}
+
+#define CFG_NEXT(arr, i, errbuf, errbufsz) do { \
+        void *g_ = cfg_grow((arr), (i), sizeof *(arr)); \
+        if (!g_) { snprintf((errbuf), (errbufsz), "out of memory"); return -1; } \
+        (arr) = g_; \
+    } while (0)
+
 void config_defaults(config_t *out) {
     memset(out, 0, sizeof *out);
 
@@ -634,6 +656,7 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
             toml_table_t *o = toml_table_at(arr, i);
             if (!o) { snprintf(errbuf, errbufsz, "operators[%d] must be a table", i); return -1; }
             if (i >= CFG_MAX_OPERATORS) { snprintf(errbuf, errbufsz, "too many [[operators]] entries (max %d)", CFG_MAX_OPERATORS); return -1; }
+            CFG_NEXT(out->operators, i, errbuf, errbufsz);
             cfg_operator_t *op = &out->operators[i];
             char fn[64];
             snprintf(fn, sizeof fn, "operators[%d].name", i);
@@ -704,6 +727,7 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
             toml_table_t *v = toml_table_at(arr, i);
             if (!v) { snprintf(errbuf, errbufsz, "vhosts[%d] must be a table", i); return -1; }
             if (i >= CFG_MAX_VHOSTS) { snprintf(errbuf, errbufsz, "too many [[vhosts]] entries (max %d)", CFG_MAX_VHOSTS); return -1; }
+            CFG_NEXT(out->vhosts, i, errbuf, errbufsz);
             cfg_vhost_t *vh = &out->vhosts[i];
             char fn[64];
             snprintf(fn, sizeof fn, "vhosts[%d].host", i);
@@ -733,6 +757,7 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
             toml_table_t *t = toml_table_at(arr, i);
             if (!t) { snprintf(errbuf, errbufsz, "classes[%d] must be a table", i); return -1; }
             if (i >= CFG_MAX_CLASSES) { snprintf(errbuf, errbufsz, "too many [[classes]] entries (max %d)", CFG_MAX_CLASSES); return -1; }
+            CFG_NEXT(out->classes, i, errbuf, errbufsz);
             cfg_class_t *cc = &out->classes[i];
             char fn[64];
             snprintf(fn, sizeof fn, "classes[%d].name", i);
@@ -771,6 +796,7 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
             toml_table_t *w = toml_table_at(arr, i);
             if (!w) { snprintf(errbuf, errbufsz, "webirc[%d] must be a table", i); return -1; }
             if (i >= CFG_MAX_WEBIRC) { snprintf(errbuf, errbufsz, "too many [[webirc]] entries (max %d)", CFG_MAX_WEBIRC); return -1; }
+            CFG_NEXT(out->webirc, i, errbuf, errbufsz);
             cfg_webirc_t *wi = &out->webirc[i];
             char fn[64];
             snprintf(fn, sizeof fn, "webirc[%d].name", i);
@@ -921,6 +947,7 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
                 toml_table_t *pe = toml_table_at(arr, i);
                 if (!pe) { snprintf(errbuf, errbufsz, "links.peers[%d] must be a table", i); return -1; }
                 if (i >= CFG_MAX_LINK_PEERS) { snprintf(errbuf, errbufsz, "too many [[links.peers]] entries (max %d)", CFG_MAX_LINK_PEERS); return -1; }
+                CFG_NEXT(out->links.peers, i, errbuf, errbufsz);
                 cfg_link_peer_t *p = &out->links.peers[i];
                 char fn[64];
                 snprintf(fn, sizeof fn, "links.peers[%d].name", i);
@@ -1349,5 +1376,6 @@ int config_load(const char *path, config_t *out, char *errbuf, size_t errbufsz) 
     int rc = build_config(raw, resolved, out, errbuf, errbufsz);
     toml_free(raw);
     if (rc == 0) rc = load_protection_file(out, errbuf, errbufsz);
+    if (rc != 0) config_free(out); /* build_config started from defaults, so whatever it allocated is ours to drop */
     return rc;
 }

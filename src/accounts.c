@@ -1,6 +1,7 @@
 #include "accounts.h"
 #include "proto.h"
 
+#include <ctype.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -8,6 +9,61 @@
 #include <strings.h>
 #include <time.h>
 #include <unistd.h>
+
+/* --- hash indexes over st->data (see accounts.h) ----------------------------------------------------------------------- */
+
+struct aidx { char key[72]; cJSON *rec; UT_hash_handle hh; };
+
+static void idx_put(struct aidx **head, const char *key, cJSON *rec) {
+    if (strlen(key) >= sizeof ((struct aidx *)0)->key) return; /* longer than any account name / fingerprint: simply unindexed */
+    struct aidx *e;
+    HASH_FIND_STR(*head, key, e);
+    if (e) return; /* first record wins, same as the linear scan this replaces */
+    e = malloc(sizeof *e);
+    if (!e) return;
+    snprintf(e->key, sizeof e->key, "%s", key);
+    e->rec = rec;
+    HASH_ADD_STR(*head, key, e);
+}
+
+static void idx_del(struct aidx **head, const char *key) {
+    struct aidx *e;
+    HASH_FIND_STR(*head, key, e);
+    if (e) { HASH_DEL(*head, e); free(e); }
+}
+
+static void idx_clear(struct aidx **head) {
+    struct aidx *e, *tmp;
+    HASH_ITER(hh, *head, e, tmp) { HASH_DEL(*head, e); free(e); }
+}
+
+static cJSON *idx_get(struct aidx *head, const char *key) {
+    struct aidx *e;
+    HASH_FIND_STR(head, key, e);
+    return e ? e->rec : NULL;
+}
+
+/* Rebuilds the nick-group and fingerprint indexes if a record changed since they were last built. */
+static void derive(account_store_t *st) {
+    if (!st->derived_stale) return;
+    idx_clear(&st->by_nick);
+    idx_clear(&st->by_fp);
+    cJSON *rec, *it;
+    cJSON_ArrayForEach(rec, st->data) {
+        cJSON *nicks = cJSON_GetObjectItemCaseSensitive(rec, "nicks");
+        if (cJSON_IsArray(nicks))
+            cJSON_ArrayForEach(it, nicks) if (cJSON_IsString(it)) idx_put(&st->by_nick, it->valuestring, rec);
+        cJSON *fp = cJSON_GetObjectItemCaseSensitive(rec, "cert_fp");
+        if (cJSON_IsString(fp)) {
+            char lower[72];
+            size_t i = 0;
+            for (; fp->valuestring[i] && i < sizeof lower - 1; i++) lower[i] = (char)tolower((unsigned char)fp->valuestring[i]);
+            lower[i] = '\0';
+            idx_put(&st->by_fp, lower, rec);
+        }
+    }
+    st->derived_stale = 0;
+}
 
 void accounts_init(account_store_t *st, const char *path) {
     memset(st, 0, sizeof *st);
@@ -33,18 +89,31 @@ void accounts_init(account_store_t *st, const char *path) {
     }
     if (!st->data) st->data = cJSON_CreateObject();
     cJSON *rec;
-    cJSON_ArrayForEach(rec, st->data) { cJSON *n = cJSON_GetObjectItemCaseSensitive(rec, "nicks"); if (cJSON_IsArray(n)) st->n_grouped += cJSON_GetArraySize(n); }
+    cJSON_ArrayForEach(rec, st->data) {
+        cJSON *n = cJSON_GetObjectItemCaseSensitive(rec, "nicks");
+        if (cJSON_IsArray(n)) st->n_grouped += cJSON_GetArraySize(n);
+        if (rec->string) idx_put(&st->by_name, rec->string, rec);
+    }
+    st->derived_stale = 1;
 }
 
 void accounts_free(account_store_t *st) {
+    accounts_flush(st);
+    idx_clear(&st->by_name);
+    idx_clear(&st->by_nick);
+    idx_clear(&st->by_fp);
     if (st->data) cJSON_Delete(st->data);
     st->data = NULL;
 }
 
+/* A change worth persisting: written by accounts_flush (net.c's 1-second tick, and at shutdown), so a burst of
+ * registrations or logins costs one write+fsync instead of one each -- the same batching the K-line store uses. */
 static void save(account_store_t *st) {
-    if (!st->path[0]) return; /* accounts disabled -- never touch disk */
-    char *text = cJSON_Print(st->data);
-    if (!text) return;
+    if (st->path[0]) st->dirty = 1; /* accounts disabled -- never touch disk */
+}
+
+void accounts_flush(account_store_t *st) {
+    if (!st->dirty || !st->path[0]) return;
     char tmp[sizeof st->path + 5];
     snprintf(tmp, sizeof tmp, "%s.tmp", st->path);
     /* O_CREAT with an explicit 0600 (not fopen()+chmod after the fact,
@@ -54,15 +123,30 @@ static void save(account_store_t *st) {
      * that loses the race with a crash/power loss can't replace the good
      * file on disk with a truncated one. */
     int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0600);
-    if (fd < 0) { free(text); return; }
+    if (fd < 0) return; /* still dirty: tried again next tick */
     FILE *fp = fdopen(fd, "wb");
-    if (!fp) { close(fd); free(text); return; }
-    size_t len = strlen(text);
-    int ok = fwrite(text, 1, len, fp) == len && fflush(fp) == 0 && fsync(fd) == 0;
+    if (!fp) { close(fd); return; }
+    /* One account per line, printed and written one at a time: a printed copy of the whole store (what cJSON_Print
+     * of the root made) is as large as the file itself. */
+    int ok = 1;
+    fputc('{', fp);
+    int first = 1;
+    cJSON *rec;
+    cJSON_ArrayForEach(rec, st->data) {
+        char *text = cJSON_PrintUnformatted(rec);
+        if (!text) { ok = 0; break; }
+        fputs(first ? "\n" : ",\n", fp);
+        first = 0;
+        json_put_string(fp, rec->string ? rec->string : "");
+        fputc(':', fp);
+        fputs(text, fp);
+        free(text);
+    }
+    fputs("\n}\n", fp);
+    ok = ok && ferror(fp) == 0 && fflush(fp) == 0 && fsync(fd) == 0;
     if (fclose(fp) != 0) ok = 0;
-    if (ok) rename(tmp, st->path); /* atomic on POSIX */
+    if (ok && rename(tmp, st->path) == 0) st->dirty = 0; /* atomic on POSIX */
     else unlink(tmp);
-    free(text);
 }
 
 static long long now_ms(void) {
@@ -87,7 +171,7 @@ static void commit(account_store_t *st, cJSON *rec) {
 static cJSON *find(account_store_t *st, const char *name) {
     char cf[64];
     irc_casefold(cf, sizeof cf, name);
-    return cJSON_GetObjectItemCaseSensitive(st->data, cf);
+    return idx_get(st->by_name, cf);
 }
 
 int accounts_exists(account_store_t *st, const char *name) {
@@ -106,6 +190,7 @@ void accounts_register_hashed(account_store_t *st, const char *name, const char 
     char cf[64];
     irc_casefold(cf, sizeof cf, name);
     cJSON_AddItemToObject(st->data, cf, rec);
+    idx_put(&st->by_name, cf, rec);
     commit(st, rec);
 }
 
@@ -142,6 +227,7 @@ void accounts_set_fingerprint(account_store_t *st, const char *name, const char 
     if (!rec) return;
     cJSON_DeleteItemFromObjectCaseSensitive(rec, "cert_fp");
     if (fp && fp[0]) cJSON_AddStringToObject(rec, "cert_fp", fp);
+    st->derived_stale = 1;
     commit(st, rec);
 }
 
@@ -152,14 +238,14 @@ const char *accounts_fingerprint(account_store_t *st, const char *name) {
 
 const char *accounts_find_by_fingerprint(account_store_t *st, const char *fp) {
     if (!fp || !fp[0]) return NULL;
-    cJSON *rec;
-    cJSON_ArrayForEach(rec, st->data) {
-        cJSON *cf = cJSON_GetObjectItemCaseSensitive(rec, "cert_fp");
-        if (!cJSON_IsString(cf) || strcasecmp(cf->valuestring, fp) != 0) continue;
-        cJSON *name = cJSON_GetObjectItemCaseSensitive(rec, "name");
-        return cJSON_IsString(name) ? name->valuestring : NULL;
-    }
-    return NULL;
+    char lower[72];
+    size_t i = 0;
+    for (; fp[i] && i < sizeof lower - 1; i++) lower[i] = (char)tolower((unsigned char)fp[i]);
+    lower[i] = '\0';
+    derive(st);
+    cJSON *rec = idx_get(st->by_fp, lower);
+    cJSON *name = rec ? cJSON_GetObjectItemCaseSensitive(rec, "name") : NULL;
+    return cJSON_IsString(name) ? name->valuestring : NULL;
 }
 
 void accounts_set_hash(account_store_t *st, const char *name, const char *hash) {
@@ -174,7 +260,7 @@ void accounts_set_hash(account_store_t *st, const char *name, const char *hash) 
 int accounts_drop(account_store_t *st, const char *name) {
     char cf[64];
     irc_casefold(cf, sizeof cf, name);
-    cJSON *rec = cJSON_GetObjectItemCaseSensitive(st->data, cf);
+    cJSON *rec = idx_get(st->by_name, cf);
     if (!rec) return 0;
     cJSON *n = cJSON_GetObjectItemCaseSensitive(rec, "nicks");
     if (cJSON_IsArray(n)) st->n_grouped -= cJSON_GetArraySize(n);
@@ -185,6 +271,8 @@ int accounts_drop(account_store_t *st, const char *name) {
     char shown[64] = "";
     cJSON *nm = cJSON_GetObjectItemCaseSensitive(rec, "name");
     snprintf(shown, sizeof shown, "%s", cJSON_IsString(nm) ? nm->valuestring : name);
+    idx_del(&st->by_name, cf);
+    st->derived_stale = 1;
     cJSON_DeleteItemFromObjectCaseSensitive(st->data, cf);
     save(st);
     if (st->on_change && !st->applying) st->on_change(st->ud, shown, ts, 1);
@@ -257,6 +345,7 @@ int accounts_group_add(account_store_t *st, const char *name, const char *nick) 
     irc_casefold(cf, sizeof cf, nick);
     cJSON_AddItemToArray(n, cJSON_CreateString(cf));
     st->n_grouped++;
+    st->derived_stale = 1;
     commit(st, rec);
     return 0;
 }
@@ -273,6 +362,7 @@ int accounts_group_del(account_store_t *st, const char *name, const char *nick) 
         if (cJSON_IsString(it) && strcmp(it->valuestring, cf) == 0) {
             cJSON_DeleteItemFromArray(n, idx);
             st->n_grouped--;
+            st->derived_stale = 1;
             commit(st, rec);
             return 0;
         }
@@ -298,19 +388,10 @@ const char *accounts_owner_of_nick(account_store_t *st, const char *nick) {
     if (st->n_grouped <= 0) return NULL;
     char cf[64];
     irc_casefold(cf, sizeof cf, nick);
-    cJSON *rec;
-    cJSON_ArrayForEach(rec, st->data) {
-        cJSON *n = cJSON_GetObjectItemCaseSensitive(rec, "nicks");
-        cJSON *it;
-        if (!cJSON_IsArray(n)) continue;
-        cJSON_ArrayForEach(it, n) {
-            if (cJSON_IsString(it) && strcmp(it->valuestring, cf) == 0) {
-                cJSON *nm = cJSON_GetObjectItemCaseSensitive(rec, "name");
-                return cJSON_IsString(nm) ? nm->valuestring : NULL;
-            }
-        }
-    }
-    return NULL;
+    derive(st);
+    cJSON *rec = idx_get(st->by_nick, cf);
+    cJSON *nm = rec ? cJSON_GetObjectItemCaseSensitive(rec, "name") : NULL;
+    return cJSON_IsString(nm) ? nm->valuestring : NULL;
 }
 
 long long accounts_updated_at(account_store_t *st, const char *name) {
@@ -332,15 +413,18 @@ int accounts_apply_remote(account_store_t *st, const char *name, long long ts, c
     cJSON_AddNumberToObject(rec, "updated_at", (double)ts);
     char cf[64];
     irc_casefold(cf, sizeof cf, name);
-    cJSON *old = cJSON_GetObjectItemCaseSensitive(st->data, cf);
+    cJSON *old = idx_get(st->by_name, cf);
     if (old) {
         cJSON *on = cJSON_GetObjectItemCaseSensitive(old, "nicks");
         if (cJSON_IsArray(on)) st->n_grouped -= cJSON_GetArraySize(on);
+        idx_del(&st->by_name, cf);
         cJSON_DeleteItemFromObjectCaseSensitive(st->data, cf);
     }
     cJSON *nn = cJSON_GetObjectItemCaseSensitive(rec, "nicks");
     if (cJSON_IsArray(nn)) st->n_grouped += cJSON_GetArraySize(nn);
     cJSON_AddItemToObject(st->data, cf, rec);
+    idx_put(&st->by_name, cf, rec);
+    st->derived_stale = 1;
     save(st);
     return 1;
 }

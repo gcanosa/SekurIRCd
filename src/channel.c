@@ -26,6 +26,7 @@ void channel_free(channel_t *chan) {
     masklist_free(&chan->bans);
     masklist_free(&chan->exceptions);
     masklist_free(&chan->invex);
+    free(chan->invited);
     free(chan);
 }
 
@@ -264,6 +265,9 @@ void channel_invite_add(channel_t *chan, const char *casefold_nick) {
         memmove(chan->invited[0], chan->invited[1], (size_t)(CHAN_MAX_INVITED - 1) * sizeof chan->invited[0]);
         chan->n_invited--;
     }
+    char (*grown)[64] = client_list_grow(chan->invited, chan->n_invited, sizeof *grown);
+    if (!grown) return; /* out of memory: the invite is simply not remembered, like one past the cap */
+    chan->invited = grown;
     snprintf(chan->invited[chan->n_invited], sizeof chan->invited[0], "%s", casefold_nick);
     chan->n_invited++;
 }
@@ -274,6 +278,7 @@ void channel_invite_remove(channel_t *chan, const char *casefold_nick) {
             memmove(chan->invited[i], chan->invited[i + 1],
                     (size_t)(chan->n_invited - i - 1) * sizeof chan->invited[0]);
             chan->n_invited--;
+            chan->invited = client_list_idle(chan->invited, chan->n_invited);
             return;
         }
     }

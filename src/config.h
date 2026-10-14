@@ -209,7 +209,7 @@ typedef struct {
     int autoconnect;     /* dial the configured peers on startup and whenever they drop (default on); off = only on /CONNECT */
     double reconnect_delay;
     double reconnect_delay_max;
-    cfg_link_peer_t peers[CFG_MAX_LINK_PEERS];
+    cfg_link_peer_t *peers;   /* n_peers entries, malloc'd by config_load (config_free releases it); at most CFG_MAX_LINK_PEERS */
     int n_peers;
 } cfg_links_t;
 
@@ -325,14 +325,17 @@ typedef struct {
     cfg_security_t security;
     cfg_messages_t messages;
     cfg_logging_t logging;
-    cfg_operator_t operators[CFG_MAX_OPERATORS];
+    /* The [[tables]] below are heap arrays sized to what the file actually lists (n_* entries, capped at CFG_MAX_*):
+     * an inline array for every possible entry made config_t -- and so the server -- over a megabyte. Owned by the
+     * config_t that config_load filled in; config_free releases them, and a struct copy moves ownership. */
+    cfg_operator_t *operators;
     int n_operators;
     cfg_admin_t admin;
-    cfg_vhost_t vhosts[CFG_MAX_VHOSTS];
+    cfg_vhost_t *vhosts;
     int n_vhosts;
-    cfg_webirc_t webirc[CFG_MAX_WEBIRC];
+    cfg_webirc_t *webirc;
     int n_webirc;
-    cfg_class_t classes[CFG_MAX_CLASSES];
+    cfg_class_t *classes;
     int n_classes;
     cfg_channels_t channels;
     cfg_dnsbl_t dnsbl;
@@ -346,8 +349,10 @@ typedef struct {
     char path[CFG_PATH]; /* "" = built-in defaults, no file loaded */
 } config_t;
 
-/* Fill `out` with built-in defaults (equivalent to Python's Config()). */
+/* Fill `out` with built-in defaults (equivalent to Python's Config()). Overwrites whatever `out` held: free it first. */
 void config_defaults(config_t *out);
+/* Release the heap arrays of a config_t that config_load filled in (it frees them itself when it fails). */
+void config_free(config_t *cfg);
 
 /* Load from `path`. If `path` is NULL, falls back to "config/sekurircd.toml"
  * in the CWD if it exists, else built-in defaults (config_defaults). Returns

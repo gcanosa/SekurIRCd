@@ -102,17 +102,30 @@ int server_init(server_t *srv, const config_t *cfg) {
     return 0;
 }
 
-static void load_textfile(textfile_t *tf, const char *path) {
+static void textfile_free(textfile_t *tf) {
+    for (int i = 0; i < tf->n; i++) free(tf->lines[i]);
+    free(tf->lines);
+    tf->lines = NULL;
     tf->n = 0;
+}
+
+static void load_textfile(textfile_t *tf, const char *path) {
+    textfile_free(tf);
     FILE *fp = fopen(path, "r");
     if (!fp) return; /* missing file -> ERR_NOMOTD / ERR_NORULES on request */
+    tf->lines = malloc(sizeof *tf->lines * MOTD_MAX_LINES);
+    if (!tf->lines) { fclose(fp); return; }
     char line[MOTD_LINE_LEN];
     while (tf->n < MOTD_MAX_LINES && fgets(line, sizeof line, fp)) {
         size_t len = strlen(line);
         while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) line[--len] = '\0';
-        snprintf(tf->lines[tf->n++], MOTD_LINE_LEN, "%s", line);
+        char *copy = malloc(len + 1);
+        if (!copy) break;
+        memcpy(copy, line, len + 1);
+        tf->lines[tf->n++] = copy;
     }
     fclose(fp);
+    if (tf->n == 0) textfile_free(tf);
 }
 
 void server_load_motd(server_t *srv) {
@@ -135,6 +148,7 @@ int server_rehash(server_t *srv, char *errbuf, size_t errbufsz) {
     /* bind/port/TLS listeners are not re-bound on rehash (same as Python) --
      * only the config values themselves swap in. */
     int old_accounts = srv->cfg.accounts.enabled, old_history = srv->cfg.messages.history_size > 0;
+    config_free(&srv->cfg); /* the new config owns its own arrays; nothing keeps a pointer into the old ones across commands */
     srv->cfg = tmp;
     server_apply_cloak_secret(srv);
     if (srv->self_srv) snprintf(srv->self_srv->desc, sizeof srv->self_srv->desc, "%s", srv->cfg.server.network); /* LINKS/MAP description follows the network name */
@@ -471,6 +485,7 @@ void server_remove_client(server_t *srv, client_t *cl, const char *quit_reason) 
         if (cl->nserver && cl->nserver->n_users > 0) cl->nserver->n_users--;
     }
     if (cl->is_watcher) { srv->n_watchers--; cl->is_watcher = 0; }
+    server_watch_index_drop(srv, cl);
     channel_forget_ban_extra_for(cl);
     net_release_class(srv, cl);
 
@@ -910,6 +925,11 @@ void server_free_tables(server_t *srv) {
     netsync_free(srv);
     history_maybe_save(srv, 1);
     history_free(srv);
+    server_watch_index_free(srv);
+    textfile_free(&srv->motd);
+    textfile_free(&srv->oper_motd);
+    textfile_free(&srv->rules);
+    for (int i = 0; i < WHOWAS_MAX; i++) free((void *)srv->whowas[i].nick);
     spam_free(srv);
     protection_free(srv);
     { marker_t *mk, *mt; HASH_ITER(hh, srv->markers, mk, mt) { HASH_DEL(srv->markers, mk); free(mk); } }
@@ -924,27 +944,87 @@ void server_free_tables(server_t *srv) {
 
 void server_whowas_record(server_t *srv, const char *nick, const char *user,
                            const char *host, const char *realname) {
+    const char *in[4] = {nick, user, host, realname};
+    static const size_t cap[4] = {NICKLEN - 1, USERLEN - 1, HOSTLEN - 1, REALNAMELEN - 1}; /* the old fixed field sizes */
+    size_t len[4], total = 0;
+    for (int i = 0; i < 4; i++) { len[i] = strnlen(in[i], cap[i]); total += len[i] + 1; }
+    char *blob = malloc(total), *p = blob;
+    if (!blob) return;
     whowas_entry_t *e = &srv->whowas[srv->whowas_head];
-    snprintf(e->nick, sizeof e->nick, "%s", nick);
-    snprintf(e->user, sizeof e->user, "%s", user);
-    snprintf(e->host, sizeof e->host, "%s", host);
-    snprintf(e->realname, sizeof e->realname, "%s", realname);
+    free((void *)e->nick); /* the entry this overwrites (NULL the first time round) */
+    const char **dst[4] = {&e->nick, &e->user, &e->host, &e->realname};
+    for (int i = 0; i < 4; i++) {
+        memcpy(p, in[i], len[i]);
+        p[len[i]] = '\0';
+        *dst[i] = p;
+        p += len[i] + 1;
+    }
     srv->whowas_head = (srv->whowas_head + 1) % WHOWAS_MAX;
     if (srv->whowas_count < WHOWAS_MAX) srv->whowas_count++;
 }
 
 /* --- MONITOR --------------------------------------------------------------- */
 
+struct watch_entry { char nick[NICKLEN]; client_t **w; int n; UT_hash_handle hh; };
+
+static struct watch_entry **watch_head(server_t *srv, int legacy) { return legacy ? &srv->watch_idx : &srv->mon_idx; }
+
+void server_watch_index_add(server_t *srv, int legacy, client_t *cl, const char *cf) {
+    struct watch_entry **head = watch_head(srv, legacy), *e;
+    HASH_FIND_STR(*head, cf, e);
+    if (!e) {
+        e = calloc(1, sizeof *e);
+        if (!e) return;
+        snprintf(e->nick, sizeof e->nick, "%s", cf);
+        HASH_ADD_STR(*head, nick, e);
+    }
+    for (int i = 0; i < e->n; i++) if (e->w[i] == cl) return;
+    client_t **nw = realloc(e->w, sizeof *nw * (size_t)(e->n + 1));
+    if (!nw) {
+        if (e->n == 0) { HASH_DEL(*head, e); free(e); }
+        return;
+    }
+    e->w = nw;
+    e->w[e->n++] = cl;
+}
+
+void server_watch_index_del(server_t *srv, int legacy, client_t *cl, const char *cf) {
+    struct watch_entry **head = watch_head(srv, legacy), *e;
+    HASH_FIND_STR(*head, cf, e);
+    if (!e) return;
+    for (int i = 0; i < e->n; i++) {
+        if (e->w[i] != cl) continue;
+        e->w[i] = e->w[--e->n];
+        break;
+    }
+    if (e->n == 0) { HASH_DEL(*head, e); free(e->w); free(e); }
+}
+
+void server_watch_index_drop(server_t *srv, client_t *cl) {
+    for (int i = 0; i < cl->n_monitor; i++) server_watch_index_del(srv, 0, cl, cl->monitor[i]);
+    for (int i = 0; i < cl->n_watch; i++) server_watch_index_del(srv, 1, cl, cl->watch[i]);
+}
+
+void server_watch_index_free(server_t *srv) {
+    for (int k = 0; k < 2; k++) {
+        struct watch_entry **head = watch_head(srv, k), *e, *tmp;
+        HASH_ITER(hh, *head, e, tmp) { HASH_DEL(*head, e); free(e->w); free(e); }
+    }
+}
+
 void server_monitor_extend(server_t *srv, client_t *cl, const char *line, unsigned int cap) {
     if (srv->n_watchers == 0) return;
     char cf[NICKLEN];
     irc_casefold(cf, sizeof cf, cl->nick);
-    for (client_t *w = srv->all_clients; w; w = w->all_next) {
-        if (w == cl || !w->is_watcher || w->fd < 0 || w->quitting) continue;
+    struct watch_entry *e;
+    HASH_FIND_STR(srv->mon_idx, cf, e);
+    if (!e) return;
+    for (int i = 0; i < e->n; i++) {
+        client_t *w = e->w[i];
+        if (w == cl || w->fd < 0 || w->quitting) continue;
         if (!(w->caps & CAP_EXTENDED_MONITOR) || (cap && !(w->caps & cap))) continue;
         if (w->fanout_mark == srv->fanout_gen) continue; /* already got it via a shared channel */
-        for (int i = 0; i < w->n_monitor; i++)
-            if (w->monitor[i][0] == cf[0] && strcmp(w->monitor[i], cf) == 0) { client_send(w, line); break; }
+        client_send(w, line);
     }
 }
 
@@ -952,23 +1032,15 @@ void server_monitor_notify(server_t *srv, client_t *cl, int online) {
     if (srv->n_watchers == 0) return;
     char cf[NICKLEN];
     irc_casefold(cf, sizeof cf, cl->nick);
+    struct watch_entry *e;
+    HASH_FIND_STR(srv->mon_idx, cf, e);
+    if (!e) return;
     char prefix[320];
     client_prefix(cl, prefix, sizeof prefix);
-
-    for (client_t *watcher = srv->all_clients; watcher; watcher = watcher->all_next) {
-        if (watcher == cl) continue;
-        for (int i = 0; i < watcher->n_monitor; i++) {
-            /* ponytail: still O(watchers x list), but the first-byte reject
-             * skips ~96% of the strcmps for free. An inverted index keyed by
-             * watched nick is the upgrade if a deployment ever has enough
-             * watchers x entries for this to show up in a profile. */
-            if (watcher->monitor[i][0] != cf[0] || strcmp(watcher->monitor[i], cf) != 0) continue;
-            const char *code = online ? N_MONONLINE : N_MONOFFLINE;
-            const char *val = online ? prefix : cl->nick;
-            client_reply(watcher, code, NULL, 0, val);
-            break;
-        }
-    }
+    const char *code = online ? N_MONONLINE : N_MONOFFLINE;
+    const char *val = online ? prefix : cl->nick;
+    for (int i = 0; i < e->n; i++)
+        if (e->w[i] != cl) client_reply(e->w[i], code, NULL, 0, val);
 }
 
 /* --- WATCH (legacy pre-MONITOR watch-list, numerics 600-607) --------------- */
@@ -977,16 +1049,12 @@ void server_watch_notify(server_t *srv, client_t *cl, int online) {
     if (srv->n_watchers == 0) return;
     char cf[NICKLEN];
     irc_casefold(cf, sizeof cf, cl->nick);
+    struct watch_entry *e;
+    HASH_FIND_STR(srv->watch_idx, cf, e);
+    if (!e) return;
     char timebuf[32];
     snprintf(timebuf, sizeof timebuf, "%ld", (long)(online ? cl->signon_time : time(NULL)));
-
-    for (client_t *watcher = srv->all_clients; watcher; watcher = watcher->all_next) {
-        if (watcher == cl) continue;
-        for (int i = 0; i < watcher->n_watch; i++) {
-            if (watcher->watch[i][0] != cf[0] || strcmp(watcher->watch[i], cf) != 0) continue;
-            const char *p[] = {cl->nick, cl->user, cl->host, timebuf};
-            client_reply(watcher, online ? N_LOGON : N_LOGOFF, p, 4, online ? "logged online" : "logged offline");
-            break;
-        }
-    }
+    const char *p[] = {cl->nick, cl->user, cl->host, timebuf};
+    for (int i = 0; i < e->n; i++)
+        if (e->w[i] != cl) client_reply(e->w[i], online ? N_LOGON : N_LOGOFF, p, 4, online ? "logged online" : "logged offline");
 }
