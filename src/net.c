@@ -278,6 +278,10 @@ static ssize_t io_write(client_t *cl, const void *buf, size_t len) {
     return -1;
 }
 
+#define WS_READ_CHUNK 4096 /* bytes asked of the transport per ws read; ws.h's WS_MAX_PAYLOAD stays below it */
+#define SBUF_SHRINK_ABOVE 8192 /* a drained send queue larger than this goes back to SBUF_KEEP bytes */
+#define SBUF_KEEP     4096
+
 /* --- WebSocket transport ---------------------------------------------------
  * A ws client's bytes on the wire are HTTP + frames, but everything above
  * io_read/write_client still sees plain IRC lines: ws_read() turns frames into
@@ -303,11 +307,9 @@ static int ws_out_append(client_t *cl, const unsigned char *data, size_t len) {
 }
 
 static void ws_send_frame(client_t *cl, int opcode, const unsigned char *payload, size_t len) {
-    unsigned char *tmp = malloc(len + 10);
-    if (!tmp) { cl->quitting = 1; return; }
-    size_t n = ws_encode_frame(tmp, opcode, payload, len);
-    ws_out_append(cl, tmp, n);
-    free(tmp);
+    unsigned char hdr[10]; /* header and payload go straight into ws_out: no per-frame scratch allocation */
+    size_t h = ws_frame_header(hdr, opcode, len);
+    if (ws_out_append(cl, hdr, h) == 0 && len) ws_out_append(cl, payload, len);
 }
 
 static int ws_origin_ok(const server_t *srv, const char *origin) {
@@ -327,16 +329,20 @@ static void ws_reject(client_t *cl, const char *status) {
 
 /* Same contract as io_read: bytes of IRC text, 0 = closed, -1 + EAGAIN = nothing yet. */
 static ssize_t ws_read(client_t *cl, void *buf, size_t len) {
-    unsigned char raw[4096];
-    ssize_t n = io_read(cl, raw, sizeof raw);
+    /* Read straight into the tail of ws_in; capacity doubles from 4 KiB, so a stream of small reads doesn't realloc each time. */
+    if (cl->ws_in_len + WS_READ_CHUNK > cl->ws_in_cap) {
+        size_t cap = cl->ws_in_cap ? cl->ws_in_cap : WS_READ_CHUNK;
+        while (cap < cl->ws_in_len + WS_READ_CHUNK) cap *= 2;
+        unsigned char *nb = realloc(cl->ws_in, cap);
+        if (!nb) { errno = ENOMEM; return -1; }
+        cl->ws_in = nb;
+        cl->ws_in_cap = cap;
+    }
+    ssize_t n = io_read(cl, cl->ws_in + cl->ws_in_len, WS_READ_CHUNK);
     if (n == 0) return 0;
     if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) return -1;
     if (n > 0) {
         if (cl->ws_in_len + (size_t)n > 2 * WS_MAX_PAYLOAD) { errno = EIO; return -1; }
-        unsigned char *nb = realloc(cl->ws_in, cl->ws_in_len + (size_t)n);
-        if (!nb) { errno = ENOMEM; return -1; }
-        cl->ws_in = nb;
-        memcpy(cl->ws_in + cl->ws_in_len, raw, (size_t)n);
         cl->ws_in_len += (size_t)n;
     }
     server_t *srv = cl->srv;
@@ -407,6 +413,7 @@ static ssize_t ws_read(client_t *cl, void *buf, size_t len) {
         memmove(cl->ws_in, cl->ws_in + consumed, cl->ws_in_len - consumed);
         cl->ws_in_len -= consumed;
     }
+    cl->ws_in = client_buf_shrink(cl->ws_in, cl->ws_in_len, &cl->ws_in_cap, WS_READ_CHUNK, 0); /* idle: hold no input buffer */
     if (out > 0) return (ssize_t)out;
     errno = EAGAIN;
     return -1;
@@ -414,7 +421,7 @@ static ssize_t ws_read(client_t *cl, void *buf, size_t len) {
 
 /* Moves the complete lines queued in sbuf into ws_out as text frames. */
 static void ws_encode_pending(client_t *cl) {
-    size_t pos = 0;
+    size_t pos = cl->sbuf_off;
     while (pos < cl->sbuf_len) {
         char *nl = memchr(cl->sbuf + pos, '\n', cl->sbuf_len - pos);
         if (!nl) break;
@@ -424,9 +431,10 @@ static void ws_encode_pending(client_t *cl) {
         ws_send_frame(cl, 1, (const unsigned char *)cl->sbuf + pos, l);
         pos = end + 1;
     }
-    if (pos > 0) {
-        memmove(cl->sbuf, cl->sbuf + pos, cl->sbuf_len - pos);
-        cl->sbuf_len -= pos;
+    cl->sbuf_off = pos;
+    if (cl->sbuf_off == cl->sbuf_len) {
+        cl->sbuf_off = cl->sbuf_len = 0;
+        cl->sbuf = client_buf_shrink(cl->sbuf, 0, &cl->sbuf_cap, SBUF_SHRINK_ABOVE, SBUF_KEEP);
     }
 }
 
@@ -662,11 +670,14 @@ static client_t *accept_common(server_t *srv, int listen_fd) {
         snprintf(j.ip, sizeof j.ip, "%s", ipbuf);
         j.timeout = prot->bl_timeout;
         j.n_zones = prot->n_blacklists < WORKER_MAX_ZONES ? prot->n_blacklists : WORKER_MAX_ZONES;
-        for (int i = 0; i < j.n_zones; i++) snprintf(j.zones[i], sizeof j.zones[0], "%s", prot->blacklists[i].zone);
-        cl->dnsbl_pending = 1;
-        /* Queue full: proceed without the verdict rather than leaving POLLIN
-         * withheld until the 30-second rescue tick. */
-        if (worker_submit(&j) != 0) cl->dnsbl_pending = 0;
+        j.zones = malloc((size_t)j.n_zones * sizeof *j.zones);
+        if (j.zones) {
+            for (int i = 0; i < j.n_zones; i++) snprintf(j.zones[i], sizeof j.zones[0], "%s", prot->blacklists[i].zone);
+            cl->dnsbl_pending = 1;
+            /* Queue full: proceed without the verdict rather than leaving POLLIN
+             * withheld until the 30-second rescue tick. */
+            if (worker_submit(&j) != 0) cl->dnsbl_pending = 0;
+        }
     }
     if (srv->cfg.security.rdns_enabled) {
         /* Runs under masking too now: cl->realhost must be the real resolved
@@ -888,6 +899,7 @@ static int read_client_once(server_t *srv, client_t *cl) {
         memmove(cl->rbuf, cl->rbuf + start, cl->rbuf_len - start);
         cl->rbuf_len -= start;
     }
+    cl->rbuf = client_buf_shrink(cl->rbuf, cl->rbuf_len, &cl->rbuf_cap, RBUF_START, RBUF_START); /* one long line doesn't pin its buffer */
     return 1;
 }
 
@@ -900,10 +912,6 @@ static void read_client(server_t *srv, client_t *cl) {
            ((cl->ssl && SSL_pending(cl->ssl) > 0) || (cl->ws == 2 && cl->ws_in_len > 0))) {}
 }
 
-/* Below this, a drained sbuf is shrunk back down rather than left at
- * whatever peak it grew to -- client.c's default/starting capacity. */
-#define SBUF_SHRINK_THRESHOLD (4096 * 4)
-
 static void write_client(client_t *cl) {
     if (cl->ws) { /* WebSocket: lines -> frames, then push the frame buffer (handshake reply included) */
         if (cl->ws == 2) ws_encode_pending(cl);
@@ -912,33 +920,27 @@ static void write_client(client_t *cl) {
         if (w > 0) {
             memmove(cl->ws_out, cl->ws_out + w, cl->ws_out_len - (size_t)w);
             cl->ws_out_len -= (size_t)w;
+            cl->ws_out = client_buf_shrink(cl->ws_out, cl->ws_out_len, &cl->ws_out_cap, SBUF_SHRINK_ABOVE, 0);
         } else if (w < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
             cl->quitting = 1;
             snprintf(cl->quit_reason, sizeof cl->quit_reason, "Write error");
         }
         return;
     }
-    if (cl->sbuf_len == 0) return;
-    ssize_t n = io_write(cl, cl->sbuf, cl->sbuf_len);
+    size_t pending = client_sendq_len(cl);
+    if (pending == 0) return;
+    ssize_t n = io_write(cl, cl->sbuf + cl->sbuf_off, pending);
     if (n > 0) {
-        /* memmove of the unsent remainder -- on the common path a write()
-         * to a non-backed-up socket sends the whole buffer in one call, so
-         * n == sbuf_len and this is a memmove of 0 bytes (returns
-         * immediately in every real libc). It only does real work while a
-         * slow reader is actually applying backpressure, which SENDQ_MAX
-         * already bounds to 1 MiB. */
-        memmove(cl->sbuf, cl->sbuf + n, cl->sbuf_len - (size_t)n);
-        cl->sbuf_len -= (size_t)n;
-        /* A burst (e.g. a large WHO/NAMES reply, or backpressure while one
-         * was queued) can grow sbuf_cap well past what any client needs in
-         * steady state -- without this it never comes back down, so every
-         * connection that ever had one large reply keeps that peak capacity
-         * (up to SENDQ_MAX) for its entire lifetime. Once it's fully
-         * drained, shrink back to the default. realloc failure here just
-         * means the oversized buffer is kept -- never fatal. */
-        if (cl->sbuf_len == 0 && cl->sbuf_cap > SBUF_SHRINK_THRESHOLD) {
-            char *nb = realloc(cl->sbuf, SBUF_SHRINK_THRESHOLD);
-            if (nb) { cl->sbuf = nb; cl->sbuf_cap = SBUF_SHRINK_THRESHOLD; }
+        /* Advance past what was sent rather than shifting the rest down: on the common path one write() takes
+         * everything, and a slow reader's backlog (bounded by SENDQ_MAX) no longer costs a memmove per partial
+         * write. client_send reclaims the sent prefix when it needs room. */
+        cl->sbuf_off += (size_t)n;
+        if (cl->sbuf_off == cl->sbuf_len) {
+            cl->sbuf_off = cl->sbuf_len = 0;
+            /* A burst (a large WHO/NAMES reply, or backpressure while one was queued) can grow sbuf_cap well past
+             * what a client needs in steady state: once fully drained, shrink back to the default. realloc failure
+             * just keeps the oversized buffer -- never fatal. */
+            cl->sbuf = client_buf_shrink(cl->sbuf, 0, &cl->sbuf_cap, SBUF_SHRINK_ABOVE, SBUF_KEEP);
         }
     } else if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
         cl->quitting = 1;
@@ -1100,6 +1102,7 @@ static void tick(server_t *srv) {
     protection_tick(srv);
     server_kline_prune_expired(srv);
     server_kline_flush(srv); /* batched: see server_kline_flush */
+    accounts_flush(&srv->accounts); /* batched the same way */
     history_maybe_save(srv, 0);
 
     if (srv->cfg.debug_channel.stats_interval > 0) {
@@ -1265,18 +1268,20 @@ int net_run(server_t *srv) {
             tls_listen_idx = n;
             fds[n].fd = srv->tls_listen_fd; fds[n].events = listen_events; fds[n].revents = 0; n++;
         }
+        int any_quitting = 0; /* seen while building the set, so the timeout below needs no second walk */
         for (client_t *cl = srv->all_clients; cl; cl = cl->all_next) {
-            if (cl->fd < 0 || cl->quitting) continue;
+            if (cl->fd < 0) continue;
+            if (cl->quitting) { any_quitting = 1; continue; }
             /* Flush now rather than waiting a whole extra poll() round for
              * POLLOUT: most replies fit the socket buffer immediately. */
-            if ((cl->sbuf_len > 0 || cl->ws_out_len > 0) && !cl->tls_handshaking) write_client(cl);
-            if (cl->quitting) continue;
+            if ((client_sendq_len(cl) > 0 || cl->ws_out_len > 0) && !cl->tls_handshaking) write_client(cl);
+            if (cl->quitting) { any_quitting = 1; continue; }
             fds[n].fd = cl->fd;
             /* A pending DNSBL verdict withholds POLLIN entirely: the client
              * exists (a listed IP might still be disconnected below), but
              * nothing it sends is dispatched until the lookup resolves. */
             fds[n].events = (cl->dnsbl_pending ? 0 : POLLIN) |
-                ((cl->tls_handshaking ? cl->tls_want_write : (cl->sbuf_len > 0 || cl->ws_out_len > 0)) ? POLLOUT : 0);
+                ((cl->tls_handshaking ? cl->tls_want_write : (client_sendq_len(cl) > 0 || cl->ws_out_len > 0)) ? POLLOUT : 0);
             fds[n].revents = 0;
             fd_client[n] = cl;
             n++;
@@ -1297,9 +1302,7 @@ int net_run(server_t *srv) {
 
         /* Anything already marked for teardown (e.g. a write error in the
          * flush above) shouldn't wait out a full poll timeout. */
-        int timeout = 1000;
-        for (client_t *cl = srv->all_clients; cl; cl = cl->all_next)
-            if (cl->quitting) { timeout = 0; break; }
+        int timeout = any_quitting ? 0 : 1000;
         for (link_conn_t *lc = srv->links; lc && timeout; lc = lc->next)
             if (lc->closing) timeout = 0;
 
@@ -1368,6 +1371,12 @@ int net_run(server_t *srv) {
     log_set_hook(NULL);
 
     log_info("net", "shutting down");
+    accounts_flush(&srv->accounts); /* batched writes hit the disk first, whatever the teardown below does */
+    /* uthash keeps its own bucket-array bookkeeping behind the head entry, so HASH_CLEAR dereferences that head: it has to
+     * run while the clients are still alive (it frees only the table, never the entries). Done after the sweep below it
+     * read a freed client -- invisible normally, a crash with scribbled free memory. */
+    HASH_CLEAR(hh, srv->users);
+    HASH_CLEAR(hh_conn, srv->by_conn_id);
     client_t *cl = srv->all_clients;
     while (cl) {
         client_t *next = cl->all_next;
@@ -1404,13 +1413,6 @@ int net_run(server_t *srv) {
         lc = next;
     }
     srv->links = NULL;
-    /* Every client_t is freed above (all_clients sweep + service pseudo-
-     * clients via their link_conn_t), but uthash keeps its OWN internal
-     * bucket-array bookkeeping attached to the head pointer -- a plain
-     * `srv->users = NULL` would leak that. HASH_CLEAR frees it and nulls
-     * the head; it never touches the (already-freed) entries themselves. */
-    HASH_CLEAR(hh, srv->users);
-    HASH_CLEAR(hh_conn, srv->by_conn_id); /* same bucket-array leak as above, different hash handle */
     server_free_tables(srv);
 
     if (srv->listen_fd >= 0) close(srv->listen_fd);
@@ -1420,6 +1422,7 @@ int net_run(server_t *srv) {
     if (srv->tls_ctx) SSL_CTX_free(srv->tls_ctx);
     link_tls_cleanup();
     accounts_free(&srv->accounts);
+    config_free(&srv->cfg);
     worker_pool_stop();
     return 0;
 }

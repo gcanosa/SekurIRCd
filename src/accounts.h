@@ -11,11 +11,20 @@
 #define SEKURIRCD_ACCOUNTS_H
 
 #include "vendor/cJSON.h"
+#include "vendor/uthash.h"
 
 #include <stddef.h>
 
+struct aidx; /* accounts.c: one hash-index entry (key -> record) */
+
 typedef struct {
     cJSON *data;      /* object: casefolded account name -> {name, pw_hash, created_at} */
+    /* cJSON objects are linked lists, so every lookup by name was a scan of all accounts. These hash indexes point at the
+     * same records: by_name is kept in step with data; by_nick (grouped nick -> owner) and by_fp (certificate fingerprint ->
+     * owner) are derived and rebuilt on the first lookup after a change to either (derived_stale). */
+    struct aidx *by_name, *by_nick, *by_fp;
+    int derived_stale;
+    int dirty;        /* changes not yet written to `path` -- see accounts_flush */
     char path[512];   /* "" = in-memory only */
     int n_grouped;    /* total grouped nicks across all accounts (0 = skip the owner scan) */
     /* Replication hook: called after a change worth sending to linked servers (deleted=1 for DROP). `ts` is the record's
@@ -26,6 +35,9 @@ typedef struct {
 } account_store_t;
 
 void accounts_init(account_store_t *st, const char *path /* may be NULL */);
+/* Writes pending changes to `path` (atomically: temp file, fsync, rename). Cheap no-op when nothing changed; call it from the
+ * periodic tick. accounts_free flushes too. A failed write leaves the store dirty so the next call retries. */
+void accounts_flush(account_store_t *st);
 void accounts_free(account_store_t *st);
 
 /* True if `name` (case-insensitive) is already registered. */

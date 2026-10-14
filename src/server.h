@@ -21,13 +21,16 @@
 #define MOTD_LINE_LEN  400
 #define WHOWAS_MAX     200
 
+/* MOTD / oper MOTD / rules: each line is its own exact-size heap string (a reload frees and re-reads them), so a
+ * three-line MOTD costs bytes, not MOTD_MAX_LINES * MOTD_LINE_LEN of fixed arrays. */
 typedef struct {
-    char lines[MOTD_MAX_LINES][MOTD_LINE_LEN];
+    char **lines;
     int n;
 } textfile_t;
 
+/* One WHOWAS record: the four strings share a single heap block (nick is its start). NULLs until the slot is first used. */
 typedef struct {
-    char nick[NICKLEN], user[USERLEN], host[HOSTLEN], realname[REALNAMELEN];
+    const char *nick, *user, *host, *realname;
 } whowas_entry_t;
 
 typedef struct kline_entry {
@@ -60,6 +63,7 @@ typedef struct server {
     struct { time_t next; double backoff; } dial[CFG_MAX_LINK_PEERS]; /* per dial-out peer reconnect state */
     int class_count[CFG_MAX_CLASSES]; /* live connections per [[classes]] entry */
     int n_watchers;        /* clients with a non-empty MONITOR/WATCH list */
+    struct watch_entry *mon_idx, *watch_idx; /* watched nick (casefolded) -> the clients watching it; see server_watch_index_add */
     char msgid_prefix[17]; /* random per run, so msgids stay unique across restarts */
     uint64_t msgid_counter;
     int listen_fd;
@@ -264,6 +268,13 @@ void server_whowas_record(server_t *srv, const char *nick, const char *user,
 /* IRCv3 extended-monitor: after server_send_common_channels(cl, line, cap), also send `line` to clients that
  * MONITOR cl's nick, negotiated extended-monitor and `cap`, and weren't already reached through a shared channel. */
 void server_monitor_extend(server_t *srv, client_t *cl, const char *line, unsigned int cap);
+/* Inverted index behind the notifications below: casefolded watched nick -> clients watching it, so a connect/quit/nick change
+ * reaches its watchers directly instead of scanning every connection. `legacy` picks the /WATCH index over MONITOR's. Kept in
+ * step with client_t's monitor/watch lists by cmd_user.c; _drop removes every entry of a client (idempotent), _free is shutdown. */
+void server_watch_index_add(server_t *srv, int legacy, client_t *cl, const char *cf);
+void server_watch_index_del(server_t *srv, int legacy, client_t *cl, const char *cf);
+void server_watch_index_drop(server_t *srv, client_t *cl);
+void server_watch_index_free(server_t *srv);
 void server_monitor_notify(server_t *srv, client_t *cl, int online);
 
 /* Same as server_monitor_notify but for the legacy /WATCH list (600 RPL_LOGON /

@@ -27,19 +27,69 @@ void history_key_dm(char *out, size_t outsz, const char *account_a, const char *
 
 int history_key_is_dm(const char *key) { return key[0] == '\x01'; }
 
+/* Longest each string may be (the old fixed field sizes, less the NUL). */
+static const size_t HIST_FIELD_MAX[6] = {47, 159, 31, 7, 71, 419};
+
+/* Copies `src`'s six strings into one malloc'd block and points `dst` at it. */
+static int entry_dup(hist_entry_t *dst, const hist_entry_t *src) {
+    const char *in[6] = {src->msgid, src->sender, src->account, src->verb, src->target, src->text};
+    size_t len[6], total = 0;
+    for (int i = 0; i < 6; i++) {
+        if (!in[i]) in[i] = "";
+        len[i] = strnlen(in[i], HIST_FIELD_MAX[i]);
+        total += len[i] + 1;
+    }
+    char *blob = malloc(total), *p = blob;
+    if (!blob) return -1;
+    const char *out[6];
+    for (int i = 0; i < 6; i++) {
+        memcpy(p, in[i], len[i]);
+        p[len[i]] = '\0';
+        out[i] = p;
+        p += len[i] + 1;
+    }
+    dst->ms = src->ms;
+    dst->msgid = out[0]; dst->sender = out[1]; dst->account = out[2];
+    dst->verb = out[3]; dst->target = out[4]; dst->text = out[5];
+    return 0;
+}
+
+static void entry_release(hist_entry_t *e) {
+    free((void *)e->msgid); /* msgid is the start of the block */
+    memset(e, 0, sizeof *e);
+}
+
+void hist_buf_clear(hist_buf_t *b) {
+    for (int i = 0; i < b->n; i++) entry_release(&b->e[(b->head + i) % b->cap]);
+    free(b->e);
+    b->e = NULL;
+    b->alloc = b->head = b->n = 0;
+}
+
 void hist_buf_add(hist_buf_t *b, int cap, const hist_entry_t *entry) {
     if (cap <= 0) return;
-    if (!b->e || b->cap != cap) { /* first message, or history_size changed on a rehash: start over at the new size */
-        free(b->e);
-        b->e = calloc((size_t)cap, sizeof *b->e);
-        b->cap = b->e ? cap : 0;
-        b->head = b->n = 0;
-        if (!b->e) return;
+    if (b->e && b->cap != cap) hist_buf_clear(b); /* history_size changed on a rehash: start over at the new size */
+    b->cap = cap;
+    hist_entry_t copy;
+    if (entry_dup(&copy, entry) != 0) return;
+    if (b->n == b->alloc && b->alloc < cap) { /* full but not at the cap yet: double (head is still 0 here) */
+        int na = b->alloc ? b->alloc * 2 : 4;
+        if (na > cap) na = cap;
+        hist_entry_t *ne = realloc(b->e, (size_t)na * sizeof *ne);
+        if (!ne) { entry_release(&copy); return; }
+        b->e = ne;
+        b->alloc = na;
     }
-    int idx = (b->head + b->n) % b->cap;
-    if (b->n == b->cap) b->head = (b->head + 1) % b->cap; else b->n++;
-    b->e[idx] = *entry;
-    b->last_ms = entry->ms;
+    int idx;
+    if (b->n == b->cap) { /* ring full: overwrite the oldest */
+        idx = b->head;
+        entry_release(&b->e[idx]);
+        b->head = (b->head + 1) % b->cap;
+    } else {
+        idx = b->n++;
+    }
+    b->e[idx] = copy;
+    b->last_ms = copy.ms;
 }
 
 const hist_entry_t *hist_buf_at(const hist_buf_t *b, int i) {
@@ -59,7 +109,7 @@ void history_add(server_t *srv, const char *key, int cap, const hist_entry_t *en
         if (HASH_COUNT(srv->history) >= HIST_MAX_BUFFERS) { /* drop the conversation that has been quiet the longest */
             hist_buf_t *cur, *tmp, *oldest = NULL;
             HASH_ITER(hh, srv->history, cur, tmp) if (!oldest || cur->last_ms < oldest->last_ms) oldest = cur;
-            if (oldest) { HASH_DEL(srv->history, oldest); free(oldest->e); free(oldest); }
+            if (oldest) { HASH_DEL(srv->history, oldest); hist_buf_clear(oldest); free(oldest); }
         }
         b = calloc(1, sizeof *b);
         if (!b) return;
@@ -76,7 +126,7 @@ void history_rename_channel(server_t *srv, const char *oldname, const char *newn
     history_key_channel(nk, sizeof nk, newname);
     hist_buf_t *b = history_get(srv, ok), *stale = history_get(srv, nk);
     if (!b || b == stale) return;
-    if (stale) { HASH_DEL(srv->history, stale); free(stale->e); free(stale); }
+    if (stale) { HASH_DEL(srv->history, stale); hist_buf_clear(stale); free(stale); }
     HASH_DEL(srv->history, b);
     snprintf(b->key, sizeof b->key, "%s", nk);
     HASH_ADD_STR(srv->history, key, b);
@@ -85,7 +135,7 @@ void history_rename_channel(server_t *srv, const char *oldname, const char *newn
 
 void history_free(server_t *srv) {
     hist_buf_t *b, *tmp;
-    HASH_ITER(hh, srv->history, b, tmp) { HASH_DEL(srv->history, b); free(b->e); free(b); }
+    HASH_ITER(hh, srv->history, b, tmp) { HASH_DEL(srv->history, b); hist_buf_clear(b); free(b); }
 }
 
 /* --- persistence ----------------------------------------------------------- */
@@ -126,17 +176,10 @@ void history_load(server_t *srv) {
         cJSON *e;
         cJSON_ArrayForEach(e, b) {
             if (!cJSON_IsArray(e) || cJSON_GetArraySize(e) < 7) continue;
-            hist_entry_t h;
-            memset(&h, 0, sizeof h);
-            snprintf(h.msgid, sizeof h.msgid, "%s", jstr(e, 0));
             const cJSON *ms = cJSON_GetArrayItem(e, 1);
             if (!cJSON_IsNumber(ms)) continue;
-            h.ms = (long long)ms->valuedouble;
-            snprintf(h.sender, sizeof h.sender, "%s", jstr(e, 2));
-            snprintf(h.account, sizeof h.account, "%s", jstr(e, 3));
-            snprintf(h.verb, sizeof h.verb, "%s", jstr(e, 4));
-            snprintf(h.target, sizeof h.target, "%s", jstr(e, 5));
-            snprintf(h.text, sizeof h.text, "%s", jstr(e, 6));
+            hist_entry_t h = {.ms = (long long)ms->valuedouble, .msgid = jstr(e, 0), .sender = jstr(e, 2), .account = jstr(e, 3),
+                              .verb = jstr(e, 4), .target = jstr(e, 5), .text = jstr(e, 6)};
             history_add(srv, b->string, cap, &h);
             loaded++;
         }
@@ -164,43 +207,51 @@ void history_maybe_save(server_t *srv, int force) {
     if (!force && now - srv->history_last_save < 30) return; /* debounce: a busy network would rewrite this every second */
     srv->history_last_save = now;
 
-    cJSON *root = cJSON_CreateObject();
-    cJSON *bufs = cJSON_AddObjectToObject(root, "buffers");
-    hist_buf_t *b, *tmp;
-    HASH_ITER(hh, srv->history, b, tmp) {
-        cJSON *arr = cJSON_AddArrayToObject(bufs, b->key);
-        for (int i = 0; i < b->n; i++) {
-            const hist_entry_t *e = hist_buf_at(b, i);
-            cJSON *row = cJSON_CreateArray();
-            cJSON_AddItemToArray(row, cJSON_CreateString(e->msgid));
-            cJSON_AddItemToArray(row, cJSON_CreateNumber((double)e->ms));
-            cJSON_AddItemToArray(row, cJSON_CreateString(e->sender));
-            cJSON_AddItemToArray(row, cJSON_CreateString(e->account));
-            cJSON_AddItemToArray(row, cJSON_CreateString(e->verb));
-            cJSON_AddItemToArray(row, cJSON_CreateString(e->target));
-            cJSON_AddItemToArray(row, cJSON_CreateString(e->text));
-            cJSON_AddItemToArray(arr, row);
-        }
-    }
-    cJSON *marks = cJSON_AddObjectToObject(root, "markers");
-    for (const struct marker *m = srv->markers; m; m = m->hh.next) cJSON_AddNumberToObject(marks, m->key, (double)m->ms);
-    char *text = cJSON_PrintUnformatted(root);
-    cJSON_Delete(root);
-    if (!text) return;
-
+    /* Streamed straight to the file: a cJSON tree of every kept message (and its printed copy) used to be built here,
+     * a spike of tens of MB each time a busy network's history changed. */
     char tmpath[CFG_PATH + 8];
     snprintf(tmpath, sizeof tmpath, "%s.tmp", path);
     int fd = open(tmpath, O_WRONLY | O_CREAT | O_TRUNC, 0600); /* private conversations live here */
+    FILE *fp = fd >= 0 ? fdopen(fd, "wb") : NULL;
     int ok = 0;
-    if (fd >= 0) {
-        FILE *fp = fdopen(fd, "wb");
-        if (fp) {
-            size_t len = strlen(text);
-            ok = fwrite(text, 1, len, fp) == len && fflush(fp) == 0 && fsync(fd) == 0;
-            if (fclose(fp) != 0) ok = 0;
-        } else close(fd);
+    if (fp) {
+        fputs("{\"buffers\":{", fp);
+        hist_buf_t *b, *tmp;
+        int first_buf = 1;
+        HASH_ITER(hh, srv->history, b, tmp) {
+            if (!first_buf) fputc(',', fp);
+            first_buf = 0;
+            json_put_string(fp, b->key);
+            fputs(":[", fp);
+            for (int i = 0; i < b->n; i++) {
+                const hist_entry_t *e = hist_buf_at(b, i);
+                fputs(i ? ",[" : "[", fp);
+                json_put_string(fp, e->msgid);
+                fprintf(fp, ",%lld,", e->ms);
+                json_put_string(fp, e->sender);
+                fputc(',', fp);
+                json_put_string(fp, e->account);
+                fputc(',', fp);
+                json_put_string(fp, e->verb);
+                fputc(',', fp);
+                json_put_string(fp, e->target);
+                fputc(',', fp);
+                json_put_string(fp, e->text);
+                fputc(']', fp);
+            }
+            fputc(']', fp);
+        }
+        fputs("},\"markers\":{", fp);
+        for (const struct marker *m = srv->markers; m; m = m->hh.next) {
+            json_put_string(fp, m->key);
+            fprintf(fp, ":%lld%s", m->ms, m->hh.next ? "," : "");
+        }
+        fputs("}}", fp);
+        ok = ferror(fp) == 0 && fflush(fp) == 0 && fsync(fd) == 0;
+        if (fclose(fp) != 0) ok = 0;
+    } else if (fd >= 0) {
+        close(fd);
     }
-    free(text);
     if (ok && rename(tmpath, path) == 0) srv->history_dirty = 0;
     else { unlink(tmpath); log_error("history", "could not write %s -- will retry", path); }
 }

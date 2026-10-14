@@ -97,7 +97,7 @@ typedef struct channel {
     masklist_t bans;                  /* +b */
     masklist_t exceptions;            /* +e */
     masklist_t invex;                 /* +I */
-    char invited[CHAN_MAX_INVITED][64]; /* client_invite_key()s /INVITE has admitted past +i */
+    char (*invited)[64];              /* client_invite_key()s /INVITE has admitted past +i; allocated on the first INVITE (client_list_grow) */
     int n_invited;
     member_t *members;                /* uthash, keyed by client ptr */
     UT_hash_handle hh;                /* server->channels, keyed by casefold_name */

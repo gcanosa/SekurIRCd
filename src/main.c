@@ -197,6 +197,7 @@ int main(int argc, char **argv) {
     }
     if (do_check) { /* parse + validate (incl. the Protection bundle) and exit, like nginx -t */
         printf("sekurircd: configuration OK (%s)\n", cfg.path[0] ? cfg.path : "<built-in defaults>");
+        config_free(&cfg);
         return 0;
     }
 

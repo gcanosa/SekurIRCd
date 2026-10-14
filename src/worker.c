@@ -35,6 +35,35 @@ typedef struct qnode {
     struct qnode *next;
 } qnode_t;
 
+/* Each scrypt verify/hash holds ~16 MiB while it runs (crypto.c), so with every worker busy on logins the process would
+ * briefly carry 4x that. Letting only two run at once halves the peak; a login burst still clears at ~60/s per pair, and
+ * the third and fourth workers stay free for DNS/ident jobs. */
+#define SCRYPT_MAX_CONCURRENT 2
+static pthread_mutex_t g_smutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_scond = PTHREAD_COND_INITIALIZER;
+static int g_scrypt_running = 0;
+
+static void scrypt_enter(void) {
+    pthread_mutex_lock(&g_smutex);
+    while (g_scrypt_running >= SCRYPT_MAX_CONCURRENT) pthread_cond_wait(&g_scond, &g_smutex);
+    g_scrypt_running++;
+    pthread_mutex_unlock(&g_smutex);
+}
+
+static void scrypt_leave(void) {
+    pthread_mutex_lock(&g_smutex);
+    g_scrypt_running--;
+    pthread_cond_signal(&g_scond);
+    pthread_mutex_unlock(&g_smutex);
+}
+
+/* A job's secrets are wiped and its zone list freed wherever a queued job is dropped or finished. */
+static void job_release(job_t *j) {
+    OPENSSL_cleanse(j->secret, sizeof j->secret);
+    free(j->zones);
+    j->zones = NULL;
+}
+
 static pthread_mutex_t g_qmutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_qcond = PTHREAD_COND_INITIALIZER;
 static qnode_t *g_qhead = NULL, *g_qtail = NULL;
@@ -133,7 +162,7 @@ static int do_dnsbl(const job_t *j, char *out, size_t outsz, int *codes) {
     unsigned int a, b, c, d;
     if (sscanf(j->ip, "%u.%u.%u.%u", &a, &b, &c, &d) != 4) return 0;
     int listed = 0;
-    for (int i = 0; i < j->n_zones && i < WORKER_MAX_ZONES; i++) {
+    for (int i = 0; j->zones && i < j->n_zones && i < WORKER_MAX_ZONES; i++) {
         char query[300];
         snprintf(query, sizeof query, "%u.%u.%u.%u.%s", d, c, b, a, j->zones[i]);
         /* getaddrinfo, not gethostbyname: this runs on N_WORKERS threads at
@@ -182,6 +211,7 @@ static void dns_call_release(dns_call_t *c) {
     if (last) {
         pthread_mutex_destroy(&c->mu);
         pthread_cond_destroy(&c->cv);
+        free(c->job.zones);
         free(c);
     }
 }
@@ -222,6 +252,12 @@ static int dns_with_timeout(const job_t *job, char *out, size_t outsz, int *code
     pthread_mutex_init(&c->mu, NULL);
     pthread_cond_init(&c->cv, NULL);
     c->job = *job;
+    c->job.zones = NULL; /* the helper can outlive the queued job, so it gets its own copy of the zone list */
+    if (job->zones && job->n_zones > 0) {
+        c->job.zones = malloc((size_t)job->n_zones * sizeof *job->zones);
+        if (!c->job.zones) { free(c); atomic_fetch_sub(&g_dns_helpers, 1); return 0; }
+        memcpy(c->job.zones, job->zones, (size_t)job->n_zones * sizeof *job->zones);
+    }
     c->refs = 2; /* this thread, plus the helper */
 
     pthread_attr_t attr;
@@ -342,7 +378,7 @@ static void *worker_main(void *arg) {
         int skip = node && node->job.conn_id != 0 && is_cancelled(node->job.conn_id);
         pthread_mutex_unlock(&g_qmutex);
         if (!node) continue;
-        if (skip) { OPENSSL_cleanse(node->job.secret, sizeof node->job.secret); free(node); continue; }
+        if (skip) { job_release(&node->job); free(node); continue; }
 
         job_result_t r;
         memset(&r, 0, sizeof r);
@@ -361,13 +397,17 @@ static void *worker_main(void *arg) {
                                        node->job.timeout, r.text, sizeof r.text);
                 break;
             case JOB_SASL:
+                scrypt_enter();
                 r.success = crypto_verify_password(node->job.secret, node->job.hash);
+                scrypt_leave();
                 break;
             case JOB_HASH:
+                scrypt_enter();
                 r.success = crypto_hash_password(node->job.secret, r.text, sizeof r.text) == 0;
+                scrypt_leave();
                 break;
         }
-        OPENSSL_cleanse(node->job.secret, sizeof node->job.secret);
+        job_release(&node->job);
         push_result(&r);
         free(node);
     }
@@ -399,7 +439,7 @@ void worker_pool_stop(void) {
     while (g_qhead) {
         qnode_t *n = g_qhead;
         g_qhead = n->next;
-        OPENSSL_cleanse(n->job.secret, sizeof n->job.secret);
+        job_release(&n->job);
         free(n);
     }
     g_qtail = NULL;
@@ -414,9 +454,9 @@ int worker_submit(const job_t *job) {
      * login behind their lookups. */
     int is_auth = (job->type == JOB_SASL || job->type == JOB_HASH);
     pthread_mutex_lock(&g_qmutex);
-    if (g_qlen >= QUEUE_MAX) { pthread_mutex_unlock(&g_qmutex); return -1; }
+    if (g_qlen >= QUEUE_MAX) { pthread_mutex_unlock(&g_qmutex); free(job->zones); return -1; }
     qnode_t *node = malloc(sizeof *node);
-    if (!node) { pthread_mutex_unlock(&g_qmutex); return -1; }
+    if (!node) { pthread_mutex_unlock(&g_qmutex); free(job->zones); return -1; }
     node->job = *job;
     node->next = NULL;
     if (is_auth) {

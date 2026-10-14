@@ -91,7 +91,7 @@ int ws_build_response(const char *client_key, int text_proto, char *out, size_t 
     return (n > 0 && (size_t)n < outsz) ? n : -1;
 }
 
-size_t ws_encode_frame(unsigned char *out, int opcode, const unsigned char *payload, size_t len) {
+size_t ws_frame_header(unsigned char *out, int opcode, size_t len) {
     size_t h = 0;
     out[h++] = (unsigned char)(0x80 | (opcode & 0x0f)); /* FIN + opcode */
     if (len < 126) out[h++] = (unsigned char)len;
@@ -100,6 +100,11 @@ size_t ws_encode_frame(unsigned char *out, int opcode, const unsigned char *payl
         out[h++] = 127;
         for (int i = 7; i >= 0; i--) out[h++] = (unsigned char)((unsigned long long)len >> (8 * i));
     }
+    return h;
+}
+
+size_t ws_encode_frame(unsigned char *out, int opcode, const unsigned char *payload, size_t len) {
+    size_t h = ws_frame_header(out, opcode, len);
     if (len) memcpy(out + h, payload, len);
     return h + len;
 }

@@ -8,6 +8,7 @@
 #define SEKURIRCD_PROTO_H
 
 #include <stddef.h>
+#include <stdio.h>
 
 #define IRC_MAX_PARAMS 32   /* generous; server.c enforces the configured max_params */
 #define IRC_MAX_TAGS   32
@@ -113,12 +114,19 @@ int irc_proxy_v2_parse(const unsigned char *buf, size_t len, char *ip, size_t ip
 void irc_iso8601_from_ms(char *out, size_t outsz, long long ms);
 long long irc_parse_iso8601_ms(const char *s);
 void irc_iso8601_now(char *out, size_t outsz);
+/* Writes `s` to `fp` as a JSON string literal, quotes included (", \\ and control characters escaped; other bytes verbatim,
+ * which is what cJSON's printer does too). Lets history/account saves stream to disk instead of building a cJSON tree first. */
+void json_put_string(FILE *fp, const char *s);
 
 /* Insert a "time=<now>" tag into an already-built wire `line`, in place
  * (`line` must have room to grow by ~30 bytes -- pass a buffer, not a
  * literal). Merges into existing tags; a no-op if `line` already has a time
  * tag (never expected from our own code, same as protocol.add_time_tag). */
 void irc_add_time_tag(char *line, size_t linesz);
+/* What irc_add_time_tag would insert into `line`, without touching it: the text goes in `tag` (returned length, 0 = nothing to
+ * add -- already has a time tag, or malformed) and belongs at byte offset *at. Lets client_send build the tagged line
+ * straight into the send buffer instead of through scratch copies. */
+size_t irc_time_tag_insert(const char *line, char *tag, size_t tagsz, size_t *at);
 
 /* --- IRCv3 capabilities (commands._CAP_ATTRS) ---------------------------- */
 #define CAP_AWAY_NOTIFY       0x0001u

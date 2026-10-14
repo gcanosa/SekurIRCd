@@ -256,8 +256,6 @@ static int store_write_now(void) {
             fclose(src);
         }
     }
-    char *text = cJSON_Print(g_store);
-    if (!text) return 0;
     char tmp[600];
     snprintf(tmp, sizeof tmp, "%s.tmp", g_cfg.storage_path);
     /* 0600 (this store holds per-channel scrypt password hashes), fsync
@@ -265,15 +263,27 @@ static int store_write_now(void) {
      * previous good file on disk -- on any error instead of possibly
      * renaming a truncated file over it (e.g. a full disk). */
     int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0600);
-    if (fd < 0) { free(text); return 0; }
+    if (fd < 0) return 0;
     FILE *fp = fdopen(fd, "wb");
-    if (!fp) { close(fd); free(text); return 0; }
-    size_t len = strlen(text);
-    int ok = fwrite(text, 1, len, fp) == len && fflush(fp) == 0 && fsync(fd) == 0;
+    if (!fp) { close(fd); return 0; }
+    /* One channel per line, printed and written one at a time rather than as one printed copy of the whole store. */
+    int ok = 1, first = 1;
+    fputc('{', fp);
+    for (cJSON *rec = g_store->child; rec; rec = rec->next) {
+        char *text = cJSON_PrintUnformatted(rec);
+        if (!text) { ok = 0; break; }
+        fputs(first ? "\n" : ",\n", fp);
+        first = 0;
+        json_put_string(fp, rec->string ? rec->string : "");
+        fputc(':', fp);
+        fputs(text, fp);
+        free(text);
+    }
+    fputs("\n}\n", fp);
+    ok = ok && ferror(fp) == 0 && fflush(fp) == 0 && fsync(fd) == 0;
     if (fclose(fp) != 0) ok = 0;
     if (ok && rename(tmp, g_cfg.storage_path) != 0) ok = 0; /* EXDEV/EACCES: report failure so the dirty flag stays set and it retries */
     if (!ok) { unlink(tmp); log_error("chanserv", "failed to write %s -- keeping the previous version on disk", g_cfg.storage_path); }
-    free(text);
     return ok;
 }
 

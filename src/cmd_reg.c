@@ -157,14 +157,14 @@ void cmd_user(server_t *srv, client_t *cl, irc_message_t *msg) {
  * bouncers): "PASS account:password", or "PASS password" for the account named like the nick. Tried at welcome time. */
 void cmd_pass(server_t *srv, client_t *cl, irc_message_t *msg) {
     if (cl->registered || msg->nparams < 1 || !srv->cfg.accounts.enabled) return;
-    snprintf(cl->pass, sizeof cl->pass, "%s", msg->params[msg->nparams - 1]);
+    client_auth_set(cl, AUTHTMP_PASS, msg->params[msg->nparams - 1]);
 }
 
 int cmd_pass_login(server_t *srv, client_t *cl) {
-    if (!cl->pass[0]) return 0;
-    char pass[sizeof cl->pass];
-    snprintf(pass, sizeof pass, "%s", cl->pass);
-    OPENSSL_cleanse(cl->pass, sizeof cl->pass);
+    if (!client_auth_get(cl, AUTHTMP_PASS)[0]) return 0;
+    char pass[256];
+    snprintf(pass, sizeof pass, "%s", client_auth_get(cl, AUTHTMP_PASS));
+    client_auth_clear(cl, AUTHTMP_PASS);
     if (cl->account[0] || !srv->cfg.accounts.enabled) return 0; /* SASL already did it */
     char *colon = strchr(pass, ':');
     const char *account = colon ? pass : cl->nick, *password = colon ? colon + 1 : pass;
@@ -563,10 +563,11 @@ static int start_plain_login(server_t *srv, client_t *cl, const char *authcid, c
      * not worth relying on) case the decoy hash ever matched. */
     snprintf(cl->pending_account, sizeof cl->pending_account, "%s", unknown ? "" : authcid);
     /* An account made before SCRAM existed has no verifier; the password is in hand now, so derive one (stored only if this login succeeds). */
-    cl->pending_scram[0] = '\0';
+    client_auth_clear(cl, AUTHTMP_SCRAM);
     if (!unknown && !accounts_scram(&srv->accounts, authcid)) {
         scram_verifier_t sv;
-        if (scram_make_verifier(passwd, &sv) == 0) scram_verifier_to_string(&sv, cl->pending_scram, sizeof cl->pending_scram);
+        char vs[160];
+        if (scram_make_verifier(passwd, &sv) == 0) { scram_verifier_to_string(&sv, vs, sizeof vs); client_auth_set(cl, AUTHTMP_SCRAM, vs); }
     }
     cl->auth_style = style;
     cl->auth_pending = 1;
@@ -903,8 +904,8 @@ static void start_register(server_t *srv, client_t *cl, const char *account, con
     j.conn_id = cl->conn_id;
     snprintf(j.secret, sizeof j.secret, "%s", password);
     snprintf(cl->pending_account, sizeof cl->pending_account, "%s", account);
-    cl->pending_scram[0] = '\0';
-    { scram_verifier_t sv; if (scram_make_verifier(password, &sv) == 0) scram_verifier_to_string(&sv, cl->pending_scram, sizeof cl->pending_scram); }
+    client_auth_clear(cl, AUTHTMP_SCRAM);
+    { scram_verifier_t sv; char vs[160]; if (scram_make_verifier(password, &sv) == 0) { scram_verifier_to_string(&sv, vs, sizeof vs); client_auth_set(cl, AUTHTMP_SCRAM, vs); } }
     cl->auth_style = style;
     cl->auth_pending = 1;
     cl->auth_started = time(NULL);
@@ -929,7 +930,7 @@ void cmd_register(server_t *srv, client_t *cl, irc_message_t *msg) {
     if (msg->nparams >= 3) {
         style = AUTH_STYLE_DRAFT;
         password = msg->params[2];
-        snprintf(cl->pending_email, sizeof cl->pending_email, "%s", strcmp(msg->params[1], "*") != 0 && valid_email(msg->params[1]) ? msg->params[1] : "");
+        client_auth_set(cl, AUTHTMP_EMAIL, strcmp(msg->params[1], "*") != 0 && valid_email(msg->params[1]) ? msg->params[1] : "");
         if (strcmp(account, "*") == 0) account = cl->nick;
     }
     if (!password[0]) { err_need_more_params(cl, "REGISTER"); return; }
@@ -995,15 +996,15 @@ void cmd_finish_account_op(server_t *srv, client_t *cl, int purpose, int success
         if (!success) {
             auth_fail_record(cl->ip);
             ns_say(srv, cl, "Current password incorrect");
-            OPENSSL_cleanse(cl->pending_newpw, sizeof cl->pending_newpw);
+            client_auth_clear(cl, AUTHTMP_NEWPW);
             return;
         }
         job_t j; memset(&j, 0, sizeof j);
         j.type = JOB_HASH;
         j.purpose = AUTH_PASSWD_HASH;
         j.conn_id = cl->conn_id;
-        snprintf(j.secret, sizeof j.secret, "%s", cl->pending_newpw);
-        OPENSSL_cleanse(cl->pending_newpw, sizeof cl->pending_newpw);
+        snprintf(j.secret, sizeof j.secret, "%s", client_auth_get(cl, AUTHTMP_NEWPW));
+        client_auth_clear(cl, AUTHTMP_NEWPW);
         cl->auth_pending = 1;
         cl->auth_started = time(NULL);
         j.gen = ++cl->auth_gen;
@@ -1015,8 +1016,8 @@ void cmd_finish_account_op(server_t *srv, client_t *cl, int purpose, int success
     case AUTH_PASSWD_HASH:
         if (!success || !cl->account[0]) { ns_say(srv, cl, "Could not change the password -- try again"); return; }
         accounts_set_hash(&srv->accounts, cl->account, text);
-        if (cl->pending_scram[0]) accounts_set_scram(&srv->accounts, cl->account, cl->pending_scram);
-        cl->pending_scram[0] = '\0';
+        if (client_auth_get(cl, AUTHTMP_SCRAM)[0]) accounts_set_scram(&srv->accounts, cl->account, client_auth_get(cl, AUTHTMP_SCRAM));
+        client_auth_clear(cl, AUTHTMP_SCRAM);
         ns_say(srv, cl, "Password changed");
         log_info("nickserv", "%s changed the password of %s", cl->nick, cl->account);
         return;
@@ -1073,7 +1074,7 @@ void nickserv_message(server_t *srv, client_t *cl, const char *text) {
         /* REGISTER <password> [email] */
         if (!a) ns_say(srv, cl, "Syntax: REGISTER <password> [email]");
         else {
-            snprintf(cl->pending_email, sizeof cl->pending_email, "%s", b && valid_email(b) ? b : "");
+            client_auth_set(cl, AUTHTMP_EMAIL, b && valid_email(b) ? b : "");
             start_register(srv, cl, cl->nick, a, AUTH_STYLE_NICKSERV);
         }
     } else if (cmd && (strcasecmp(cmd, "IDENTIFY") == 0 || strcasecmp(cmd, "ID") == 0)) {
@@ -1131,11 +1132,11 @@ void nickserv_message(server_t *srv, client_t *cl, const char *text) {
         else if (!b || !c3) ns_say(srv, cl, "Syntax: SET PASSWORD <current> <new>");
         else if (strlen(c3) < 6 || strlen(c3) >= 200) ns_say(srv, cl, "The new password must be 6-199 characters");
         else {
-            snprintf(cl->pending_newpw, sizeof cl->pending_newpw, "%s", c3);
-            cl->pending_scram[0] = '\0';
-            { scram_verifier_t sv; if (scram_make_verifier(c3, &sv) == 0) scram_verifier_to_string(&sv, cl->pending_scram, sizeof cl->pending_scram); }
+            client_auth_set(cl, AUTHTMP_NEWPW, c3);
+            client_auth_clear(cl, AUTHTMP_SCRAM);
+            { scram_verifier_t sv; char vs[160]; if (scram_make_verifier(c3, &sv) == 0) { scram_verifier_to_string(&sv, vs, sizeof vs); client_auth_set(cl, AUTHTMP_SCRAM, vs); } }
             if (ns_verify_own_password(srv, cl, b, AUTH_PASSWD_VERIFY) != 0) {
-                OPENSSL_cleanse(cl->pending_newpw, sizeof cl->pending_newpw);
+                client_auth_clear(cl, AUTHTMP_NEWPW);
                 ns_say(srv, cl, "Could not start the password change -- try again shortly");
             }
         }
@@ -1221,8 +1222,8 @@ void cmd_finish_auth(server_t *srv, client_t *cl, int is_register, int success, 
     if (!is_register) {
         if (success) {
             account = accounts_display_name(&srv->accounts, account); /* stored case, not whatever was typed */
-            if (cl->pending_scram[0] && !accounts_scram(&srv->accounts, account)) accounts_set_scram(&srv->accounts, account, cl->pending_scram);
-            cl->pending_scram[0] = '\0';
+            if (client_auth_get(cl, AUTHTMP_SCRAM)[0] && !accounts_scram(&srv->accounts, account)) accounts_set_scram(&srv->accounts, account, client_auth_get(cl, AUTHTMP_SCRAM));
+            client_auth_clear(cl, AUTHTMP_SCRAM);
             server_login(srv, cl, account);
             if (style == AUTH_STYLE_NICKSERV || style == AUTH_STYLE_PASS) {
                 char m[200];
@@ -1248,11 +1249,11 @@ void cmd_finish_auth(server_t *srv, client_t *cl, int is_register, int success, 
         return;
     }
     accounts_register_hashed(&srv->accounts, account, hash);
-    if (cl->pending_scram[0]) accounts_set_scram(&srv->accounts, account, cl->pending_scram);
-    cl->pending_scram[0] = '\0';
+    if (client_auth_get(cl, AUTHTMP_SCRAM)[0]) accounts_set_scram(&srv->accounts, account, client_auth_get(cl, AUTHTMP_SCRAM));
+    client_auth_clear(cl, AUTHTMP_SCRAM);
     char reg_email[160];
-    snprintf(reg_email, sizeof reg_email, "%s", cl->pending_email);
-    cl->pending_email[0] = '\0';
+    snprintf(reg_email, sizeof reg_email, "%s", client_auth_get(cl, AUTHTMP_EMAIL));
+    client_auth_clear(cl, AUTHTMP_EMAIL);
     server_login(srv, cl, account);
     char m[200];
     snprintf(m, sizeof m, "Account %s registered -- you are now logged in as it", account);
