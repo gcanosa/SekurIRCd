@@ -389,7 +389,7 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
             if (!is_notice) { const char *pe[] = {target}; client_reply(cl, N_CANNOTSENDTOCHAN, pe, 1, "Cannot send to channel (quieted)"); }
             return;
         }
-        if ((chan->modes & CMODE_FLOOD) && chan->flood_lines > 0 && m && !privileged) {
+        if ((chan->modes & CMODE_FLOOD) && chan->flood_lines > 0 && m && !privileged && !is_tagmsg) { /* typing indicators are not lines of text */
             time_t now = time(NULL);
             if (now - m->fl_start >= chan->flood_secs) { m->fl_start = now; m->fl_count = 0; }
             if (++m->fl_count > chan->flood_lines) { /* +f: kick the flooder; ops/halfops/voice/opers are exempt */
