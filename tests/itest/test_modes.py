@@ -21,6 +21,19 @@ def test_flood_mode_kicks_flooder():
         assert u.saw(r"KICK #f u1 :Channel flood", 1.0)
 
 
+def test_flood_mode_ignores_typing_tagmsg():
+    with Server() as s:
+        op, u = s.client("op"), s.client("u1", caps=["message-tags"])
+        op.say("JOIN #f")
+        op.say("MODE #f +f 3:5")
+        u.say("JOIN #f")
+        for i in range(8):  # a web client repeats +typing while you type; that is not channel flood
+            u.send("@+typing=active TAGMSG #f")
+        assert not u.saw(r"KICK #f u1", 0.8)
+        u.send("PRIVMSG #f :still here")
+        assert not u.saw(r"KICK #f u1", 0.5)
+
+
 def test_join_throttle():
     with Server() as s:
         op = s.client("op")
