@@ -24,16 +24,23 @@
     '</form>' +
     '<section id="chat" class="chat" hidden>' +
     '<div class="chat-bar"><div id="tabs" class="chat-tabs" role="tablist"></div>' +
+    '<button id="list-btn" class="tool" type="button" aria-label="Browse channels" title="Browse channels">' +
+    '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg></button>' +
     '<button id="size-btn" class="tool" type="button">Aa</button>' +
     '<button id="users-btn" class="tool users-btn" type="button" aria-pressed="false" aria-label="User list">' +
     '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
     '<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg></button>' +
+    '<button id="opts-btn" class="tool" type="button" aria-label="Settings" title="Settings">' +
+    '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/></svg></button>' +
     '<button id="quit-btn" class="tool" type="button" aria-label="Leave the chat" title="Leave the chat">' +
     '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
     '<path d="M18.36 6.64a9 9 0 1 1-12.73 0M12 2v10"/></svg></button></div>' +
     '<div id="topic" class="chat-topic"></div>' +
     '<div class="chat-body"><div id="log" class="chat-log" aria-live="polite"></div>' +
     '<aside class="chat-users closed" aria-label="Users"><div id="users"></div></aside></div>' +
+    '<div id="typing" class="chat-typing" aria-live="off"></div>' +
     '<form id="send" class="chat-send">' +
     '<input id="input" maxlength="400" autocomplete="off" autocapitalize="off" autocorrect="off" enterkeyhint="send" aria-label="Message">' +
     '<button class="btn send-btn" type="submit" aria-label="Send" title="Send">' +
@@ -47,13 +54,15 @@
   var CHAN_RE = /^[#&][^\s,\x07]{1,49}$/;
   var MAX_CHANS = 10;
   // IRCv3 capabilities we use when the server offers them ("sasl" is added only when logging in).
-  var WANT_CAPS = ["server-time", "message-tags", "batch", "draft/chathistory", "echo-message", "multi-prefix", "userhost-in-names", "draft/read-marker"];
+  var WANT_CAPS = ["server-time", "message-tags", "batch", "draft/chathistory", "echo-message", "multi-prefix", "userhost-in-names", "draft/read-marker",
+                    "away-notify", "account-notify", "extended-join", "chghost"];
   var HISTORY_ON_JOIN = 50; // messages shown when you join; a reconnect fetches everything missed (server max 100)
 
   var $ = function (id) { return document.getElementById(id); };
+  function dict() { return Object.create(null); } // maps keyed by nick or channel: a nick like "constructor" or "__proto__" must be an ordinary key
   var form = $("connect"), app = $("chat"), nickIn = $("nick"), chanIn = $("chan"), err = $("conn-err");
   var acctIn = $("acct"), passIn = $("pass");
-  var tabs = $("tabs"), log = $("log"), users = $("users"), topic = $("topic"), input = $("input");
+  var tabs = $("tabs"), log = $("log"), users = $("users"), topic = $("topic"), input = $("input"), typingEl = $("typing");
 
   // Highest prefix first (the server's PREFIX=(qaohv)~&@%+); "" is a regular user.
   var GROUPS = [{ prefix: "~", name: "Owners", cls: "owner" }, { prefix: "&", name: "Admins", cls: "admin" }, { prefix: "@", name: "Operators", cls: "op" },
@@ -63,10 +72,11 @@
   var BAR = " \x0314│\x0f ", SITE = "https://www.sekurnet.org/chat/";
   var QUIT_MSG = "\x02" + CLIENT + "\x02 v" + CLIENT_V + BAR + SITE; // the default quit message, same branding as CTCP VERSION
   var ws, nick, wantChan, registered, tries = 0, closing = false, timer, away = false, awayTimer;
-  var bufs = {}, active = "*";
-  var avail = {}, caps = {}, auth = null, sasl = null, account = "", batches = {};
+  var bufs = dict(), active = "*";
+  var avail = dict(), caps = dict(), auth = null, sasl = null, account = "", batches = dict();
   var unseen = 0, baseTitle = document.title, sent = [], spos = 0;
-  var hosts = {}, ignored = {}; // hosts: nick -> host, for ban masks. ignored: kept in this browser only
+  var SECRET = /^\/(identify|oper|quote|raw|ns|cs|nickserv|chanserv|msg\s+(nickserv|chanserv))\b/i; // never kept for Up-arrow recall: they carry passwords
+  var hosts = dict(), ignored = dict(); // hosts: nick -> host, for ban masks. ignored: kept in this browser only
   try { JSON.parse(localStorage.getItem("chat-ignore") || "[]").forEach(function (n) { ignored[n] = 1; }); } catch (e) {}
   var coarse = matchMedia("(pointer: coarse)").matches; // touch screens: a tap opens the nick menu (no right click there)
 
@@ -81,6 +91,26 @@
   }
   setSize(size);
   sizeBtn.onclick = function () { var stick = log.scrollTop + log.clientHeight >= log.scrollHeight - 30; setSize((size + 1) % SIZES.length); if (stick) log.scrollTop = log.scrollHeight; };
+  // Settings, kept in this browser only: sound (the chime), joins (join, part, quit and nick lines), typing (show who is typing, and tell others when you are),
+  // notify (desktop notifications while the tab is in the background). The Settings button and /sound /joins /typing /notify flip the same switches.
+  var opts = { sound: true, joins: true, typing: true, notify: false };
+  try { Object.keys(opts).forEach(function (k) { var v = localStorage.getItem("chat-" + k); if (v) opts[k] = v === "on"; }); } catch (e) {}
+  if (opts.notify && !(window.Notification && Notification.permission === "granted")) opts.notify = false; // the browser's permission changed since last time
+  function applyOpts() { app.classList.toggle("hide-joins", !opts.joins); typingEl.hidden = !opts.typing; }
+  function setOpt(k, on) {
+    opts[k] = on; applyOpts();
+    try { localStorage.setItem("chat-" + k, on ? "on" : "off"); } catch (e) {}
+  }
+  applyOpts();
+  function setNotify(on) { // the browser only asks for permission after a click or key press, which the checkbox and the /notify command both are
+    if (!on) { setOpt("notify", false); return say(active, "Desktop notifications are off.", "evt"); }
+    if (!window.Notification) { setOpt("notify", false); syncOpts(); return say(active, "This browser cannot show desktop notifications.", "err"); }
+    Promise.resolve(Notification.requestPermission()).then(function (perm) {
+      setOpt("notify", perm === "granted"); syncOpts();
+      say(active, perm === "granted" ? "Desktop notifications are on: private messages, mentions and invites pop up while this tab is in the background."
+        : "Notifications are blocked for this site. Allow them in your browser's site settings, then try again.", perm === "granted" ? "evt" : "err");
+    });
+  }
   function guest() { return "Guest" + Math.floor(1000 + Math.random() * 9000); }
   // A fresh nickname on every load, so a reload never retries a nick that is still held by the previous session.
   var guestNick = nickIn.value = guest();
@@ -151,7 +181,7 @@
   function isChan(n) { return n[0] === "#" || n[0] === "&"; }
   function buf(name) {
     var k = key(name);
-    if (!bufs[k]) { bufs[k] = { name: name, lines: [], users: {}, topic: "", unread: false, ids: {}, last: "" }; draw(); }
+    if (!bufs[k]) { bufs[k] = { name: name, lines: [], users: dict(), topic: "", unread: false, ids: dict(), last: "" }; draw(); }
     return bufs[k];
   }
   // meta (optional): time = the server-time tag, id = msgid (a message already shown is skipped), hist = from CHATHISTORY,
@@ -172,15 +202,16 @@
       addLine(b.lines[b.lines.length - 1]); if (meta.time) markSoon();
       while (log.childElementCount > 500) log.removeChild(log.firstElementChild); // the shown log stays as short as the buffer
     }
-    else if (!b.unread) { b.unread = true; drawTabs(); }
+    else if (!b.unread && !(!opts.joins && noise(cls))) { b.unread = true; drawTabs(); }
     if (document.hidden && !meta.hist && /\b(hl|msg)\b/.test(cls || "")) { unseen++; document.title = "(" + unseen + ") " + baseTitle; }
   }
+  function noise(cls) { return /\b(join|part|quit|nick)\b/.test(cls || "") && !/\bself\b/.test(cls || ""); } // the lines the "joins" setting hides
   // a small glyph before each kind of event; the first class that matches wins, so specific kinds come before "evt"
   var EVT_ICONS = [["join", "\u2192"], ["part", "\u2190"], ["quit", "\u21d0"], ["kick", "\u2715"], ["nick", "\u21bb"], ["mode", "\u00b1"],
                ["topic", "\u270e"], ["invite", "\u2709"], ["away", "\u263e"], ["ctcp", "\u2699"], ["whois", "\u00bb"],
                ["notice", "\u25b8"], ["err", "!"], ["evt", "\u2022"]];
-  function addLine(l) {
-    var stick = log.scrollTop + log.clientHeight >= log.scrollHeight - 30;
+  function addLine(l, bulk) { // bulk: draw() adds hundreds in a row and scrolls once at the end; measuring the log per line forced a layout each time
+    var stick = !bulk && log.scrollTop + log.clientHeight >= log.scrollHeight - 30;
     var d = document.createElement("div"); d.className = "ln " + l.cls;
     var s = document.createElement("span"); s.className = "ts"; s.textContent = l.t + " ";
     d.appendChild(s);
@@ -233,11 +264,128 @@
     linkDlg.showModal();
   });
   log.addEventListener("contextmenu", function (e) { var n = nickAt(e); if (n) { e.preventDefault(); openMenu(n, e.clientX, e.clientY); } });
+
+  function dlg(html) { var d = document.createElement("dialog"); d.className = "chat-dlg"; d.innerHTML = html; app.appendChild(d); return d; } // static markup only
+
+  // --- settings (the sliders button) ---
+  var optsDlg = dlg('<form method="dialog"><h3>Settings</h3>' +
+    '<label><input type="checkbox" data-opt="joins"> Show joins, parts, quits and nick changes</label>' +
+    '<label><input type="checkbox" data-opt="typing"> Show who is typing, and let others see when you are</label>' +
+    '<label><input type="checkbox" data-opt="sound"> Play a sound for private messages, mentions and invites</label>' +
+    '<label><input type="checkbox" data-opt="notify"> Desktop notifications while this tab is in the background</label>' +
+    '<p class="hint">Kept in this browser only. The same switches as /joins, /typing, /sound and /notify (on or off).</p>' +
+    '<div class="act"><button class="btn primary" value="ok">Done</button></div></form>');
+  function syncOpts() { [].forEach.call(optsDlg.querySelectorAll("input[data-opt]"), function (c) { c.checked = !!opts[c.dataset.opt]; }); }
+  optsDlg.addEventListener("change", function (e) {
+    var o = e.target.dataset.opt, on = e.target.checked;
+    if (o === "notify") return setNotify(on);
+    setOpt(o, on);
+    if (o === "sound" && on) { unlockAudio(); lastChime = 0; chime(); }
+  });
+  $("opts-btn").onclick = function () { syncOpts(); optsDlg.showModal(); };
+
+  // --- channel list (the list button, or /list [mask]): the 322 rows are collected and shown in a dialog you can filter, click a channel to join ---
+  var listDlg = dlg('<form method="dialog"><h3>Channels</h3>' +
+    '<input type="search" class="filter" placeholder="Filter by name or topic" aria-label="Filter channels" autocomplete="off">' +
+    '<div class="chat-list"></div><p class="hint"></p><div class="act"><button class="btn" value="ok">Close</button></div></form>');
+  listDlg.classList.add("wide");
+  var listing = null, listRows = [], listBox = listDlg.querySelector(".chat-list"), listFilter = listDlg.querySelector(".filter"), listHint = listDlg.querySelector(".hint");
+  function startList(args) {
+    var mine = listing = []; // rows so far; the dialog opens when the server ends the list, or after 10 s with what has arrived
+    say(active, "Fetching the channel list ...", "evt");
+    send("LIST" + (args ? " " + args : ""));
+    setTimeout(function () { if (listing === mine) endList(); }, 10000);
+  }
+  function endList() {
+    listRows = listing.sort(function (x, y) { return y.n - x.n || (x.name.toLowerCase() < y.name.toLowerCase() ? -1 : 1); }); listing = null;
+    listFilter.value = ""; drawList(); listDlg.showModal(); listFilter.focus();
+  }
+  function drawList() {
+    var q = listFilter.value.trim().toLowerCase(), shown = 0;
+    listBox.textContent = "";
+    listRows.forEach(function (r) {
+      if (shown >= 300 || (q && (r.name + " " + r.topic).toLowerCase().indexOf(q) < 0)) return;
+      shown++;
+      var b = document.createElement("button"), c = document.createElement("span"), u = document.createElement("span"), t = document.createElement("span");
+      b.type = "button"; b.className = "row"; c.className = "cn"; c.textContent = r.name; u.className = "cu"; u.textContent = r.n; u.title = "users";
+      t.className = "ct"; t.textContent = plain(r.topic); // plain text: a link inside a button would be a button inside a link
+      b.append(c, u, t);
+      b.onclick = function () { listDlg.close(); if (bufs[key(r.name)]) { active = bufs[key(r.name)].name; draw(); } else send("JOIN " + r.name); input.focus(); };
+      listBox.appendChild(b);
+    });
+    listHint.textContent = listRows.length ? shown + " of " + listRows.length + " channels" + (shown >= 300 ? ", type to narrow it down" : "")
+      : "No channels to show (private and secret channels are not listed).";
+  }
+  listFilter.addEventListener("input", drawList);
+  listFilter.addEventListener("keydown", function (e) { if (e.key === "Enter") e.preventDefault(); }); // Enter would submit the form and close the dialog
+  $("list-btn").onclick = function () { startList(""); };
+
+  // --- pasting several lines: a box first, then the lines go out one at a time ---
+  // More than PASTE_WARN lines is a flood to most channels (and their operators), so the box warns and points to a paste site; the user can still send it.
+  // More than PASTE_MAX is refused. PASTE_GAP keeps clear of the server's flood guard, which drops a client sending about 20 lines a second.
+  var PASTE_WARN = 5, PASTE_MAX = 50, PASTE_GAP = 500;
+  var PASTE_SITES = [["dpaste.org", "https://dpaste.org"], ["bpa.st", "https://bpa.st"], ["paste.debian.net", "https://paste.debian.net"]];
+  var pasteDlg = dlg('<form method="dialog"><h3></h3><p class="why"></p><pre class="prev"></pre><p class="alt"></p>' +
+    '<div class="act"><button class="btn" value="no">Cancel</button><button class="btn" value="one">Paste as one line</button><button class="btn primary" value="send">Send</button></div></form>');
+  var pasteQ = [], pasteT = 0, pasteJob = null;
+  function askPaste(lines) {
+    var to = active, n = lines.length, joined = lines.join(" "), big = n > PASTE_WARN, over = n > PASTE_MAX;
+    var q = function (s) { return pasteDlg.querySelector(s); }, alt = q(".alt"), yes = q('[value="send"]'), no = q('[value="no"]');
+    pasteJob = { to: to, lines: lines, joined: joined };
+    pasteDlg.classList.toggle("warn", big);
+    q("h3").textContent = over ? "Too many lines to paste" : big ? "This will post " + n + " lines in " + to : "Send " + n + " lines?";
+    q(".why").textContent = over ? n + " lines is more than this chat sends at once (" + PASTE_MAX + ")."
+      : big ? "Pasting this much floods the conversation, and many channels and their operators kick or ban for it. The lines go out one at a time, but everyone in " + to + " still has to scroll past all of them."
+      : "Each line is sent as its own message to " + to + ".";
+    q(".prev").textContent = lines.slice(0, 5).map(function (l) { return l.length > 80 ? l.slice(0, 80) + " ..." : l; }).join("\n") + (n > 5 ? "\n... and " + (n - 5) + " more" : "");
+    alt.textContent = ""; alt.hidden = !big;
+    if (big) {
+      alt.append((over ? "Please" : "Better:") + " put it on a paste site and share the link, for example ");
+      PASTE_SITES.forEach(function (s, i) {
+        var a = document.createElement("a"); a.href = s[1]; a.textContent = s[0]; a.target = "_blank"; a.rel = "noopener noreferrer";
+        alt.append(i ? (i === PASTE_SITES.length - 1 ? " or " : ", ") : "", a);
+      });
+      alt.append(".");
+    }
+    q('[value="one"]').hidden = joined.length > 400; // the message box holds 400 characters
+    yes.hidden = over; yes.textContent = big ? "Send anyway" : "Send " + n + " lines"; no.textContent = over ? "OK" : "Cancel";
+    pasteDlg.returnValue = ""; pasteDlg.showModal();
+    (big || over ? no : yes).focus(); // a big paste needs a deliberate click: Enter lands on Cancel
+  }
+  pasteDlg.addEventListener("close", function () {
+    var j = pasteJob; pasteJob = null;
+    if (!j) return;
+    if (pasteDlg.returnValue === "one") input.setRangeText(j.joined, input.selectionStart, input.selectionEnd, "end");
+    else if (pasteDlg.returnValue === "send") queuePaste(j.to, j.lines);
+    input.focus();
+  });
+  function queuePaste(to, lines) {
+    if (!bufs[key(to)]) return;
+    activity("");
+    pasteQ = pasteQ.concat(lines.map(function (l) { return [to, l]; }));
+    say(active, "Sending " + lines.length + " lines, one every " + PASTE_GAP / 1000 + " s. /stop cancels the rest.", "evt");
+    if (!pasteT) pump();
+  }
+  function pump() {
+    var j = pasteQ.shift();
+    if (!j) { pasteT = 0; return; }
+    if (!bufs[key(j[0])] || !ws || ws.readyState !== 1) pasteQ = pasteQ.filter(function (x) { return key(x[0]) !== key(j[0]); }); // the tab is gone, or the connection dropped
+    else privmsg(j[0], j[1]); // never through command(): a pasted line starting with "/" must not run as a command
+    pasteT = setTimeout(pump, PASTE_GAP);
+  }
+  input.addEventListener("paste", function (e) {
+    var lines = (e.clipboardData.getData("text") || "").split(/\r\n|\r|\n/).map(function (l) { return l.replace(/\s+$/, ""); }).filter(Boolean);
+    if (lines.length < 2) return; // one line: the normal paste
+    e.preventDefault();
+    if (active === "*") return say("*", "Open a channel or a private chat to paste into.", "err");
+    askPaste(lines);
+  });
   function drawTabs() {
     tabs.textContent = "";
     Object.keys(bufs).forEach(function (k) {
       var b = bufs[k], a = document.createElement("button");
       a.type = "button"; a.textContent = b.name === "*" ? "status" : b.name;
+      a.setAttribute("role", "tab"); a.setAttribute("aria-selected", k === key(active));
       if (k === key(active)) { a.setAttribute("aria-current", "true"); setTimeout(function () { a.scrollIntoView({ block: "nearest", inline: "nearest" }); }); }
       if (b.unread) a.className = "unread";
       a.onclick = function () { active = b.name; b.unread = false; b.mark = b.read; draw(); markSoon(); input.focus(); };
@@ -261,9 +409,17 @@
     b.lines.forEach(function (l, i) {
       if (l.from && ignored[key(l.from)] && l.cls.indexOf("me") < 0) return; // ignoring someone also hides what they said before
       if (i === newAt) { var nd = document.createElement("div"); nd.className = "ln new"; nd.textContent = "── new messages ──"; log.appendChild(nd); }
-      addLine(l);
+      addLine(l, true);
     });
+    drawTopic(); drawUsers(); drawTyping();
+    toBottom(); // last: the topic bar and the user list above change the log's size
+  }
+  function drawTopic() {
+    var b = buf(active);
     topic.textContent = ""; topic.title = [b.topicBy, b.modes && "Modes: " + b.modes].filter(Boolean).join("\n"); topic.appendChild(fmt(b.topic || (b.name === "*" ? "SekurNet web chat" + (account ? " · logged in as " + account : "") : "")));
+  }
+  function drawUsers() {
+    var b = buf(active);
     users.textContent = "";
     GROUPS.forEach(function (g) {
       var names = Object.keys(b.users).filter(function (n) { return b.users[n] === g.prefix; })
@@ -271,16 +427,22 @@
       if (!names.length) return;
       var h = document.createElement("div"); h.className = "grp g-" + g.cls; h.textContent = g.name + " (" + names.length + ")"; users.appendChild(h);
       names.forEach(function (n) {
-        var d = document.createElement("div"); d.className = "g-" + g.cls + (ignored[key(n)] ? " ign" : ""); d.textContent = g.prefix + n;
-        d.title = (ignored[key(n)] ? "Ignored. " : "") + (coarse ? "Tap for options" : "Click to message, right click for options");
+        var pr = people[key(n)] || {}, d = document.createElement("div");
+        d.className = "g-" + g.cls + (ignored[key(n)] ? " ign" : "") + (pr.away ? " away" : "") + (pr.acct ? " acct" : ""); d.textContent = g.prefix + n;
+        d.title = (ignored[key(n)] ? "Ignored. " : "") + (pr.away ? "Away" + (pr.away === "Away" ? "" : ": " + pr.away) + ". " : "") + (pr.acct ? "Logged in as " + pr.acct + ". " : "") +
+          (coarse ? "Tap for options" : "Click to message, right click for options");
         d.onclick = function (e) { if (coarse) return openMenu(n, e.clientX, e.clientY); if (key(n) !== key(nick)) { query(n); showUsers(false); input.focus(); } };
         d.oncontextmenu = function (e) { e.preventDefault(); openMenu(n, e.clientX, e.clientY); };
+        d.tabIndex = 0; d.setAttribute("role", "button"); // keyboard: Enter or Space opens the same menu
+        d.onkeydown = function (e) { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); var r = d.getBoundingClientRect(); openMenu(n, r.left, r.bottom); } };
         users.appendChild(d);
       });
     });
     usersPane.hidden = usersBtn.hidden = !isChan(b.name);
-    toBottom(); // last: the topic bar and the user list above change the log's size
   }
+  // Joins, parts and quits only change the user list, and a netsplit sends hundreds of QUITs in one burst: redraw it once per frame.
+  var usersQ = 0;
+  function usersSoon() { if (!usersQ) usersQ = requestAnimationFrame(function () { usersQ = 0; drawUsers(); }); }
   function toBottom() { // the newest line, or the first unread one when there is a long backlog
     function go() {
       log.scrollTop = log.scrollHeight;
@@ -314,7 +476,7 @@
     var b = bufs[key(active)], chan = b && isChan(b.name) ? b.name : "", self = key(n) === key(nick);
     var myRank = chan ? b.users[Object.keys(b.users).filter(function (u) { return key(u) === key(nick); })[0]] || "" : "";
     var theirs = chan ? b.users[n] || "" : "", op = "~&@".indexOf(myRank) >= 0 && myRank, half = op || myRank === "%";
-    var mask = hosts[key(n)] ? "*!*@" + hosts[key(n)] : n + "!*@*";
+    var mask = banMask(n);
     var groups = [ // [section, [icon, label, action, danger?] ...]; falsy entries are left out
       ["Talk", [!self && ["msg", "Send private message", function () { query(n); showUsers(false); }],
                 !self && ["at", "Mention in message", function () { var v = input.value; input.value = v + (v && !/\s$/.test(v) ? " " : "") + n + (v ? " " : ": "); }]]],
@@ -385,6 +547,8 @@
   showSide(!sideOff);
   function askModes(ch) { bufs[key(ch)].askModes = true; send("MODE " + ch); }
   // A long topic is cut to one line; a click (not on a link) shows all of it, another click folds it again.
+  topic.tabIndex = 0; topic.setAttribute("role", "button");
+  topic.onkeydown = function (e) { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); topic.click(); } };
   topic.onclick = function (e) {
     if (e.target.closest("a")) return;
     var stick = log.scrollTop + log.clientHeight >= log.scrollHeight - 30;
@@ -396,10 +560,23 @@
     if (fresh) history(n);
   }
 
+  function cut(s, n) { // at most n UTF-8 bytes, never in the middle of a character (the server refuses a line over 512 bytes)
+    for (var i = 0, b = 0; i < s.length; i++) {
+      var c = s.codePointAt(i), w = c < 128 ? 1 : c < 2048 ? 2 : c < 65536 ? 3 : 4;
+      if (b + w > n) break;
+      b += w; if (c > 65535) i++;
+    }
+    return s.slice(0, i);
+  }
   function send(line) {
-    line = line.replace(/[\r\n\0]/g, " ").slice(0, 450); // one line per call: user text can never smuggle extra commands
+    line = cut(line.replace(/[\r\n\0]/g, " "), 450); // one line per call: user text can never smuggle extra commands
     if (ws && ws.readyState === 1) ws.send(line);
   }
+  // ponytail: replies to a typed command (LIST, WHO, MOTD, MODE #chan b ...) are shown in the tab it was typed in for 15 s, not tied to one
+  // command. IRCv3 labeled-response (the server has it) would pin each reply exactly; add it if unsolicited numerics land in the wrong tab.
+  var replyTo = { name: "*", at: 0 };
+  function ask(line) { replyTo = { name: active, at: Date.now() }; send(line); }
+  function reply() { return Date.now() - replyTo.at < 15000 && bufs[key(replyTo.name)] ? replyTo.name : "*"; }
 
   function parse(raw) {
     var m = { tags: {}, prefix: "", cmd: "", params: [] }, s = raw;
@@ -489,7 +666,7 @@
   }
 
   // --- CTCP: replies to the common queries, rate limited so a CTCP flood cannot get us disconnected for flooding ---
-  var ctcpTimes = [], pings = {};
+  var ctcpTimes = [], pings = dict();
   function ctcpReply(to, cmd, arg) {
     var now = Date.now();
     ctcpTimes = ctcpTimes.filter(function (t) { return now - t < 10000; });
@@ -515,14 +692,47 @@
     say(active, "CTCP " + cmd + " reply from " + from + ": " + arg, "evt ctcp");
   }
 
+  // --- desktop notifications: opt-in, and only while the tab is in the background ---
+  function plain(s) { return s.replace(/\x03(\d{1,2}(,\d{1,2})?)?|[\x00-\x1f]/g, ""); } // IRC formatting codes removed
+  function notify(title, body, tab) {
+    if (!opts.notify || !window.Notification || Notification.permission !== "granted" || (!document.hidden && document.hasFocus())) return;
+    try {
+      var n = new Notification(title, { body: plain(body).slice(0, 140), tag: "sekurchat-" + key(tab), renotify: true });
+      n.onclick = function () { window.focus(); var b = bufs[key(tab)]; if (b) { active = b.name; b.unread = false; draw(); } n.close(); };
+    } catch (e) {} // some phones only allow notifications from a service worker: no popup there
+  }
+
+  // --- typing (IRCv3 +typing on TAGMSG): tell the channel or person you are typing, and show who else is ---
+  var typers = dict(), typingT, typing = { to: "", sent: false, at: 0 }, typingOff;
+  function setTyping(name, n, state) { // state: active (good for 6 s), paused (30 s) or done
+    var k = key(name), t = typers[k];
+    if (state === "done") { if (t) delete t[n]; }
+    else { if (!t) t = typers[k] = dict(); t[n] = Date.now() + (state === "paused" ? 30000 : 6000); }
+    if (k === key(active)) drawTyping();
+  }
+  function drawTyping() { // the names still typing in the open tab; re-checked every second so an "active" that never got its "done" fades away
+    clearTimeout(typingT);
+    var now = Date.now(), t = typers[key(active)] || dict(), names = Object.keys(t).filter(function (n) { if (t[n] > now) return true; delete t[n]; return false; });
+    typingEl.textContent = names.length > 3 ? "Several people are typing ..." : names.length ? names.join(" and ") + (names.length > 1 ? " are" : " is") + " typing ..." : "";
+    if (names.length) typingT = setTimeout(drawTyping, 1000);
+  }
+  function tellTyping(state, to) { send("@+typing=" + state + " TAGMSG " + to); }
+
+  // --- who is away or logged in (away-notify, account-notify, extended-join), shown in the user list ---
+  var people = dict(), whox = false, autoWho = dict();
+  function person(n) { var k = key(n); return people[k] || (people[k] = { away: "", acct: "" }); }
+  function whoSync(ch) { // the state of everyone already in the channel, in one WHOX reply (token 17; fields: token, channel, nick, flags, account)
+    if (!whox || !(caps["away-notify"] || caps["account-notify"])) return;
+    autoWho[key(ch)] = true; send("WHO " + ch + " %tcnfa,17");
+  }
+
   // --- a soft two-note chime when someone else messages, notices, mentions or invites you; synthesized (no audio file) ---
-  var actx, lastChime = 0, sound = true;
-  try { sound = localStorage.getItem("chat-sound") !== "off"; } catch (e) {}
+  var actx, lastChime = 0;
   function unlockAudio() { // browsers (iOS above all) only allow audio after a tap: called from Connect and Send
     try { actx = actx || new (window.AudioContext || window.webkitAudioContext)(); if (actx.state === "suspended") actx.resume(); } catch (e) {}
   }
   function chime() {
-    if (!sound || !actx || Date.now() - lastChime < 2000) return; // at most one every 2 seconds
+    if (!opts.sound || !actx || Date.now() - lastChime < 2000) return; // at most one every 2 seconds
     lastChime = Date.now();
     var t = actx.currentTime;
     [660, 990].forEach(function (f, i) {
@@ -587,12 +797,15 @@
       return;
     }
     if (c === "FAIL" && p[0] === "CHATHISTORY") return; // e.g. no private history for guests: nothing to show
+    if (c === "FAIL" || c === "WARN" || c === "NOTE") return say(active, p[0] + ": " + p[p.length - 1], c === "FAIL" ? "err" : "evt"); // standard replies (RENAME, REGISTER ...)
+    if (c === "WALLOPS") return say("*", "[Wallops] " + m.nick + ": " + p[0], "notice", meta);
     if (c === "001") {
       registered = true; tries = 0; armAway(); nick = p[0]; say("*", p[1], "", meta);
       if (wantChan) send("JOIN " + wantChan);
       Object.keys(bufs).forEach(function (k) { if (k !== "*" && !isChan(k)) history(bufs[k].name); }); // private chats kept across a reconnect
       return;
     }
+    if (c === "005" && p.indexOf("WHOX") > 0) whox = true;
     if (c === "305" || c === "306") away = c === "306";
     if ((c === "433" || c === "432") && !registered) { // taken or refused: keep trying, never past NICKLEN
       nick = c === "433" && nick.length < 30 ? nick + "_" : guest();
@@ -601,7 +814,7 @@
     if (c === "353") { // names
       var b = bufs[key(p[2])];
       if (!b) return say(active, "Users in " + p[2] + ": " + p[3], "evt"); // /names of a channel you are not in: no tab for it
-      b.pending = b.pending || {}; // a NAMES reply spans several 353s, swapped in at 366
+      b.pending = b.pending || dict(); // a NAMES reply spans several 353s, swapped in at 366
       p[3].split(" ").forEach(function (n) { // "@nick", or "@nick!user@host" with userhost-in-names
         var mm = /^([~&@%+]*)([^!]+)(?:!([^@]*)@(.*))?$/.exec(n);
         if (mm) { b.pending[mm[2]] = mm[1].charAt(0); if (mm[4]) hosts[key(mm[2])] = mm[4]; }
@@ -610,31 +823,53 @@
     }
     if (c === "324" || c === "329") { // channel modes and creation time; 329 always follows 324 and ends the reply
       var mb = bufs[key(p[1])];
-      if (mb && c === "324") { mb.modes = p.slice(2).join(" "); if (key(p[1]) === key(active)) draw(); }
+      if (mb && c === "324") { mb.modes = p.slice(2).join(" "); if (key(p[1]) === key(active)) drawTopic(); }
       if (mb && mb.askModes) { if (c === "329") mb.askModes = false; return; } // our own request: no status line
     }
-    if (c === "366") { var nb = bufs[key(p[1])]; if (!nb) return; if (nb.pending) { nb.users = nb.pending; nb.pending = null; } return key(p[1]) === key(active) && draw(); }
+    if (c === "366") { var nb = bufs[key(p[1])]; if (!nb) return; if (nb.pending) { nb.users = nb.pending; nb.pending = null; } return key(p[1]) === key(active) && usersSoon(); }
+    if (listing && c === "321") return; // a /list in progress: collected here, shown by endList()
+    if (listing && c === "322") { if (listing.length < 2000) listing.push({ name: p[1], n: +p[2] || 0, topic: p[3] || "" }); return; }
+    if (listing && c === "323") return endList();
+    if (c === "354" && p[1] === "17" && p.length > 5) { // our own WHOX sync on join: p = me, token, channel, nick, flags (G = gone), account (0 = none)
+      var gone = p[4][0] === "G" ? "Away" : "", acct = p[5] === "0" ? "" : p[5];
+      if (gone || acct || people[key(p[3])]) { var pe = person(p[3]); pe.away = gone; pe.acct = acct; }
+      return key(p[2]) === key(active) && usersSoon();
+    }
+    if (c === "315" && autoWho[key(p[1])]) { delete autoWho[key(p[1])]; return; }
     if (c === "MODE" && isChan(p[0])) {
       say(p[0], m.nick + " sets mode " + p.slice(1).join(" "), "evt mode", meta);
       if (/[qaohv]/.test(p[1] || "")) send("NAMES " + p[0]); // privilege changed: re-read the list
       if (/[^qaohvbeI+-]/.test(p[1] || "") && bufs[key(p[0])]) askModes(p[0]); // a channel mode changed: refresh the topic bar's tooltip
       return;
     }
+    if (c === "MODE" && isMe(p[0])) return say(reply(), "Your user modes: " + p.slice(1).join(" "), "evt mode", meta);
     if (c === "332") {
       if (!bufs[key(p[1])]) return say(active, "Topic of " + p[1] + ": " + p[2], "evt topic");
-      buf(p[1]).topic = p[2]; return key(p[1]) === key(active) && draw();
+      buf(p[1]).topic = p[2]; return key(p[1]) === key(active) && drawTopic();
     }
     if (c === "333") { // who set the topic, and when: shown on hover over the topic bar
       if (bufs[key(p[1])]) bufs[key(p[1])].topicBy = "Set by " + p[2].split("!")[0] + (+p[3] ? " on " + new Date(p[3] * 1000).toLocaleString() : "");
-      return key(p[1]) === key(active) && draw();
+      return key(p[1]) === key(active) && drawTopic();
     }
     if (c === "329") return; // channel creation time: not worth a line
-    if (c === "TOPIC") { buf(p[0]).topic = p[1]; buf(p[0]).topicBy = "Set by " + m.nick + " on " + new Date().toLocaleString(); say(p[0], m.nick + " set the topic: " + p[1], "evt topic", meta); return key(p[0]) === key(active) && draw(); }
+    if (c === "TOPIC") { buf(p[0]).topic = p[1]; buf(p[0]).topicBy = "Set by " + m.nick + " on " + new Date().toLocaleString(); say(p[0], m.nick + " set the topic: " + p[1], "evt topic", meta); return key(p[0]) === key(active) && drawTopic(); }
     if (m.prefix.indexOf("@") > 0) hosts[key(m.nick)] = m.prefix.split("@")[1]; // keep the latest host of everyone we hear from
+    if (c === "AWAY") { person(m.nick).away = p[0] || ""; return usersSoon(); } // away-notify: no text means they are back
+    if (c === "ACCOUNT") { person(m.nick).acct = p[0] === "*" ? "" : p[0]; return usersSoon(); }
+    if (c === "CHGHOST") { hosts[key(m.nick)] = p[1]; return; } // keeps ban masks right after a /vhost
+    if (c === "TAGMSG") { // typing indicators (a TAGMSG carries no text); ours come back too with echo-message
+      var ty = m.tags["+typing"], tb = isChan(p[0]) ? p[0] : m.nick;
+      if (ty && opts.typing && !isMe(m.nick) && !ignored[key(m.nick)] && bufs[key(tb)]) setTyping(tb, m.nick, ty);
+      return;
+    }
     if (c === "JOIN") {
       var ch = p[0];
-      if (isMe(m.nick)) { var again = !!bufs[key(ch)]; buf(ch); active = ch; draw(); if (!again) say(ch, "Joined " + ch, "evt join"); history(ch); askModes(ch); }
-      else { buf(ch).users[m.nick] = ""; say(ch, m.nick + " joined", "evt join"); if (key(ch) === key(active)) draw(); }
+      if (isMe(m.nick)) { var again = !!bufs[key(ch)]; buf(ch); active = ch; draw(); if (!again) say(ch, "Joined " + ch, "evt join self"); history(ch); askModes(ch); whoSync(ch); }
+      else {
+        buf(ch).users[m.nick] = ""; delete people[key(m.nick)]; // a fresh start; extended-join tells their account: JOIN #chan account :realname
+        if (p[1] && p[1] !== "*") person(m.nick).acct = p[1];
+        say(ch, m.nick + " joined", "evt join"); if (key(ch) === key(active)) usersSoon();
+      }
       return;
     }
     if (c === "PART" || c === "KICK") {
@@ -645,17 +880,18 @@
         if (c === "KICK") say(active, "You were kicked from " + p[0] + " by " + m.nick + (why ? " (" + why + ")" : ""), "err kick"); // its tab is gone
         draw();
       }
-      else { delete buf(p[0]).users[who]; if (key(p[0]) === key(active)) draw(); }
+      else { delete buf(p[0]).users[who]; setTyping(p[0], who, "done"); if (key(p[0]) === key(active)) usersSoon(); }
       return;
     }
     if (c === "QUIT") {
-      Object.keys(bufs).forEach(function (k) { if (m.nick in bufs[k].users) { delete bufs[k].users[m.nick]; say(bufs[k].name, m.nick + " quit" + (p[0] ? " (" + p[0] + ")" : ""), "evt quit"); } });
+      Object.keys(bufs).forEach(function (k) { if (m.nick in bufs[k].users) { delete bufs[k].users[m.nick]; if (typers[k]) delete typers[k][m.nick]; say(bufs[k].name, m.nick + " quit" + (p[0] ? " (" + p[0] + ")" : ""), "evt quit"); } });
       if (bufs[key(m.nick)]) say(m.nick, m.nick + " quit" + (p[0] ? " (" + p[0] + ")" : ""), "evt quit"); // their private chat
-      return draw();
+      delete people[key(m.nick)]; drawTyping(); return usersSoon();
     }
     if (c === "NICK") {
       if (isMe(m.nick)) nick = p[0];
       if (hosts[key(m.nick)]) hosts[key(p[0])] = hosts[key(m.nick)];
+      if (people[key(m.nick)]) { people[key(p[0])] = people[key(m.nick)]; delete people[key(m.nick)]; }
       var q = bufs[key(m.nick)]; // a private chat follows the nick, so their next message lands in the same tab
       if (q && (key(m.nick) === key(p[0]) || !bufs[key(p[0])])) {
         delete bufs[key(m.nick)]; bufs[key(p[0])] = q; q.name = p[0];
@@ -663,7 +899,7 @@
         say(p[0], m.nick + " is now " + p[0], "evt nick");
       }
       Object.keys(bufs).forEach(function (k) { var u = bufs[k].users; if (m.nick in u) { u[p[0]] = u[m.nick]; delete u[m.nick]; say(bufs[k].name, m.nick + " is now " + p[0], "evt nick"); } });
-      return draw();
+      drawTabs(); return usersSoon(); // a private chat's tab may have been renamed
     }
     if (c === "PRIVMSG" || c === "NOTICE") {
       var mine = isMe(m.nick), server = m.prefix.indexOf("!") < 0;
@@ -674,9 +910,12 @@
         if (!bt && !mine && !server) (c === "PRIVMSG" ? ctcp : ctcpAnswer)(m.nick, cq[1].toUpperCase(), cq[2]);
         return;
       }
+      if (!bt && !mine && !server) setTyping(target, m.nick, "done"); // a message ends their "typing ..."
       if (bt) bt.n++;
-      // chime only for what others send you: a private message or action, a notice, or your nick in a channel. Never for your own lines.
-      else if (!mine && !server && (c === "NOTICE" || !isChan(target) || mentions(txt, me))) chime();
+      // chime and pop up only for what others send you: a private message or action, a notice, or your nick in a channel. Never for your own lines.
+      else if (!mine && !server && (c === "NOTICE" || !isChan(target) || mentions(txt, me))) {
+        chime(); notify(isChan(target) ? m.nick + " in " + target : m.nick, act ? "* " + act[1] : txt, target);
+      }
       var cls = mine ? "me" : (c === "NOTICE" ? "notice " : "") + (mentions(txt, me) ? "hl" : !isChan(target) && !server ? "msg" : "");
       meta.from = m.nick; meta.kind = act ? "act" : c === "NOTICE" ? "notice" : "msg";
       say(target, act ? act[1] : mine ? masked(target, txt) : txt, cls, meta);
@@ -684,11 +923,12 @@
     }
     if (c === "INVITE" && isMe(p[0]) && !ignored[key(m.nick)]) {
       say(active, m.nick + " invites you to " + p[1] + ". Type /join " + p[1] + " to accept.", "evt hl invite", meta);
+      notify(m.nick + " invited you", p[1], "*");
       return chime();
     }
     if (c === "ERROR") return say("*", "Server error: " + p[0], "err");
-    if (/^(276|30[17]|31[1-46-9]|320|330|338|378|379|671)$/.test(c)) return say(active, whois(c, p), c === "301" ? "evt whois away" : "evt whois", meta); // WHOIS: where you asked
-    if (/^\d+$/.test(c)) say(+c >= 400 ? active : "*", p.slice(1).join(" "), +c >= 400 ? "err" : c === "305" || c === "306" ? "evt away" : "", meta);
+    if (/^(276|30[17]|31[1-46-9]|320|330|335|338|378|379|671)$/.test(c)) return say(active, whois(c, p), c === "301" ? "evt whois away" : "evt whois", meta); // WHOIS: where you asked
+    if (/^\d+$/.test(c)) say(+c >= 400 ? active : reply(), numeric(c, p), +c >= 400 ? "err" : c === "305" || c === "306" ? "evt away" : "", meta); // errors where you are, replies where you asked
   }
 
   function ago(sec) { // 3725 -> "1h 2m 5s"
@@ -708,6 +948,17 @@
     if (c === "313") return n + " is an IRC operator";
     if (c === "671") return n + " is using a secure connection";
     if (c === "318") return "\u2500\u2500 end of whois \u2500\u2500";
+    return p.slice(1).join(" ");
+  }
+
+  function numeric(c, p) { // LIST, WHO, ban lists and modes as sentences; anything else as the server sent it
+    if (c === "322") return p[1] + " (" + p[2] + " users) " + (p[3] || "");
+    if (c === "352" && p.length > 7) return p[5] + " (" + p[2] + "@" + p[3] + ") on " + p[1] + ", " + p[7].replace(/^\d+ /, "") + (p[6] ? " [" + p[6] + "]" : "");
+    if (c === "367" || c === "348" || c === "346")
+      return p[1] + " " + (c === "367" ? "ban" : c === "348" ? "exception" : "invite exception") + ": " + p[2] +
+        (p[3] ? " (set by " + p[3].split("!")[0] + (+p[4] ? " on " + new Date(p[4] * 1000).toLocaleString() : "") + ")" : "");
+    if (c === "324") return "Modes of " + p[1] + ": " + p.slice(2).join(" ");
+    if (c === "221") return "Your user modes: " + p[1];
     return p.slice(1).join(" ");
   }
 
@@ -754,9 +1005,12 @@
     out.push(cps.slice(start).join(""));
     return out;
   }
-  function masked(to, text) { // what you tell NickServ (REGISTER, IDENTIFY ...) carries a password: show only the command
-    return /^nickserv$/i.test(to) ? text.replace(/^(\S+)\s.*$/, "$1 ********") : text;
+  function masked(to, text) { // what you tell NickServ (REGISTER, IDENTIFY ...) or ChanServ (REGISTER, IDENTIFY, SETPASS, DROP) carries a password: show only the command
+    return /^nickserv$/i.test(to) || /^chanserv$/i.test(to) && /^(register|identify|setpass|drop)\s/i.test(text) ? text.replace(/^(\S+)\s.*$/, "$1 ********") : text;
   }
+
+  function chanOf(a) { return a[0] && isChan(a[0]) ? a.shift() : isChan(active) ? active : ""; } // an explicit #channel first, else the open tab
+  function banMask(n) { return /[!@*]/.test(n) ? n : hosts[key(n)] ? "*!*@" + hosts[key(n)] : n + "!*@*"; } // a mask as typed, or a nick's last known host
 
   function command(text) {
     activity(text);
@@ -766,41 +1020,85 @@
       return privmsg(active, text);
     }
     var a = text.slice(1).split(" "), cmd = a.shift().toLowerCase(), rest = a.join(" ");
-    if (cmd === "help") return say(active, "Commands: /join #chan, /part, /close, /nick name, /me action, /msg nick text, /whois nick, /topic text, " +
-      "/notice nick text, /kick nick reason, /away text, /ctcp nick version|time|ping, /sound on|off, /ignore nick, /unignore nick, /quit. Right click a nick (tap on phones) for more. Accounts: /msg NickServ REGISTER password. Tab completes nicknames, Up/Down recall what you sent.", "evt");
-    if (cmd === "sound") {
-      sound = a[0] ? a[0].toLowerCase() !== "off" : !sound;
-      try { localStorage.setItem("chat-sound", sound ? "on" : "off"); } catch (e) {}
-      if (sound) { unlockAudio(); lastChime = 0; chime(); }
-      return say(active, "Sound for private messages, notices, mentions and invites is " + (sound ? "on" : "off") + ".", "evt");
+    if (cmd === "help" && !a[0]) return say(active, "Commands: /join #chan [key], /part, /cycle, /close, /clear, /nick name, /me action, /msg nick text, /notice nick text, /whois nick, /topic text, " +
+      "/mode +modes, /invite nick, /list [mask], /away text, /ctcp nick version|time|ping, /ignore nick, /unignore nick, /quit. " +
+      "Settings (the sliders button): /sound, /joins, /typing, /notify on|off. Pasting several lines asks first; /stop cancels one in progress. " +
+      "Channel ops: /op /deop /voice /devoice /halfop /dehalfop nick, /kick nick reason, /ban nick|mask (alone: list the bans), /unban nick|mask, /kickban nick reason. " +
+      "Accounts: /ns and /cs talk to NickServ and ChanServ, /identify password, /msg NickServ REGISTER password. " +
+      "Anything else goes to the server as typed (/list, /who, /motd, /help topic ...). Right click a nick (tap on phones) for more. Tab completes nicknames, Up/Down recall what you sent.", "evt");
+    if (/^(sound|joins|typing|notify)$/.test(cmd)) { // /sound /joins /typing /notify [on|off]: no argument flips it
+      var on = a[0] ? a[0].toLowerCase() !== "off" : !opts[cmd];
+      if (cmd === "notify") { syncOpts(); return setNotify(on); }
+      setOpt(cmd, on); syncOpts();
+      if (cmd === "sound" && on) { unlockAudio(); lastChime = 0; chime(); }
+      return say(active, { sound: "Sound for private messages, notices, mentions and invites", joins: "Showing joins, parts, quits and nick changes", typing: "Typing indicators (yours and theirs)" }[cmd] + " is " + (on ? "on" : "off") + ".", "evt");
     }
+    if (cmd === "list") return startList(rest);
+    if (cmd === "stop") { var left = pasteQ.length; pasteQ = []; return say(active, left ? "Stopped: " + left + " pasted lines were not sent." : "Nothing is being sent.", "evt"); }
     if (cmd === "ignore" || cmd === "unignore") {
       if (a[0]) return setIgnore(a[0], cmd === "ignore");
       var list = Object.keys(ignored);
       return say(active, list.length ? "Ignored: " + list.join(", ") : "You are not ignoring anyone.", "evt");
     }
     if (cmd === "join" && a[0]) return send("JOIN " + a[0].split(",").map(function (c) { return /^[#&]/.test(c) ? c : "#" + c; }).join(",") + (a[1] ? " " + a.slice(1).join(" ") : ""));
+    if (cmd === "join") return say(active, "Usage: /join #channel [key]", "err");
     if (cmd === "part" || cmd === "topic" || cmd === "kick") { // /part [#chan] [reason], /topic [#chan] [text], /kick [#chan] nick [reason]
-      var ch = a[0] && isChan(a[0]) ? a.shift() : isChan(active) ? active : "", why = a.join(" "); // the channel defaults to the open tab
+      var ch = chanOf(a), why = a.join(" ");
       if (!ch) return say(active, "Use it in a channel tab, or name the channel: /" + cmd + " #channel ...", "err");
       if (cmd === "part") return send("PART " + ch + (why ? " :" + why : ""));
       if (cmd === "topic") return send("TOPIC " + ch + (why ? " :" + why : ""));
       if (!a[0]) return say(active, "Usage: /kick [#channel] nick [reason]", "err");
       return send("KICK " + ch + " " + a[0] + " :" + (a.slice(1).join(" ") || "Kicked"));
     }
+    var svc = /^(ns|nickserv)$/.test(cmd) ? "NickServ" : /^(cs|chanserv)$/.test(cmd) ? "ChanServ" : "";
+    if (svc) return rest ? privmsg(svc, rest) : say(active, "Usage: /" + cmd + " command, e.g. /" + cmd + " help", "err");
+    if (cmd === "identify") return rest ? privmsg("NickServ", "IDENTIFY " + rest) : say(active, "Usage: /identify [account] password", "err");
+    if (cmd === "whois") {
+      var wn = a[0] || (active !== "*" && !isChan(active) ? active : ""); // in a private chat: the other person
+      return wn ? send("WHOIS " + wn + " " + (a[1] || wn)) : say(active, "Usage: /whois nick", "err"); // asking the user's own server also returns idle time
+    }
+    if (cmd === "mode" && isChan(active) && (!a[0] || /^[+-]/.test(a[0]))) return ask("MODE " + active + (rest ? " " + rest : "")); // the open channel is the default target
+    if (cmd === "umode") return ask("MODE " + nick + (rest ? " " + rest : ""));
+    if (cmd === "invite") {
+      var ic = a[1] || (isChan(active) ? active : "");
+      return a[0] && ic ? send("INVITE " + a[0] + " " + ic) : say(active, "Usage: /invite nick [#channel]", "err");
+    }
+    if (cmd === "clear") { var cb = buf(active); cb.lines = []; cb.ids = dict(); cb.mark = ""; return draw(); }
+    if (cmd === "quote" || cmd === "raw") return rest ? ask(rest) : say(active, "Usage: /quote COMMAND parameters", "err");
+    if (cmd === "cycle" || cmd === "hop") {
+      var cc = chanOf(a);
+      if (!cc) return say(active, "Use it in a channel tab, or name the channel: /" + cmd + " #channel", "err");
+      send("PART " + cc + (a.length ? " :" + a.join(" ") : ""));
+      return send("JOIN " + cc);
+    }
+    if (/^(de)?(op|voice|halfop)$/.test(cmd)) { // /op nick [nick ...] and friends on the open channel, up to MODES=6 nicks per line
+      var oc = chanOf(a), who = a.slice(0, 6);
+      if (!oc || !who.length) return say(active, "Usage: /" + cmd + " [#channel] nick [nick ...], in a channel tab", "err");
+      return send("MODE " + oc + " " + (/^de/.test(cmd) ? "-" : "+") + (/halfop$/.test(cmd) ? "h" : /op$/.test(cmd) ? "o" : "v").repeat(who.length) + " " + who.join(" "));
+    }
+    if (/^(ban|unban|kickban|kb)$/.test(cmd)) { // /ban alone lists the bans; a nick becomes the same *!*@host mask as the nick menu's Ban
+      var bc = chanOf(a);
+      if (!bc) return say(active, "Use it in a channel tab, or name the channel: /" + cmd + " #channel ...", "err");
+      if (!a[0]) return cmd === "ban" ? ask("MODE " + bc + " +b") : say(active, "Usage: /" + cmd + " [#channel] nick|mask", "err");
+      send("MODE " + bc + (cmd === "unban" ? " -b " : " +b ") + banMask(a[0]));
+      if (cmd !== "ban" && cmd !== "unban" && !/[!@*]/.test(a[0])) send("KICK " + bc + " " + a[0] + " :" + (a.slice(1).join(" ") || "Banned"));
+      return;
+    }
     if (cmd === "away") return send(rest ? "AWAY :" + rest : "AWAY");
     if (cmd === "notice" && a[1]) return send("NOTICE " + a[0] + " :" + a.slice(1).join(" "));
+    if (cmd === "notice") return say(active, "Usage: /notice nick|#channel text", "err");
     if (cmd === "close") {
       if (active === "*") return say("*", "The status tab cannot be closed.", "err");
       return closeBuf(active);
     }
-    if (cmd === "me") { if (active === "*" || !rest) return; return privmsg(active, rest, true); }
+    if (cmd === "me") { if (active === "*" || !rest) return say(active, "Usage: /me action, in a channel or private chat tab", "err"); return privmsg(active, rest, true); }
     if ((cmd === "msg" || cmd === "query") && a[0]) {
       var body = a.slice(1).join(" ");
       if (!isChan(a[0])) query(a[0]);
       if (body) privmsg(a[0], body);
       return;
     }
+    if (cmd === "msg" || cmd === "query") return say(active, "Usage: /" + cmd + " nick text", "err");
     if (cmd === "ctcp" && a[1]) {
       var what = a[1].toUpperCase(), arg = a.slice(2).join(" ");
       if (what === "PING") { arg = String(Date.now()); pings[key(a[0])] = { tok: arg, at: Date.now() }; }
@@ -814,12 +1112,13 @@
       var s = ws; setTimeout(function () { if (s && s.readyState < 2) s.close(); }, 1500); // the server normally closes first; this is the fallback
       return;
     }
-    send(a.length ? cmd.toUpperCase() + " " + rest : cmd.toUpperCase()); // /mode /whois /topic /nick ...: pass through
+    ask(a.length ? cmd.toUpperCase() + " " + rest : cmd.toUpperCase()); // /list /who /motd /nick /help topic ...: pass through, replies land in this tab
   }
 
   function connect() {
     clearTimeout(timer); registered = false; away = false; // a new connection starts un-away
-    avail = {}; caps = {}; sasl = null; account = ""; batches = {};
+    avail = dict(); caps = dict(); sasl = null; account = ""; batches = dict();
+    listing = null; whox = false; autoWho = dict(); people = dict(); typers = dict(); // per-connection state; the join sync refills people
     say("*", "Connecting to irc.sekurnet.org ...");
     var sock;
     try { sock = ws = new WebSocket(WS_URL); } catch (e) { return fail(); }
@@ -881,15 +1180,24 @@
     auth = user ? { user: user, pass: pass } : null; // kept in memory only, so an automatic reconnect can log in again
     passIn.value = "";
     try { localStorage.setItem("chat-chan", cs.join(" ")); localStorage.setItem("chat-acct", user); } catch (x) {}
-    nick = n; wantChan = cs.join(","); closing = false; tries = 0; bufs = {}; active = "*"; draw();
+    nick = n; wantChan = cs.join(","); closing = false; tries = 0; bufs = dict(); active = "*"; draw();
     form.hidden = true; app.hidden = false; showUsers(false); input.focus();
     unlockAudio(); connect();
   });
   $("send").addEventListener("submit", function (e) {
     e.preventDefault(); var t = input.value.trim(); input.value = ""; unlockAudio();
-    if (t) { sent.push(t); if (sent.length > 50) sent.shift(); spos = sent.length; }
+    clearTimeout(typingOff); typing.sent = false; // sending the message ends "typing ..." for everyone else on its own
+    if (t && !SECRET.test(t)) { sent.push(t); if (sent.length > 50) sent.shift(); spos = sent.length; }
     if (dead() && tries > 5) { tries = 0; return reconnect(); } // gave up earlier: sending is the "try again" button
     if (t) command(t);
+  });
+  input.addEventListener("input", function () { // +typing: "active" at most every 3 s while you type, "paused" after 5 s of nothing, "done" when the box is emptied
+    clearTimeout(typingOff);
+    if (!opts.typing || !caps["message-tags"]) return;
+    var v = input.value, live = v && v[0] !== "/" && active !== "*" && !/^(nickserv|chanserv)$/i.test(active);
+    if (!live) { if (typing.sent) tellTyping("done", typing.to); typing.sent = false; return; }
+    if (!typing.sent || typing.to !== active || Date.now() - typing.at > 3000) { tellTyping("active", active); typing = { to: active, sent: true, at: Date.now() }; }
+    typingOff = setTimeout(function () { if (typing.sent) tellTyping("paused", typing.to); typing.sent = false; }, 5000);
   });
   input.addEventListener("keydown", function (e) {
     if (e.key === "ArrowUp" || e.key === "ArrowDown") { // recall what you sent

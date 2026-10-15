@@ -34,7 +34,7 @@
 <tr><td><code>multi-prefix</code> <code>userhost-in-names</code></td><td>All rank prefixes, and full <code>nick!user@host</code>, in <code>NAMES</code> and <code>WHO</code>.</td></tr>
 <tr><td><code>extended-join</code> <code>chghost</code> <code>setname</code></td><td>Account and realname on JOIN; live host and realname changes.</td></tr>
 <tr><td><code>echo-message</code></td><td>Your own messages are echoed back to you.</td></tr>
-<tr><td><code>message-tags</code> <code>server-time</code></td><td>Message tags and server timestamps.</td></tr>
+<tr><td><code>message-tags</code> <code>server-time</code></td><td>Message tags and server timestamps. Client-only tags (<code>+typing</code>, <code>+draft/reply</code>) are relayed on messages and on tag-only <code>TAGMSG</code>; a <code>TAGMSG</code> does not count toward <code>+f</code> channel flood.</td></tr>
 <tr><td><code>invite-notify</code> <code>standard-replies</code></td><td>Invite visibility for ops; machine-readable <code>FAIL</code>/<code>WARN</code>/<code>NOTE</code> replies.</td></tr>
 <tr><td><code>batch</code> <code>labeled-response</code></td><td>Related lines grouped in a <code>BATCH</code>; replies tagged with the <code>label</code> of the command that caused them.</td></tr>
 <tr><td><code>draft/chathistory</code></td><td>Message history with <code>CHATHISTORY</code>. See <a href="#history">history</a>. Not advertised when <code>history_size = 0</code>.</td></tr>

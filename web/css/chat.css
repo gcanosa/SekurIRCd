@@ -61,6 +61,30 @@
 .chat-dlg label { display: flex; gap: 8px; align-items: center; font-size: .85rem; color: var(--c-muted); }
 .chat-dlg .act { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
 .chat-log .new { color: var(--link); text-align: center; font-size: .8rem; margin: 4px 0; }
+/* settings: "joins" off hides join, part, quit and nick lines (not your own join); the setting is a class on the chat, so it applies to what is already shown */
+.chat.hide-joins .ln.join:not(.self), .chat.hide-joins .ln.part, .chat.hide-joins .ln.quit, .chat.hide-joins .ln.nick { display: none; }
+#users > .away { opacity: .5; }
+#users > .acct::after { content: " \2713\FE0E"; color: var(--ok); font-size: .85em; }
+.chat-typing { padding: 0 12px; min-height: 1.5em; line-height: 1.5em; font-size: calc(.8rem * var(--fs, 1)); font-style: italic; color: var(--c-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-typing[hidden] { display: none; }
+/* channel list, settings and paste dialogs (the .chat-dlg box is above) */
+.chat-dlg [hidden] { display: none !important; }
+.chat-dlg label { margin-bottom: 8px; }
+.chat-dlg .hint { color: var(--c-muted); font-size: .8rem; }
+.chat-dlg.wide { width: min(640px, calc(100vw - 32px)); max-width: none; }
+.chat-dlg .filter { width: 100%; box-sizing: border-box; margin-bottom: 8px; background: var(--c-panel); color: var(--fg); border: 1px solid var(--c-border); border-radius: 4px; padding: 8px 10px; font: inherit; font-size: max(16px, 1em); }
+.chat-list { max-height: 50vh; overflow-y: auto; border: 1px solid var(--c-border); border-radius: 4px; margin-bottom: 8px; }
+.chat-list .row { display: grid; grid-template-columns: minmax(6em, 14em) 3em 1fr; gap: 10px; align-items: baseline; width: 100%; text-align: left; background: none; border: 0; border-bottom: 1px solid var(--c-border); color: var(--fg); font: inherit; font-size: .85rem; padding: 6px 10px; cursor: pointer; }
+.chat-list .row:last-child { border-bottom: 0; }
+.chat-list .row:hover, .chat-list .row:focus-visible { background: var(--c-panel); outline: none; }
+.chat-list .cn { color: var(--c-ink); font-weight: bold; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-list .cu { color: var(--c-muted); text-align: right; }
+.chat-list .ct { color: var(--c-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-dlg .prev { margin: 0 0 10px; padding: 8px 10px; background: var(--c-panel); border: 1px solid var(--c-border); border-radius: 4px; font-size: .8rem; line-height: 1.4; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 14em; overflow-y: auto; }
+.chat-dlg.warn h3 { color: var(--link); }
+.chat-dlg .alt a { color: var(--link); }
+.chat-dlg .act { flex-wrap: wrap; }
+@media (max-width: 640px) { .chat-list .row { grid-template-columns: 1fr auto; } .chat-list .ct { grid-column: 1 / -1; } }
 /* 16px minimum: iOS Safari zooms the page when an input under 16px gets focus */
 .chat-form input, .chat-send input { background: var(--c-panel); color: var(--fg); border: 1px solid var(--c-border); border-radius: 4px; padding: 8px 10px; font: inherit; font-size: max(16px, 1em); min-width: 0; }
 .chat-send input { font-size: max(16px, calc(1em * var(--fs, 1))); }
