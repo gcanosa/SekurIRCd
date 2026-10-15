@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Web chat · SekurIRCd docs</title>
+<meta name="description" content="The SekurNet web chat: commands, settings, typing indicators, the channel list, the multi-line paste guard and how it uses IRCv3.">
+<link rel="canonical" href="https://gcanosa.github.io/SekurIRCd/docs/webchat.html">
+<meta property="og:title" content="Web chat · SekurIRCd docs">
+<meta property="og:description" content="The SekurNet web chat: commands, settings, typing indicators, the channel list, the multi-line paste guard and how it uses IRCv3.">
+<meta property="og:image" content="https://gcanosa.github.io/SekurIRCd/img/og.png">
+<meta property="og:type" content="website">
+<meta name="twitter:card" content="summary_large_image">
+<meta property="og:url" content="https://gcanosa.github.io/SekurIRCd/docs/webchat.html">
+<link rel="icon" href="../img/favicon.ico" sizes="any">
+<script>(function(){var t;try{t=localStorage.getItem("theme")}catch(e){}if(t!=="light"&&t!=="dark")t=matchMedia("(prefers-color-scheme: light)").matches?"light":"dark";document.documentElement.dataset.theme=t})()</script>
+<link rel="stylesheet" href="../css/site.css">
+</head>
+<body data-root="../" data-page="webchat">
+<header id="site-header"></header>
+<div class="wrap docs-layout">
+<aside id="docs-nav" class="docs-nav"></aside>
+<main class="docs">
+<h1>web chat</h1>
+<p>The <a href="../chat.html">web chat</a> is a small IRC client that runs in the browser and talks to the network over a secure WebSocket. No install and no account needed.
+  It is one script, <code>js/chat.js</code>, with <code>css/chat.css</code> and a page that only has to contain <code>&lt;div id="sekurchat"&gt;&lt;/div&gt;</code>.
+  The server address is a constant in the script, so there is no host field and no URL parameter that can point it somewhere else.
+  Servers need a <code>[websocket]</code> listener with <code>tls = true</code> (see <a href="configuration.html">configuration</a>).</p>
+
+<h2>using it</h2>
+<ul>
+<li><strong>Connect:</strong> pick a nickname and up to 10 channels. A guest nickname is made up for you on every visit. Logging in to an account is optional: it uses SASL SCRAM-SHA-256 (the password never crosses the wire) and falls back to PLAIN only when the account has no SCRAM key yet. The password is kept in memory only, never stored.</li>
+<li><strong>Tabs:</strong> a <em>status</em> tab, one per channel, one per private chat. A tab turns red when something new arrives; <code>×</code> closes it (leaving the channel). A divider marks what you have not read, and with an account it follows you across devices (<code>draft/read-marker</code>).</li>
+<li><strong>History:</strong> the last 50 messages when you join a channel, and everything you missed after a dropped connection. Private history needs an account on both sides.</li>
+<li><strong>Nicks:</strong> click one to message them; right click (tap on a phone) for the menu: private message, mention, whois, client version, ping, ignore, and for channel ops give or remove op and voice, kick, ban, kick and ban.</li>
+<li><strong>Users:</strong> the list groups people by rank. A dimmed name is away (hover for the reason when it is known); a check mark means they are logged in to an account (hover for which).</li>
+<li><strong>Safety:</strong> links ask before leaving the site and show the real address, formatting codes are rendered without HTML, and you are marked away after 30 minutes without activity.</li>
+<li><strong>Ignore:</strong> <code>/ignore nick</code> hides their messages, notices and CTCPs. It is kept in your browser only.</li>
+</ul>
+
+<h2>commands</h2>
+<p>Type <code>/help</code> in the chat for a summary. Text starting with <code>//</code> is sent as a message starting with one <code>/</code>.</p>
+<div class="tablewrap"><table>
+<tr><th>Command</th><th>Purpose</th></tr>
+<tr><td><code>/join #chan [key]</code></td><td>Join channels (<code>#</code> is added if you leave it out, commas allow several).</td></tr>
+<tr><td><code>/part [#chan] [reason]</code> <code>/cycle</code> <code>/close</code></td><td>Leave, leave and rejoin (<code>/hop</code>), or close the open tab.</td></tr>
+<tr><td><code>/msg nick text</code> <code>/query nick</code> <code>/notice target text</code> <code>/me action</code></td><td>Messages. <code>/msg</code> and <code>/query</code> open a private chat tab.</td></tr>
+<tr><td><code>/topic [#chan] [text]</code> <code>/mode [+modes ...]</code> <code>/invite nick [#chan]</code></td><td>In a channel tab the channel is the default, so <code>/mode +m</code> and <code>/invite nick</code> need no channel name.</td></tr>
+<tr><td><code>/list [mask]</code></td><td>Opens the channel list (also the list button): filter by name or topic, click a channel to join. Takes the server's <code>LIST</code> filters, for example <code>/list &gt;5</code>.</td></tr>
+<tr><td><code>/whois nick</code> <code>/who mask</code> <code>/away [text]</code> <code>/nick name</code> <code>/umode +modes</code></td><td>Who is who, away status, nickname and user modes. <code>/whois</code> also shows idle time.</td></tr>
+<tr><td><code>/ctcp nick version|time|ping</code></td><td>Ask another client. The chat answers VERSION, PING, TIME, CLIENTINFO and SOURCE itself, at most four replies in ten seconds.</td></tr>
+<tr><td><code>/op</code> <code>/deop</code> <code>/voice</code> <code>/devoice</code> <code>/halfop</code> <code>/dehalfop</code> <code>[#chan] nick [nick ...]</code></td><td>Rank changes, up to 6 nicks at a time.</td></tr>
+<tr><td><code>/kick [#chan] nick [reason]</code> <code>/ban [nick|mask]</code> <code>/unban nick|mask</code> <code>/kickban nick [reason]</code></td><td>A nick becomes the mask <code>*!*@host</code>, the same as the nick menu's Ban. <code>/ban</code> alone lists the bans. <code>/kb</code> is short for <code>/kickban</code>.</td></tr>
+<tr><td><code>/ns ...</code> <code>/cs ...</code> <code>/identify [account] password</code></td><td>Talk to NickServ and ChanServ. Passwords are never shown in the log or kept for Up-arrow recall. No account yet: <code>/msg NickServ REGISTER password</code>.</td></tr>
+<tr><td><code>/clear</code> <code>/quit [reason]</code> <code>/stop</code></td><td>Clear the open tab, leave the chat, cancel a paste that is still being sent.</td></tr>
+<tr><td><code>/sound</code> <code>/joins</code> <code>/typing</code> <code>/notify</code> <code>[on|off]</code></td><td>The settings below. With no argument a setting flips.</td></tr>
+<tr><td><code>/quote COMMAND ...</code> and anything else</td><td>Sent to the server as typed, for example <code>/motd</code> or <code>/help topic</code>. Replies appear in the tab you typed in.</td></tr>
+</table></div>
+
+<h2>settings</h2>
+<p>The sliders button opens the settings. They are kept in your browser only.</p>
+<div class="tablewrap"><table>
+<tr><th>Setting</th><th>Default</th><th>Effect</th></tr>
+<tr><td>Joins, parts, quits, nick changes</td><td>shown</td><td>Off hides those lines, including the ones already on screen. Your own join, kicks and mode changes stay. A tab no longer turns red for hidden lines.</td></tr>
+<tr><td>Typing indicators</td><td>on</td><td>Shows who is typing under the message list, and lets others see when you are. Uses <code>+typing</code> on <code>TAGMSG</code>: sent at most every 3 seconds while you type, paused after 5 seconds, cleared when you send or empty the box. Not sent in the status, NickServ or ChanServ tabs.</td></tr>
+<tr><td>Sound</td><td>on</td><td>A soft chime for private messages, notices, mentions and invites.</td></tr>
+<tr><td>Desktop notifications</td><td>off</td><td>A pop-up for the same events, only while the tab is in the background. The browser asks for permission when you turn it on. Phone browsers mostly allow notifications only through a service worker or an installed web app, which this page does not use, so expect none there.</td></tr>
+</table></div>
+<p>The <code>Aa</code> button cycles the text size and the people button shows or hides the user list.</p>
+
+<h2>pasting several lines</h2>
+<p>Pasting two or more lines opens a box first instead of sending anything. IRC has no paste box of its own: every line becomes a message that everyone in the channel has to scroll past, and many channels and their operators kick or ban for it.</p>
+<div class="tablewrap"><table>
+<tr><th>Lines pasted</th><th>What the box does</th></tr>
+<tr><td>2 to 5</td><td>Shows a preview and asks to send them as separate messages. Or paste them as one line when they fit in 400 characters.</td></tr>
+<tr><td>6 to 50</td><td>Warns that this floods the channel and suggests a paste site (dpaste.org, bpa.st, paste.debian.net) so you can share a link instead. You can still choose <em>Send anyway</em>; Cancel has the focus so Enter cannot send by accident.</td></tr>
+<tr><td>more than 50</td><td>Refuses, and points to a paste site.</td></tr>
+</table></div>
+<p>Accepted lines go out one every 500 milliseconds, well inside the default flood guard of 20 lines per second, and always as plain messages: a pasted line that starts with <code>/</code> is text, never a command. <code>/stop</code> cancels what is left.
+  Operators can change the limits, the pace and the suggested sites in <code>js/chat.js</code> (<code>PASTE_WARN</code>, <code>PASTE_MAX</code>, <code>PASTE_GAP</code>, <code>PASTE_SITES</code>).
+  A channel with <code>+f</code> will still kick a flooder, whatever the client does.</p>
+
+<h2>capabilities it uses</h2>
+<div class="tablewrap"><table>
+<tr><th>Capability</th><th>Used for</th></tr>
+<tr><td><code>sasl</code></td><td>Account login while connecting (only when you fill in the account fields).</td></tr>
+<tr><td><code>server-time</code> <code>message-tags</code> <code>echo-message</code></td><td>Real message times, typing indicators, and showing your own messages as the server saw them.</td></tr>
+<tr><td><code>batch</code> <code>draft/chathistory</code> <code>draft/read-marker</code></td><td>Recent history, catching up after a reconnect, and the read position.</td></tr>
+<tr><td><code>multi-prefix</code> <code>userhost-in-names</code></td><td>Correct ranks in the user list, and hosts for ban masks.</td></tr>
+<tr><td><code>away-notify</code> <code>account-notify</code> <code>extended-join</code> <code>chghost</code></td><td>The away and logged-in markers, and keeping ban masks right after a host change. When you join, one <code>WHO #channel %tcnfa</code> (WHOX) fills in who is already away or logged in.</td></tr>
+</table></div>
+<p>See <a href="ircv3.html">IRCv3 &amp; SASL</a> for what the server offers. The chat does not request <code>draft/multiline</code>, so messages sent that way by other clients reach it as separate lines.</p>
+</main>
+</div>
+<footer id="site-footer"></footer>
+<script src="../js/site.js"></script>
+</body>
+</html>
