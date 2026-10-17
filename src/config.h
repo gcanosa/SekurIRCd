@@ -149,7 +149,8 @@ typedef struct {
 #define OPER_PRIV_REHASH  0x20u /* REHASH */
 #define OPER_PRIV_DIE     0x40u /* DIE/RESTART */
 #define OPER_PRIV_LINK    0x80u /* SQUIT/CONNECT */
-#define OPER_PRIV_ALL     0xFFu
+#define OPER_PRIV_ACCOUNT 0x200u /* NickServ SUSPEND/UNSUSPEND/FDROP/SASET (0x100 is config.c's "privileges = []" marker) */
+#define OPER_PRIV_ALL     (0xFFu | OPER_PRIV_ACCOUNT)
 
 typedef struct {
     char location1[CFG_STR];

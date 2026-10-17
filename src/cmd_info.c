@@ -271,6 +271,9 @@ static const help_entry_t HELP_TABLE[] = {
                   "draft/account-registration; * means your nick). Also: /msg NickServ REGISTER <password> "
                   "and /msg NickServ IDENTIFY [account] <password>. Only available when the "
                   "server has [accounts] enabled -- ask a server operator if this fails."}},
+    {"NS", {"NS <command> [args...]",
+            "Shorthand for /msg NickServ <command> (also NICKSERV); CS and CHANSERV do the same for ChanServ. "
+            "/NS HELP lists the NickServ commands: REGISTER, IDENTIFY, GHOST, REGAIN, RESETPASS, GROUP, SET, DROP and more."}},
     {"AUTHENTICATE", {"AUTHENTICATE PLAIN|EXTERNAL",
                        "SASL login to an existing account -- normally sent by your client automatically "
                        "during connection setup, not typed by hand. EXTERNAL logs in via a TLS client "

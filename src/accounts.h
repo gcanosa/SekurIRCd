@@ -90,6 +90,17 @@ const char *accounts_pending_email(account_store_t *st, const char *name);
 /* 1 and the email is promoted to verified if `code` matches and hasn't expired. */
 int accounts_check_verify(account_store_t *st, const char *name, const char *code);
 
+/* Password reset (NickServ RESETPASS): a one-time code mailed to the verified address. check_reset consumes a matching,
+ * unexpired code; reset_expires is 0 when none is pending (used to space out requests). A password change clears it. */
+void accounts_set_reset(account_store_t *st, const char *name, const char *code, long expires_at);
+long accounts_reset_expires(account_store_t *st, const char *name);
+int accounts_check_reset(account_store_t *st, const char *name, const char *code);
+
+/* Suspension (oper NickServ SUSPEND): every login to the account is refused while set; it stays registered, so its
+ * nicks stay protected. `by` NULL lifts it. accounts_suspended is 1 and fills by/reason (valid until the next mutation). */
+void accounts_set_suspended(account_store_t *st, const char *name, const char *by, const char *reason);
+int accounts_suspended(account_store_t *st, const char *name, const char **by, const char **reason);
+
 /* Nick groups: extra nicks that belong to an account (max ACCOUNT_MAX_GROUP). */
 #define ACCOUNT_MAX_GROUP 10
 int accounts_group_add(account_store_t *st, const char *name, const char *nick); /* 0 ok, -1 limit/taken */

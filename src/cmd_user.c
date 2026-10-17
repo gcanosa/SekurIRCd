@@ -561,9 +561,33 @@ void cmd_batch(server_t *srv, client_t *cl, irc_message_t *msg) {
 }
 void cmd_tagmsg(server_t *srv, client_t *cl, irc_message_t *msg) { send_msg(srv, cl, msg, "TAGMSG", 1); }
 
+/* NS/NICKSERV/CS/CHANSERV <text>: shorthand for PRIVMSG to that service, which most networks accept. */
+void cmd_service_alias(server_t *srv, client_t *cl, irc_message_t *msg) {
+    char text[512] = "";
+    for (int i = 0; i < msg->nparams; i++) {
+        if (i) strncat(text, " ", sizeof text - strlen(text) - 1);
+        strncat(text, msg->params[i], sizeof text - strlen(text) - 1);
+    }
+    irc_message_t m = *msg;
+    m.params[0] = (char *)(msg->command[0] == 'N' ? "NickServ" : "ChanServ");
+    m.params[1] = text;
+    m.nparams = 2;
+    send_msg(srv, cl, &m, "PRIVMSG", 0);
+}
+
 static void whois_one(server_t *srv, client_t *cl, const char *nick) {
     client_t *target = server_find_user(srv, nick);
     if (target && !target->registered) target = NULL; /* not yet USER/welcomed -- see send_msg's dst check */
+    if (!target && srv->cfg.accounts.enabled && strcasecmp(nick, "NickServ") == 0) { /* the virtual one (cmd_reg.c) */
+        const char *p1[] = {"NickServ", "NickServ", srv->cfg.server.name};
+        client_reply(cl, N_WHOISUSER, p1, 3, "Nickname Services");
+        const char *p2[] = {"NickServ", srv->cfg.server.name};
+        client_reply(cl, N_WHOISSERVER, p2, 2, srv->cfg.server.network);
+        const char *p3[] = {"NickServ"};
+        client_reply(cl, N_WHOISOPERATOR, p3, 1, "is a Network Service");
+        client_reply(cl, N_ENDOFWHOIS, p3, 1, "End of /WHOIS list.");
+        return;
+    }
     if (!target) {
         err_no_such_nick(cl, nick);
         const char *pe[] = {nick};

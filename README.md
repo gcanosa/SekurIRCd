@@ -99,8 +99,12 @@ Website & docs: <https://gcanosa.github.io/SekurIRCd/> (source in [`web/`](web/)
 - More channel/user features: owner (`+q`, `~`) and admin (`+a`, `&`) ranks that
   junior ops can't kick or deop; extbans `~r:<realname>`, `~z` (TLS users) and
   `~j:#chan`; caller-ID (`+g` with `/ACCEPT`); `[[classes]]` connection classes
-  (per-IP-range client caps, sendq and flood limits); NickServ `GHOST` and optional
-  nick-ownership enforcement (`[accounts] enforce_nicks`).
+  (per-IP-range client caps, sendq and flood limits); NickServ `GHOST`, `REGAIN`
+  (take your nick back in one step), `RESETPASS` (emailed reset code) and optional
+  nick-ownership enforcement (`[accounts] enforce_nicks`). Opers with the `accounts`
+  privilege get NickServ `SUSPEND`/`UNSUSPEND`, `FDROP` and `SASET PASSWORD`.
+  `/NS` and `/CS` (or `/NICKSERV`, `/CHANSERV`) work as shorthands, and
+  `/WHOIS NickServ` answers like a real service.
   Caller-ID `/ACCEPT` entries bind to the person's account (or connection), so
   renaming keeps access and a stranger taking the nick doesn't inherit it.
   ChanServ can grant the new ranks: `ACCESS ... <v|h|o|a|q>`, `ADMIN`/`DEADMIN`/

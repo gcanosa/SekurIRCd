@@ -23,7 +23,8 @@ typedef enum { JOB_RDNS, JOB_IDENT, JOB_DNSBL, JOB_SASL, JOB_HASH } job_type_t;
  * cmd_*.c completion function to call. Carried through job_t -> job_result_t
  * untouched. */
 typedef enum { AUTH_SASL, AUTH_REGISTER, AUTH_OPER, AUTH_DIE, AUTH_RESTART,
-               AUTH_PASSWD_VERIFY, AUTH_PASSWD_HASH, AUTH_DROP_VERIFY } auth_purpose_t;
+               AUTH_PASSWD_VERIFY, AUTH_PASSWD_HASH, AUTH_DROP_VERIFY,
+               AUTH_RESET_HASH, AUTH_SASET_HASH } auth_purpose_t;
 
 #define WORKER_MAX_ZONES 16
 

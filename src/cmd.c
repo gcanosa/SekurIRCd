@@ -64,6 +64,10 @@ static const cmd_entry_t DISPATCH[] = {
     {"AUTHENTICATE", cmd_authenticate, 1, 0, 0},
     {"REGISTER", cmd_register, 2, 1, 0},
     {"CERT", cmd_cert, 1, 1, 0},
+    {"NS", cmd_service_alias, 1, 1, 0},
+    {"NICKSERV", cmd_service_alias, 1, 1, 0},
+    {"CS", cmd_service_alias, 1, 1, 0},
+    {"CHANSERV", cmd_service_alias, 1, 1, 0},
 
     {"JOIN", cmd_join, 1, 1, 0},
     {"PART", cmd_part, 1, 1, 0},
