@@ -25,3 +25,4 @@ plans/
 *.upstream-*
 /dist/
 __pycache__/
+/ircop-levels.md
