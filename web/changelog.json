@@ -1,5 +1,18 @@
 [
   {
+    "tag": "v1.2.3",
+    "date": "2026-10-18",
+    "changes": [
+      "NickServ: RESETPASS (emailed one-time code to the verified address, then a new password), REGAIN (take your nick back in one step), oper SUSPEND/UNSUSPEND, FDROP and SASET PASSWORD behind a new \"accounts\" oper privilege (suspensions replicate across linked servers and log the account out everywhere); /WHOIS NickServ answers as a network service; /NS, /NICKSERV, /CS and /CHANSERV shorthands. email_command now gets \"verify\" or \"reset\" as a fifth argument",
+      "Lower memory use: per-client lists allocated on demand, compact chat history, heap-allocated tables",
+      "Channel flood (+f) no longer counts TAGMSG, so typing indicators can't get anyone kicked",
+      "Web chat v2 (shared with www.sekurnet.org/chat/): home-screen app, tabs with close buttons, nick menu and colors, read markers, event icons, commands, /list dialog, typing indicators, desktop notifications, away/account markers, paste guard, text size and a hideable user list; new web chat docs page",
+      "Tools: tools/confcheck.py config validator (and sekurircd/chanserv --check; upgrade.py won't restart on a bad config), warns on a [server] name without a dot; upgrade.py can install systemd user units for clone installs",
+      "#server-debug: cleaner relay format, less connection noise",
+      "Testing: 115 end-to-end integration tests (5 new NickServ tests)"
+    ]
+  },
+  {
     "tag": "v1.2.2",
     "date": "2026-10-09",
     "changes": [
