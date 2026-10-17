@@ -87,6 +87,7 @@ void cmd_register(server_t *srv, client_t *cl, irc_message_t *msg);
 void nickserv_message(server_t *srv, client_t *cl, const char *text);
 /* Bind/clear/report the caller's own account's SASL EXTERNAL cert fingerprint. */
 void cmd_cert(server_t *srv, client_t *cl, irc_message_t *msg);
+void cmd_service_alias(server_t *srv, client_t *cl, irc_message_t *msg); /* NS/NICKSERV/CS/CHANSERV */
 /* net.c: apply a finished JOB_SASL (is_register=0) / JOB_HASH (is_register=1,
  * `hash` = the new scrypt string) for cl->pending_account. */
 void cmd_finish_auth(server_t *srv, client_t *cl, int is_register, int success, const char *hash);

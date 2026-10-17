@@ -341,10 +341,15 @@ max_accounts = 10000
 #enforce_nicks = false
 
 # Email verification. NickServ `SET EMAIL <address>` generates a code and runs
-#     <email_command> <address> <code> <account> <network>
+#     <email_command> <address> <code> <account> <network> verify
 # (directly, no shell -- point it at a small script that mails the code); the
 # user then sends `/msg NickServ VERIFY <code>` within an hour. Empty (the
 # default) = no mail is sent, and the address is stored as unverified.
+# The same command mails password resets: `/msg NickServ RESETPASS <account>`
+# runs it with `reset` as the last argument (only for a verified address, at
+# most once per 5 minutes per account), and `RESETPASS <account> <code> <new
+# password>` sets the new password within the hour. No email_command = no
+# self-service reset (opers can still use NickServ SASET PASSWORD).
 #email_command = "/usr/local/bin/send-verification"
 #enforce_grace = 30
 
@@ -456,6 +461,7 @@ backup_count = 5
 #   sa       SAJOIN/SAPART/SAMODE/SANICK   host     CHGHOST/SETHOST/CHGIDENT/USERIP
 #   wallops  WALLOPS/GLOBOPS               rehash   REHASH
 #   die      DIE/RESTART                   link     SQUIT/CONNECT
+#   accounts NickServ SUSPEND/UNSUSPEND/FDROP/SASET PASSWORD, and full NickServ INFO
 #   all      everything. `privileges = []` grants none of the above (a "helper" oper).
 #   e.g.  privileges = ["kill", "kline", "wallops"]
 # -----------------------------------------------------------------------------

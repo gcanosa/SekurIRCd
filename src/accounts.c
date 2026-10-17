@@ -254,7 +254,58 @@ void accounts_set_hash(account_store_t *st, const char *name, const char *hash) 
     cJSON_DeleteItemFromObjectCaseSensitive(rec, "pw_hash");
     cJSON_AddStringToObject(rec, "pw_hash", hash);
     cJSON_DeleteItemFromObjectCaseSensitive(rec, "scram"); /* derived from the old password */
+    cJSON_DeleteItemFromObjectCaseSensitive(rec, "reset_code"); /* a pending reset is moot now */
+    cJSON_DeleteItemFromObjectCaseSensitive(rec, "reset_expires");
     commit(st, rec);
+}
+
+void accounts_set_reset(account_store_t *st, const char *name, const char *code, long expires_at) {
+    cJSON *rec = find(st, name);
+    if (!rec) return;
+    cJSON_DeleteItemFromObjectCaseSensitive(rec, "reset_code");
+    cJSON_DeleteItemFromObjectCaseSensitive(rec, "reset_expires");
+    if (code && code[0]) {
+        cJSON_AddStringToObject(rec, "reset_code", code);
+        cJSON_AddNumberToObject(rec, "reset_expires", (double)expires_at);
+    }
+    commit(st, rec);
+}
+
+long accounts_reset_expires(account_store_t *st, const char *name) {
+    cJSON *v = cJSON_GetObjectItemCaseSensitive(find(st, name), "reset_expires");
+    return cJSON_IsNumber(v) ? (long)v->valuedouble : 0;
+}
+
+int accounts_check_reset(account_store_t *st, const char *name, const char *code) {
+    cJSON *rec = find(st, name);
+    cJSON *c = rec ? cJSON_GetObjectItemCaseSensitive(rec, "reset_code") : NULL;
+    if (!cJSON_IsString(c) || accounts_reset_expires(st, name) < (long)time(NULL)) return 0;
+    if (strlen(c->valuestring) != strlen(code) || strcasecmp(c->valuestring, code) != 0) return 0;
+    accounts_set_reset(st, name, NULL, 0); /* one use */
+    return 1;
+}
+
+void accounts_set_suspended(account_store_t *st, const char *name, const char *by, const char *reason) {
+    cJSON *rec = find(st, name);
+    if (!rec) return;
+    cJSON_DeleteItemFromObjectCaseSensitive(rec, "suspended");
+    if (by) {
+        cJSON *s = cJSON_CreateObject();
+        cJSON_AddStringToObject(s, "by", by);
+        cJSON_AddStringToObject(s, "reason", reason ? reason : "");
+        cJSON_AddNumberToObject(s, "at", (double)time(NULL));
+        cJSON_AddItemToObject(rec, "suspended", s);
+    }
+    commit(st, rec);
+}
+
+int accounts_suspended(account_store_t *st, const char *name, const char **by, const char **reason) {
+    cJSON *s = cJSON_GetObjectItemCaseSensitive(find(st, name), "suspended");
+    if (!cJSON_IsObject(s)) return 0;
+    cJSON *b = cJSON_GetObjectItemCaseSensitive(s, "by"), *r = cJSON_GetObjectItemCaseSensitive(s, "reason");
+    if (by) *by = cJSON_IsString(b) ? b->valuestring : "";
+    if (reason) *reason = cJSON_IsString(r) ? r->valuestring : "";
+    return 1;
 }
 
 int accounts_drop(account_store_t *st, const char *name) {

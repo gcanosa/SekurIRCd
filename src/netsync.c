@@ -1182,7 +1182,9 @@ static void handle_acct(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     srv->accounts.applying = 1; /* don't echo it back out through the replication hook */
     int applied = accounts_apply_remote(&srv->accounts, msg->params[1], ts, msg->params[msg->nparams - 1]);
     srv->accounts.applying = 0;
-    (void)applied;
+    if (applied && accounts_suspended(&srv->accounts, msg->params[1], NULL, NULL))
+        for (client_t *c = srv->all_clients; c; c = c->all_next) /* suspended elsewhere: our sessions of it are logged out too */
+            if (c->fd >= 0 && c->account[0] && strcasecmp(c->account, msg->params[1]) == 0) server_logout(srv, c);
     char fl[3000];
     irc_build(fl, sizeof fl, NULL, 0, s->sid, "ACCT", (const char *[]){msg->params[0], msg->params[1]}, 2, msg->params[msg->nparams - 1]);
     flood(srv, lc, fl);

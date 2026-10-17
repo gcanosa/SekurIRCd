@@ -680,7 +680,7 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
                 static const struct { const char *name; unsigned bit; } OPER_PRIV_NAMES[] = {
                     {"kill", OPER_PRIV_KILL}, {"kline", OPER_PRIV_KLINE}, {"sa", OPER_PRIV_SA}, {"host", OPER_PRIV_HOST},
                     {"wallops", OPER_PRIV_WALLOPS}, {"rehash", OPER_PRIV_REHASH}, {"die", OPER_PRIV_DIE}, {"link", OPER_PRIV_LINK},
-                    {"all", OPER_PRIV_ALL},
+                    {"accounts", OPER_PRIV_ACCOUNT}, {"all", OPER_PRIV_ALL},
                 };
                 char pv[16][CFG_STR];
                 int npv = 0;
@@ -692,7 +692,7 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
                     for (size_t k = 0; k < sizeof OPER_PRIV_NAMES / sizeof OPER_PRIV_NAMES[0]; k++)
                         if (strcasecmp(pv[j], OPER_PRIV_NAMES[k].name) == 0) { op->privs |= OPER_PRIV_NAMES[k].bit; found = 1; }
                     if (!found) {
-                        snprintf(errbuf, errbufsz, "operators[%d].privileges: unknown privilege '%s' (kill, kline, sa, host, wallops, rehash, die, link, all)", i, pv[j]);
+                        snprintf(errbuf, errbufsz, "operators[%d].privileges: unknown privilege '%s' (kill, kline, sa, host, wallops, rehash, die, link, accounts, all)", i, pv[j]);
                         return -1;
                     }
                 }

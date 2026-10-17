@@ -1042,7 +1042,8 @@ static void drain_worker_results(server_t *srv) {
                 if (r->gen != cl->auth_gen) continue;
                 if (r->purpose == AUTH_SASL || r->purpose == AUTH_REGISTER)
                     cmd_finish_auth(srv, cl, r->purpose == AUTH_REGISTER, r->success, r->text);
-                else if (r->purpose == AUTH_PASSWD_VERIFY || r->purpose == AUTH_PASSWD_HASH || r->purpose == AUTH_DROP_VERIFY)
+                else if (r->purpose == AUTH_PASSWD_VERIFY || r->purpose == AUTH_PASSWD_HASH || r->purpose == AUTH_DROP_VERIFY ||
+                         r->purpose == AUTH_RESET_HASH || r->purpose == AUTH_SASET_HASH)
                     cmd_finish_account_op(srv, cl, r->purpose, r->success, r->text);
                 else
                     cmd_finish_privileged_auth(srv, cl, r->purpose, r->success);

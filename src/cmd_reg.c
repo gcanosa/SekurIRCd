@@ -543,12 +543,14 @@ static const char *auth_decoy_hash(void) {
  * never runs on the event loop; net.c applies the result via
  * cmd_finish_auth). Shared by SASL PLAIN and NickServ IDENTIFY. One in flight
  * per connection bounds the queue. 0 = submitted, -1 = refused (too many
- * recent failures from this IP, one already pending, or worker queue full)
- * -- the caller words the failure for its own protocol. */
+ * recent failures from this IP, one already pending, or worker queue full),
+ * -2 = the account is suspended -- the caller words the failure for its own
+ * protocol. */
 static int start_plain_login(server_t *srv, client_t *cl, const char *authcid, const char *passwd, int style) {
     if (cl->auth_pending || auth_fail_throttled(cl->ip)) return -1;
     const char *owner_acct = accounts_owner_of_nick(&srv->accounts, authcid);
     if (owner_acct) authcid = owner_acct; /* logging in as a grouped nick means its account */
+    if (accounts_suspended(&srv->accounts, authcid, NULL, NULL)) return -2;
     const char *hash = accounts_hash(&srv->accounts, authcid);
     int unknown = !hash;
     if (unknown) hash = auth_decoy_hash();
@@ -646,6 +648,7 @@ static void scram_step(server_t *srv, client_t *cl, const char *token) {
         char user[64], cnonce[96];
         if (!scram_attr(bare, 'n', user, sizeof user) || !scram_attr(bare, 'r', cnonce, sizeof cnonce) || strchr(user, '=')) { scram_fail(cl); return; }
         const char *stored = accounts_scram(&srv->accounts, user);
+        if (accounts_suspended(&srv->accounts, user, NULL, NULL)) { scram_fail(cl); return; }
         if (!stored || scram_verifier_from_string(stored, &s->v) != 0) { scram_fail(cl); return; } /* unknown account, or no verifier yet (log in with PLAIN once) */
         snprintf(s->account, sizeof s->account, "%s", accounts_display_name(&srv->accounts, user));
         snprintf(s->first_bare, sizeof s->first_bare, "%s", bare);
@@ -755,7 +758,7 @@ void cmd_authenticate(server_t *srv, client_t *cl, irc_message_t *msg) {
         char fp[65];
         const char *account;
         if (peer_cert_fingerprint(cl, fp, sizeof fp) != 0 ||
-            !(account = accounts_find_by_fingerprint(&srv->accounts, fp))) {
+            !(account = accounts_find_by_fingerprint(&srv->accounts, fp)) || accounts_suspended(&srv->accounts, account, NULL, NULL)) {
             client_reply(cl, N_SASLFAIL, NULL, 0, "SASL authentication failed");
             return;
         }
@@ -951,15 +954,17 @@ static int valid_email(const char *e) {
     return at == 1 && e[n - 1] != '@';
 }
 
-/* Runs `cmd addr code account network` fully detached (double fork, so no zombie and nothing to wait on), no shell. */
-static void spawn_email_command(const char *cmd, const char *addr, const char *code, const char *account, const char *network) {
+/* Runs `cmd addr code account network purpose` fully detached (double fork, so no zombie and nothing to wait on), no
+ * shell. `purpose` is "verify" (SET EMAIL) or "reset" (RESETPASS), so the script can word the mail. */
+static void spawn_email_command(const char *cmd, const char *addr, const char *code, const char *account, const char *network,
+                                const char *purpose) {
     pid_t p1 = fork();
     if (p1 < 0) return;
     if (p1 == 0) {
         if (fork() == 0) {
             int dn = open("/dev/null", O_RDWR);
             if (dn >= 0) { dup2(dn, 0); dup2(dn, 1); dup2(dn, 2); }
-            execl(cmd, cmd, addr, code, account, network, (char *)NULL);
+            execl(cmd, cmd, addr, code, account, network, purpose, (char *)NULL);
             _exit(127);
         }
         _exit(0);
@@ -978,7 +983,7 @@ static void ns_begin_email(server_t *srv, client_t *cl, const char *email) {
     char code[12];
     crypto_random_hex(code, sizeof code, 4);
     accounts_set_pending_email(&srv->accounts, cl->account, email, code, (long)time(NULL) + 3600);
-    spawn_email_command(srv->cfg.accounts.email_command, email, code, cl->account, srv->cfg.server.network);
+    spawn_email_command(srv->cfg.accounts.email_command, email, code, cl->account, srv->cfg.server.network, "verify");
     ns_say(srv, cl, "A verification code was sent -- finish with /msg NickServ VERIFY <code> within an hour");
 }
 
@@ -1031,6 +1036,34 @@ void cmd_finish_account_op(server_t *srv, client_t *cl, int purpose, int success
         log_info("nickserv", "account %s dropped by %s", account, cl->nick);
         return;
     }
+    case AUTH_RESET_HASH:
+    case AUTH_SASET_HASH: { /* RESETPASS (code already checked) / oper SASET PASSWORD: the account is in pending_account */
+        char account[64], m[200];
+        snprintf(account, sizeof account, "%s", cl->pending_account);
+        cl->pending_account[0] = '\0';
+        if (!success || !accounts_exists(&srv->accounts, account)) {
+            client_auth_clear(cl, AUTHTMP_SCRAM);
+            ns_say(srv, cl, "Could not set the password -- try again");
+            return;
+        }
+        accounts_set_hash(&srv->accounts, account, text);
+        if (client_auth_get(cl, AUTHTMP_SCRAM)[0]) accounts_set_scram(&srv->accounts, account, client_auth_get(cl, AUTHTMP_SCRAM));
+        client_auth_clear(cl, AUTHTMP_SCRAM);
+        if (purpose == AUTH_SASET_HASH) {
+            snprintf(m, sizeof m, "Password of %s changed", account);
+            ns_say(srv, cl, m);
+            snprintf(m, sizeof m, "%s used NickServ SASET PASSWORD on account %s", cl->nick, account);
+            log_info("nickserv", "%s", m);
+            server_notify_opers(srv, m);
+            return;
+        }
+        logout_all_sessions(srv, account); /* whoever knew the old password is out */
+        if (!cl->account[0] && !accounts_suspended(&srv->accounts, account, NULL, NULL)) server_login(srv, cl, account);
+        snprintf(m, sizeof m, "Password of %s reset%s", account, strcasecmp(cl->account, account) == 0 ? " -- you are now identified" : "");
+        ns_say(srv, cl, m);
+        log_info("nickserv", "%s reset the password of %s by email code", cl->nick, account);
+        return;
+    }
     default: return;
     }
 }
@@ -1053,6 +1086,165 @@ static int ns_verify_own_password(server_t *srv, client_t *cl, const char *passw
     OPENSSL_cleanse(j.secret, sizeof j.secret);
     if (rc != 0) { cl->auth_pending = 0; return -1; }
     return 0;
+}
+
+/* --- RESETPASS, REGAIN and the oper account commands --------------------------- */
+
+#define RESET_TTL 3600   /* a reset code is good for an hour */
+#define RESET_SPACING 300 /* and a new one is mailed at most every 5 minutes per account */
+
+/* Hashes `password` on a worker as the new password of cl->pending_account; cmd_finish_account_op stores it. */
+static int submit_new_password(client_t *cl, const char *password, auth_purpose_t purpose) {
+    client_auth_clear(cl, AUTHTMP_SCRAM);
+    { scram_verifier_t sv; char vs[160]; if (scram_make_verifier(password, &sv) == 0) { scram_verifier_to_string(&sv, vs, sizeof vs); client_auth_set(cl, AUTHTMP_SCRAM, vs); } }
+    job_t j; memset(&j, 0, sizeof j);
+    j.type = JOB_HASH;
+    j.purpose = purpose;
+    j.conn_id = cl->conn_id;
+    snprintf(j.secret, sizeof j.secret, "%s", password);
+    cl->auth_pending = 1;
+    cl->auth_started = time(NULL);
+    j.gen = ++cl->auth_gen;
+    int rc = worker_submit(&j);
+    OPENSSL_cleanse(j.secret, sizeof j.secret);
+    if (rc != 0) { cl->auth_pending = 0; client_auth_clear(cl, AUTHTMP_SCRAM); cl->pending_account[0] = '\0'; return -1; }
+    return 0;
+}
+
+/* RESETPASS <account>: mails a code to the account's verified address. The reply is the same whether or not the account
+ * exists or has one, so it can't be used to probe for accounts or addresses. Every request counts against the IP's
+ * failure budget, and an account gets at most one mail per RESET_SPACING, so it can't be used to mail-bomb either. */
+static void ns_request_reset(server_t *srv, client_t *cl, const char *name) {
+    if (!srv->cfg.accounts.email_command[0]) { ns_say(srv, cl, "Password reset is not available here (no mail is configured) -- ask a server operator"); return; }
+    if (auth_fail_throttled(cl->ip)) { ns_say(srv, cl, "Too many attempts -- wait a minute and try again"); return; }
+    auth_fail_record(cl->ip);
+    time_t now = time(NULL);
+    const char *owner = accounts_owner_of_nick(&srv->accounts, name);
+    const char *em = owner ? accounts_email(&srv->accounts, owner) : NULL;
+    if (em && accounts_email_verified(&srv->accounts, owner) && !accounts_suspended(&srv->accounts, owner, NULL, NULL) &&
+        accounts_reset_expires(&srv->accounts, owner) - RESET_TTL + RESET_SPACING <= now) {
+        char account[64], email[200], code[16];
+        snprintf(account, sizeof account, "%s", owner); /* the store is about to change under these pointers */
+        snprintf(email, sizeof email, "%s", em);
+        crypto_random_hex(code, sizeof code, 6);
+        accounts_set_reset(&srv->accounts, account, code, (long)now + RESET_TTL);
+        spawn_email_command(srv->cfg.accounts.email_command, email, code, account, srv->cfg.server.network, "reset");
+        log_info("nickserv", "%s requested a password reset for %s", cl->nick, account);
+    }
+    ns_say(srv, cl, "If that account has a verified email address, a reset code was sent to it -- finish with "
+                    "/msg NickServ RESETPASS <account> <code> <new password> within an hour");
+}
+
+/* RESETPASS <account> <code> <new password>: a wrong code counts as a failed login for the IP. */
+static void ns_confirm_reset(server_t *srv, client_t *cl, const char *name, const char *code, const char *password) {
+    if (auth_fail_throttled(cl->ip)) { ns_say(srv, cl, "Too many attempts -- wait a minute and try again"); return; }
+    if (strlen(password) < 6 || strlen(password) >= 200) { ns_say(srv, cl, "The new password must be 6-199 characters"); return; }
+    if (cl->auth_pending) { ns_say(srv, cl, "Another login is still in progress -- try again shortly"); return; }
+    const char *owner = accounts_owner_of_nick(&srv->accounts, name);
+    if (owner && accounts_suspended(&srv->accounts, owner, NULL, NULL)) { ns_say(srv, cl, "That account is suspended -- contact a server operator"); return; }
+    if (!owner || !accounts_check_reset(&srv->accounts, owner, code)) {
+        auth_fail_record(cl->ip);
+        ns_say(srv, cl, "That code is wrong or has expired");
+        return;
+    }
+    snprintf(cl->pending_account, sizeof cl->pending_account, "%s", owner);
+    if (submit_new_password(cl, password, AUTH_RESET_HASH) != 0) ns_say(srv, cl, "Server busy -- request a new code with RESETPASS <account>");
+}
+
+/* GHOST/REGAIN may act on `nick` if cl is identified as the account that owns it. */
+static int owns_nick(server_t *srv, client_t *cl, const char *nick) {
+    const char *owner = accounts_owner_of_nick(&srv->accounts, nick);
+    return cl->account[0] && owner && strcasecmp(cl->account, owner) == 0;
+}
+
+static void pick_guest_nick(server_t *srv, char *out, size_t outsz) {
+    for (int tries = 0; tries < 20; tries++) {
+        char rh[9];
+        crypto_random_hex(rh, sizeof rh, 4);
+        snprintf(out, outsz, "Guest%u", 10000 + (unsigned)(strtoul(rh, NULL, 16) % 90000));
+        if (!server_find_user(srv, out)) break;
+    }
+}
+
+/* REGAIN <nick>: the owner takes their nick back in one step -- a local squatter is renamed to Guest<n> (not
+ * disconnected; GHOST does that), then the caller is renamed to it. */
+static void ns_regain(server_t *srv, client_t *cl, const char *nick) {
+    client_t *t = server_find_user(srv, nick);
+    char m[300];
+    if (!cl->account[0]) { ns_say(srv, cl, "You must IDENTIFY first"); return; }
+    if (!owns_nick(srv, cl, nick)) { ns_say(srv, cl, "You do not own that nickname"); return; }
+    if (t == cl) { ns_say(srv, cl, "You are already using that nickname"); return; }
+    if (t && (t->is_service || !t->registered)) { ns_say(srv, cl, "That nickname is busy right now -- try again in a moment"); return; }
+    if (t && t->remote) { /* its own server has to let go of it first */
+        netsync_kill(srv, cl, t, "REGAIN command used");
+        snprintf(m, sizeof m, "The session using %s is on another server and has been disconnected -- /NICK %s in a moment", nick, nick);
+        ns_say(srv, cl, m);
+        log_info("nickserv", "%s regained %s (remote session killed)", cl->nick, nick);
+        return;
+    }
+    if (t) {
+        char guest[NICKLEN];
+        pick_guest_nick(srv, guest, sizeof guest);
+        ns_say(srv, t, "This nickname was reclaimed by its owner -- changing your nickname.");
+        if (force_nick_change(srv, t, guest) != 0) { ns_say(srv, cl, "Could not free that nickname -- try GHOST"); return; }
+        nick_enforce_check(srv, t); /* clears any identify countdown it had on the old nick */
+    }
+    if (force_nick_change(srv, cl, nick) != 0) { ns_say(srv, cl, "Could not change your nickname"); return; }
+    nick_enforce_check(srv, cl);
+    snprintf(m, sizeof m, "You have regained %s", nick);
+    ns_say(srv, cl, m);
+    log_info("nickserv", "%s regained %s", cl->nick, nick);
+}
+
+/* `s` with its first `n` space-separated words skipped (the free-text tail of a command, e.g. a SUSPEND reason). */
+static const char *skip_words(const char *s, int n) {
+    while (n-- > 0) {
+        while (*s == ' ') s++;
+        while (*s && *s != ' ') s++;
+    }
+    while (*s == ' ') s++;
+    return s;
+}
+
+static int ns_account_oper(const client_t *cl) {
+    return (cl->umodes & UMODE_O) && (cl->oper_privs & OPER_PRIV_ACCOUNT);
+}
+
+/* Oper NickServ commands, OPER_PRIV_ACCOUNT ("accounts" in [[operators]] privileges). `a`/`b`/`c3` are the words after
+ * the command, `text` the whole message. Each is snoted and logged. */
+static void ns_oper_command(server_t *srv, client_t *cl, const char *cmd, const char *a, const char *b, const char *c3, const char *text) {
+    char account[64], m[400];
+    int saset = strcasecmp(cmd, "SASET") == 0;
+    const char *name = saset ? b : a;
+    const char *owner = name ? accounts_owner_of_nick(&srv->accounts, name) : NULL; /* an account name or one of its nicks */
+    if (saset && (!a || strcasecmp(a, "PASSWORD") != 0 || !b || !c3)) { ns_say(srv, cl, "Syntax: SASET PASSWORD <account> <new password>"); return; }
+    if (!name) { snprintf(m, sizeof m, "Syntax: %s <account>%s", cmd, strcasecmp(cmd, "SUSPEND") == 0 ? " [reason]" : ""); ns_say(srv, cl, m); return; }
+    if (!owner) { ns_say(srv, cl, "No such account"); return; }
+    snprintf(account, sizeof account, "%s", owner);
+
+    if (strcasecmp(cmd, "SUSPEND") == 0) {
+        const char *reason = skip_words(text, 2);
+        accounts_set_suspended(&srv->accounts, account, cl->nick, reason);
+        logout_all_sessions(srv, account);
+        snprintf(m, sizeof m, "%s suspended account %s%s%s", cl->nick, account, reason[0] ? ": " : "", reason);
+    } else if (strcasecmp(cmd, "UNSUSPEND") == 0) {
+        if (!accounts_suspended(&srv->accounts, account, NULL, NULL)) { ns_say(srv, cl, "That account is not suspended"); return; }
+        accounts_set_suspended(&srv->accounts, account, NULL, NULL);
+        snprintf(m, sizeof m, "%s unsuspended account %s", cl->nick, account);
+    } else if (strcasecmp(cmd, "FDROP") == 0) {
+        logout_all_sessions(srv, account);
+        accounts_drop(&srv->accounts, account);
+        snprintf(m, sizeof m, "%s force-dropped account %s", cl->nick, account);
+    } else { /* SASET PASSWORD: the hash runs on a worker, cmd_finish_account_op reports and snotes */
+        if (strlen(c3) < 6 || strlen(c3) >= 200) { ns_say(srv, cl, "The new password must be 6-199 characters"); return; }
+        if (cl->auth_pending) { ns_say(srv, cl, "Another login is still in progress -- try again shortly"); return; }
+        snprintf(cl->pending_account, sizeof cl->pending_account, "%s", account);
+        if (submit_new_password(cl, c3, AUTH_SASET_HASH) != 0) ns_say(srv, cl, "Server busy -- try again");
+        return;
+    }
+    ns_say(srv, cl, m);
+    log_info("nickserv", "%s", m);
+    server_notify_opers(srv, m);
 }
 
 /* PRIVMSG to "NickServ" when no real user by that name exists (see
@@ -1085,8 +1277,11 @@ void nickserv_message(server_t *srv, client_t *cl, const char *text) {
         const char *password = b ? b : a;
         if (!password) ns_say(srv, cl, "Syntax: IDENTIFY [account] <password>");
         else if (cl->account[0]) ns_say(srv, cl, "You are already identified");
-        else if (start_plain_login(srv, cl, account, password, AUTH_STYLE_NICKSERV) != 0)
-            ns_say(srv, cl, "Invalid account or password");
+        else {
+            int rc = start_plain_login(srv, cl, account, password, AUTH_STYLE_NICKSERV);
+            if (rc == -2) ns_say(srv, cl, "That account is suspended -- contact a server operator");
+            else if (rc != 0) ns_say(srv, cl, "Invalid account or password");
+        }
     } else if (cmd && strcasecmp(cmd, "GHOST") == 0) {
         /* GHOST <nick>: you must be identified as the account that owns <nick> (the account named
          * <nick>, or the same account as that session) -- then that session is disconnected. */
@@ -1094,8 +1289,7 @@ void nickserv_message(server_t *srv, client_t *cl, const char *text) {
         if (!a) ns_say(srv, cl, "Syntax: GHOST <nick>");
         else if (!cl->account[0]) ns_say(srv, cl, "You must IDENTIFY first");
         else if (!t || !t->registered || t == cl) ns_say(srv, cl, "No such nick (or that is you)");
-        else if (!(accounts_owner_of_nick(&srv->accounts, a) && strcasecmp(cl->account, accounts_owner_of_nick(&srv->accounts, a)) == 0) &&
-                 strcasecmp(cl->account, t->account) != 0)
+        else if (!owns_nick(srv, cl, a) && strcasecmp(cl->account, t->account) != 0)
             ns_say(srv, cl, "You do not own that nickname");
         else {
             if (t->remote) netsync_kill(srv, cl, t, "GHOST command used"); /* its server disconnects it */
@@ -1103,6 +1297,17 @@ void nickserv_message(server_t *srv, client_t *cl, const char *text) {
             ns_say(srv, cl, "Ghost session disconnected");
             log_info("nickserv", "%s ghosted %s", cl->nick, a);
         }
+    } else if (cmd && strcasecmp(cmd, "REGAIN") == 0) {
+        if (!a) ns_say(srv, cl, "Syntax: REGAIN <nick>");
+        else ns_regain(srv, cl, a);
+    } else if (cmd && strcasecmp(cmd, "RESETPASS") == 0) {
+        if (a && !b) ns_request_reset(srv, cl, a);
+        else if (a && b && c3) ns_confirm_reset(srv, cl, a, b, c3);
+        else ns_say(srv, cl, "Syntax: RESETPASS <account> (mails a code), then RESETPASS <account> <code> <new password>");
+    } else if (cmd && (strcasecmp(cmd, "SUSPEND") == 0 || strcasecmp(cmd, "UNSUSPEND") == 0 || strcasecmp(cmd, "FDROP") == 0 ||
+                       strcasecmp(cmd, "SASET") == 0)) {
+        if (!ns_account_oper(cl)) ns_say(srv, cl, "Permission denied -- that needs an oper login with the accounts privilege");
+        else ns_oper_command(srv, cl, cmd, a, b, c3, text);
     } else if (cmd && strcasecmp(cmd, "LOGOUT") == 0) {
         if (!cl->account[0]) ns_say(srv, cl, "You are not identified");
         else server_logout(srv, cl);
@@ -1114,7 +1319,13 @@ void nickserv_message(server_t *srv, client_t *cl, const char *text) {
             snprintf(m, sizeof m, "Account %s, registered %ld", who, accounts_created_at(&srv->accounts, who));
             ns_say(srv, cl, m);
             int self = cl->account[0] && strcasecmp(cl->account, who) == 0;
-            if (self) { /* the owner also sees their email and grouped nicks */
+            const char *sby, *sreason;
+            if (accounts_suspended(&srv->accounts, who, &sby, &sreason)) {
+                if (ns_account_oper(cl)) snprintf(m, sizeof m, "Suspended by %s%s%s", sby, sreason[0] ? ": " : "", sreason);
+                else snprintf(m, sizeof m, "This account is suspended");
+                ns_say(srv, cl, m);
+            }
+            if (self || ns_account_oper(cl)) { /* the owner (and account opers) also see the email and grouped nicks */
                 const char *em = accounts_email(&srv->accounts, who);
                 snprintf(m, sizeof m, "Email: %s%s", em ? em : "(none)", em ? (accounts_email_verified(&srv->accounts, who) ? " (verified)" : " (unverified)") : "");
                 ns_say(srv, cl, m);
@@ -1164,7 +1375,10 @@ void nickserv_message(server_t *srv, client_t *cl, const char *text) {
         else ns_say(srv, cl, "Nick removed from your account");
     } else {
         ns_say(srv, cl, "Commands: REGISTER <password> [email], IDENTIFY [account] <password>, LOGOUT, INFO [account], "
-                        "SET PASSWORD <old> <new>, SET EMAIL <address>, VERIFY <code>, GROUP, UNGROUP <nick>, GHOST <nick>, DROP <password>");
+                        "SET PASSWORD <old> <new>, SET EMAIL <address>, VERIFY <code>, GROUP, UNGROUP <nick>, GHOST <nick>, "
+                        "REGAIN <nick>, RESETPASS <account> [<code> <new password>], DROP <password>");
+        if (ns_account_oper(cl))
+            ns_say(srv, cl, "Oper commands: SUSPEND <account> [reason], UNSUSPEND <account>, FDROP <account>, SASET PASSWORD <account> <new>");
     }
     OPENSSL_cleanse(buf, sizeof buf);
 }
@@ -1220,6 +1434,7 @@ void cmd_finish_auth(server_t *srv, client_t *cl, int is_register, int success, 
     cl->auth_style = AUTH_STYLE_LEGACY;
     const char *account = cl->pending_account;
     if (!is_register) {
+        if (success && accounts_suspended(&srv->accounts, account, NULL, NULL)) success = 0; /* suspended while the hash ran */
         if (success) {
             account = accounts_display_name(&srv->accounts, account); /* stored case, not whatever was typed */
             if (client_auth_get(cl, AUTHTMP_SCRAM)[0] && !accounts_scram(&srv->accounts, account)) accounts_set_scram(&srv->accounts, account, client_auth_get(cl, AUTHTMP_SCRAM));
@@ -1296,12 +1511,7 @@ void nick_enforce_tick(server_t *srv, time_t now) {
         if (now < cl->enforce_deadline) continue;
         cl->enforce_deadline = 0;
         char guest[NICKLEN];
-        for (int tries = 0; tries < 20; tries++) {
-            char rh[9];
-            crypto_random_hex(rh, sizeof rh, 4);
-            snprintf(guest, sizeof guest, "Guest%u", 10000 + (unsigned)(strtoul(rh, NULL, 16) % 90000));
-            if (!server_find_user(srv, guest)) break;
-        }
+        pick_guest_nick(srv, guest, sizeof guest);
         ns_say(srv, cl, "You did not identify in time -- changing your nickname.");
         force_nick_change(srv, cl, guest);
     }
