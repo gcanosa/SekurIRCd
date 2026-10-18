@@ -3,5 +3,5 @@
 #ifndef SEKURIRCD_VERSION_H
 #define SEKURIRCD_VERSION_H
 #define SEKURIRCD_VERSION "1.2.3"
-extern const char sekurircd_version[]; /* build.c: SEKURIRCD_VERSION, plus "-git" for a build that isn't a release tag */
+extern const char sekurircd_version[]; /* build.c: SEKURIRCD_VERSION, plus "-git.<commit date>" off a release tag */
 #endif

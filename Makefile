@@ -83,12 +83,14 @@ MAIN_SRC  := $(SRC_DIR)/main.c
 ALL_SRCS  := $(CORE_SRCS) $(VEND_SRCS) $(MAIN_SRC)
 ALL_OBJS  := $(patsubst %.c,$(OBJ_DIR)/%.o,$(ALL_SRCS))
 
-# Build id for /VERSION: date + short commit (+ -dirty). build.o depends on
+# Build id for /VERSION: short commit (+ -dirty), "release" outside git. build.o depends on
 # every other object, so it is regenerated whenever anything else is.
-BUILD_ID := $(shell date +%Y%m%d)-$(shell git rev-parse --short HEAD 2>/dev/null || echo release)$(shell git diff --quiet HEAD 2>/dev/null || echo -dirty)
-# "-git" on the version (1.2.3-git) for any checkout that isn't exactly a v* release tag: the commits since the last
-# release. version.h stays the plain release number; a tarball without .git is the release itself.
-VERSION_SUFFIX := $(shell if git rev-parse HEAD >/dev/null 2>&1 && ! git describe --exact-match --tags --match 'v[0-9]*' HEAD >/dev/null 2>&1; then echo -git; fi)
+BUILD_ID := $(shell git rev-parse --short HEAD 2>/dev/null || echo release)$(shell git diff --quiet HEAD 2>/dev/null || echo -dirty)
+# "-git.<commit date>" on the version (1.2.3-git.20261018) for any checkout that isn't exactly a v* release tag: the
+# commits since the last release, dated by HEAD's commit (so rebuilding the same code gives the same version).
+# version.h stays the plain release number; a tarball without .git is the release itself. Keep tools/upgrade.py's
+# git_version() in step with this.
+VERSION_SUFFIX := $(shell if git rev-parse HEAD >/dev/null 2>&1 && ! git describe --exact-match --tags --match 'v[0-9]*' HEAD >/dev/null 2>&1; then echo -git.$$(git log -1 --format=%cd --date=format:%Y%m%d HEAD); fi)
 # Rebuild build.o when the id/suffix changes even if no source did (a commit, a new tag).
 BUILD_STAMP := $(OBJ_DIR)/build-id
 $(shell mkdir -p $(OBJ_DIR); echo '$(BUILD_ID)$(VERSION_SUFFIX)' | cmp -s - $(BUILD_STAMP) || echo '$(BUILD_ID)$(VERSION_SUFFIX)' > $(BUILD_STAMP))

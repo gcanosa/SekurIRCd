@@ -149,12 +149,21 @@ def version_of(text):
     return m.group(1) if m else None
 
 
+def git_version(sha, version):
+    """What a build of `sha` reports: `version` on a v* tag, else version-git.<commit date> (same rule as the Makefile)."""
+    if not version or run(["git", "describe", "--exact-match", "--tags", "--match", "v[0-9]*", sha], check=False).returncode == 0:
+        return version
+    return f"{version}-git.{git('log', '-1', '--format=%cd', '--date=format:%Y%m%d', sha)}"
+
+
 def describe(ref) -> Any:
     p = run(["git", "rev-parse", "--verify", "--quiet", ref + "^{commit}"], check=False)
     if p.returncode:
         return None
     sha = p.stdout.strip()
-    return {"ref": ref, "sha": sha, "short": sha[:7], "version": version_of(gshow(sha, "src/version.h")),
+    version = version_of(gshow(sha, "src/version.h"))
+    # "version" is version.h's release number (comparisons, changelog); "full" is what the binary reports
+    return {"ref": ref, "sha": sha, "short": sha[:7], "version": version, "full": git_version(sha, version),
             "date": git("log", "-1", "--format=%cs", sha), "subject": git("log", "-1", "--format=%s", sha)}
 
 
@@ -394,7 +403,7 @@ def switch(steps, target_sha, park=True):
     return sorted(keep)
 
 
-def build(expect_version):
+def build(expect_version, expect_full=None):
     for d in ("bin.new", "build.new"): shutil.rmtree(d, ignore_errors=True)
     total = len(glob.glob("src/**/*.c", recursive=True)) + len(glob.glob("services/*.c"))
     cmd = ["make", f"-j{os.cpu_count() or 2}", "BIN_DIR=bin.new", "OBJ_DIR=build.new"]
@@ -414,9 +423,13 @@ def build(expect_version):
         v = subprocess.run([f"bin.new/{name}", "--version"], capture_output=True, text=True).stdout.strip()
         LOG.w(f"bin.new/{name} --version -> {v}")
         # chanserv carries its own version number; only the ircd must match the release
-        if not v.startswith(name) or (name == "sekurircd" and not v.endswith((expect_version, expect_version + "-git"))):
-            raise RuntimeError(f"bin.new/{name} reports '{v}', expected {name} {expect_version if name == 'sekurircd' else '...'}")
-    ok(f"Build OK: sekurircd {expect_version}, chanserv runs")
+        # "sekurircd 1.2.3", or "sekurircd 1.2.3-git.20261018, commits after release 1.2.3" off a release tag (see the
+        # Makefile); without expect_full any dated build of this release is fine
+        reported = v.split()[1].rstrip(",") if len(v.split()) > 1 else ""
+        good = reported == expect_full if expect_full else re.fullmatch(re.escape(expect_version) + r"(-git\.\d{8})?", reported)
+        if not v.startswith(name) or (name == "sekurircd" and not good):
+            raise RuntimeError(f"bin.new/{name} reports '{v}', expected {name} {(expect_full or expect_version) if name == 'sekurircd' else '...'}")
+    ok(f"Build OK: sekurircd {expect_full or expect_version}, chanserv runs")
 
 
 def install_binaries():
@@ -497,6 +510,7 @@ def wrap(text, indent="      "):
 def current_state():
     cur = describe("HEAD")
     cur["version"] = version_of(open("src/version.h").read()) or cur["version"]
+    cur["full"] = git_version(cur["sha"], cur["version"])
     cur["branch"] = git("symbolic-ref", "-q", "--short", "HEAD", check=False) or None
     return cur
 
@@ -516,7 +530,7 @@ def preflight():
     st = daemon_status()
     dirty = dirty_files()
     out()
-    info(f"Installed  {bold('v' + cur['version'])}  {dim(cur['short'] + ' · ' + cur['date'])}  "
+    info(f"Installed  {bold('v' + cur['full'])}  {dim(cur['short'] + ' · ' + cur['date'])}  "
          f"on {cur['branch'] or 'detached HEAD'}")
     info("Running    " + ", ".join(f"{k}: {green('up') if v else dim('down')}" for k, v in st.items()))
     if dirty:
@@ -563,7 +577,7 @@ def choose_target(cur):
                  f" {dim('(' + o['date'] + ', via ' + o['src'] + ')')}  {note(o)}")
         else:
             info(f"{bold(f'[{i}]')} Latest {bold('commits')}   origin/{o['branch']} @ {o['short']}"
-                 f" {dim('(version ' + str(o['version']) + ', ' + o['date'] + ')')}  {note(o)}")
+                 f" {dim('(version ' + str(o['full']) + ', ' + o['date'] + ')')}  {note(o)}")
             info(dim(f"      newest commit: {o['subject']}"))
     info(f"{bold(f'[{len(opts) + 1}]')} A specific tag or commit")
     info(f"{bold('[q]')} Quit")
@@ -582,7 +596,7 @@ def review(cur, tgt):
     out()
     tv, cv = vt(tgt["version"]), vt(cur["version"])
     arrow = "→" if tv >= cv else red("→ (DOWNGRADE)")
-    info(f"{bold('v' + cur['version'])} {dim(cur['short'])}   {arrow}   {bold('v' + str(tgt['version']))} {dim(tgt['short'] + ' · ' + tgt['date'])}")
+    info(f"{bold('v' + cur['full'])} {dim(cur['short'])}   {arrow}   {bold('v' + str(tgt['full']))} {dim(tgt['short'] + ' · ' + tgt['date'])}")
     if tv < cv: warn("Target is OLDER than what you run. Stored data (accounts, ChanServ) may not be readable by older code.")
     elif tgt["sha"] != cur["sha"] and is_ancestor(tgt["sha"], cur["sha"]):
         warn("Target is already contained in your checkout (you're ahead of it).")
@@ -628,7 +642,7 @@ def upgrade(cur, st, tgt):
     if ARGS.dry_run:
         out(); warn(bold("DRY RUN -- nothing was changed.")); LOG.w("RESULT: DRY RUN"); return
     do_full = ask("Also make a COMPLETE backup of the running version (source, binaries, config)?", True)
-    if not ask(f"Proceed with upgrade v{cur['version']} → v{tgt['version']}?", True):
+    if not ask(f"Proceed with upgrade v{cur['full']} → v{tgt['full']}?", True):
         die("Cancelled -- nothing was changed.", 0)
     t0 = time.monotonic()
     backups = []
@@ -648,7 +662,7 @@ def upgrade(cur, st, tgt):
 
     step("Building")
     try:
-        build(tgt["version"])
+        build(tgt["version"], tgt["full"])
     except RuntimeError as e:
         fail(str(e)); warn("Reverting the source tree; your running install was not touched.")
         revert(cur)
@@ -659,8 +673,8 @@ def upgrade(cur, st, tgt):
 
     step("Installing")
     had_prev = install_binaries()
-    state = {"time": time.strftime("%Y-%m-%d %H:%M:%S"), "from": {k: cur[k] for k in ("sha", "version", "branch")},
-             "to": {k: tgt[k] for k in ("sha", "version")}, "prev_binaries": had_prev, "parked": [f"{f}.upstream-{tgt['version']}" for f in kept], "backups": backups, "log": LOG.path}
+    state = {"time": time.strftime("%Y-%m-%d %H:%M:%S"), "from": {k: cur[k] for k in ("sha", "version", "full", "branch")},
+             "to": {k: tgt[k] for k in ("sha", "version", "full")}, "prev_binaries": had_prev, "parked": [f"{f}.upstream-{tgt['version']}" for f in kept], "backups": backups, "log": LOG.path}
     json.dump(state, open(STATE_FILE, "w"), indent=2)
 
     systemd_step()
@@ -680,7 +694,7 @@ def upgrade(cur, st, tgt):
         rollback(); return
 
     out(); out(bold(green("━━ Upgrade complete")))
-    info(f"v{cur['version']} → {bold('v' + tgt['version'])} in {time.monotonic() - t0:.0f}s")
+    info(f"v{cur['full']} → {bold('v' + tgt['full'])} in {time.monotonic() - t0:.0f}s")
     for b in backups: info(f"backup: {b}")
     info(f"log:    {LOG.path}")
     info(f"undo:   {bold('tools/upgrade.py --rollback')}")
@@ -700,7 +714,7 @@ def rollback():
     if not os.path.exists(STATE_FILE): die("No previous upgrade recorded (logs/upgrade-state.json missing).")
     s = json.load(open(STATE_FILE))
     step("Roll back")
-    out(); info(f"Undo the upgrade from {s['time']}: v{s['to']['version']} → back to {bold('v' + s['from']['version'])}")
+    out(); info(f"Undo the upgrade from {s['time']}: v{s['to'].get('full', s['to']['version'])} → back to {bold('v' + s['from'].get('full', s['from']['version']))}")
     if not ask("Roll back the source and binaries?", True): die("Cancelled.", 0)
     if ARGS.dry_run: warn("DRY RUN"); return
     prev = {"sha": s["from"]["sha"], "branch": s["from"]["branch"]}
@@ -711,7 +725,7 @@ def rollback():
         for n in ("sekurircd", "chanserv"): os.replace(f"bin/{n}.prev", f"bin/{n}")
         ok("restored previous binaries (no rebuild needed)")
     else:
-        warn("previous binaries not available -- rebuilding"); build(s["from"]["version"]); install_binaries()
+        warn("previous binaries not available -- rebuilding"); build(s["from"]["version"], s["from"].get("full")); install_binaries()
     st = daemon_status()
     if any(st.values()): restart_daemons()
     for f in s.get("parked", []):
@@ -726,7 +740,7 @@ def check():
     p = run(["git", "fetch", "--tags", "origin"], check=False)
     if p.returncode: warn("could not reach origin -- reporting against what's already fetched")
     cur = current_state()
-    out(); info(f"Installed  {bold('v' + cur['version'])}  {dim(cur['short'] + ' · ' + cur['date'])}  "
+    out(); info(f"Installed  {bold('v' + cur['full'])}  {dim(cur['short'] + ' · ' + cur['date'])}  "
                 f"on {cur['branch'] or 'detached HEAD'}")
     news = 0
 
@@ -738,7 +752,7 @@ def check():
     elif vt(rel[0]) > vt(cur["version"]):
         news += 1
         warn(f"{bold(yellow('NEW RELEASE'))} {bold(rel[0])} {dim('(' + d['date'] + ', via ' + rel[2] + ')')}"
-             f"  — you run v{cur['version']}")
+             f"  — you run v{cur['full']}")
         try: entries = json.loads(gshow(d["sha"], "web/changelog.json") or "[]")
         except ValueError: entries = []
         for e in [e for e in entries if vt(cur["version"]) < vt(e["tag"]) <= vt(rel[0])]:
@@ -758,7 +772,7 @@ def check():
         news += 1
         log = git("log", "--format=%h|%cs|%s", "--no-decorate", f"{cur['sha']}..{m['sha']}").splitlines()
         warn(f"{bold(yellow(str(len(log)) + ' new commit(s)'))} on origin/{branch} "
-             f"{dim('(version ' + str(m['version']) + ')')} since your checkout")
+             f"{dim('(version ' + str(m['full']) + ')')} since your checkout")
         for l in log[:10]:
             h, dt, s = l.split("|", 2)
             info(f"  {cyan(h)} {dim(dt)} {s}")
@@ -775,7 +789,7 @@ def check():
 
 
 def selftest():
-    assert vt("1.0.10") > vt("1.0.9") and vt("v1.2") == (1, 2, 0)
+    assert vt("1.0.10") > vt("1.0.9") and vt("v1.2") == (1, 2, 0) and vt("1.2.3-git.20261018") == (1, 2, 3)
     old = "[a]\n# doc line\nx = 1\n"
     new = old + "\n[b]\n# new opt\n# y = \"z\"\nx = 2\n"
     d = diff_settings(old, new, "[a]\nx = 1\n")
