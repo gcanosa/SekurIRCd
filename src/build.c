@@ -1,5 +1,5 @@
-/* Build identifier shown in /VERSION and 004 ("20260921-c2d1aa0", "-dirty"
- * if built from uncommitted changes). The Makefile defines SEKURIRCD_BUILD
+/* Build identifier shown in /VERSION and 004 ("c2d1aa0", "-dirty" if built
+ * from uncommitted changes). The Makefile defines SEKURIRCD_BUILD
  * and rebuilds this file whenever any other object is rebuilt. */
 #include "server.h"
 #include "version.h"
@@ -12,4 +12,4 @@
 #endif
 
 const char sekurircd_build[] = SEKURIRCD_BUILD;
-const char sekurircd_version[] = SEKURIRCD_VERSION SEKURIRCD_VERSION_SUFFIX; /* "1.2.3", or "1.2.3-git" between releases */
+const char sekurircd_version[] = SEKURIRCD_VERSION SEKURIRCD_VERSION_SUFFIX; /* "1.2.3", or "1.2.3-git.20261018" between releases */

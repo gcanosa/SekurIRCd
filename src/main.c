@@ -180,7 +180,13 @@ int main(int argc, char **argv) {
         else if (strcmp(a, "--stop") == 0) do_stop = 1;
         else if (strcmp(a, "--rehash") == 0) do_rehash = 1;
         else if (strcmp(a, "-t") == 0 || strcmp(a, "--check") == 0) do_check = 1;
-        else if (strcmp(a, "--version") == 0) { printf("sekurircd %s\n", sekurircd_version); return 0; }
+        else if (strcmp(a, "--version") == 0) {
+            /* Off a release tag the line still ends in the release number: upgrade.py up to 1.2.3 checks
+             * endswith(<version.h>), and runs from the OLD checkout when upgrading to newer commits. */
+            if (strcmp(sekurircd_version, SEKURIRCD_VERSION) != 0) printf("sekurircd %s, commits after release %s\n", sekurircd_version, SEKURIRCD_VERSION);
+            else printf("sekurircd %s\n", sekurircd_version);
+            return 0;
+        }
         else if (strcmp(a, "-h") == 0 || strcmp(a, "--help") == 0) { usage(argv[0]); return 0; }
         else { fprintf(stderr, "unrecognized argument: %s\n", a); usage(argv[0]); return 2; }
     }
