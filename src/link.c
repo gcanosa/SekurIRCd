@@ -32,6 +32,7 @@
  * its SSL_CTX is created once, lazily, and freed at shutdown. */
 
 static void sync_ranks_to(server_t *srv, link_conn_t *lc);
+static void send_member_line(link_conn_t *lc, const char *cmd, channel_t *chan, client_t *u, int rank);
 static ssize_t link_io_read(link_conn_t *lc, void *buf, size_t len) {
     if (!lc->ssl) return read(lc->fd, buf, len);
     ERR_clear_error();
@@ -851,24 +852,43 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
         link_forward_line(lc, reply);
         return 0;
     }
+    if (strcasecmp(msg.command, "SVCMEMBERS") == 0) {
+        /* The live topic, then every current member's real identity + ranks, so a ChanServ setting change (ACCESS,
+         * AKICK, RESTRICTED, SECUREOPS, FOUNDER, TOPICLOCK) takes effect without anyone rejoining. */
+        if (msg.nparams < 1) return 0;
+        channel_t *chan = server_find_channel(srv, msg.params[0]);
+        if (!chan) return 0;
+        char tline[600];
+        irc_build(tline, sizeof tline, NULL, 0, NULL, "SVCTOPIC", (const char *[]){chan->name}, 1, chan->topic);
+        link_forward_line(lc, tline);
+        member_t *m, *mtmp;
+        HASH_ITER(hh, chan->members, m, mtmp)
+            if (!m->client->is_service) send_member_line(lc, "SVCMEMBER", chan, m->client, m->rank);
+        return 0;
+    }
     /* SQUIT or anything else unrecognized: ignored, same "log, never spam
      * back" policy as the client-facing dispatcher. */
     return 0;
 }
 
-/* SVCSYNC <chan> <nick> <user> <realhost> <account|*> <ident 0|1> <ranks qaohv>: a ranked member, for ChanServ to vet. */
-static void send_svcsync(link_conn_t *lc, channel_t *chan, client_t *u, int rank) {
+/* <cmd> <chan> <nick> <user> <realhost> <account|*> <ident 0|1> <ranks qaohv, or "-" for none>. SVCSYNC (ranked
+ * members only, for ChanServ to vet) and SVCMEMBER (every member, answering SVCMEMBERS) share this shape. */
+static void send_member_line(link_conn_t *lc, const char *cmd, channel_t *chan, client_t *u, int rank) {
     char ranks[8] = "";
     if (rank & RANK_OWNER) strcat(ranks, "q");
     if (rank & RANK_ADMIN) strcat(ranks, "a");
     if (rank & RANK_OP) strcat(ranks, "o");
     if (rank & RANK_HALFOP) strcat(ranks, "h");
     if (rank & RANK_VOICE) strcat(ranks, "v");
-    if (!ranks[0]) return;
+    if (!ranks[0]) strcpy(ranks, "-");
     char line[500];
     const char *p[] = {chan->name, u->nick, u->user, u->realhost, u->account[0] ? u->account : "*", u->ident_confirmed ? "1" : "0", ranks};
-    irc_build(line, sizeof line, NULL, 0, NULL, "SVCSYNC", p, 7, NULL);
+    irc_build(line, sizeof line, NULL, 0, NULL, cmd, p, 7, NULL);
     link_forward_line(lc, line);
+}
+
+static void send_svcsync(link_conn_t *lc, channel_t *chan, client_t *u, int rank) {
+    if (rank & (RANK_OWNER | RANK_ADMIN | RANK_OP | RANK_HALFOP | RANK_VOICE)) send_member_line(lc, "SVCSYNC", chan, u, rank);
 }
 
 /* A new service link: let it vet every rank already handed out while it was away. */

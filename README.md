@@ -602,7 +602,7 @@ retries the connection rather than exiting.
 /msg ChanServ JOIN #mychannel hunter2             # ChanServ joins and stays -- see below
 /msg ChanServ PART #mychannel hunter2             # ChanServ leaves (undoes JOIN)
 /msg ChanServ SETPASS #mychannel hunter2 newpass  # change the password in place
-/msg ChanServ TOPICLOCK #mychannel ON hunter2     # remember + restore the topic across a restart
+/msg ChanServ TOPICLOCK #mychannel ON hunter2     # lock the current topic (only ChanServ TOPIC changes it)
 /msg ChanServ INFO #mychannel                     # registration date + GUARD/TOPICLOCK status
 /msg ChanServ ACCESS #mychannel ADD *@trusted.example h hunter2  # auto-+h on JOIN from that host
 /msg ChanServ ACCESS #mychannel ADD =alice o hunter2             # auto-+o once "alice" is identified
@@ -635,11 +635,13 @@ them to `IDENTIFY`). This closes the gap where a full **ircd** restart
 empties the channel and a stranger wins the race to join it first,
 auto-opping themselves before ChanServ reconnects.
 
-**`TOPICLOCK`**: `TOPICLOCK #chan ON|OFF <password>` makes `chanserv`
-remember the channel's topic (recorded on every change while on) and
-restore it whenever `GUARD` (re)joins and the live channel's topic doesn't
-match -- topics are in-memory only in the ircd, so a full restart would
-otherwise lose them even for a `GUARD`ed channel.
+**`TOPICLOCK`**: `TOPICLOCK #chan ON|OFF <password>` locks the channel's
+current topic: anyone else's `/TOPIC` is put straight back, and only
+`TOPIC #chan <text> <password>` through ChanServ changes the locked one.
+Turning it on also turns on `GUARD` (ChanServ has to sit in the channel to
+see topic changes), and the locked topic is restored whenever `GUARD`
+(re)joins -- topics are in-memory only in the ircd, so a full restart would
+otherwise lose them.
 
 **`SETPASS`/`INFO`**: `SETPASS #chan <old> <new>` changes a channel's
 password in place -- without it, changing a password meant `DROP` +
@@ -668,7 +670,12 @@ command -- no error spam back to whoever's probing.
 founder grant `+v`/`+h`/`+o` on every future `JOIN` to `#chan` from a
 matching connection, without handing out the channel password itself.
 `AKICK #chan ADD <mask> <password>` auto-kicks anyone matching `<mask>` on
-`JOIN` instead. Both take the same `<mask>` forms:
+`JOIN` instead. Changes take effect at once for people already in the
+channel: an `ACCESS ADD` gives them their mode, a `DEL` or downgrade takes
+back what ChanServ gave, and an `AKICK ADD` kicks a matching member. The
+same goes for `SET RESTRICTED ON` (current ops are left in), `SET SECUREOPS
+ON` and `SET FOUNDER`, while `SET MLOCK` turns on `GUARD` so later mode
+changes get reverted. Both take the same `<mask>` forms:
 
 - a bare host (`trusted.example`, `1.2.3.4`), `ident@host`
   (`*@trusted.example`, `~user@1.2.3.4`), or a full `nick!ident@host` mask

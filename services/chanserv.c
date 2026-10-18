@@ -515,6 +515,12 @@ static void wire_whoisuser(const char *nick) {
     irc_build(line, sizeof line, NULL, 0, NULL, "WHOISUSER", p, 1, NULL);
     queue_line(line);
 }
+static void wire_svcmembers(const char *chan) {
+    char line[300];
+    const char *p[] = {chan};
+    irc_build(line, sizeof line, NULL, 0, NULL, "SVCMEMBERS", p, 1, NULL);
+    queue_line(line);
+}
 static void wire_invite(const char *chan, const char *nick) {
     char line[300];
     const char *p[] = {chan, nick};
@@ -727,6 +733,14 @@ static int granted_has(const char *chan, const char *nick) {
     irc_casefold(cn, sizeof cn, nick);
     for (int i = 0; i < g_n_granted; i++) if (!strcmp(g_granted[i].chan, cc) && !strcmp(g_granted[i].nick, cn)) return 1;
     return 0;
+}
+static void granted_unmark(const char *chan, const char *nick) {
+    char cc[128], cn[64];
+    irc_casefold(cc, sizeof cc, chan);
+    irc_casefold(cn, sizeof cn, nick);
+    int w = 0;
+    for (int i = 0; i < g_n_granted; i++) if (strcmp(g_granted[i].chan, cc) || strcmp(g_granted[i].nick, cn)) g_granted[w++] = g_granted[i];
+    g_n_granted = w;
 }
 static void granted_clear_nick(const char *nick) {
     char cn[64];
@@ -978,6 +992,14 @@ static void cmd_topiclock(const char *from_nick, char *args) {
     if (!rec) return;
     int on = strcasecmp(setting, "on") == 0;
     rec_set_bool(rec, "topiclock", on);
+    if (on) {
+        /* enforcing needs to see /TOPIC, which only reaches a channel ChanServ sits in; the live topic (SVCTOPIC)
+         * becomes the locked one */
+        rec_set_bool(rec, "guard", 1);
+        rec_set_str(rec, "topic", "");
+        wire_join(rec_str(rec, "name"));
+        wire_svcmembers(rec_str(rec, "name"));
+    }
     store_save();
     char msg[200];
     snprintf(msg, sizeof msg, "TOPICLOCK for %s is now %s", chan, on ? "ON" : "OFF");
@@ -1054,6 +1076,7 @@ static void cmd_access(const char *from_nick, char *args) {
         store_save();
         char msg[300]; snprintf(msg, sizeof msg, "%s now has %s access on %s", norm, levelbuf, chan);
         reply(from_nick, msg);
+        wire_svcmembers(chan); /* apply it to whoever is already in the channel (handle_svcmember) */
     } else if (strcasecmp(sub, "DEL") == 0) {
         char *mask = strtok_r(NULL, " ", &save);
         char *password = strtok_r(NULL, " ", &save);
@@ -1072,6 +1095,7 @@ static void cmd_access(const char *from_nick, char *args) {
         char msg[300];
         snprintf(msg, sizeof msg, existed ? "%s removed from %s's access list" : "%s is not on %s's access list", norm, chan);
         reply(from_nick, msg);
+        if (existed) wire_svcmembers(chan);
     } else {
         reply(from_nick, "Syntax: ACCESS <#channel> ADD|DEL|LIST ...");
     }
@@ -1113,6 +1137,7 @@ static void cmd_akick(const char *from_nick, char *args) {
         store_save();
         char msg[300]; snprintf(msg, sizeof msg, "%s added to %s's AKICK list", norm, chan);
         reply(from_nick, msg);
+        wire_svcmembers(chan); /* kick anyone already inside who matches (handle_svcmember) */
     } else if (strcasecmp(sub, "DEL") == 0) {
         char *mask = strtok_r(NULL, " ", &save);
         char *password = strtok_r(NULL, " ", &save);
@@ -1303,6 +1328,10 @@ static void cmd_set(const char *from_nick, char *args) {
         rec_set_str(rec, "mlock", on);
         rec_set_str(rec, "mlock_off", off);
         for (int i = 0; i < N_MLOCK_PARAMS; i++) rec_set_str(rec, MLOCK_PARAMS[i].field, fields[i]);
+        if (on[0] || off[0] || fields[0][0] || fields[1][0] || fields[2][0] || fields[3][0] || fields[4][0]) {
+            rec_set_bool(rec, "guard", 1); /* reverting a later MODE needs to see it, same as RESTRICTED/SECUREOPS */
+            wire_join(rec_str(rec, "name"));
+        }
         store_save();
         apply_mlock(rec, rec_str(rec, "name"));
     } else if (flag_val >= 0) {
@@ -1311,6 +1340,7 @@ static void cmd_set(const char *from_nick, char *args) {
             /* these need to see joins and mode changes, which only reach us for a channel ChanServ sits in */
             rec_set_bool(rec, "guard", 1);
             wire_join(rec_str(rec, "name"));
+            wire_svcmembers(rec_str(rec, "name")); /* and apply it to who is already inside */
         }
         store_save();
         snprintf(msg, sizeof msg, "%s for %s is now %s", option, chan, flag_val ? "ON" : "OFF");
@@ -1319,6 +1349,7 @@ static void cmd_set(const char *from_nick, char *args) {
     } else if (strcmp(optlower, "founder") == 0) {
         rec_set_str(rec, "founder", strcmp(value, "-") == 0 ? "" : value);
         store_save();
+        wire_svcmembers(chan);
         snprintf(msg, sizeof msg, value[0] && strcmp(value, "-") != 0 ? "Founder account for %s is now %s (use * as the password while logged in as it)" : "Founder account for %s cleared", chan, value);
         reply(from_nick, msg);
         return;
@@ -1671,6 +1702,63 @@ static void handle_svcsync(irc_message_t *msg) {
     if (n > 1) wire_mode_args(chan, ms, args);
 }
 
+/* SVCMEMBER (the hub answering SVCMEMBERS after a setting change): give a member who is already in the channel what
+ * they'd get on JOIN now -- AKICK, RESTRICTED, ACCESS levels, the founder's mode, SECUREOPS -- not on their next JOIN.
+ * Ranks ChanServ handed out that the list no longer backs are taken back; ranks from anyone else (an op, IDENTIFY)
+ * are left to SECUREOPS. RESTRICTED leaves current ops in place (whoever just turned it on is usually one of them). */
+static void handle_svcmember(irc_message_t *msg) {
+    if (msg->nparams < 7) return;
+    const char *chan = msg->params[0], *nick = msg->params[1], *user = msg->params[2], *host = msg->params[3];
+    const char *account = msg->params[4], *ranks = msg->params[6];
+    int ident_confirmed = msg->params[5][0] == '1';
+    cJSON *rec = store_get(chan);
+    if (!rec || strcasecmp(nick, g_cfg.nick) == 0) return;
+    char ban[300];
+    if (akick_matches(rec, nick, user, host, account, ident_confirmed, ban, sizeof ban)) {
+        wire_mode(chan, "+b", ban);
+        wire_kick(chan, nick, "Banned from this channel (AKICK)");
+        return;
+    }
+    const char *fa = rec_str(rec, "founder");
+    if (fa[0] && account[0] && account[0] != '*' && strcasecmp(fa, account) == 0) {
+        if (!strchr(ranks, g_cfg.founder_mode)) { char fm[3] = {'+', g_cfg.founder_mode, '\0'}; wire_mode(chan, fm, nick); }
+        mark_identified(chan, nick);
+        granted_mark(chan, nick);
+        return;
+    }
+    if (is_identified(chan, nick)) return;
+    const char *level = access_level_for(rec, nick, user, host, account, ident_confirmed);
+    int was_granted = granted_has(chan, nick);
+    if (rec_bool(rec, "restricted") && !level[0] && !strpbrk(ranks, "qao")) {
+        char rban[300];
+        snprintf(rban, sizeof rban, "*!*@%s", host);
+        wire_mode(chan, "+b", rban);
+        wire_kick(chan, nick, "This channel is restricted to its access list");
+        return;
+    }
+    char ms[24] = "", args[512] = "";
+    size_t n = 0;
+    char cur = 0;
+    if (was_granted)
+        for (const char *c = ranks; *c && n < sizeof ms - 3; c++) {
+            if (*c == '-' || *c == level[0]) continue;
+            if (cur != '-') ms[n++] = cur = '-';
+            ms[n++] = *c;
+            strncat(args, args[0] ? " " : "", sizeof args - strlen(args) - 1);
+            strncat(args, nick, sizeof args - strlen(args) - 1);
+        }
+    if (level[0] && !strchr(ranks, level[0])) {
+        ms[n++] = '+';
+        ms[n++] = level[0];
+        strncat(args, args[0] ? " " : "", sizeof args - strlen(args) - 1);
+        strncat(args, nick, sizeof args - strlen(args) - 1);
+    }
+    ms[n] = '\0';
+    if (n) wire_mode_args(chan, ms, args);
+    if (level[0]) granted_mark(chan, nick); else granted_unmark(chan, nick);
+    if (!level[0] && !was_granted && ranks[0] != '-') handle_svcsync(msg); /* SECUREOPS for ranks someone else gave */
+}
+
 /* --- link handshake + main loop --------------------------------------------- */
 
 static int connect_hub(void) {
@@ -1811,17 +1899,21 @@ static void process_line(char *line) {
         return;
     }
 
-    /* TOPICLOCK: whenever the live topic changes (by anyone), remember it
-     * as the baseline to restore on a later guard_join -- ported from
-     * Python's _on_topic. Was never handled here at all, so the JSON
-     * store's "topic" field went stale the moment anyone ran /TOPIC. */
+    /* TOPICLOCK: only ChanServ's own TOPIC (the TOPIC command) changes the locked topic; anyone else's /TOPIC is put
+     * back. The stored topic is also the baseline restored on a later guard_join. It used to just record every
+     * change, so the "lock" locked nothing. */
     if (strcasecmp(msg.command, "TOPIC") == 0) {
         if (msg.nparams < 1) return;
         const char *topic = msg.nparams > 1 ? msg.params[msg.nparams - 1] : "";
         cJSON *rec = store_get(msg.params[0]);
-        if (rec && rec_bool(rec, "topiclock")) {
-            rec_set_str(rec, "topic", topic);
-            store_save();
+        if (!rec || !rec_bool(rec, "topiclock")) return;
+        char setter[64] = "";
+        if (msg.prefix) nick_from_prefix(msg.prefix, setter, sizeof setter);
+        const char *locked = rec_str(rec, "topic");
+        if (strcasecmp(setter, g_cfg.nick) == 0 || !locked[0]) {
+            if (strcmp(locked, topic) != 0) { rec_set_str(rec, "topic", topic); store_save(); }
+        } else if (strcmp(locked, topic) != 0) {
+            wire_topic(msg.params[0], locked);
         }
         return;
     }
@@ -1894,6 +1986,18 @@ static void process_line(char *line) {
     if (strcasecmp(msg.command, "SVCJOIN") == 0) { handle_svcjoin(&msg); return; }
     if (strcasecmp(msg.command, "SVCNEW") == 0) { handle_svcnew(&msg); return; }
     if (strcasecmp(msg.command, "SVCSYNC") == 0) { handle_svcsync(&msg); return; }
+    if (strcasecmp(msg.command, "SVCMEMBER") == 0) { handle_svcmember(&msg); return; }
+    if (strcasecmp(msg.command, "SVCTOPIC") == 0) {
+        /* TOPICLOCK ON just asked for the live topic: it becomes the locked one (an empty one leaves the first topic
+         * set afterwards as the baseline). */
+        if (msg.nparams < 1) return;
+        cJSON *rec = store_get(msg.params[0]);
+        if (rec && rec_bool(rec, "topiclock") && !rec_str(rec, "topic")[0] && msg.nparams > 1) {
+            rec_set_str(rec, "topic", msg.params[msg.nparams - 1]);
+            store_save();
+        }
+        return;
+    }
     if (strcasecmp(msg.command, "WHOISCHANREPLY") == 0) {
         if (msg.nparams < 3 || !g_pending_register.active) return;
         char cf1[128], cf2[128];

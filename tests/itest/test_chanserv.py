@@ -100,3 +100,80 @@ def test_services_reconnect_strips_unearned_ops():
         assert "@intruder" not in " ".join(x.say("NAMES #sr", 1.5))
         assert "324 intruder #sr +r" in " ".join(x.say("MODE #sr"))
         cs.stop()
+
+
+def test_access_change_applies_to_members_already_in_channel():
+    s = net()
+    with s:
+        with ChanServ(s, s.link_port, password=LINK_PW):
+            f = s.client("fnd")
+            f.say("JOIN #live")
+            f.say("PRIVMSG ChanServ :REGISTER #live pw12345", 1.2)
+            u = s.client("usr")
+            u.say("JOIN #live", 0.5)
+            f.say("PRIVMSG ChanServ :ACCESS #live ADD usr!*@127.0.0.1 v pw12345", 1.0)
+            assert "+usr" in " ".join(f.say("NAMES #live")), "ADD did not voice a present member"
+            f.say("PRIVMSG ChanServ :ACCESS #live ADD usr!*@127.0.0.1 o pw12345", 1.0)
+            names = " ".join(f.say("NAMES #live"))
+            assert "@usr" in names and "+usr" not in names, names  # upgraded, the voice ChanServ gave is taken back
+            f.say("PRIVMSG ChanServ :ACCESS #live DEL usr!*@127.0.0.1 pw12345", 1.0)
+            names = " ".join(f.say("NAMES #live"))
+            assert "@usr" not in names and "+usr" not in names, names
+            assert "@fnd" in names, names  # the channel creator's own op is untouched
+
+
+def _reg(s, chan):
+    f = s.client("fnd")
+    f.say(f"JOIN {chan}")
+    f.say(f"PRIVMSG ChanServ :REGISTER {chan} pw12345", 1.2)  # no ChanServ JOIN: the settings below must guard on their own
+    return f
+
+
+def test_topiclock_reverts_other_topics_and_takes_the_live_one():
+    s = net()
+    with s:
+        with ChanServ(s, s.link_port, password=LINK_PW):
+            f = _reg(s, "#tl")
+            f.say("TOPIC #tl :the original", 0.3)
+            f.say("PRIVMSG ChanServ :TOPICLOCK #tl ON pw12345", 1.2)
+            f.say("TOPIC #tl :vandalised", 1.0)
+            assert "the original" in " ".join(f.say("TOPIC #tl")), "a /TOPIC under TOPICLOCK is put back"
+            f.say("PRIVMSG ChanServ :TOPIC #tl new official pw12345", 1.0)
+            f.say("TOPIC #tl :vandalised again", 1.0)
+            assert "new official" in " ".join(f.say("TOPIC #tl")), "ChanServ TOPIC moves the lock"
+
+
+def test_mlock_enforced_without_guard_join():
+    s = net()
+    with s:
+        with ChanServ(s, s.link_port, password=LINK_PW):
+            f = _reg(s, "#ml")
+            f.say("PRIVMSG ChanServ :SET #ml MLOCK +nt pw12345", 1.2)
+            f.say("MODE #ml -n", 1.0)
+            modes = " ".join(l for l in f.say("MODE #ml") if " 324 " in l)
+            assert "n" in modes.split(" #ml ")[-1], modes
+
+
+def test_akick_restricted_secureops_hit_present_members():
+    s = net()
+    with s:
+        with ChanServ(s, s.link_port, password=LINK_PW):
+            f = _reg(s, "#pm")
+            f.say("PRIVMSG ChanServ :SET #pm SECUREOPS OFF pw12345", 1.0)  # on by default; turned back on below
+            b = s.client("bad")
+            b.say("JOIN #pm", 0.4)
+            f.say("PRIVMSG ChanServ :AKICK #pm ADD bad!*@127.0.0.1 pw12345", 1.2)
+            assert "bad" not in " ".join(f.say("NAMES #pm")), "AKICK ADD kicks a matching member"
+            o = s.client("opd")
+            o.say("JOIN #pm", 0.4)
+            f.say("MODE #pm +o opd", 0.4)
+            n = s.client("nobody")
+            n.say("JOIN #pm", 0.4)
+            f.say("PRIVMSG ChanServ :ACCESS #pm ADD fnd!*@127.0.0.1 o pw12345", 1.0)
+            f.say("PRIVMSG ChanServ :SET #pm RESTRICTED ON pw12345", 1.2)
+            names = " ".join(f.say("NAMES #pm"))
+            assert "nobody" not in names, names       # not on the list: kicked now
+            assert "opd" in names and "@fnd" in names, names  # current ops are left in
+            f.say("PRIVMSG ChanServ :SET #pm SECUREOPS ON pw12345", 1.2)
+            names = " ".join(f.say("NAMES #pm"))
+            assert "@opd" not in names and "@fnd" in names, names  # an op ChanServ didn't grant loses it now
