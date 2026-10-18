@@ -180,7 +180,7 @@ int main(int argc, char **argv) {
         else if (strcmp(a, "--stop") == 0) do_stop = 1;
         else if (strcmp(a, "--rehash") == 0) do_rehash = 1;
         else if (strcmp(a, "-t") == 0 || strcmp(a, "--check") == 0) do_check = 1;
-        else if (strcmp(a, "--version") == 0) { printf("sekurircd %s\n", SEKURIRCD_VERSION); return 0; }
+        else if (strcmp(a, "--version") == 0) { printf("sekurircd %s\n", sekurircd_version); return 0; }
         else if (strcmp(a, "-h") == 0 || strcmp(a, "--help") == 0) { usage(argv[0]); return 0; }
         else { fprintf(stderr, "unrecognized argument: %s\n", a); usage(argv[0]); return 2; }
     }
@@ -238,7 +238,7 @@ int main(int argc, char **argv) {
     snprintf(lcfg.file, sizeof lcfg.file, "%s", cfg.logging.file);
     log_init(&lcfg, verbose);
 
-    log_info("main", "sekurircd %s starting (config: %s)", SEKURIRCD_VERSION,
+    log_info("main", "sekurircd %s starting (config: %s)", sekurircd_version,
               cfg.path[0] ? cfg.path : "<built-in defaults>");
 
     if (geteuid() == 0)
