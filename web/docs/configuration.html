@@ -89,6 +89,11 @@ hosts = ["*@*"]                                       # or restrict, e.g. ["*@20
 <p>Apply it with <code>/REHASH</code> from an already-opered client, <code>sekurircd --rehash</code>, or a restart, then confirm with
   <code>/OPER admin &lt;password&gt;</code>. Rotating a password is the same edit in place. Removing an entry does not deop clients
   that are already opered under it until they reconnect.</p>
+<p>An optional <code>privileges</code> list limits which oper commands a login may use (without it, everything is allowed):
+  <code>kill</code>, <code>kline</code> (KLINE/GLINE/ZLINE, SPAMFILTER, PROTECT), <code>sa</code> (SAJOIN/SAPART/SAMODE/SANICK),
+  <code>host</code> (CHGHOST/SETHOST/CHGIDENT/USERIP), <code>wallops</code>, <code>rehash</code>, <code>die</code>,
+  <code>link</code> (SQUIT/CONNECT), <code>accounts</code> (NickServ SUSPEND/UNSUSPEND/FDROP/SASET PASSWORD and full INFO) and
+  <code>all</code>. <code>privileges = []</code> makes a helper oper with none of them.</p>
 
 <h2>host cloaking</h2>
 <pre>[security]
