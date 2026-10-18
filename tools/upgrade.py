@@ -387,20 +387,24 @@ def switch(steps, target_sha, park=True):
     cur = git("rev-parse", "HEAD")
     changed = set(git("diff", "--name-only", cur, target_sha).splitlines())
     dirty = dirty_files()
-    keep = {f: open(f, "rb").read() for f in dirty if f in changed and os.path.isfile(f)}
+    # Every edited file, not just the ones the target changes: an intermediate step can still trip on the rest
+    # ("checkout main" lands on a stale local main first, whose ircd.motd differs, before the fast-forward).
+    keep = {f: open(f, "rb").read() for f in dirty if os.path.isfile(f)}
     for f in keep:
-        git("checkout", "--", f)
+        git("checkout", "HEAD", "--", f)  # HEAD, not the index: a staged edit would otherwise survive and still block
     try:
         for s in steps:
             git(*s)
     finally:
         ver = version_of(gshow(target_sha, "src/version.h")) or target_sha[:7]
+        parked = []
         for f, data in keep.items():
-            up = gshow(target_sha, f) if park else None
-            if up is not None:
+            up = gshow(target_sha, f) if park and f in changed else None
+            if up is not None and up.encode() != data:  # identical to the target: not really a local edit
                 open(f"{f}.upstream-{ver}", "w").write(up)
+                parked.append(f)
             open(f, "wb").write(data)
-    return sorted(keep)
+    return sorted(parked) if park else sorted(f for f in keep if f in changed)
 
 
 def build(expect_version, expect_full=None):
