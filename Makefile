@@ -86,9 +86,15 @@ ALL_OBJS  := $(patsubst %.c,$(OBJ_DIR)/%.o,$(ALL_SRCS))
 # Build id for /VERSION: date + short commit (+ -dirty). build.o depends on
 # every other object, so it is regenerated whenever anything else is.
 BUILD_ID := $(shell date +%Y%m%d)-$(shell git rev-parse --short HEAD 2>/dev/null || echo release)$(shell git diff --quiet HEAD 2>/dev/null || echo -dirty)
-$(OBJ_DIR)/$(SRC_DIR)/build.o: CPPFLAGS += -DSEKURIRCD_BUILD='"$(BUILD_ID)"'
-$(OBJ_DIR)/$(SRC_DIR)/build.o: $(filter-out $(OBJ_DIR)/$(SRC_DIR)/build.o,$(ALL_OBJS))
-build-debug/$(SRC_DIR)/build.o: CPPFLAGS += -DSEKURIRCD_BUILD='"$(BUILD_ID)-asan"'
+# "-git" on the version (1.2.3-git) for any checkout that isn't exactly a v* release tag: the commits since the last
+# release. version.h stays the plain release number; a tarball without .git is the release itself.
+VERSION_SUFFIX := $(shell if git rev-parse HEAD >/dev/null 2>&1 && ! git describe --exact-match --tags --match 'v[0-9]*' HEAD >/dev/null 2>&1; then echo -git; fi)
+# Rebuild build.o when the id/suffix changes even if no source did (a commit, a new tag).
+BUILD_STAMP := $(OBJ_DIR)/build-id
+$(shell mkdir -p $(OBJ_DIR); echo '$(BUILD_ID)$(VERSION_SUFFIX)' | cmp -s - $(BUILD_STAMP) || echo '$(BUILD_ID)$(VERSION_SUFFIX)' > $(BUILD_STAMP))
+$(OBJ_DIR)/$(SRC_DIR)/build.o: CPPFLAGS += -DSEKURIRCD_BUILD='"$(BUILD_ID)"' -DSEKURIRCD_VERSION_SUFFIX='"$(VERSION_SUFFIX)"'
+$(OBJ_DIR)/$(SRC_DIR)/build.o: $(filter-out $(OBJ_DIR)/$(SRC_DIR)/build.o,$(ALL_OBJS)) $(BUILD_STAMP)
+build-debug/$(SRC_DIR)/build.o: CPPFLAGS += -DSEKURIRCD_BUILD='"$(BUILD_ID)-asan"' -DSEKURIRCD_VERSION_SUFFIX='"$(VERSION_SUFFIX)"'
 
 .DEFAULT_GOAL := all
 .PHONY: fuzz all debug check itest clean

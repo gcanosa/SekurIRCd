@@ -316,7 +316,7 @@ void config_defaults(config_t *out) {
 
     snprintf(out->server.name, CFG_STR, "sekuri");
     snprintf(out->server.network, CFG_STR, "SekuriIRC Network");
-    snprintf(out->server.version, CFG_STR, "%s", SEKURIRCD_VERSION);
+    snprintf(out->server.version, CFG_STR, "%s", sekurircd_version);
     snprintf(out->server.bind, CFG_STR, "0.0.0.0");
     out->server.port = 6667;
 
@@ -469,7 +469,7 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
 
     if (cfg_get_str(srv, "name", "sekuri", out->server.name, CFG_STR, errbuf, errbufsz, "server.name")) return -1;
     if (cfg_get_str(srv, "network", "SekuriIRC Network", out->server.network, CFG_STR, errbuf, errbufsz, "server.network")) return -1;
-    if (cfg_get_str(srv, "version", SEKURIRCD_VERSION, out->server.version, CFG_STR, errbuf, errbufsz, "server.version")) return -1;
+    if (cfg_get_str(srv, "version", sekurircd_version, out->server.version, CFG_STR, errbuf, errbufsz, "server.version")) return -1;
     if (cfg_get_str(srv, "sid", "", out->server.sid, sizeof out->server.sid, errbuf, errbufsz, "server.sid")) return -1;
     if (out->server.sid[0]) {
         const char *s = out->server.sid;

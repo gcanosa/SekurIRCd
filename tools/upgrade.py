@@ -414,7 +414,7 @@ def build(expect_version):
         v = subprocess.run([f"bin.new/{name}", "--version"], capture_output=True, text=True).stdout.strip()
         LOG.w(f"bin.new/{name} --version -> {v}")
         # chanserv carries its own version number; only the ircd must match the release
-        if not v.startswith(name) or (name == "sekurircd" and not v.endswith(expect_version)):
+        if not v.startswith(name) or (name == "sekurircd" and not v.endswith((expect_version, expect_version + "-git"))):
             raise RuntimeError(f"bin.new/{name} reports '{v}', expected {name} {expect_version if name == 'sekurircd' else '...'}")
     ok(f"Build OK: sekurircd {expect_version}, chanserv runs")
 
