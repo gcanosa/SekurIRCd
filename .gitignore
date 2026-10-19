@@ -26,3 +26,4 @@ plans/
 /dist/
 __pycache__/
 /ircop-levels.md
+*.pre-fix-*

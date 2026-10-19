@@ -4,7 +4,9 @@
 Pick the latest release or the latest main, review what changes (versions,
 changelog, new config options), back everything up, build safely, install,
 optionally restart -- and roll back if something goes wrong. Your live config
-is never modified. Every run writes logs/SekurIRCd-upgrade-<date>.log.
+is only touched with your OK: before the restart it offers tools/confcheck.py
+--fix (settings moved to where they live now, the same behaviour, backups kept).
+Every run writes logs/SekurIRCd-upgrade-<date>.log.
 
   tools/upgrade.py                    interactive
   tools/upgrade.py --check            report new releases/commits only (exit 10 = updates)
@@ -253,7 +255,7 @@ def show_config_news(news, limit=25):
     if not news:
         ok("No new, changed or removed options in the config templates.")
         return
-    info("Your config files are " + bold("never modified") + ". Compare, then copy what you want:")
+    info("Your config files are not modified here; after the install, tools/confcheck.py --fix offers to tidy them.")
     for d in news:
         out(); out(f"  {bold(d['live'])} {dim('(template: ' + d['tpl'] + ')')}")
         if d["new_file"]:
@@ -716,6 +718,7 @@ def upgrade(cur, st, tgt):
         fail("The new version rejects your config -- NOT restarting (the old daemons keep running).")
         info(f"Fix it (see {bold('tools/confcheck.py')}), then ./sekurircd restart -- or {bold('tools/upgrade.py --rollback')}")
         LOG.w("RESULT: INSTALLED, config check failed, not restarted"); print(dim(f"  Log: {LOG.path}")); sys.exit(1)
+    fix_config()
     result = restart_daemons() if any(st.values()) else None
     if not any(st.values()): info("No daemons were running -- start them with ./sekurircd start")
     if result is None and any(st.values()) and not ARGS.no_restart and ask("The new ircd did not come up. Roll back now?", True):
@@ -732,6 +735,24 @@ def upgrade(cur, st, tgt):
         info("REGISTER need it running. It uses your existing config/accounts.json in place -- nothing was moved.")
         info("Settings that used to be [accounts] in sekurircd.toml go in [nickserv] in services/services.toml.")
     LOG.w("RESULT: SUCCESS")
+
+
+def fix_config():
+    """Offer confcheck --fix: deprecated/moved settings to where they live now, unknown ones commented out, missing
+    options added commented out. It never changes what the server does; the daemons validate it before it sticks."""
+    p = run([sys.executable, "tools/confcheck.py", "--fix", "--no-banner"], check=False, log_out=False)
+    if p.returncode != 2:  # 0 = nothing to tidy (warnings left, if any, need a person), 1 = refused
+        return
+    out(); out(bold("  Config tidy-up (tools/confcheck.py --fix)"))
+    for l in p.stdout.rstrip().splitlines(): out(l)
+    if not ask("Apply these config changes? (same behaviour; backups kept as <file>.pre-fix-<date>)", True):
+        info(dim("Left as is -- apply later with tools/confcheck.py --fix --write")); return
+    w = run([sys.executable, "tools/confcheck.py", "--fix", "--write", "-q", "--no-banner"], check=False, log_out=False)
+    lines = w.stdout.rstrip().splitlines()
+    for l in [l for l in lines if "wrote " in l or "✘" in l] + lines[-1:]: out(l)
+    LOG.w(w.stdout)
+    if w.returncode:
+        warn("Config not changed (the new version refused the tidied files, so yours were restored).")
 
 
 def revert(prev):
