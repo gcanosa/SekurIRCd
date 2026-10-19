@@ -351,19 +351,15 @@ int spam_check_message(server_t *srv, client_t *cl, const char *target, const ch
 
     /* exempt_identified is meant for an account this server has trusted for
      * a while, not "anyone who just ran /REGISTER" -- that's instant,
-     * unverified self-service (see cmd_reg.c), so without an age floor it's
+     * unverified self-service (NickServ REGISTER), so without an age floor it's
      * a one-line bypass of every check below. Age-gate it against the same
      * new_user_period a fresh *connection* already has to wait out; with
      * new_user_period == 0 (the feature off) this is always true, same as
      * the old unconditional exemption. */
     int trusted_account = 0;
     if (sp->exempt_identified && cl->account[0]) {
-        /* accounts_created_at is a linear cJSON lookup -- cache it on the client per account name. */
-        if (strcmp(cl->acct_created_for, cl->account) != 0) {
-            cl->acct_created = accounts_created_at(&srv->accounts, cl->account);
-            snprintf(cl->acct_created_for, sizeof cl->acct_created_for, "%s", cl->account);
-        }
-        long created = cl->acct_created;
+        /* the account's registration time came with the login (services' SVSLOGIN, see cmd_reg.c's svc_command) */
+        long created = strcmp(cl->acct_created_for, cl->account) == 0 ? cl->acct_created : 0;
         trusted_account = created > 0 && now - created >= sp->new_user_period;
     }
     if (trusted_account) return 0;

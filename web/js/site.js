@@ -9,7 +9,7 @@
     ["commands", "Commands & modes", "docs/commands.html"],
     ["protection", "Protection bundle", "docs/protection.html"],
     ["ircv3", "IRCv3 & SASL", "docs/ircv3.html"],
-    ["chanserv", "ChanServ", "docs/chanserv.html"],
+    ["chanserv", "Services", "docs/chanserv.html"],
     ["webchat", "Web chat", "docs/webchat.html"]
   ];
   var cur = function (k) { return page === k ? ' aria-current="page"' : ""; };

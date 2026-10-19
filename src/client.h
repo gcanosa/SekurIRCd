@@ -53,7 +53,6 @@ typedef struct chan_node {
 } chan_node_t;
 
 #define AUTH_STYLE_LEGACY 0   /* SASL numerics / plain /REGISTER notice */
-#define AUTH_STYLE_NICKSERV 1 /* NOTICE from NickServ */
 #define AUTH_STYLE_DRAFT 2    /* draft/account-registration REGISTER SUCCESS */
 #define AUTH_STYLE_PASS 3     /* PASS account:password at connect: a server NOTICE */
 
@@ -112,9 +111,11 @@ typedef struct client {
     unsigned oper_privs;  /* OPER_PRIV_* granted by that login (see config.h) */
     int is_service;       /* introduced by a trusted link as a service bot (chanserv) */
     char account[64];     /* "" if not logged in (SASL or /REGISTER) -- see accounts.h */
-    char acct_created_for[64]; /* spam.c cache: account name whose created_at is in acct_created */
+    char acct_created_for[64]; /* account whose registration time (from services' SVSLOGIN) is in acct_created */
     long acct_created;
-    char sasl_mech[16];   /* "" outside an AUTHENTICATE exchange; "PLAIN" mid-exchange */
+    char sasl_mech[16];   /* "" outside a SASL exchange (relayed to services); the mechanism while one runs */
+    time_t sasl_started;  /* when it started -- cmd_services_tick fails one services never answer */
+    char certfp[72];      /* SHA-256 hex of the TLS client certificate, "" = none (SASL EXTERNAL / NickServ CERT) */
     int oper_fails;       /* consecutive failed /OPER attempts -- see cmd_oper.c _MAX_OPER_FAILS */
 
     /* Per-client lists, allocated on the first entry and freed when they empty (client_list_grow/idle): a
@@ -141,15 +142,13 @@ typedef struct client {
     int ident_pending;      /* RFC 1413 ident query in flight -- gates welcome */
     int dnsbl_pending;      /* DNSBL zone lookup in flight -- gates ALL dispatch, not just welcome */
     int ident_confirmed;    /* an identd answered -- cl->user is authoritative, no "~" prefix */
-    int auth_pending;       /* SASL verify / REGISTER hash running on a worker (scrypt is ~30ms) */
+    int auth_pending;       /* an OPER/DIE password check on a worker, or a PASS login at services -- gates welcome */
     time_t auth_started;    /* when auth_pending was set -- net.c's tick clears a result that never came back */
     uint64_t auth_gen;      /* bumped on every SASL/REGISTER/OPER/DIE/RESTART job submitted -- see worker.h job_t.gen */
     char pending_account[64];
-    /* PASS password, NickServ SET PASSWORD's new password, REGISTER's email and the SCRAM verifier derived from a password in
-     * flight: ~1 KB that exists only mid-login, so it lives in one heap block (client_auth_*) that is wiped and freed as
-     * soon as every field is empty. */
+    /* The PASS password until it is tried at welcome: exists only mid-login, so it lives in one heap block
+     * (client_auth_*) that is wiped and freed as soon as it is empty. */
     struct auth_tmp *auth_tmp;
-    struct scram_sess *scram; /* SASL SCRAM-SHA-256 exchange in progress (cmd_reg.c) */
     int auth_style;         /* AUTH_STYLE_*: how to word the result of the pending login/register */
     int register_attempts;  /* /REGISTER is unauthenticated account creation: cap it per connection */
     time_t register_last;
@@ -200,9 +199,6 @@ void *client_list_grow(void *list, int n, size_t elem);
 /* Fields of client_t.auth_tmp. */
 enum {
     AUTHTMP_PASS,   /* PASS given before registration, tried as an account login once NICK+USER are in (then wiped) */
-    AUTHTMP_NEWPW,  /* NickServ SET PASSWORD: the new password while the old one is being verified */
-    AUTHTMP_EMAIL,  /* email given at REGISTER, stored once the account exists */
-    AUTHTMP_SCRAM,  /* SCRAM verifier derived from the password in flight; stored if the login/registration succeeds */
     AUTHTMP_N
 };
 const char *client_auth_get(const client_t *cl, int field);       /* "" when unset; valid until the next set/clear */

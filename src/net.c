@@ -86,6 +86,14 @@ static void emit_stats_snote(server_t *srv) {
     char chanserv_part[160] = "";
     if (srv->cfg.debug_channel.chanserv_pidfile[0]) {
         FILE *pf = fopen(srv->cfg.debug_channel.chanserv_pidfile, "r");
+        const char *base = strrchr(srv->cfg.debug_channel.chanserv_pidfile, '/');
+        if (!pf && strcmp(base ? base + 1 : srv->cfg.debug_channel.chanserv_pidfile, "chanserv.pid") == 0) {
+            /* a config from before bin/chanserv became bin/services: its pidfile is services.pid beside the old one */
+            char alt[CFG_PATH];
+            snprintf(alt, sizeof alt, "%.*sservices.pid", base ? (int)(base - srv->cfg.debug_channel.chanserv_pidfile + 1) : 0,
+                     srv->cfg.debug_channel.chanserv_pidfile);
+            pf = fopen(alt, "r");
+        }
         int cs_pid = 0;
         if (pf) {
             if (fscanf(pf, "%d", &cs_pid) != 1) cs_pid = 0;
@@ -97,16 +105,16 @@ static void emit_stats_snote(server_t *srv) {
              * WorkingDirectory= and the pidfile then never resolves. Use an
              * absolute path matching chanserv's actual --pidfile/PIDFile=. */
             snprintf(chanserv_part, sizeof chanserv_part,
-                      " | chanserv: not running (pidfile %s not found -- check for a relative path)",
+                      " | services: not running (pidfile %s not found -- check for a relative path)",
                       srv->cfg.debug_channel.chanserv_pidfile);
         }
         if (cs_pid > 0) {
             double cs_cpu = 0;
             long cs_rss = 0;
             if (kill((pid_t)cs_pid, 0) == 0 && proc_stats((pid_t)cs_pid, &cs_cpu, &cs_rss) == 0) {
-                snprintf(chanserv_part, sizeof chanserv_part, " | chanserv %.1f%% cpu %ldMB", cs_cpu, cs_rss / 1024);
+                snprintf(chanserv_part, sizeof chanserv_part, " | services %.1f%% cpu %ldMB", cs_cpu, cs_rss / 1024);
             } else if (errno == ESRCH) {
-                snprintf(chanserv_part, sizeof chanserv_part, " | chanserv: not running (stale pidfile, pid %d)", cs_pid);
+                snprintf(chanserv_part, sizeof chanserv_part, " | services: not running (stale pidfile, pid %d)", cs_pid);
             } else {
                 snprintf(chanserv_part, sizeof chanserv_part, " | chanserv: pid %d unreachable (%s)", cs_pid, strerror(errno));
             }
@@ -1033,21 +1041,15 @@ static void drain_worker_results(server_t *srv) {
                 }
                 /* not listed: POLLIN resumes next poll() build, nothing else to do */
             } else if (r->type == JOB_SASL || r->type == JOB_HASH) {
-                /* A second SASL/REGISTER/OPER/DIE/RESTART attempt on the same
+                /* A second OPER/DIE/RESTART attempt on the same
                  * connection before this job's scrypt finished bumped
                  * cl->auth_gen when it submitted its own job -- this result
                  * belongs to the superseded attempt (possibly a different
                  * account/password) and must not be applied to whatever
                  * pending_account/auth_started the newer one set. */
                 if (r->gen != cl->auth_gen) continue;
-                if (r->purpose == AUTH_SASL || r->purpose == AUTH_REGISTER)
-                    cmd_finish_auth(srv, cl, r->purpose == AUTH_REGISTER, r->success, r->text);
-                else if (r->purpose == AUTH_PASSWD_VERIFY || r->purpose == AUTH_PASSWD_HASH || r->purpose == AUTH_DROP_VERIFY ||
-                         r->purpose == AUTH_RESET_HASH || r->purpose == AUTH_SASET_HASH)
-                    cmd_finish_account_op(srv, cl, r->purpose, r->success, r->text);
-                else
-                    cmd_finish_privileged_auth(srv, cl, r->purpose, r->success);
-                cmd_send_welcome_if_ready(srv, cl); /* held back while auth_pending (SASL before 001) */
+                cmd_finish_privileged_auth(srv, cl, r->purpose, r->success);
+                cmd_send_welcome_if_ready(srv, cl); /* held back while auth_pending */
             }
         }
     }
@@ -1061,7 +1063,7 @@ static void drain_worker_results(server_t *srv) {
 /* PING/timeout for client connections + the link keepalive tick. */
 static void tick(server_t *srv) {
     time_t now = time(NULL);
-    if (srv->cfg.accounts.enforce_nicks) nick_enforce_tick(srv, now);
+    cmd_services_tick(srv, now);
     for (client_t *cl = srv->all_clients; cl; cl = cl->all_next) {
         if (cl->fd < 0 || cl->quitting) continue; /* service pseudo-clients have no timeout of their own */
         double age = difftime(now, cl->signon_time);
@@ -1103,7 +1105,6 @@ static void tick(server_t *srv) {
     protection_tick(srv);
     server_kline_prune_expired(srv);
     server_kline_flush(srv); /* batched: see server_kline_flush */
-    accounts_flush(&srv->accounts); /* batched the same way */
     history_maybe_save(srv, 0);
 
     if (srv->cfg.debug_channel.stats_interval > 0) {
@@ -1372,7 +1373,6 @@ int net_run(server_t *srv) {
     log_set_hook(NULL);
 
     log_info("net", "shutting down");
-    accounts_flush(&srv->accounts); /* batched writes hit the disk first, whatever the teardown below does */
     /* uthash keeps its own bucket-array bookkeeping behind the head entry, so HASH_CLEAR dereferences that head: it has to
      * run while the clients are still alive (it frees only the table, never the entries). Done after the sweep below it
      * read a freed client -- invisible normally, a crash with scribbled free memory. */
@@ -1408,7 +1408,7 @@ int net_run(server_t *srv) {
     link_conn_t *lc = srv->links;
     while (lc) {
         link_conn_t *next = lc->next;
-        if (lc->service) client_free(lc->service);
+        for (int b = 0; b < lc->n_bots; b++) client_free(lc->bots[b]);
         if (lc->fd >= 0) close(lc->fd);
         free(lc);
         lc = next;
@@ -1422,7 +1422,6 @@ int net_run(server_t *srv) {
     if (srv->ws_listen_fd >= 0) close(srv->ws_listen_fd);
     if (srv->tls_ctx) SSL_CTX_free(srv->tls_ctx);
     link_tls_cleanup();
-    accounts_free(&srv->accounts);
     config_free(&srv->cfg);
     worker_pool_stop();
     return 0;

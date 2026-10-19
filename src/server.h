@@ -7,7 +7,6 @@
 #ifndef SEKURIRCD_SERVER_H
 #define SEKURIRCD_SERVER_H
 
-#include "accounts.h"
 #include "channel.h"
 #include "client.h"
 #include "config.h"
@@ -80,7 +79,7 @@ typedef struct server {
 
     client_t *users;        /* uthash, keyed by casefold_nick (registered clients) */
     channel_t *channels;    /* uthash, keyed by casefold_name */
-    account_store_t accounts;
+    int services_online;    /* a NickServ service user is on the network (cmd_services_tick; drives the sasl cap) */
     client_t *all_clients;  /* doubly-linked list, EVERY live connection (net.c's poll set) */
     client_t *by_conn_id;   /* uthash (hh_conn), keyed by conn_id -- real (fd >= 0) connections
                               * only, see server_add_connection; O(1) worker-result lookup */

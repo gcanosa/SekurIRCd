@@ -42,7 +42,8 @@
   connect-flood keys still work here but now live in the Protection bundle.</td></tr>
 <tr><td><code>[tls]</code></td><td><code>enabled</code> (default false), <code>port</code> (default 6697), <code>cert_file</code>, <code>key_file</code>, <code>request_client_cert</code> (needed for SASL EXTERNAL).
   Runs alongside the plaintext listener, never instead of it.</td></tr>
-<tr><td><code>[accounts]</code></td><td><code>enabled</code> (default false), <code>store_file</code>, <code>email_command</code> (mails verification and RESETPASS codes; gets <code>verify</code> or <code>reset</code> as its last argument). Backs SASL, <code>/REGISTER</code>, NickServ REGISTER/IDENTIFY, <code>draft/account-registration</code>, <code>/CERT</code> and the <code>a:</code> extban.</td></tr>
+<tr><td>accounts</td><td>Not an ircd section any more: accounts, NickServ and SASL are the services daemon's, configured in <code>[nickserv]</code> of <code>services/services.toml</code>
+  (see <a href="chanserv.html">services</a>). An <code>[accounts]</code> section left from an older release is ignored with a warning, and its <code>accounts.json</code> is used in place.</td></tr>
 <tr><td><code>[messages]</code></td><td><code>motd</code>, <code>oper_motd</code> (shown to opers) and <code>rules</code> (for <code>/RULES</code>) files, and max message length.</td></tr>
 <tr><td><code>[logging]</code></td><td><code>enabled</code>, <code>directory</code>, <code>level</code>, <code>debug</code> (protocol trace), <code>file</code>, rotation (<code>max_bytes</code>, <code>backup_count</code>).</td></tr>
 <tr><td><code>[[operators]]</code></td><td>One table per <code>/OPER</code> login. See below.</td></tr>
@@ -92,8 +93,8 @@ hosts = ["*@*"]                                       # or restrict, e.g. ["*@20
 <p>An optional <code>privileges</code> list limits which oper commands a login may use (without it, everything is allowed):
   <code>kill</code>, <code>kline</code> (KLINE/GLINE/ZLINE, SPAMFILTER, PROTECT), <code>sa</code> (SAJOIN/SAPART/SAMODE/SANICK),
   <code>host</code> (CHGHOST/SETHOST/CHGIDENT/USERIP), <code>wallops</code>, <code>rehash</code>, <code>die</code>,
-  <code>link</code> (SQUIT/CONNECT), <code>accounts</code> (NickServ SUSPEND/UNSUSPEND/FDROP/SASET PASSWORD and full INFO) and
-  <code>all</code>. <code>privileges = []</code> makes a helper oper with none of them.</p>
+  <code>link</code> (SQUIT/CONNECT) and <code>all</code>. NickServ SUSPEND/UNSUSPEND/FDROP/SASET are for services admins
+  (<code>[nickserv] admins</code>, by account), not an oper privilege. <code>privileges = []</code> makes a helper oper with none of them.</p>
 
 <h2>host cloaking</h2>
 <pre>[security]

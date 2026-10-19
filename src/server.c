@@ -89,12 +89,11 @@ int server_init(server_t *srv, const config_t *cfg) {
     srv->start_time = time(NULL);
     server_load_motd(srv);
 
-    char accounts_path[CFG_PATH];
-    int has_path = config_accounts_path(&srv->cfg, accounts_path, sizeof accounts_path);
-    accounts_init(&srv->accounts, has_path ? accounts_path : NULL);
     history_load(srv);
-    srv->accounts.on_change = netsync_account_changed; /* accounts replicate to linked servers */
-    srv->accounts.ud = srv;
+    if (srv->cfg.accounts.enabled)
+        log_warn("main", "[accounts] in %s is no longer used: accounts, NickServ and SASL are served by the services daemon "
+                         "(bin/services, [nickserv] in services.toml), which uses the existing account database in place",
+                 srv->cfg.path);
 
     server_kline_load(srv);
     spam_reload(srv);
@@ -147,12 +146,12 @@ int server_rehash(server_t *srv, char *errbuf, size_t errbufsz) {
     if (config_load(srv->cfg.path, &tmp, errbuf, errbufsz) != 0) return -1;
     /* bind/port/TLS listeners are not re-bound on rehash (same as Python) --
      * only the config values themselves swap in. */
-    int old_accounts = srv->cfg.accounts.enabled, old_history = srv->cfg.messages.history_size > 0;
+    int old_history = srv->cfg.messages.history_size > 0;
     config_free(&srv->cfg); /* the new config owns its own arrays; nothing keeps a pointer into the old ones across commands */
     srv->cfg = tmp;
     server_apply_cloak_secret(srv);
     if (srv->self_srv) snprintf(srv->self_srv->desc, sizeof srv->self_srv->desc, "%s", srv->cfg.server.network); /* LINKS/MAP description follows the network name */
-    cmd_cap_notify_changes(srv, old_accounts, old_history);
+    cmd_cap_notify_changes(srv, srv->services_online, old_history);
     net_reclass_all(srv);
     net_apply_listeners(srv);
     server_load_motd(srv);
@@ -478,6 +477,7 @@ void server_remove_client(server_t *srv, client_t *cl, const char *quit_reason) 
     irc_build(line, sizeof line, NULL, 0, prefix, "QUIT", NULL, 0, quit_reason ? quit_reason : "");
     if (cl->conn_id) worker_cancel(cl->conn_id); /* skip its still-queued lookups */
     if (cl->uid[0] && !cl->remote) netsync_user_quit(srv, cl, quit_reason); /* tell the rest of the network */
+    link_svc_user(srv, cl, SVC_EV_QUIT);
     if (cl->uid[0]) { /* out of the UID index */
         client_t *byu;
         HASH_FIND(hh_uid, srv->by_uid, cl->uid, strlen(cl->uid), byu);

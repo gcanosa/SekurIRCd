@@ -299,7 +299,7 @@ key_file = ""
 # client with no certificate still connects normally; one that presents a
 # certificate whose fingerprint has been bound to an account (see /CERT ADD
 # in README.md) can then log in via SASL EXTERNAL instead of a password.
-# Off by default -- no effect unless [accounts] below is also enabled.
+# Off by default -- no effect unless the services daemon (NickServ) is running.
 request_client_cert = false
 
 # IRCv3 STS (Strict Transport Security): advertised in CAP LS only while
@@ -311,47 +311,13 @@ sts_duration = 0
 
 
 # -----------------------------------------------------------------------------
-# [accounts] -- self-service accounts (SASL PLAIN/EXTERNAL, /REGISTER, /CERT)
+# Accounts (NickServ, SASL, /REGISTER, /CERT) live in the services daemon
 # -----------------------------------------------------------------------------
-# Backs SASL PLAIN/EXTERNAL, /REGISTER, /msg NickServ REGISTER|IDENTIFY, the
-# IRCv3 draft/account-registration cap, /CERT, EXTBAN's "a:" account type, and
-# the account-notify/account-tag IRCv3 caps. Off by default. Deliberately
-# independent of channel services (services/chanserv.py, which stays
-# password-only per-channel, no accounts) -- a small standalone store in
-# core, so it works with no services process running at all. See README.md's
-# "SASL EXTERNAL (certificate login)" section for the /CERT walkthrough.
-[accounts]
-enabled = false
-
-# JSON file account registrations are persisted to, resolved relative to
-# this config file's directory.
-store_file = "accounts.json"
-
-# Upper bound on registered accounts. /REGISTER is self-service account
-# creation, so without a cap one client can grow this store (and the file
-# rewritten on every registration) without limit. 0 = unlimited.
-max_accounts = 10000
-
-# Nick ownership: an account is named after the nick it was registered with.
-# With enforce_nicks on, someone using a nick that is a registered account name
-# must log in to it (SASL, or /msg NickServ IDENTIFY <password>) within
-# enforce_grace seconds, or they are renamed to Guest<number>. Off by default.
-# Either way, `/msg NickServ GHOST <nick>` (while identified as that account)
-# disconnects a session squatting on your nick.
-#enforce_nicks = false
-
-# Email verification. NickServ `SET EMAIL <address>` generates a code and runs
-#     <email_command> <address> <code> <account> <network> verify
-# (directly, no shell -- point it at a small script that mails the code); the
-# user then sends `/msg NickServ VERIFY <code>` within an hour. Empty (the
-# default) = no mail is sent, and the address is stored as unverified.
-# The same command mails password resets: `/msg NickServ RESETPASS <account>`
-# runs it with `reset` as the last argument (only for a verified address, at
-# most once per 5 minutes per account), and `RESETPASS <account> <code> <new
-# password>` sets the new password within the hour. No email_command = no
-# self-service reset (opers can still use NickServ SASET PASSWORD).
-#email_command = "/usr/local/bin/send-verification"
-#enforce_grace = 30
+# bin/services hosts NickServ next to ChanServ and owns the account database;
+# every server relays SASL and REGISTER to it. Configure it in [nickserv] of
+# services/services.toml (see services/services.template.toml). An [accounts]
+# section left here from an older release is ignored (with a startup warning);
+# its accounts.json is used in place by the services daemon.
 
 
 # -----------------------------------------------------------------------------
@@ -380,8 +346,10 @@ min_level = "WARNING"
 # how much it is actually catching. 0 = off.
 stats_interval = 0
 
-# Path to chanserv's pidfile, to report its CPU/mem alongside the ircd's own
-# in the periodic stats snote. "" = don't report chanserv stats.
+# Path to the services daemon's pidfile (bin/services, e.g. "services/services.pid"),
+# to report its CPU/mem alongside the ircd's own in the periodic stats snote.
+# "" = don't. (The key keeps its old name; an old ".../chanserv.pid" value is
+# looked up as ".../services.pid".)
 chanserv_pidfile = ""
 
 
@@ -461,7 +429,7 @@ backup_count = 5
 #   sa       SAJOIN/SAPART/SAMODE/SANICK   host     CHGHOST/SETHOST/CHGIDENT/USERIP
 #   wallops  WALLOPS/GLOBOPS               rehash   REHASH
 #   die      DIE/RESTART                   link     SQUIT/CONNECT
-#   accounts NickServ SUSPEND/UNSUSPEND/FDROP/SASET PASSWORD, and full NickServ INFO
+#   (NickServ SUSPEND/FDROP/SASET are for services admins: [nickserv] admins in services.toml)
 #   all      everything. `privileges = []` grants none of the above (a "helper" oper).
 #   e.g.  privileges = ["kill", "kline", "wallops"]
 # -----------------------------------------------------------------------------
@@ -597,17 +565,25 @@ auto_join = []
 
 
 # -----------------------------------------------------------------------------
-# [links] -- server-to-server linking (hub/leaf redundancy)
+# [links] -- server-to-server linking (multi-server networks)
 # -----------------------------------------------------------------------------
-# OFF by default -- this daemon is single-server unless you opt in. Strict
-# hub-and-spoke: one hub, one or more leaves that link only to the hub
-# (never to each other). See docs/irc-protocol-reference.md "Server-to-server
-# linking" for the wire protocol and what does/doesn't propagate
-# network-wide.
+# OFF by default -- this daemon is single-server unless you opt in. Linked
+# servers form a tree (no loops; a loop link is refused) and share users,
+# channels, modes, topics, messages, G-lines and the account database
+# (NickServ is built into every server and answers from that shared
+# database). ChanServ links to any ONE server and serves the whole network --
+# never run a second copy. Each server needs a unique [server] name (with a
+# dot) and [server] sid, and every server should use the same
+# host_masking_secret so cloaks match. Servers of different versions link as
+# long as their link protocol overlaps (checked at handshake; a mismatch is
+# refused with an error, a different-but-compatible version is announced to
+# opers). See README.md "Linking servers".
 [links]
 enabled = false
 
-# "hub" (accepts connections from leaves) or "leaf" (dials out to one hub).
+# "hub" accepts links, "leaf" only dials out, "both" does both. Whichever
+# side has `host`/`port` in its [[links.peers]] entry dials; the other side
+# lists the same peer without `host` and accepts it. Put `host` on ONE side.
 mode = "hub"
 
 # hub only: address/port the link listener binds to (separate from
@@ -634,7 +610,7 @@ tls_insecure_skip_verify = false
 ping_interval = 60.0
 ping_timeout = 180.0
 
-# leaf only: reconnect backoff (seconds), doubling from reconnect_delay up
+# dialing side: reconnect backoff (seconds), doubling from reconnect_delay up
 # to reconnect_delay_max after each failed attempt.
 reconnect_delay = 5.0
 reconnect_delay_max = 300.0

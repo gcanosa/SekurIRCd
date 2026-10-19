@@ -424,7 +424,7 @@ void cmd_channel_rename_apply(server_t *srv, channel_t *chan, client_t *by, cons
 void cmd_sajoin(server_t *srv, client_t *cl, irc_message_t *msg) {
     client_t *target = server_find_user(srv, msg->params[0]);
     if (!target) { err_no_such_nick(cl, msg->params[0]); return; }
-    if (target->remote) { notice_self(srv, cl, "That user is on another server -- SAJOIN works on local users only"); return; }
+    if (target->remote) { netsync_encap(srv, cl, target, "SAJOIN", msg->params + 1, msg->nparams - 1); return; }
     char joined[600] = "";
     char chanlist[600];
     snprintf(chanlist, sizeof chanlist, "%s", msg->params[1]);
@@ -451,7 +451,7 @@ void cmd_sajoin(server_t *srv, client_t *cl, irc_message_t *msg) {
 void cmd_sapart(server_t *srv, client_t *cl, irc_message_t *msg) {
     client_t *target = server_find_user(srv, msg->params[0]);
     if (!target) { err_no_such_nick(cl, msg->params[0]); return; }
-    if (target->remote) { notice_self(srv, cl, "That user is on another server -- SAPART works on local users only"); return; }
+    if (target->remote) { netsync_encap(srv, cl, target, "SAPART", msg->params + 1, msg->nparams - 1); return; }
     const char *reason = msg->nparams > 2 ? msg->params[2] : cl->nick;
     char parted[600] = "";
     char chanlist[600];

@@ -241,8 +241,8 @@ def test_cycle_link_is_refused():
     # c also tries to dial a directly: a -> b -> c plus c -> a would be a loop
     n["a"].cfg["links.peers"].append({"name": n["c"].name, "password": n.password})
     n["c"].cfg["links.peers"].append({"name": n["a"].name, "password": n.password, "host": "127.0.0.1", "port": n["a"].link_port})
-    n.start()
     try:
+        n.start()
         time.sleep(3)
         probe = n.client("a", "cyc")
         links = [l for l in probe.say("LINKS", 0.6) if " 364 " in l]
@@ -252,36 +252,32 @@ def test_cycle_link_is_refused():
 
 
 def test_chanserv_serves_users_on_other_servers():
-    from harness import ChanServ
-    n = Network(cfg={**OPERS, "accounts": {"enabled": True, "store_file": "acc.json"}})
+    n = Network(cfg={**OPERS, "accounts": {"enabled": True, "store_file": "acc.json"}})  # services link to a
     n.add("a")
     n.add("b", parent="a")
-    n["a"].cfg["links.peers"].append({"name": "services.test.net", "password": "svcsecret"})
     n.start()
     try:
-        with ChanServ(n["a"], n["a"].link_port, password="svcsecret"):
-            time.sleep(1.5)
-            far = n.client("b", "farfounder")  # lives on the leaf, ChanServ is on the hub
-            far.say("JOIN #svc", 0.5)
-            r = []
-            far.send("PRIVMSG ChanServ :REGISTER #svc farpass1")
-            assert far.saw(r"ChanServ.*NOTICE farfounder :#svc is now registered", 4), "REGISTER works from the other side of the link"
-            far.send("PRIVMSG ChanServ :JOIN #svc farpass1")
-            far.drain(0.8)
-            near = n.client("a", "nearuser")
-            near.say("JOIN #svc", 0.8)
-            far.send("PRIVMSG ChanServ :ACCESS #svc ADD *!*@127.0.0.1 o farpass1")
-            far.drain(1.0)
-            third = n.client("b", "thirduser")
-            third.say("JOIN #svc", 1.0)
-            names = " ".join(l for l in far.say("NAMES #svc", 0.5) if " 353 " in l)
-            assert "ChanServ" in names, names                  # the service sits in the channel for everyone
-            assert "@thirduser" in names, names                # and its ACCESS auto-op reached a user on the leaf
-            far.send("PRIVMSG ChanServ :AKICK #svc ADD bad!*@127.0.0.1 farpass1")
-            far.drain(0.8)
-            bad = n.client("a", "bad")
-            bad.say("JOIN #svc", 1.0)
-            assert bad.saw(r"KICK #svc bad", 1.5) or "bad" not in " ".join(l for l in far.say("NAMES #svc", 0.5) if " 353 " in l)
+        far = n.client("b", "farfounder")  # lives on the leaf, ChanServ is on the hub
+        far.say("JOIN #svc", 0.5)
+        r = []
+        far.send("PRIVMSG ChanServ :REGISTER #svc farpass1")
+        assert far.saw(r"ChanServ.*NOTICE farfounder :#svc is now registered", 4), "REGISTER works from the other side of the link"
+        far.send("PRIVMSG ChanServ :JOIN #svc farpass1")
+        far.drain(0.8)
+        near = n.client("a", "nearuser")
+        near.say("JOIN #svc", 0.8)
+        far.send("PRIVMSG ChanServ :ACCESS #svc ADD *!*@127.0.0.1 o farpass1")
+        far.drain(1.0)
+        third = n.client("b", "thirduser")
+        third.say("JOIN #svc", 1.0)
+        names = " ".join(l for l in far.say("NAMES #svc", 0.5) if " 353 " in l)
+        assert "@ChanServ" in names, names                 # the service sits in the channel, opped, for everyone
+        assert "@thirduser" in names, names                # and its ACCESS auto-op reached a user on the leaf
+        far.send("PRIVMSG ChanServ :AKICK #svc ADD bad!*@127.0.0.1 farpass1")
+        far.drain(0.8)
+        bad = n.client("a", "bad")
+        bad.say("JOIN #svc", 1.0)
+        assert bad.saw(r"KICK #svc bad", 1.5) or "bad" not in " ".join(l for l in far.say("NAMES #svc", 0.5) if " 353 " in l)
     finally:
         n.stop()
 
@@ -315,7 +311,8 @@ def test_rename_and_status_messages_cross_servers():
         assert c.saw(r"PRIVMSG @#new :for ops only", 1.5)
 
 
-def test_accounts_replicate_between_servers():
+def test_accounts_work_from_every_server_through_services():
+    # one services daemon on a: logins and changes from b and c are relayed to it, so every server sees the same accounts
     import base64
     cfg = {**OPERS, "accounts": {"enabled": True, "store_file": "acc.json"}}
     n = Network(cfg=cfg)
@@ -356,7 +353,7 @@ def test_accounts_replicate_between_servers():
         n.stop()
 
 
-def test_accounts_sync_in_the_burst_when_servers_link():
+def test_accounts_reach_a_server_that_links_later():
     import base64
     cfg = {**OPERS, "accounts": {"enabled": True, "store_file": "acc.json"}}
     n = Network(cfg=cfg)
@@ -377,6 +374,182 @@ def test_accounts_sync_in_the_burst_when_servers_link():
         c.send("AUTHENTICATE PLAIN")
         c.expect(r"AUTHENTICATE \+")
         c.send("AUTHENTICATE " + base64.b64encode(b"\0preexisting\0password1").decode())
-        assert c.saw(r" 903 ", 3), "accounts that existed before the link are burst across"
+        assert c.saw(r" 903 ", 3), "a server that links later logs users in through the same services"
+    finally:
+        n.stop()
+
+
+def test_big_burst_reaches_the_new_server():
+    # well past the old fixed 32 KB link sendq, which silently cut the burst short
+    from harness import Client
+    n = Network(cfg=OPERS)
+    n.add("a")
+    n.add("b", parent="a")
+    n["b"].cfg["links"]["autoconnect"] = False
+    n["a"].start()
+    n["b"].start()
+    try:
+        users = []
+        for i in range(200):
+            u = Client(n["a"].port, f"bu{i}", realname="R" * 150)
+            u.send(f"JOIN #big{i % 10}")
+            users.append(u)
+        time.sleep(1)
+        boss = n.client("b", "linker")
+        boss.say("OPER boss bosspw", 0.8)
+        boss.say("CONNECT a.test.net", 3)
+        n.wait_converged()
+        time.sleep(1)
+        assert any("There are 201 users" in l for l in boss.say("LUSERS", 0.6)), "every user made it across"
+        names = " ".join(l for l in boss.say("NAMES #big9", 0.6) if " 353 " in l)
+        assert "bu199" in names and "@bu9" in names, names
+    finally:
+        n.stop()
+
+
+def test_oper_overrides_reach_users_on_other_servers():
+    with chain() as n:
+        boss = n.client("a", "boss")
+        boss.say("OPER boss bosspw", 0.8)
+        c = n.client("c", "carol")
+        boss.send("SAJOIN carol #forced")
+        assert c.saw(r":carol!.* JOIN :?#forced", 2), "SAJOIN reached a user two hops away"
+        boss.send("SANICK carol carol2")
+        assert c.saw(r":carol!.* NICK :?carol2", 2)
+        time.sleep(0.5)  # the rename travels back to a before CHGHOST can name carol2 there
+        boss.send("CHGHOST carol2 moved.example")
+        time.sleep(0.6)
+        assert any(" 311 boss carol2 " in l and "moved.example" in l for l in boss.say("WHOIS carol2", 0.6))
+        boss.send("CHGIDENT carol2 newid")
+        time.sleep(0.6)
+        assert any(" 311 boss carol2 newid moved.example" in l for l in boss.say("WHOIS carol2", 0.6))
+        boss.send("SAPART carol2 #forced :out")
+        assert c.saw(r":carol2!.* PART #forced", 2)
+        plain = n.client("b", "plain")
+        plain.send("SAJOIN carol2 #nope")
+        assert plain.saw(r" 481 ", 1), "non-opers still can't"
+
+
+def test_server_link_over_tls():
+    import tempfile
+    from test_conn import make_cert
+    crt, key = make_cert(tempfile.mkdtemp(prefix="itest-cert-"))
+    n = Network(cfg=OPERS)
+    n.add("a")
+    n.add("b", parent="a")
+    for name in ("a", "b"):
+        s = n[name]
+        s.cfg["tls"] = {"enabled": True, "port": s.tls_port, "cert_file": crt, "key_file": key}
+        s.cfg["links"].update({"tls": True, "tls_insecure_skip_verify": True})
+    n["b"].cfg["links"]["autoconnect"] = False
+    n["a"].start()
+    n["b"].start()
+    try:
+        early = n.client("a", "early")
+        early.say("JOIN #tls", 0.3)
+        early.say("TOPIC #tls :over tls", 0.3)
+        boss = n.client("b", "linker")
+        boss.say("OPER boss bosspw", 0.8)
+        boss.send("CONNECT a.test.net")
+        time.sleep(1.5)  # far below ping_interval: the burst must not sit in OpenSSL until the next PING
+        assert any(" 311 linker early " in l for l in boss.say("WHOIS early", 0.6)), "the burst arrived over TLS"
+        boss.say("JOIN #tls", 0.6)
+        assert boss.saw(r"332 linker #tls :over tls", 0.5) or "over tls" in " ".join(boss.say("TOPIC #tls", 0.5))
+        boss.send("PRIVMSG #tls :hello through tls")
+        assert early.saw(r"PRIVMSG #tls :hello through tls", 2)
+        assert "TLS" in n["b"].output()
+    finally:
+        n.stop()
+
+
+def test_link_version_check():
+    import socket
+    n = Network(cfg=OPERS)
+    n.add("a")
+    n["a"].cfg["links.peers"] = [{"name": "old.test.net", "password": "pw1"}, {"name": "future.test.net", "password": "pw2"}]
+    n.start()
+    try:
+        def handshake(name, pw, sid, capab):
+            s = socket.create_connection(("127.0.0.1", n["a"].link_port), timeout=3)
+            s.sendall(f"PASS {pw}\r\nCAPAB :{capab}\r\nSERVER {name} 1 {sid} :x\r\n".encode())
+            time.sleep(0.8)
+            s.settimeout(0.5)
+            data = b""
+            try:
+                while True:
+                    chunk = s.recv(65536)
+                    if not chunk:
+                        break
+                    data += chunk
+            except socket.timeout:
+                pass
+            s.close()
+            return data.decode(errors="replace")
+        old = handshake("old.test.net", "pw1", "7OL", "SEKURNET")  # a build from before version reporting
+        assert "SERVER a.test.net" in old and "PROTO=1" in old and "VERSION=SekurIRCd-" in old, old
+        assert "compatible" in n["a"].output() and "older than version reporting" in n["a"].output()
+        bad = handshake("future.test.net", "pw2", "8FU", "SEKURNET PROTO=9 MINPROTO=9 VERSION=SekurIRCd-9.0.0")
+        assert "ERROR :Incompatible link protocol" in bad and "SERVER a.test.net" not in bad, bad
+    finally:
+        n.stop()
+
+
+def _sasl(n, server, nick, account, pw):
+    import base64
+    c = n.client(server, nick, register=False, extra=["CAP REQ :sasl"])
+    c.send("AUTHENTICATE PLAIN")
+    c.expect(r"AUTHENTICATE \+")
+    c.send("AUTHENTICATE " + base64.b64encode(f"\0{account}\0{pw}".encode()).decode())
+    return c, c.saw(r" 903 ", 3)
+
+
+def test_services_down_means_no_sasl_anywhere_and_logins_survive():
+    n = Network(cfg={**OPERS, "accounts": {"enabled": True, "store_file": "acc.json"}})
+    n.add("a")
+    n.add("b", parent="a")
+    n.start()
+    try:
+        reg = n.client("b", "keeper")
+        reg.send("PRIVMSG NickServ :REGISTER keeperpw1")
+        assert reg.saw(r"now logged in as it", 3), "NickServ on a registers a user of b"
+        n["a"].services.stop()
+        time.sleep(1.5)
+        assert any(" 330 " in l for l in n.client("b", "look").say("WHOIS keeper", 0.6)), "a login outlives services"
+        probe = n.client("b", "capprobe", register=False)
+        ls = " ".join(probe.say("CAP LS 302", 0.6))
+        assert "sasl" not in ls, ls
+        c, ok = None, False
+        c = n.client("b", "late", register=False, extra=["CAP REQ :sasl"])
+        c.send("AUTHENTICATE PLAIN")
+        assert c.saw(r" 904 ", 2), "no services: SASL fails at once instead of hanging"
+        n["a"]._start_services()
+        _, ok = _sasl(n, "b", "back", "keeper", "keeperpw1")
+        assert ok, "services back: logins work again"
+    finally:
+        n.stop()
+
+
+def test_enforcement_ghost_and_regain_across_servers():
+    cfg = {**OPERS, "accounts": {"enabled": True, "store_file": "acc.json", "enforce_nicks": True, "enforce_grace": 5}}
+    n = Network(cfg=cfg)
+    n.add("a")
+    n.add("b", parent="a")
+    n.add("c", parent="b")
+    n.start()
+    try:
+        own = n.client("a", "owner")
+        own.send("PRIVMSG NickServ :REGISTER ownerpw12")
+        assert own.saw(r"now logged in as it", 3)
+        own.say("NICK ownerelse", 0.5)
+        squat = n.client("c", "owner")  # two hops from services
+        assert squat.saw(r"This nickname is registered", 3)
+        assert squat.saw(r"NICK :Guest\d+", 8), "renamed on its own server after the grace period"
+        squat2 = n.client("c", "owner")
+        own.drain()
+        own.send("PRIVMSG NickServ :GHOST owner")
+        assert own.saw(r"Ghost session disconnected", 3)
+        time.sleep(1)
+        assert any(" 401 " in l for l in own.say("WHOIS owner", 0.8)), "GHOST disconnects a session on another server"
+        assert "Killed (NickServ (GHOST" in n["c"].output()
     finally:
         n.stop()

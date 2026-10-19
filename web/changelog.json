@@ -1,5 +1,16 @@
 [
   {
+    "tag": "v1.2.4",
+    "date": "2026-10-19",
+    "changes": [
+      "Services: NickServ now runs in the services daemon next to ChanServ (bin/services, services 1.4.0) instead of inside every ircd. One account database for the whole network: every server relays SASL (PLAIN, SCRAM-SHA-256, EXTERNAL), REGISTER and PASS logins to it, so accounts can no longer diverge in a netsplit. Nick enforcement, GHOST and REGAIN work across servers; services admins are accounts listed in [nickserv] admins. While services are down, SASL is not offered and existing logins stay logged in",
+      "Upgrade: nothing to convert -- NickServ uses the existing config/accounts.json in place (the pre-upgrade file is kept as accounts.json.bak1); the old [accounts] section is ignored with a warning. Account and ChanServ stores keep rotating backups and never start empty over a corrupt file (they load the newest good backup or refuse to start)",
+      "Tools: ./sekurircd start|stop|restart|status manages the ircd and services (and retires an old standalone ChanServ); systemd services.service replaces chanserv.service and follows sekurircd.service; upgrade.py, make install, confcheck and the config backup handle the switch",
+      "Server linking: a server joining a large network no longer loses part of the burst (the link send queue was a fixed 32 KB); TLS links no longer stall the burst until the next PING; ChanServ's ops and UNBAN reach every server; SAJOIN/SAPART/SANICK/CHGHOST/CHGIDENT work on users of other servers; servers exchange their link protocol and version at handshake (compatible versions are announced to opers, incompatible ones refused)",
+      "Testing: 127 end-to-end integration tests (multi-server bursts, TLS links, services across servers, upgrade of old data)"
+    ]
+  },
+  {
     "tag": "v1.2.3",
     "date": "2026-10-18",
     "changes": [

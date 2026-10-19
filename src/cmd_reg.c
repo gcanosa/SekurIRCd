@@ -1,19 +1,12 @@
-/* Registration: NICK, USER, PASS, CAP, PING, PONG, QUIT, AUTHENTICATE, REGISTER.
- * Ported (reduced scope) from commands.py's cmd_nick/cmd_user/cmd_cap/
- * cmd_authenticate/cmd_register. */
-#include "accounts.h"
+/* Registration: NICK, USER, PASS, CAP, PING, PONG, QUIT, plus the relay to account services (AUTHENTICATE, REGISTER,
+ * CERT, and the services -> user commands in svc_command). Accounts themselves live in the services daemon. */
 #include "cmd.h"
 #include "crypto.h"
 #include "log.h"
 #include "net.h"
-#include "scram.h"
-#include "worker.h"
 
 #include <arpa/inet.h>
 #include <ctype.h>
-#include <fcntl.h>
-#include <sys/wait.h>
-#include <unistd.h>
 #include <netinet/in.h>
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
@@ -24,9 +17,7 @@
 #include <strings.h>
 #include <time.h>
 
-static int valid_email(const char *e);
-static void ns_begin_email(server_t *srv, client_t *cl, const char *email);
-static int start_plain_login(server_t *srv, client_t *cl, const char *authcid, const char *passwd, int style);
+static const char *sasl_mechs(server_t *srv);
 
 void cmd_nick(server_t *srv, client_t *cl, irc_message_t *msg) {
     if (msg->nparams < 1) {
@@ -125,7 +116,6 @@ void cmd_nick(server_t *srv, client_t *cl, irc_message_t *msg) {
     server_monitor_notify(srv, cl, 1);
     server_watch_notify(srv, cl, 1);
     netsync_user_nick(srv, cl);
-    nick_enforce_check(srv, cl);
 }
 
 void cmd_user(server_t *srv, client_t *cl, irc_message_t *msg) {
@@ -153,29 +143,6 @@ void cmd_user(server_t *srv, client_t *cl, irc_message_t *msg) {
     cmd_send_welcome_if_ready(srv, cl);
 }
 
-/* No server-wide connect password exists, so PASS doubles as an account login for clients without SASL (mIRC,
- * bouncers): "PASS account:password", or "PASS password" for the account named like the nick. Tried at welcome time. */
-void cmd_pass(server_t *srv, client_t *cl, irc_message_t *msg) {
-    if (cl->registered || msg->nparams < 1 || !srv->cfg.accounts.enabled) return;
-    client_auth_set(cl, AUTHTMP_PASS, msg->params[msg->nparams - 1]);
-}
-
-int cmd_pass_login(server_t *srv, client_t *cl) {
-    if (!client_auth_get(cl, AUTHTMP_PASS)[0]) return 0;
-    char pass[256];
-    snprintf(pass, sizeof pass, "%s", client_auth_get(cl, AUTHTMP_PASS));
-    client_auth_clear(cl, AUTHTMP_PASS);
-    if (cl->account[0] || !srv->cfg.accounts.enabled) return 0; /* SASL already did it */
-    char *colon = strchr(pass, ':');
-    const char *account = colon ? pass : cl->nick, *password = colon ? colon + 1 : pass;
-    if (colon) *colon = '\0';
-    int rc = (account[0] && password[0] && strlen(password) < sizeof ((job_t *)0)->secret)
-                 ? start_plain_login(srv, cl, account, password, AUTH_STYLE_PASS) : -1;
-    OPENSSL_cleanse(pass, sizeof pass);
-    if (rc != 0) notice_self(srv, cl, "PASS login refused (try again later or use SASL) -- continuing unidentified");
-    return rc == 0;
-}
-
 /* `tokens302` goes to clients that negotiated CAP 302 (cap values allowed), `tokens` to the rest (bare names). */
 static void cap_notify_send(server_t *srv, const char *verb, const char *tokens302, const char *tokens, unsigned drop_bit) {
     for (client_t *c = srv->all_clients; c; c = c->all_next) {
@@ -188,14 +155,14 @@ static void cap_notify_send(server_t *srv, const char *verb, const char *tokens3
     }
 }
 
+/* SASL/REGISTER follow account services being reachable (cmd_services_tick), chathistory follows the config. */
 void cmd_cap_notify_changes(server_t *srv, int old_accounts, int old_history) {
-    int accounts = srv->cfg.accounts.enabled, history = srv->cfg.messages.history_size > 0;
+    int accounts = services_agent(srv) != NULL, history = srv->cfg.messages.history_size > 0;
     if (accounts != old_accounts) {
         if (accounts) {
-            int external = srv->cfg.tls.enabled && srv->cfg.tls.request_client_cert; /* same rule as CAP LS */
-            cap_notify_send(srv, "NEW", external ? "sasl=PLAIN,SCRAM-SHA-256,EXTERNAL draft/account-registration=custom-account-name"
-                                                 : "sasl=PLAIN,SCRAM-SHA-256 draft/account-registration=custom-account-name",
-                            "sasl draft/account-registration", 0);
+            char t302[160];
+            snprintf(t302, sizeof t302, "sasl=%s draft/account-registration=custom-account-name", sasl_mechs(srv));
+            cap_notify_send(srv, "NEW", t302, "sasl draft/account-registration", 0);
         } else {
             cap_notify_send(srv, "DEL", "sasl draft/account-registration", "sasl draft/account-registration", 0);
         }
@@ -303,16 +270,10 @@ static int supported_cap_tokens(server_t *srv, client_t *cl, char tok[][CAP_TOKE
         if (CAP_ATTRS[i].bit == CAP_MULTILINE && v302) snprintf(tok[n++], CAP_TOKEN_LEN, "draft/multiline=max-bytes=%d,max-lines=%d", 4096, 24);
         else snprintf(tok[n++], CAP_TOKEN_LEN, "%s", CAP_ATTRS[i].name);
     }
-    if (srv->cfg.accounts.enabled && n + 2 <= MAX_CAP_TOKENS) {
-        /* EXTERNAL only ever succeeds if the TLS listener actually asks
-         * clients for a certificate -- otherwise cl->ssl never has a peer
-         * cert to match, so don't advertise a mechanism that can't work. */
-        int external_possible = srv->cfg.tls.enabled && srv->cfg.tls.request_client_cert;
-        if (v302) snprintf(tok[n++], CAP_TOKEN_LEN, "%s", external_possible ? "sasl=PLAIN,SCRAM-SHA-256,EXTERNAL" : "sasl=PLAIN,SCRAM-SHA-256");
+    if (services_agent(srv) && n + 2 <= MAX_CAP_TOKENS) { /* accounts live in services: offered while they are reachable */
+        if (v302) snprintf(tok[n++], CAP_TOKEN_LEN, "sasl=%s", sasl_mechs(srv));
         else snprintf(tok[n++], CAP_TOKEN_LEN, "sasl");
-        /* No before-connect (REGISTER needs a registered connection) and no
-         * email-required (email is accepted but not stored/verified);
-         * custom-account-name because the account needn't match the nick. */
+        /* custom-account-name: the account needn't match the nick; no before-connect (REGISTER needs a registered connection) */
         snprintf(tok[n++], CAP_TOKEN_LEN, "%s", v302 ? "draft/account-registration=custom-account-name" : "draft/account-registration");
     }
     /* IRCv3 STS: a plaintext connection is told to switch to the TLS port
@@ -388,7 +349,7 @@ void cmd_cap(server_t *srv, client_t *cl, irc_message_t *msg) {
             for (char *tok = strtok_r(probe, " ", &save); tok; tok = strtok_r(NULL, " ", &save)) {
                 const char *name = tok[0] == '-' ? tok + 1 : tok;
                 int known = ((strcasecmp(name, "sasl") == 0 || strcasecmp(name, "draft/account-registration") == 0) &&
-                             srv->cfg.accounts.enabled);
+                             services_agent(srv) != NULL);
                 for (int i = 0; !known && i < N_CAP_ATTRS; i++)
                     if (strcasecmp(name, CAP_ATTRS[i].name) == 0 && !(CAP_ATTRS[i].bit == CAP_CHATHISTORY && srv->cfg.messages.history_size <= 0)) known = 1;
                 if (!known) { ok = 0; break; }
@@ -440,28 +401,10 @@ void cmd_quit(server_t *srv, client_t *cl, irc_message_t *msg) {
     cl->quitting = 1;
 }
 
-/* base64-decode `in` (must be a full 4-char-aligned blob, padding included)
- * into `out` (capacity `outcap`), stripping '=' padding from the reported
- * length. Uses OpenSSL's EVP_DecodeBlock rather than hand-rolling base64. */
-static int b64_decode(const char *in, unsigned char *out, size_t outcap, int *outlen) {
-    size_t inlen = strlen(in);
-    if (inlen == 0 || inlen % 4 != 0) return -1;
-    if (inlen / 4 * 3 > outcap) return -1;
-    int n = EVP_DecodeBlock(out, (const unsigned char *)in, (int)inlen);
-    if (n < 0) return -1;
-    int pad = 0;
-    if (in[inlen - 1] == '=') pad++;
-    if (inlen >= 2 && in[inlen - 2] == '=') pad++;
-    *outlen = n - pad;
-    return 0;
-}
-
-/* Hex-encodes the SHA-256 fingerprint of `cl`'s TLS client certificate into
- * `out` (>= 65 bytes: 32 bytes * 2 hex chars + NUL). Returns -1 if this isn't
- * a TLS connection or the client didn't present a certificate -- SASL
- * EXTERNAL needs [tls] request_client_cert = true for the latter to ever be
- * possible. Backs both SASL EXTERNAL (cmd_authenticate) and /CERT ADD. */
-static int peer_cert_fingerprint(client_t *cl, char *out, size_t outsz) {
+/* Hex-encodes the SHA-256 fingerprint of `cl`'s TLS client certificate into `out` (>= 65 bytes). -1 if this isn't a TLS
+ * connection or no certificate was presented ([tls] request_client_cert = true is needed for that). Set on the client at
+ * registration (cl->certfp) and handed to services, which back SASL EXTERNAL and NickServ CERT with it. */
+int client_cert_fingerprint(client_t *cl, char *out, size_t outsz) {
     if (!cl->ssl) return -1;
 #if OPENSSL_VERSION_NUMBER >= 0x30000000L
     X509 *cert = SSL_get1_peer_certificate(cl->ssl);
@@ -473,23 +416,13 @@ static int peer_cert_fingerprint(client_t *cl, char *out, size_t outsz) {
     unsigned int dlen = 0;
     int digest_ok = X509_digest(cert, EVP_sha256(), digest, &dlen);
     X509_free(cert);
-    /* Without this check a failed digest left dlen == 0, the hex loop below
-     * never ran, and `out` went back to the caller uninitialized -- an
-     * unterminated stack buffer used as a credential. */
-    if (digest_ok != 1 || dlen == 0) return -1;
-    if (outsz < (size_t)dlen * 2 + 1) return -1;
+    if (digest_ok != 1 || dlen == 0 || outsz < (size_t)dlen * 2 + 1) return -1; /* never hand back an uninitialized buffer */
     for (unsigned int i = 0; i < dlen; i++) snprintf(out + i * 2, 3, "%02x", digest[i]);
     return 0;
 }
 
-/* Per-IP failed-login throttle for SASL/NickServ IDENTIFY -- both go through
- * start_plain_login below, before *and* after registration. Same fixed-slot
- * eviction shape as net.c's connect-flood table: a full table evicts the
- * oldest entry rather than tracking every IP forever. Without this, an
- * unlimited number of connections (or nick changes on one) can each grind
- * through the account/password space at whatever rate the worker pool keeps
- * up with -- there was no failure counter at all, only "one attempt in
- * flight per connection". */
+/* Per-IP failed-login throttle, applied before anything is relayed to services (they keep their own too), so a flood of
+ * guesses from one address stops here instead of crossing the network. Fixed slots, oldest evicted. */
 #define AUTH_FAIL_SLOTS  256
 #define AUTH_FAIL_MAX    5
 #define AUTH_FAIL_WINDOW 60
@@ -526,291 +459,138 @@ static void auth_fail_record(const char *ip) {
     t->count++;
 }
 
-/* A precomputed scrypt hash for a password nobody knows, used in place of a
- * real account's hash when `authcid` doesn't exist -- so an unknown account
- * still costs a full ~30ms verify instead of failing instantly, closing the
- * timing side-channel that let a client tell "no such account" apart from
- * "wrong password" by how fast the reply came back. Computed once, lazily
- * (itself a ~30ms scrypt hash, off the hot path). */
-static const char *auth_decoy_hash(void) {
-    static char buf[160];
-    static int ready;
-    if (!ready) { crypto_hash_password("sekurircd-timing-decoy, not a real password", buf, sizeof buf); ready = 1; }
-    return buf;
+/* --- account services (the services daemon's NickServ) ------------------------------------------------------------
+ * Accounts, SASL and REGISTER all live in services; this server only relays. Lines for services go to the NickServ
+ * pseudo-client -- over its link if it is ours, else through netsync toward the server it sits on. Their answers come
+ * back through svc_command (from the services link or relayed). A connection is named by its client id
+ * "<sid>.<conn_id>" (it may not have a UID yet), which also tells a relaying server where to deliver the answer. */
+
+client_t *services_agent(server_t *srv) {
+    client_t *a = server_find_user(srv, "NickServ");
+    return a && a->is_service ? a : NULL;
 }
 
-/* Starts a password check for `authcid` on a worker (scrypt is ~30ms, so it
- * never runs on the event loop; net.c applies the result via
- * cmd_finish_auth). Shared by SASL PLAIN and NickServ IDENTIFY. One in flight
- * per connection bounds the queue. 0 = submitted, -1 = refused (too many
- * recent failures from this IP, one already pending, or worker queue full),
- * -2 = the account is suspended -- the caller words the failure for its own
- * protocol. */
-static int start_plain_login(server_t *srv, client_t *cl, const char *authcid, const char *passwd, int style) {
-    if (cl->auth_pending || auth_fail_throttled(cl->ip)) return -1;
-    const char *owner_acct = accounts_owner_of_nick(&srv->accounts, authcid);
-    if (owner_acct) authcid = owner_acct; /* logging in as a grouped nick means its account */
-    if (accounts_suspended(&srv->accounts, authcid, NULL, NULL)) return -2;
-    const char *hash = accounts_hash(&srv->accounts, authcid);
-    int unknown = !hash;
-    if (unknown) hash = auth_decoy_hash();
-    job_t j; memset(&j, 0, sizeof j);
-    j.type = JOB_SASL;
-    j.purpose = AUTH_SASL;
-    j.conn_id = cl->conn_id;
-    snprintf(j.secret, sizeof j.secret, "%s", passwd);
-    snprintf(j.hash, sizeof j.hash, "%s", hash);
-    /* Never record an account name the store doesn't have -- cmd_finish_auth
-     * would otherwise log in as it in the (cryptographically negligible, but
-     * not worth relying on) case the decoy hash ever matched. */
-    snprintf(cl->pending_account, sizeof cl->pending_account, "%s", unknown ? "" : authcid);
-    /* An account made before SCRAM existed has no verifier; the password is in hand now, so derive one (stored only if this login succeeds). */
-    client_auth_clear(cl, AUTHTMP_SCRAM);
-    if (!unknown && !accounts_scram(&srv->accounts, authcid)) {
-        scram_verifier_t sv;
-        char vs[160];
-        if (scram_make_verifier(passwd, &sv) == 0) { scram_verifier_to_string(&sv, vs, sizeof vs); client_auth_set(cl, AUTHTMP_SCRAM, vs); }
-    }
-    cl->auth_style = style;
-    cl->auth_pending = 1;
-    cl->auth_started = time(NULL);
-    j.gen = ++cl->auth_gen;
-    int rc = worker_submit(&j);
-    OPENSSL_cleanse(j.secret, sizeof j.secret);
-    if (rc != 0) { cl->auth_pending = 0; return -1; }
-    return 0;
+static void client_id(server_t *srv, const client_t *cl, char *out, size_t outsz) {
+    snprintf(out, outsz, "%s.%llu", srv->self_srv->sid, (unsigned long long)cl->conn_id);
 }
 
-/* --- SASL SCRAM-SHA-256 ------------------------------------------------------
- * Three client messages: client-first, client-final, then an empty "+" after
- * the server-final. The password never reaches the server (and no scrypt job is
- * needed): the stored verifier is enough to check the proof. */
-struct scram_sess {
-    char account[64];
-    char first_bare[300];   /* client-first-message-bare */
-    char server_first[300];
-    scram_verifier_t v;
-    int step;               /* 0 = expecting client-first, 1 = client-final, 2 = expecting the final "+" */
-};
-
-static void authenticate_send(client_t *cl, const char *data) {
-    char line[500];
-    const char *p[] = {data};
-    irc_build(line, sizeof line, NULL, 0, NULL, "AUTHENTICATE", p, 1, NULL);
-    client_send(cl, line);
+static void to_services(server_t *srv, const char *line) {
+    client_t *a = services_agent(srv);
+    if (!a) return;
+    if (a->link_conn) link_forward_line(a->link_conn, line);
+    else netsync_svcrelay(srv, a->uid, line);
 }
 
-static void scram_fail(client_t *cl) {
-    auth_fail_record(cl->ip);
-    free(cl->scram);
-    cl->scram = NULL;
+static const char *sasl_mechs(server_t *srv) {
+    /* EXTERNAL only works if the TLS listener asks for client certificates */
+    return srv->cfg.tls.enabled && srv->cfg.tls.request_client_cert ? "PLAIN,SCRAM-SHA-256,EXTERNAL" : "PLAIN,SCRAM-SHA-256";
+}
+
+#define SASL_TIMEOUT 20 /* services that don't answer by then: 904 */
+
+static void sasl_end(client_t *cl) {
     cl->sasl_mech[0] = '\0';
-    client_reply(cl, N_SASLFAIL, NULL, 0, "SASL authentication failed");
+    cl->sasl_started = 0;
 }
 
-/* Pulls "k=value" out of a comma-separated SCRAM attribute list. */
-static int scram_attr(const char *msg, char key, char *out, size_t outsz) {
-    for (const char *p = msg; *p; ) {
-        const char *end = strchr(p, ',');
-        size_t len = end ? (size_t)(end - p) : strlen(p);
-        if (len >= 2 && p[0] == key && p[1] == '=') {
-            if (len - 2 >= outsz) return 0;
-            memcpy(out, p + 2, len - 2);
-            out[len - 2] = '\0';
-            return 1;
-        }
-        p = end ? end + 1 : p + len;
-    }
-    return 0;
+static void sasl_start(server_t *srv, client_t *cl, const char *mech) {
+    char cid[40], line[300];
+    client_id(srv, cl, cid, sizeof cid);
+    snprintf(cl->sasl_mech, sizeof cl->sasl_mech, "%s", mech);
+    cl->sasl_started = time(NULL);
+    char fp[72];
+    if (!cl->certfp[0] && client_cert_fingerprint(cl, fp, sizeof fp) == 0) snprintf(cl->certfp, sizeof cl->certfp, "%s", fp);
+    irc_build(line, sizeof line, NULL, 0, NULL, "SVCSASL",
+              (const char *[]){cid, "S", mech, cl->certfp[0] ? cl->certfp : "*", cl->ip}, 5, NULL);
+    to_services(srv, line);
 }
 
-static void scram_step(server_t *srv, client_t *cl, const char *token) {
-    struct scram_sess *s = cl->scram;
-    if (!s) { /* first client message arrives with a fresh session */
-        if (auth_fail_throttled(cl->ip)) { scram_fail(cl); return; }
-        s = cl->scram = calloc(1, sizeof *s);
-        if (!s) { cl->sasl_mech[0] = '\0'; return; }
-    }
-    if (strlen(token) > 400) { scram_fail(cl); return; }
-    unsigned char raw[320];
-    char msg[320];
-    if (strcmp(token, "+") == 0) { raw[0] = '\0'; msg[0] = '\0'; }
-    else {
-        int n = scram_b64_decode(token, raw, sizeof raw - 1);
-        if (n < 0) { scram_fail(cl); return; }
-        memcpy(msg, raw, (size_t)n);
-        msg[n] = '\0';
-    }
-
-    if (s->step == 0) { /* client-first: "n,,n=<user>,r=<cnonce>" */
-        if (strncmp(msg, "n,,", 3) != 0 && strncmp(msg, "y,,", 3) != 0) { scram_fail(cl); return; } /* no channel binding */
-        const char *bare = msg + 3;
-        char user[64], cnonce[96];
-        if (!scram_attr(bare, 'n', user, sizeof user) || !scram_attr(bare, 'r', cnonce, sizeof cnonce) || strchr(user, '=')) { scram_fail(cl); return; }
-        const char *stored = accounts_scram(&srv->accounts, user);
-        if (accounts_suspended(&srv->accounts, user, NULL, NULL)) { scram_fail(cl); return; }
-        if (!stored || scram_verifier_from_string(stored, &s->v) != 0) { scram_fail(cl); return; } /* unknown account, or no verifier yet (log in with PLAIN once) */
-        snprintf(s->account, sizeof s->account, "%s", accounts_display_name(&srv->accounts, user));
-        snprintf(s->first_bare, sizeof s->first_bare, "%s", bare);
-        char snonce[24], saltb[64];
-        crypto_random_hex(snonce, sizeof snonce, 11);
-        scram_b64_encode(s->v.salt, (size_t)s->v.saltlen, saltb, sizeof saltb);
-        snprintf(s->server_first, sizeof s->server_first, "r=%s%s,s=%s,i=%d", cnonce, snonce, saltb, s->v.iter);
-        char out[500];
-        if (scram_b64_encode((const unsigned char *)s->server_first, strlen(s->server_first), out, sizeof out) < 0) { scram_fail(cl); return; }
-        s->step = 1;
-        snprintf(cl->sasl_mech, sizeof cl->sasl_mech, "SCRAM-SHA-256"); /* exchange continues */
-        authenticate_send(cl, out);
-        return;
-    }
-    if (s->step == 1) { /* client-final: "c=biws,r=<nonce>,p=<proof>" */
-        char chan[16], nonce[200], proofb[64];
-        if (!scram_attr(msg, 'c', chan, sizeof chan) || (strcmp(chan, "biws") != 0 && strcmp(chan, "eSws") != 0) ||
-            !scram_attr(msg, 'r', nonce, sizeof nonce) || !scram_attr(msg, 'p', proofb, sizeof proofb)) { scram_fail(cl); return; }
-        char expect_nonce[200];
-        if (!scram_attr(s->server_first, 'r', expect_nonce, sizeof expect_nonce) || strcmp(nonce, expect_nonce) != 0) { scram_fail(cl); return; }
-        const char *pp = strstr(msg, ",p=");
-        unsigned char proof[64];
-        if (!pp || scram_b64_decode(proofb, proof, sizeof proof) != SCRAM_KEYLEN) { scram_fail(cl); return; }
-        char authmsg[900];
-        snprintf(authmsg, sizeof authmsg, "%s,%s,%.*s", s->first_bare, s->server_first, (int)(pp - msg), msg);
-        unsigned char sig[SCRAM_KEYLEN];
-        if (!scram_check_proof(&s->v, authmsg, proof, sig)) { scram_fail(cl); return; }
-        char sigb[64], final[100], out[200];
-        scram_b64_encode(sig, SCRAM_KEYLEN, sigb, sizeof sigb);
-        snprintf(final, sizeof final, "v=%s", sigb);
-        scram_b64_encode((const unsigned char *)final, strlen(final), out, sizeof out);
-        s->step = 2;
-        snprintf(cl->sasl_mech, sizeof cl->sasl_mech, "SCRAM-SHA-256");
-        authenticate_send(cl, out);
-        return;
-    }
-    /* step 2: the client's empty "+" acknowledging the server signature */
-    char account[64];
-    snprintf(account, sizeof account, "%s", s->account);
-    free(cl->scram);
-    cl->scram = NULL;
-    server_login(srv, cl, account);
-    client_reply(cl, N_SASLSUCCESS, NULL, 0, "SASL authentication successful");
-    log_info("sasl", "%s authenticated as %s via SCRAM-SHA-256", cl->nick, account);
+static void sasl_data(server_t *srv, client_t *cl, const char *kind, const char *data) {
+    char cid[40], line[600];
+    client_id(srv, cl, cid, sizeof cid);
+    irc_build(line, sizeof line, NULL, 0, NULL, "SVCSASL", (const char *[]){cid, kind, data}, 3, NULL);
+    to_services(srv, line);
 }
 
-/* SASL PLAIN and EXTERNAL -- the universal minimum every SASL-capable client
- * already supports, plus certificate-based login for one that presented a
- * TLS client cert bound to an account via /CERT ADD. Ported (PLAIN) from
- * commands.cmd_authenticate. Deliberately doesn't support the multi-line
- * ("400-byte chunks, a final short/empty line") form of the spec -- neither
- * mechanism's blob ever needs it in practice. */
+/* SASL: the mechanism exchange runs in services; this relays each AUTHENTICATE and turns the outcome into numerics.
+ * Deliberately no multi-line (400-byte chunk) continuation -- none of PLAIN/SCRAM/EXTERNAL needs it in practice. */
 void cmd_authenticate(server_t *srv, client_t *cl, irc_message_t *msg) {
     const char *token = msg->params[0];
-
     if (!cl->sasl_mech[0]) {
-        if (cl->account[0]) {
-            client_reply(cl, N_SASLALREADY, NULL, 0, "You have already authenticated using SASL");
-            return;
-        }
-        int is_plain = strcasecmp(token, "PLAIN") == 0;
-        int is_external = strcasecmp(token, "EXTERNAL") == 0;
-        int is_scram = strcasecmp(token, "SCRAM-SHA-256") == 0;
-        if (!srv->cfg.accounts.enabled) {
+        if (cl->account[0]) { client_reply(cl, N_SASLALREADY, NULL, 0, "You have already authenticated using SASL"); return; }
+        int known = strcasecmp(token, "PLAIN") == 0 || strcasecmp(token, "SCRAM-SHA-256") == 0 || strcasecmp(token, "EXTERNAL") == 0;
+        if (!services_agent(srv) || auth_fail_throttled(cl->ip)) { client_reply(cl, N_SASLFAIL, NULL, 0, "SASL authentication failed"); return; }
+        if (!known) {
+            const char *p[] = {sasl_mechs(srv)}; /* 908 first: tells a client that guessed wrong what exists */
+            client_reply(cl, N_SASLMECHS, p, 1, "are available SASL mechanisms");
             client_reply(cl, N_SASLFAIL, NULL, 0, "SASL authentication failed");
             return;
         }
-        if (!is_plain && !is_external && !is_scram) {
-            /* 908 before 904: a bare "failed" gives a client that guessed the
-             * wrong mechanism no way to discover which ones exist. */
-            int external_possible = srv->cfg.tls.enabled && srv->cfg.tls.request_client_cert;
-            const char *mechs[] = {external_possible ? "PLAIN,SCRAM-SHA-256,EXTERNAL" : "PLAIN,SCRAM-SHA-256"};
-            client_reply(cl, N_SASLMECHS, mechs, 1, "are available SASL mechanisms");
-            client_reply(cl, N_SASLFAIL, NULL, 0, "SASL authentication failed");
-            return;
-        }
-        snprintf(cl->sasl_mech, sizeof cl->sasl_mech, "%s", is_plain ? "PLAIN" : is_scram ? "SCRAM-SHA-256" : "EXTERNAL");
-        free(cl->scram); /* a fresh attempt starts a fresh exchange */
-        cl->scram = NULL;
-        const char *p[] = {"+"};
+        char mech[16];
+        snprintf(mech, sizeof mech, "%s", token);
+        for (char *c = mech; *c; c++) *c = (char)toupper((unsigned char)*c);
+        cl->auth_style = AUTH_STYLE_LEGACY;
+        sasl_start(srv, cl, mech);
         char line[64];
-        irc_build(line, sizeof line, NULL, 0, NULL, "AUTHENTICATE", p, 1, NULL);
+        irc_build(line, sizeof line, NULL, 0, NULL, "AUTHENTICATE", (const char *[]){"+"}, 1, NULL);
         client_send(cl, line);
         return;
     }
-
-    char mech[16];
-    snprintf(mech, sizeof mech, "%s", cl->sasl_mech);
-    cl->sasl_mech[0] = '\0';
-
     if (strcmp(token, "*") == 0) {
-        free(cl->scram);
-        cl->scram = NULL;
+        sasl_data(srv, cl, "D", "A");
+        sasl_end(cl);
         client_reply(cl, N_SASLABORTED, NULL, 0, "SASL authentication aborted");
         return;
     }
-
-    if (strcmp(mech, "SCRAM-SHA-256") == 0) {
-        scram_step(srv, cl, token);
-        return;
-    }
-
-    if (strcmp(mech, "EXTERNAL") == 0) {
-        /* Identity comes entirely from the TLS certificate already on this
-         * connection -- the continuation blob is just an (ignored) optional
-         * authzid, same as PLAIN's. */
-        char fp[65];
-        const char *account;
-        if (peer_cert_fingerprint(cl, fp, sizeof fp) != 0 ||
-            !(account = accounts_find_by_fingerprint(&srv->accounts, fp)) || accounts_suspended(&srv->accounts, account, NULL, NULL)) {
-            client_reply(cl, N_SASLFAIL, NULL, 0, "SASL authentication failed");
-            return;
-        }
-        server_login(srv, cl, account);
-        client_reply(cl, N_SASLSUCCESS, NULL, 0, "SASL authentication successful");
-        log_info("sasl", "%s authenticated as %s via EXTERNAL", cl->nick, account);
-        return;
-    }
-
-    /* 400 bytes is the IRCv3 AUTHENTICATE chunk size; this server doesn't
-     * implement the multi-line continuation form, so anything longer can be
-     * named as such instead of reported as a generic failure. */
     if (strlen(token) > 400) {
+        sasl_data(srv, cl, "D", "A");
+        sasl_end(cl);
         client_reply(cl, N_SASLTOOLONG, NULL, 0, "SASL message too long");
         return;
     }
-    unsigned char blob[600];
-    int blen = 0;
-    if (b64_decode(token, blob, sizeof blob, &blen) != 0 || blen < 0) {
-        client_reply(cl, N_SASLFAIL, NULL, 0, "SASL authentication failed");
-        return;
-    }
-    /* authzid \0 authcid \0 passwd -- authzid is ignored, same as upstream. */
-    unsigned char *end = blob + blen;
-    unsigned char *nul1 = memchr(blob, '\0', (size_t)(end - blob));
-    unsigned char *authcid_start = nul1 ? nul1 + 1 : NULL;
-    unsigned char *nul2 = authcid_start ? memchr(authcid_start, '\0', (size_t)(end - authcid_start)) : NULL;
-    if (!nul1 || !nul2) {
-        client_reply(cl, N_SASLFAIL, NULL, 0, "SASL authentication failed");
-        return;
-    }
-    size_t authcid_len = (size_t)(nul2 - authcid_start);
-    unsigned char *pw_start = nul2 + 1;
-    size_t pw_len = (size_t)(end - pw_start);
-    if (authcid_len == 0 || authcid_len >= NICKLEN || pw_len == 0 || pw_len >= 256) {
-        client_reply(cl, N_SASLFAIL, NULL, 0, "SASL authentication failed");
-        return;
-    }
-    char authcid[NICKLEN], passwd[256];
-    memcpy(authcid, authcid_start, authcid_len);
-    authcid[authcid_len] = '\0';
-    memcpy(passwd, pw_start, pw_len);
-    passwd[pw_len] = '\0';
-
-    int rc = strcmp(mech, "PLAIN") == 0 ? start_plain_login(srv, cl, authcid, passwd, AUTH_STYLE_LEGACY) : -1;
-    OPENSSL_cleanse(passwd, sizeof passwd);
-    if (rc != 0) client_reply(cl, N_SASLFAIL, NULL, 0, "SASL authentication failed");
+    sasl_data(srv, cl, "C", token);
 }
 
-/* IRCv3 standard-replies: a structured FAIL for a command with no natural
- * legacy-numeric equivalent, only for clients that negotiated the cap --
- * everyone else gets the existing plain NOTICE fallback. */
+/* PASS doubles as an account login for clients without SASL (mIRC, bouncers): "PASS account:password", or "PASS password"
+ * for the account named like the nick. Tried at welcome time as a PLAIN exchange with services; registration waits for
+ * it the way it waits for an in-flight SASL login. */
+void cmd_pass(server_t *srv, client_t *cl, irc_message_t *msg) {
+    (void)srv;
+    if (cl->registered || msg->nparams < 1) return;
+    client_auth_set(cl, AUTHTMP_PASS, msg->params[msg->nparams - 1]);
+}
+
+int cmd_pass_login(server_t *srv, client_t *cl) {
+    if (!client_auth_get(cl, AUTHTMP_PASS)[0]) return 0;
+    char pass[256];
+    snprintf(pass, sizeof pass, "%s", client_auth_get(cl, AUTHTMP_PASS));
+    client_auth_clear(cl, AUTHTMP_PASS);
+    if (cl->account[0] || cl->sasl_mech[0]) { OPENSSL_cleanse(pass, sizeof pass); return 0; } /* SASL already did it */
+    if (!services_agent(srv) || auth_fail_throttled(cl->ip)) {
+        OPENSSL_cleanse(pass, sizeof pass);
+        notice_self(srv, cl, "PASS login unavailable right now (account services offline, or too many attempts) -- continuing unidentified");
+        return 0;
+    }
+    char *colon = strchr(pass, ':');
+    const char *account = colon ? pass : cl->nick, *password = colon ? colon + 1 : pass;
+    if (colon) *colon = '\0';
+    unsigned char blob[400];
+    int bl = snprintf((char *)blob, sizeof blob, "%s%c%s%c%s", account, 0, account, 0, password);
+    char b64[600];
+    int ok = bl > 0 && (size_t)bl < sizeof blob && (size_t)bl < 290 && account[0] && password[0];
+    if (ok) EVP_EncodeBlock((unsigned char *)b64, blob, bl);
+    OPENSSL_cleanse(pass, sizeof pass);
+    OPENSSL_cleanse(blob, sizeof blob);
+    if (!ok) { notice_self(srv, cl, "PASS login refused (malformed) -- continuing unidentified"); return 0; }
+    cl->auth_style = AUTH_STYLE_PASS;
+    cl->auth_pending = 1;
+    sasl_start(srv, cl, "PLAIN");
+    sasl_data(srv, cl, "C", b64);
+    OPENSSL_cleanse(b64, sizeof b64);
+    return 1;
+}
+
+/* IRCv3 standard-replies FAIL for clients that negotiated it, a NOTICE otherwise. */
 static void send_fail(server_t *srv, client_t *cl, const char *cmd, const char *code, const char *desc) {
     if (cl->caps & CAP_STANDARD_REPLIES) {
         char line[500];
@@ -822,697 +602,150 @@ static void send_fail(server_t *srv, client_t *cl, const char *cmd, const char *
     }
 }
 
-/* Self-service account registration is unauthenticated account creation, so
- * it gets the same kind of throttle chanserv's password checks do: a few per
- * connection, spaced out, on top of [accounts] max_accounts for the store as
- * a whole. */
+/* A few registrations per connection, spaced out (services also throttle per IP and cap the total). */
 #define REGISTER_MAX_PER_CONNECTION 3
 #define REGISTER_COOLDOWN 10
 
-/* NickServ-style reply: a NOTICE from a virtual "NickServ" -- there's no real
- * services pseudo-client behind it (accounts live in core, see accounts.h). */
-static void ns_say(server_t *srv, client_t *cl, const char *text) {
-    char line[500];
-    char prefix[160];
-    snprintf(prefix, sizeof prefix, "NickServ!NickServ@%s", srv->cfg.server.name);
-    const char *p[] = {cl->nick[0] ? cl->nick : "*"};
-    irc_build(line, sizeof line, NULL, 0, prefix, "NOTICE", p, 1, text);
-    client_send(cl, line);
-}
-
-/* Failure reply in whichever dialect the request came in. */
-static void reg_fail(server_t *srv, client_t *cl, int style, const char *code, const char *desc) {
-    if (style == AUTH_STYLE_NICKSERV) ns_say(srv, cl, desc);
-    else send_fail(srv, cl, "REGISTER", code, desc);
-}
-
-/* Validates and starts an account registration; the hash runs on a worker and
- * cmd_finish_auth completes it. Shared by /REGISTER (both forms) and
- * NickServ REGISTER. */
-static void start_register(server_t *srv, client_t *cl, const char *account, const char *password, int style) {
-    if (!srv->cfg.accounts.enabled) {
-        reg_fail(srv, cl, style, "REG_UNAVAILABLE", "Account registration is not enabled on this server");
-        return;
+/*   REGISTER <account> <password>               legacy form
+ *   REGISTER <account|*> <email|*> <password>   draft/account-registration ("*" account = the current nick) */
+void cmd_register(server_t *srv, client_t *cl, irc_message_t *msg) {
+    const char *account = msg->params[0], *password = msg->params[1], *email = "*";
+    int style = AUTH_STYLE_LEGACY;
+    if (msg->nparams >= 3) {
+        style = AUTH_STYLE_DRAFT;
+        email = msg->params[1];
+        password = msg->params[2];
+        if (strcmp(account, "*") == 0) account = cl->nick;
     }
-    if (cl->account[0]) {
-        reg_fail(srv, cl, style, "ALREADY_AUTHENTICATED", "You are already logged in to an account");
-        return;
-    }
-    if (!irc_valid_user(account, 30)) {
-        char m[200];
-        snprintf(m, sizeof m, "%s is not a valid account name", account);
-        reg_fail(srv, cl, style, "BAD_ACCOUNT_NAME", m);
-        return;
-    }
-    if (accounts_exists(&srv->accounts, account)) {
-        char m[200];
-        snprintf(m, sizeof m, "Account %s already exists", account);
-        reg_fail(srv, cl, style, "ACCOUNT_EXISTS", m);
-        return;
-    }
-    if (strlen(password) >= sizeof ((job_t *)0)->secret) {
-        reg_fail(srv, cl, style, "BAD_PASSWORD", "Password is too long");
-        return;
-    }
-    if (cl->auth_pending) {
-        reg_fail(srv, cl, style, "TEMPORARILY_UNAVAILABLE", "Another login/registration is still in progress");
-        return;
-    }
-    /* auth_pending only bounds concurrency, not the total: without these,
-     * one connection could create accounts in a loop, each one rewriting the
-     * whole accounts file. */
-    if (srv->cfg.accounts.max_accounts > 0 &&
-        accounts_count(&srv->accounts) >= srv->cfg.accounts.max_accounts) {
-        reg_fail(srv, cl, style, "REG_UNAVAILABLE",
-                 "This server has reached its account limit -- ask a server operator");
-        return;
-    }
+    if (!password[0]) { err_need_more_params(cl, "REGISTER"); return; }
+    if (!services_agent(srv)) { send_fail(srv, cl, "REGISTER", "TEMPORARILY_UNAVAILABLE", "Account services are unavailable right now -- try again later"); return; }
+    if (cl->account[0]) { send_fail(srv, cl, "REGISTER", "ALREADY_AUTHENTICATED", "You are already logged in to an account"); return; }
     time_t now = time(NULL);
     if (cl->register_attempts >= REGISTER_MAX_PER_CONNECTION) {
-        reg_fail(srv, cl, style, "REG_UNAVAILABLE",
-                 "Too many registrations on this connection -- reconnect to register another account");
+        send_fail(srv, cl, "REGISTER", "REG_UNAVAILABLE", "Too many registrations on this connection -- reconnect to register another account");
         return;
     }
     if (cl->register_last && difftime(now, cl->register_last) < REGISTER_COOLDOWN) {
-        reg_fail(srv, cl, style, "TEMPORARILY_UNAVAILABLE",
-                 "You are registering too fast -- wait a few seconds and try again");
+        send_fail(srv, cl, "REGISTER", "TEMPORARILY_UNAVAILABLE", "You are registering too fast -- wait a few seconds and try again");
         return;
     }
     cl->register_last = now;
     cl->register_attempts++;
-    /* Hash on a worker (scrypt, ~30ms); net.c finishes via cmd_finish_auth. */
-    job_t j; memset(&j, 0, sizeof j);
-    j.type = JOB_HASH;
-    j.purpose = AUTH_REGISTER;
-    j.conn_id = cl->conn_id;
-    snprintf(j.secret, sizeof j.secret, "%s", password);
-    snprintf(cl->pending_account, sizeof cl->pending_account, "%s", account);
-    client_auth_clear(cl, AUTHTMP_SCRAM);
-    { scram_verifier_t sv; char vs[160]; if (scram_make_verifier(password, &sv) == 0) { scram_verifier_to_string(&sv, vs, sizeof vs); client_auth_set(cl, AUTHTMP_SCRAM, vs); } }
     cl->auth_style = style;
-    cl->auth_pending = 1;
-    cl->auth_started = time(NULL);
-    j.gen = ++cl->auth_gen;
-    if (worker_submit(&j) != 0) {
-        cl->auth_pending = 0;
-        reg_fail(srv, cl, style, "TEMPORARILY_UNAVAILABLE", "Server is busy -- try again shortly");
-    }
-    OPENSSL_cleanse(j.secret, sizeof j.secret);
+    char cid[40], line[600];
+    client_id(srv, cl, cid, sizeof cid);
+    irc_build(line, sizeof line, NULL, 0, NULL, "SVCREGISTER", (const char *[]){cid, cl->ip, account, email}, 4, password);
+    to_services(srv, line);
 }
 
-/* Self-service account registration -- not RFC/IRCv3-final, matching this
- * daemon's "accounts live in core" design (see accounts.h). Two forms:
- *   REGISTER <account> <password>               legacy, this daemon's own
- *   REGISTER <account|*> <email|*> <password>   draft/account-registration
- * where "*" for the account means the current nick. The email is accepted
- * but neither stored nor verified. */
-void cmd_register(server_t *srv, client_t *cl, irc_message_t *msg) {
-    const char *account = msg->params[0];
-    const char *password = msg->params[1];
-    int style = AUTH_STYLE_LEGACY;
-    if (msg->nparams >= 3) {
-        style = AUTH_STYLE_DRAFT;
-        password = msg->params[2];
-        client_auth_set(cl, AUTHTMP_EMAIL, strcmp(msg->params[1], "*") != 0 && valid_email(msg->params[1]) ? msg->params[1] : "");
-        if (strcmp(account, "*") == 0) account = cl->nick;
-    }
-    if (!password[0]) { err_need_more_params(cl, "REGISTER"); return; }
-    start_register(srv, cl, account, password, style);
-}
-
-/* --- email, verification codes ------------------------------------------------ */
-
-static int valid_email(const char *e) {
-    size_t n = strlen(e);
-    if (n < 3 || n > 120 || e[0] == '-' || e[0] == '@') return 0;
-    int at = 0;
-    for (const char *p = e; *p; p++) {
-        unsigned char c = (unsigned char)*p;
-        if (c == '@') { if (++at > 1) return 0; continue; }
-        if (!(isalnum(c) || c == '.' || c == '_' || c == '%' || c == '+' || c == '-')) return 0; /* never a shell metacharacter, space or '/' */
-    }
-    return at == 1 && e[n - 1] != '@';
-}
-
-/* Runs `cmd addr code account network purpose` fully detached (double fork, so no zombie and nothing to wait on), no
- * shell. `purpose` is "verify" (SET EMAIL) or "reset" (RESETPASS), so the script can word the mail. */
-static void spawn_email_command(const char *cmd, const char *addr, const char *code, const char *account, const char *network,
-                                const char *purpose) {
-    pid_t p1 = fork();
-    if (p1 < 0) return;
-    if (p1 == 0) {
-        if (fork() == 0) {
-            int dn = open("/dev/null", O_RDWR);
-            if (dn >= 0) { dup2(dn, 0); dup2(dn, 1); dup2(dn, 2); }
-            execl(cmd, cmd, addr, code, account, network, purpose, (char *)NULL);
-            _exit(127);
-        }
-        _exit(0);
-    }
-    waitpid(p1, NULL, 0);
-}
-
-/* The account's owner has asked to use `email`: send a code (if email_command is set) or just store it. */
-static void ns_begin_email(server_t *srv, client_t *cl, const char *email) {
-    if (!valid_email(email)) { ns_say(srv, cl, "That does not look like a valid email address"); return; }
-    if (!srv->cfg.accounts.email_command[0]) {
-        accounts_set_email(&srv->accounts, cl->account, email, 0);
-        ns_say(srv, cl, "Email saved (this server does not verify addresses)");
-        return;
-    }
-    char code[12];
-    crypto_random_hex(code, sizeof code, 4);
-    accounts_set_pending_email(&srv->accounts, cl->account, email, code, (long)time(NULL) + 3600);
-    spawn_email_command(srv->cfg.accounts.email_command, email, code, cl->account, srv->cfg.server.network, "verify");
-    ns_say(srv, cl, "A verification code was sent -- finish with /msg NickServ VERIFY <code> within an hour");
-}
-
-/* Disconnect-free logout of every session on `account` (used when it is dropped). */
-static void logout_all_sessions(server_t *srv, const char *account) {
-    for (client_t *c = srv->all_clients; c; c = c->all_next)
-        if (c->fd >= 0 && c->account[0] && strcasecmp(c->account, account) == 0) server_logout(srv, c);
-}
-
-/* NickServ SET PASSWORD / DROP need scrypt (worker thread): this is the second half, called from net.c. */
-void cmd_finish_account_op(server_t *srv, client_t *cl, int purpose, int success, const char *text) {
-    cl->auth_pending = 0;
-    switch ((auth_purpose_t)purpose) {
-    case AUTH_PASSWD_VERIFY: {
-        if (!success) {
-            auth_fail_record(cl->ip);
-            ns_say(srv, cl, "Current password incorrect");
-            client_auth_clear(cl, AUTHTMP_NEWPW);
-            return;
-        }
-        job_t j; memset(&j, 0, sizeof j);
-        j.type = JOB_HASH;
-        j.purpose = AUTH_PASSWD_HASH;
-        j.conn_id = cl->conn_id;
-        snprintf(j.secret, sizeof j.secret, "%s", client_auth_get(cl, AUTHTMP_NEWPW));
-        client_auth_clear(cl, AUTHTMP_NEWPW);
-        cl->auth_pending = 1;
-        cl->auth_started = time(NULL);
-        j.gen = ++cl->auth_gen;
-        int rc = worker_submit(&j);
-        OPENSSL_cleanse(j.secret, sizeof j.secret);
-        if (rc != 0) { cl->auth_pending = 0; ns_say(srv, cl, "Server busy -- try again"); }
-        return;
-    }
-    case AUTH_PASSWD_HASH:
-        if (!success || !cl->account[0]) { ns_say(srv, cl, "Could not change the password -- try again"); return; }
-        accounts_set_hash(&srv->accounts, cl->account, text);
-        if (client_auth_get(cl, AUTHTMP_SCRAM)[0]) accounts_set_scram(&srv->accounts, cl->account, client_auth_get(cl, AUTHTMP_SCRAM));
-        client_auth_clear(cl, AUTHTMP_SCRAM);
-        ns_say(srv, cl, "Password changed");
-        log_info("nickserv", "%s changed the password of %s", cl->nick, cl->account);
-        return;
-    case AUTH_DROP_VERIFY: {
-        if (!success) { auth_fail_record(cl->ip); ns_say(srv, cl, "Password incorrect -- account NOT dropped"); return; }
-        char account[64];
-        snprintf(account, sizeof account, "%s", cl->account);
-        logout_all_sessions(srv, account);
-        accounts_drop(&srv->accounts, account);
-        ns_say(srv, cl, "Your account has been dropped");
-        log_info("nickserv", "account %s dropped by %s", account, cl->nick);
-        return;
-    }
-    case AUTH_RESET_HASH:
-    case AUTH_SASET_HASH: { /* RESETPASS (code already checked) / oper SASET PASSWORD: the account is in pending_account */
-        char account[64], m[200];
-        snprintf(account, sizeof account, "%s", cl->pending_account);
-        cl->pending_account[0] = '\0';
-        if (!success || !accounts_exists(&srv->accounts, account)) {
-            client_auth_clear(cl, AUTHTMP_SCRAM);
-            ns_say(srv, cl, "Could not set the password -- try again");
-            return;
-        }
-        accounts_set_hash(&srv->accounts, account, text);
-        if (client_auth_get(cl, AUTHTMP_SCRAM)[0]) accounts_set_scram(&srv->accounts, account, client_auth_get(cl, AUTHTMP_SCRAM));
-        client_auth_clear(cl, AUTHTMP_SCRAM);
-        if (purpose == AUTH_SASET_HASH) {
-            snprintf(m, sizeof m, "Password of %s changed", account);
-            ns_say(srv, cl, m);
-            snprintf(m, sizeof m, "%s used NickServ SASET PASSWORD on account %s", cl->nick, account);
-            log_info("nickserv", "%s", m);
-            server_notify_opers(srv, m);
-            return;
-        }
-        logout_all_sessions(srv, account); /* whoever knew the old password is out */
-        if (!cl->account[0] && !accounts_suspended(&srv->accounts, account, NULL, NULL)) server_login(srv, cl, account);
-        snprintf(m, sizeof m, "Password of %s reset%s", account, strcasecmp(cl->account, account) == 0 ? " -- you are now identified" : "");
-        ns_say(srv, cl, m);
-        log_info("nickserv", "%s reset the password of %s by email code", cl->nick, account);
-        return;
-    }
-    default: return;
-    }
-}
-
-/* Submits the scrypt verification of `password` against the logged-in account's stored hash. */
-static int ns_verify_own_password(server_t *srv, client_t *cl, const char *password, auth_purpose_t purpose) {
-    if (cl->auth_pending || auth_fail_throttled(cl->ip)) return -1;
-    const char *hash = accounts_hash(&srv->accounts, cl->account);
-    if (!hash) return -1;
-    job_t j; memset(&j, 0, sizeof j);
-    j.type = JOB_SASL;
-    j.purpose = purpose;
-    j.conn_id = cl->conn_id;
-    snprintf(j.secret, sizeof j.secret, "%s", password);
-    snprintf(j.hash, sizeof j.hash, "%s", hash);
-    cl->auth_pending = 1;
-    cl->auth_started = time(NULL);
-    j.gen = ++cl->auth_gen;
-    int rc = worker_submit(&j);
-    OPENSSL_cleanse(j.secret, sizeof j.secret);
-    if (rc != 0) { cl->auth_pending = 0; return -1; }
-    return 0;
-}
-
-/* --- RESETPASS, REGAIN and the oper account commands --------------------------- */
-
-#define RESET_TTL 3600   /* a reset code is good for an hour */
-#define RESET_SPACING 300 /* and a new one is mailed at most every 5 minutes per account */
-
-/* Hashes `password` on a worker as the new password of cl->pending_account; cmd_finish_account_op stores it. */
-static int submit_new_password(client_t *cl, const char *password, auth_purpose_t purpose) {
-    client_auth_clear(cl, AUTHTMP_SCRAM);
-    { scram_verifier_t sv; char vs[160]; if (scram_make_verifier(password, &sv) == 0) { scram_verifier_to_string(&sv, vs, sizeof vs); client_auth_set(cl, AUTHTMP_SCRAM, vs); } }
-    job_t j; memset(&j, 0, sizeof j);
-    j.type = JOB_HASH;
-    j.purpose = purpose;
-    j.conn_id = cl->conn_id;
-    snprintf(j.secret, sizeof j.secret, "%s", password);
-    cl->auth_pending = 1;
-    cl->auth_started = time(NULL);
-    j.gen = ++cl->auth_gen;
-    int rc = worker_submit(&j);
-    OPENSSL_cleanse(j.secret, sizeof j.secret);
-    if (rc != 0) { cl->auth_pending = 0; client_auth_clear(cl, AUTHTMP_SCRAM); cl->pending_account[0] = '\0'; return -1; }
-    return 0;
-}
-
-/* RESETPASS <account>: mails a code to the account's verified address. The reply is the same whether or not the account
- * exists or has one, so it can't be used to probe for accounts or addresses. Every request counts against the IP's
- * failure budget, and an account gets at most one mail per RESET_SPACING, so it can't be used to mail-bomb either. */
-static void ns_request_reset(server_t *srv, client_t *cl, const char *name) {
-    if (!srv->cfg.accounts.email_command[0]) { ns_say(srv, cl, "Password reset is not available here (no mail is configured) -- ask a server operator"); return; }
-    if (auth_fail_throttled(cl->ip)) { ns_say(srv, cl, "Too many attempts -- wait a minute and try again"); return; }
-    auth_fail_record(cl->ip);
-    time_t now = time(NULL);
-    const char *owner = accounts_owner_of_nick(&srv->accounts, name);
-    const char *em = owner ? accounts_email(&srv->accounts, owner) : NULL;
-    if (em && accounts_email_verified(&srv->accounts, owner) && !accounts_suspended(&srv->accounts, owner, NULL, NULL) &&
-        accounts_reset_expires(&srv->accounts, owner) - RESET_TTL + RESET_SPACING <= now) {
-        char account[64], email[200], code[16];
-        snprintf(account, sizeof account, "%s", owner); /* the store is about to change under these pointers */
-        snprintf(email, sizeof email, "%s", em);
-        crypto_random_hex(code, sizeof code, 6);
-        accounts_set_reset(&srv->accounts, account, code, (long)now + RESET_TTL);
-        spawn_email_command(srv->cfg.accounts.email_command, email, code, account, srv->cfg.server.network, "reset");
-        log_info("nickserv", "%s requested a password reset for %s", cl->nick, account);
-    }
-    ns_say(srv, cl, "If that account has a verified email address, a reset code was sent to it -- finish with "
-                    "/msg NickServ RESETPASS <account> <code> <new password> within an hour");
-}
-
-/* RESETPASS <account> <code> <new password>: a wrong code counts as a failed login for the IP. */
-static void ns_confirm_reset(server_t *srv, client_t *cl, const char *name, const char *code, const char *password) {
-    if (auth_fail_throttled(cl->ip)) { ns_say(srv, cl, "Too many attempts -- wait a minute and try again"); return; }
-    if (strlen(password) < 6 || strlen(password) >= 200) { ns_say(srv, cl, "The new password must be 6-199 characters"); return; }
-    if (cl->auth_pending) { ns_say(srv, cl, "Another login is still in progress -- try again shortly"); return; }
-    const char *owner = accounts_owner_of_nick(&srv->accounts, name);
-    if (owner && accounts_suspended(&srv->accounts, owner, NULL, NULL)) { ns_say(srv, cl, "That account is suspended -- contact a server operator"); return; }
-    if (!owner || !accounts_check_reset(&srv->accounts, owner, code)) {
-        auth_fail_record(cl->ip);
-        ns_say(srv, cl, "That code is wrong or has expired");
-        return;
-    }
-    snprintf(cl->pending_account, sizeof cl->pending_account, "%s", owner);
-    if (submit_new_password(cl, password, AUTH_RESET_HASH) != 0) ns_say(srv, cl, "Server busy -- request a new code with RESETPASS <account>");
-}
-
-/* GHOST/REGAIN may act on `nick` if cl is identified as the account that owns it. */
-static int owns_nick(server_t *srv, client_t *cl, const char *nick) {
-    const char *owner = accounts_owner_of_nick(&srv->accounts, nick);
-    return cl->account[0] && owner && strcasecmp(cl->account, owner) == 0;
-}
-
-static void pick_guest_nick(server_t *srv, char *out, size_t outsz) {
-    for (int tries = 0; tries < 20; tries++) {
-        char rh[9];
-        crypto_random_hex(rh, sizeof rh, 4);
-        snprintf(out, outsz, "Guest%u", 10000 + (unsigned)(strtoul(rh, NULL, 16) % 90000));
-        if (!server_find_user(srv, out)) break;
-    }
-}
-
-/* REGAIN <nick>: the owner takes their nick back in one step -- a local squatter is renamed to Guest<n> (not
- * disconnected; GHOST does that), then the caller is renamed to it. */
-static void ns_regain(server_t *srv, client_t *cl, const char *nick) {
-    client_t *t = server_find_user(srv, nick);
-    char m[300];
-    if (!cl->account[0]) { ns_say(srv, cl, "You must IDENTIFY first"); return; }
-    if (!owns_nick(srv, cl, nick)) { ns_say(srv, cl, "You do not own that nickname"); return; }
-    if (t == cl) { ns_say(srv, cl, "You are already using that nickname"); return; }
-    if (t && (t->is_service || !t->registered)) { ns_say(srv, cl, "That nickname is busy right now -- try again in a moment"); return; }
-    if (t && t->remote) { /* its own server has to let go of it first */
-        netsync_kill(srv, cl, t, "REGAIN command used");
-        snprintf(m, sizeof m, "The session using %s is on another server and has been disconnected -- /NICK %s in a moment", nick, nick);
-        ns_say(srv, cl, m);
-        log_info("nickserv", "%s regained %s (remote session killed)", cl->nick, nick);
-        return;
-    }
-    if (t) {
-        char guest[NICKLEN];
-        pick_guest_nick(srv, guest, sizeof guest);
-        ns_say(srv, t, "This nickname was reclaimed by its owner -- changing your nickname.");
-        if (force_nick_change(srv, t, guest) != 0) { ns_say(srv, cl, "Could not free that nickname -- try GHOST"); return; }
-        nick_enforce_check(srv, t); /* clears any identify countdown it had on the old nick */
-    }
-    if (force_nick_change(srv, cl, nick) != 0) { ns_say(srv, cl, "Could not change your nickname"); return; }
-    nick_enforce_check(srv, cl);
-    snprintf(m, sizeof m, "You have regained %s", nick);
-    ns_say(srv, cl, m);
-    log_info("nickserv", "%s regained %s", cl->nick, nick);
-}
-
-/* `s` with its first `n` space-separated words skipped (the free-text tail of a command, e.g. a SUSPEND reason). */
-static const char *skip_words(const char *s, int n) {
-    while (n-- > 0) {
-        while (*s == ' ') s++;
-        while (*s && *s != ' ') s++;
-    }
-    while (*s == ' ') s++;
-    return s;
-}
-
-static int ns_account_oper(const client_t *cl) {
-    return (cl->umodes & UMODE_O) && (cl->oper_privs & OPER_PRIV_ACCOUNT);
-}
-
-/* Oper NickServ commands, OPER_PRIV_ACCOUNT ("accounts" in [[operators]] privileges). `a`/`b`/`c3` are the words after
- * the command, `text` the whole message. Each is snoted and logged. */
-static void ns_oper_command(server_t *srv, client_t *cl, const char *cmd, const char *a, const char *b, const char *c3, const char *text) {
-    char account[64], m[400];
-    int saset = strcasecmp(cmd, "SASET") == 0;
-    const char *name = saset ? b : a;
-    const char *owner = name ? accounts_owner_of_nick(&srv->accounts, name) : NULL; /* an account name or one of its nicks */
-    if (saset && (!a || strcasecmp(a, "PASSWORD") != 0 || !b || !c3)) { ns_say(srv, cl, "Syntax: SASET PASSWORD <account> <new password>"); return; }
-    if (!name) { snprintf(m, sizeof m, "Syntax: %s <account>%s", cmd, strcasecmp(cmd, "SUSPEND") == 0 ? " [reason]" : ""); ns_say(srv, cl, m); return; }
-    if (!owner) { ns_say(srv, cl, "No such account"); return; }
-    snprintf(account, sizeof account, "%s", owner);
-
-    if (strcasecmp(cmd, "SUSPEND") == 0) {
-        const char *reason = skip_words(text, 2);
-        accounts_set_suspended(&srv->accounts, account, cl->nick, reason);
-        logout_all_sessions(srv, account);
-        snprintf(m, sizeof m, "%s suspended account %s%s%s", cl->nick, account, reason[0] ? ": " : "", reason);
-    } else if (strcasecmp(cmd, "UNSUSPEND") == 0) {
-        if (!accounts_suspended(&srv->accounts, account, NULL, NULL)) { ns_say(srv, cl, "That account is not suspended"); return; }
-        accounts_set_suspended(&srv->accounts, account, NULL, NULL);
-        snprintf(m, sizeof m, "%s unsuspended account %s", cl->nick, account);
-    } else if (strcasecmp(cmd, "FDROP") == 0) {
-        logout_all_sessions(srv, account);
-        accounts_drop(&srv->accounts, account);
-        snprintf(m, sizeof m, "%s force-dropped account %s", cl->nick, account);
-    } else { /* SASET PASSWORD: the hash runs on a worker, cmd_finish_account_op reports and snotes */
-        if (strlen(c3) < 6 || strlen(c3) >= 200) { ns_say(srv, cl, "The new password must be 6-199 characters"); return; }
-        if (cl->auth_pending) { ns_say(srv, cl, "Another login is still in progress -- try again shortly"); return; }
-        snprintf(cl->pending_account, sizeof cl->pending_account, "%s", account);
-        if (submit_new_password(cl, c3, AUTH_SASET_HASH) != 0) ns_say(srv, cl, "Server busy -- try again");
-        return;
-    }
-    ns_say(srv, cl, m);
-    log_info("nickserv", "%s", m);
-    server_notify_opers(srv, m);
-}
-
-/* PRIVMSG to "NickServ" when no real user by that name exists (see
- * cmd_user.c send_msg). Maps the familiar commands onto the same account code
- * as /REGISTER and SASL: the account name is the current nick, as with Anope
- * and Atheme. */
-void nickserv_message(server_t *srv, client_t *cl, const char *text) {
-    char buf[420];
-    snprintf(buf, sizeof buf, "%s", text);
-    char *save = NULL;
-    char *cmd = strtok_r(buf, " ", &save);
-    char *a = cmd ? strtok_r(NULL, " ", &save) : NULL;
-    char *b = cmd ? strtok_r(NULL, " ", &save) : NULL;
-    char *c3 = cmd ? strtok_r(NULL, " ", &save) : NULL;
-
-    if (!srv->cfg.accounts.enabled) {
-        ns_say(srv, cl, "Accounts are not enabled on this server");
-    } else if (cmd && strcasecmp(cmd, "REGISTER") == 0) {
-        /* REGISTER <password> [email] */
-        if (!a) ns_say(srv, cl, "Syntax: REGISTER <password> [email]");
-        else {
-            client_auth_set(cl, AUTHTMP_EMAIL, b && valid_email(b) ? b : "");
-            start_register(srv, cl, cl->nick, a, AUTH_STYLE_NICKSERV);
-        }
-    } else if (cmd && (strcasecmp(cmd, "IDENTIFY") == 0 || strcasecmp(cmd, "ID") == 0)) {
-        /* IDENTIFY [account] <password> */
-        const char *account = b ? a : cl->nick;
-        const char *owner = accounts_owner_of_nick(&srv->accounts, account); /* a grouped nick identifies its account */
-        if (owner) account = owner;
-        const char *password = b ? b : a;
-        if (!password) ns_say(srv, cl, "Syntax: IDENTIFY [account] <password>");
-        else if (cl->account[0]) ns_say(srv, cl, "You are already identified");
-        else {
-            int rc = start_plain_login(srv, cl, account, password, AUTH_STYLE_NICKSERV);
-            if (rc == -2) ns_say(srv, cl, "That account is suspended -- contact a server operator");
-            else if (rc != 0) ns_say(srv, cl, "Invalid account or password");
-        }
-    } else if (cmd && strcasecmp(cmd, "GHOST") == 0) {
-        /* GHOST <nick>: you must be identified as the account that owns <nick> (the account named
-         * <nick>, or the same account as that session) -- then that session is disconnected. */
-        client_t *t = a ? server_find_user(srv, a) : NULL;
-        if (!a) ns_say(srv, cl, "Syntax: GHOST <nick>");
-        else if (!cl->account[0]) ns_say(srv, cl, "You must IDENTIFY first");
-        else if (!t || !t->registered || t == cl) ns_say(srv, cl, "No such nick (or that is you)");
-        else if (!owns_nick(srv, cl, a) && strcasecmp(cl->account, t->account) != 0)
-            ns_say(srv, cl, "You do not own that nickname");
-        else {
-            if (t->remote) netsync_kill(srv, cl, t, "GHOST command used"); /* its server disconnects it */
-            else { snprintf(t->quit_reason, sizeof t->quit_reason, "Killed (GHOST command used by %s)", cl->nick); t->quitting = 1; }
-            ns_say(srv, cl, "Ghost session disconnected");
-            log_info("nickserv", "%s ghosted %s", cl->nick, a);
-        }
-    } else if (cmd && strcasecmp(cmd, "REGAIN") == 0) {
-        if (!a) ns_say(srv, cl, "Syntax: REGAIN <nick>");
-        else ns_regain(srv, cl, a);
-    } else if (cmd && strcasecmp(cmd, "RESETPASS") == 0) {
-        if (a && !b) ns_request_reset(srv, cl, a);
-        else if (a && b && c3) ns_confirm_reset(srv, cl, a, b, c3);
-        else ns_say(srv, cl, "Syntax: RESETPASS <account> (mails a code), then RESETPASS <account> <code> <new password>");
-    } else if (cmd && (strcasecmp(cmd, "SUSPEND") == 0 || strcasecmp(cmd, "UNSUSPEND") == 0 || strcasecmp(cmd, "FDROP") == 0 ||
-                       strcasecmp(cmd, "SASET") == 0)) {
-        if (!ns_account_oper(cl)) ns_say(srv, cl, "Permission denied -- that needs an oper login with the accounts privilege");
-        else ns_oper_command(srv, cl, cmd, a, b, c3, text);
-    } else if (cmd && strcasecmp(cmd, "LOGOUT") == 0) {
-        if (!cl->account[0]) ns_say(srv, cl, "You are not identified");
-        else server_logout(srv, cl);
-    } else if (cmd && strcasecmp(cmd, "INFO") == 0) {
-        const char *who = a ? accounts_owner_of_nick(&srv->accounts, a) : (cl->account[0] ? cl->account : NULL);
-        if (!who) { ns_say(srv, cl, a ? "No such account" : "You are not identified -- INFO <account>"); }
-        else {
-            char m[300];
-            snprintf(m, sizeof m, "Account %s, registered %ld", who, accounts_created_at(&srv->accounts, who));
-            ns_say(srv, cl, m);
-            int self = cl->account[0] && strcasecmp(cl->account, who) == 0;
-            const char *sby, *sreason;
-            if (accounts_suspended(&srv->accounts, who, &sby, &sreason)) {
-                if (ns_account_oper(cl)) snprintf(m, sizeof m, "Suspended by %s%s%s", sby, sreason[0] ? ": " : "", sreason);
-                else snprintf(m, sizeof m, "This account is suspended");
-                ns_say(srv, cl, m);
-            }
-            if (self || ns_account_oper(cl)) { /* the owner (and account opers) also see the email and grouped nicks */
-                const char *em = accounts_email(&srv->accounts, who);
-                snprintf(m, sizeof m, "Email: %s%s", em ? em : "(none)", em ? (accounts_email_verified(&srv->accounts, who) ? " (verified)" : " (unverified)") : "");
-                ns_say(srv, cl, m);
-                int gn = accounts_group_count(&srv->accounts, who);
-                if (gn) {
-                    char list[250] = "";
-                    for (int i = 0; i < gn; i++) { strncat(list, i ? ", " : "", sizeof list - strlen(list) - 1); strncat(list, accounts_group_nick(&srv->accounts, who, i), sizeof list - strlen(list) - 1); }
-                    snprintf(m, sizeof m, "Grouped nicks: %s", list);
-                    ns_say(srv, cl, m);
-                }
-            }
-        }
-    } else if (cmd && strcasecmp(cmd, "SET") == 0 && a && strcasecmp(a, "PASSWORD") == 0) {
-        if (!cl->account[0]) ns_say(srv, cl, "You must IDENTIFY first");
-        else if (!b || !c3) ns_say(srv, cl, "Syntax: SET PASSWORD <current> <new>");
-        else if (strlen(c3) < 6 || strlen(c3) >= 200) ns_say(srv, cl, "The new password must be 6-199 characters");
-        else {
-            client_auth_set(cl, AUTHTMP_NEWPW, c3);
-            client_auth_clear(cl, AUTHTMP_SCRAM);
-            { scram_verifier_t sv; char vs[160]; if (scram_make_verifier(c3, &sv) == 0) { scram_verifier_to_string(&sv, vs, sizeof vs); client_auth_set(cl, AUTHTMP_SCRAM, vs); } }
-            if (ns_verify_own_password(srv, cl, b, AUTH_PASSWD_VERIFY) != 0) {
-                client_auth_clear(cl, AUTHTMP_NEWPW);
-                ns_say(srv, cl, "Could not start the password change -- try again shortly");
-            }
-        }
-    } else if (cmd && strcasecmp(cmd, "SET") == 0 && a && strcasecmp(a, "EMAIL") == 0) {
-        if (!cl->account[0]) ns_say(srv, cl, "You must IDENTIFY first");
-        else if (!b) ns_say(srv, cl, "Syntax: SET EMAIL <address>");
-        else ns_begin_email(srv, cl, b);
-    } else if (cmd && strcasecmp(cmd, "VERIFY") == 0) {
-        if (!cl->account[0]) ns_say(srv, cl, "You must IDENTIFY first");
-        else if (!a) ns_say(srv, cl, "Syntax: VERIFY <code>");
-        else if (accounts_check_verify(&srv->accounts, cl->account, a)) ns_say(srv, cl, "Email verified");
-        else ns_say(srv, cl, "That code is wrong or has expired");
-    } else if (cmd && strcasecmp(cmd, "DROP") == 0) {
-        if (!cl->account[0]) ns_say(srv, cl, "You must IDENTIFY first");
-        else if (!a) ns_say(srv, cl, "Syntax: DROP <password> -- permanently deletes your account");
-        else if (ns_verify_own_password(srv, cl, a, AUTH_DROP_VERIFY) != 0) ns_say(srv, cl, "Could not start that -- try again shortly");
-    } else if (cmd && strcasecmp(cmd, "GROUP") == 0) {
-        if (!cl->account[0]) ns_say(srv, cl, "You must IDENTIFY first");
-        else if (accounts_group_add(&srv->accounts, cl->account, cl->nick) != 0)
-            ns_say(srv, cl, "That nick is already registered/grouped, or your group is full (10 nicks)");
-        else { char m[200]; snprintf(m, sizeof m, "%s is now part of account %s", cl->nick, cl->account); ns_say(srv, cl, m); }
-    } else if (cmd && strcasecmp(cmd, "UNGROUP") == 0) {
-        if (!cl->account[0]) ns_say(srv, cl, "You must IDENTIFY first");
-        else if (!a || accounts_group_del(&srv->accounts, cl->account, a) != 0) ns_say(srv, cl, "Syntax: UNGROUP <nick> (a nick in your group)");
-        else ns_say(srv, cl, "Nick removed from your account");
-    } else {
-        ns_say(srv, cl, "Commands: REGISTER <password> [email], IDENTIFY [account] <password>, LOGOUT, INFO [account], "
-                        "SET PASSWORD <old> <new>, SET EMAIL <address>, VERIFY <code>, GROUP, UNGROUP <nick>, GHOST <nick>, "
-                        "REGAIN <nick>, RESETPASS <account> [<code> <new password>], DROP <password>");
-        if (ns_account_oper(cl))
-            ns_say(srv, cl, "Oper commands: SUSPEND <account> [reason], UNSUSPEND <account>, FDROP <account>, SASET PASSWORD <account> <new>");
-    }
-    OPENSSL_cleanse(buf, sizeof buf);
-}
-
-/* ``/CERT ADD|DEL|INFO`` -- binds (or clears, or reports) the SASL EXTERNAL
- * certificate fingerprint on the caller's own account, taken from whatever
- * TLS client certificate this connection is currently presenting (see
- * peer_cert_fingerprint above; requires [tls] request_client_cert = true).
- * Not RFC/IRCv3 -- same "no NickServ required" self-service design as
- * /REGISTER. */
+/* CERT ADD|DEL|INFO -- kept as shorthand for /msg NickServ CERT ..., which owns certificate fingerprints now. */
 void cmd_cert(server_t *srv, client_t *cl, irc_message_t *msg) {
-    const char *sub = msg->params[0];
-    if (!srv->cfg.accounts.enabled) {
-        send_fail(srv, cl, "CERT", "CERT_UNAVAILABLE", "Accounts are not enabled on this server");
-        return;
-    }
-    if (!cl->account[0]) {
-        send_fail(srv, cl, "CERT", "ACCOUNT_REQUIRED", "You must be logged in (SASL or /REGISTER) to manage a certificate fingerprint");
-        return;
-    }
-
-    if (strcasecmp(sub, "ADD") == 0) {
-        char fp[65];
-        if (peer_cert_fingerprint(cl, fp, sizeof fp) != 0) {
-            send_fail(srv, cl, "CERT", "CERT_REQUIRED", "Your connection isn't presenting a TLS client certificate");
-            return;
-        }
-        accounts_set_fingerprint(&srv->accounts, cl->account, fp);
-        char m[200];
-        snprintf(m, sizeof m, "Certificate fingerprint %s bound to %s -- SASL EXTERNAL will now log this connection in", fp, cl->account);
-        notice_self(srv, cl, m);
-        log_info("sasl", "%s bound a certificate fingerprint to account %s", cl->nick, cl->account);
-    } else if (strcasecmp(sub, "DEL") == 0) {
-        accounts_set_fingerprint(&srv->accounts, cl->account, NULL);
-        notice_self(srv, cl, "Certificate fingerprint removed -- SASL EXTERNAL is now disabled for this account");
-    } else if (strcasecmp(sub, "INFO") == 0) {
-        const char *fp = accounts_fingerprint(&srv->accounts, cl->account);
-        if (fp) {
-            char m[120];
-            snprintf(m, sizeof m, "Certificate fingerprint on file: %s", fp);
-            notice_self(srv, cl, m);
-        } else {
-            notice_self(srv, cl, "No certificate fingerprint is on file for this account");
-        }
-    } else {
-        send_fail(srv, cl, "CERT", "UNKNOWN_SUBCOMMAND", "Syntax: CERT ADD|DEL|INFO");
-    }
+    char text[64];
+    snprintf(text, sizeof text, "CERT %s", msg->params[0]);
+    irc_message_t m;
+    memset(&m, 0, sizeof m);
+    m.command = "PRIVMSG";
+    m.params[0] = "NickServ";
+    m.params[1] = text;
+    m.nparams = 2;
+    cmd_privmsg(srv, cl, &m);
 }
 
-void cmd_finish_auth(server_t *srv, client_t *cl, int is_register, int success, const char *hash) {
-    cl->auth_pending = 0;
+/* A SASL session finished (services said D S|F, or it timed out). */
+static void sasl_finish(server_t *srv, client_t *cl, int success) {
     int style = cl->auth_style;
+    sasl_end(cl);
     cl->auth_style = AUTH_STYLE_LEGACY;
-    const char *account = cl->pending_account;
-    if (!is_register) {
-        if (success && accounts_suspended(&srv->accounts, account, NULL, NULL)) success = 0; /* suspended while the hash ran */
-        if (success) {
-            account = accounts_display_name(&srv->accounts, account); /* stored case, not whatever was typed */
-            if (client_auth_get(cl, AUTHTMP_SCRAM)[0] && !accounts_scram(&srv->accounts, account)) accounts_set_scram(&srv->accounts, account, client_auth_get(cl, AUTHTMP_SCRAM));
-            client_auth_clear(cl, AUTHTMP_SCRAM);
-            server_login(srv, cl, account);
-            if (style == AUTH_STYLE_NICKSERV || style == AUTH_STYLE_PASS) {
-                char m[200];
-                snprintf(m, sizeof m, "You are now identified for %s", account);
-                if (style == AUTH_STYLE_PASS) notice_self(srv, cl, m); else ns_say(srv, cl, m);
-            } else {
-                client_reply(cl, N_SASLSUCCESS, NULL, 0, "SASL authentication successful");
-            }
-            log_info("sasl", "%s authenticated as %s", cl->nick, account);
-        } else {
-            auth_fail_record(cl->ip);
-            if (style == AUTH_STYLE_NICKSERV) ns_say(srv, cl, "Invalid account or password");
-            else if (style == AUTH_STYLE_PASS) notice_self(srv, cl, "PASS login failed: invalid account or password -- continuing unidentified");
-            else client_reply(cl, N_SASLFAIL, NULL, 0, "SASL authentication failed");
+    if (!success) auth_fail_record(cl->ip);
+    if (style == AUTH_STYLE_PASS) {
+        cl->auth_pending = 0;
+        if (success) { char m[200]; snprintf(m, sizeof m, "You are now identified for %s", cl->account); notice_self(srv, cl, m); }
+        else notice_self(srv, cl, "PASS login failed: invalid account or password -- continuing unidentified");
+        cmd_send_welcome_if_ready(srv, cl);
+        return;
+    }
+    if (success) client_reply(cl, N_SASLSUCCESS, NULL, 0, "SASL authentication successful");
+    else client_reply(cl, N_SASLFAIL, NULL, 0, "SASL authentication failed");
+}
+
+/* Once a second (net.c): services that never answered, and the SASL cap following services coming and going. */
+void cmd_services_tick(server_t *srv, time_t now) {
+    for (client_t *cl = srv->all_clients; cl; cl = cl->all_next)
+        if (cl->fd >= 0 && cl->sasl_mech[0] && cl->sasl_started && now - cl->sasl_started > SASL_TIMEOUT) {
+            log_warn("sasl", "account services did not answer for %s -- failing the login", cl->ip);
+            sasl_finish(srv, cl, 0);
         }
-        return;
+    int online = services_agent(srv) != NULL;
+    if (online != srv->services_online) {
+        srv->services_online = online;
+        cmd_cap_notify_changes(srv, !online, srv->cfg.messages.history_size > 0);
+        log_info("services", "account services %s", online ? "available" : "unavailable -- SASL/REGISTER off until they return");
     }
-    if (!success) { reg_fail(srv, cl, style, "TEMPORARILY_UNAVAILABLE", "Internal error hashing password -- try again"); return; }
-    if (accounts_exists(&srv->accounts, account)) { /* lost a race with another REGISTER */
-        char m[200];
-        snprintf(m, sizeof m, "Account %s already exists", account);
-        reg_fail(srv, cl, style, "ACCOUNT_EXISTS", m);
-        return;
-    }
-    accounts_register_hashed(&srv->accounts, account, hash);
-    if (client_auth_get(cl, AUTHTMP_SCRAM)[0]) accounts_set_scram(&srv->accounts, account, client_auth_get(cl, AUTHTMP_SCRAM));
-    client_auth_clear(cl, AUTHTMP_SCRAM);
-    char reg_email[160];
-    snprintf(reg_email, sizeof reg_email, "%s", client_auth_get(cl, AUTHTMP_EMAIL));
-    client_auth_clear(cl, AUTHTMP_EMAIL);
-    server_login(srv, cl, account);
-    char m[200];
-    snprintf(m, sizeof m, "Account %s registered -- you are now logged in as it", account);
-    if (style == AUTH_STYLE_NICKSERV) {
-        ns_say(srv, cl, m);
-    } else if (style == AUTH_STYLE_DRAFT) {
-        char line[500];
-        const char *p[] = {"SUCCESS", account};
-        irc_build(line, sizeof line, NULL, 0, srv->cfg.server.name, "REGISTER", p, 2, m);
-        client_send(cl, line);
-    } else {
-        notice_self(srv, cl, m);
-    }
-    log_info("main", "%s registered account %s", cl->nick, account);
-    if (reg_email[0]) ns_begin_email(srv, cl, reg_email);
 }
 
-/* --- nick ownership enforcement ([accounts] enforce_nicks) ------------------ */
-
-/* Called when a registered client's nick has just been set (welcome, NICK): starts the identify countdown if the nick is a registered account. */
-void nick_enforce_check(server_t *srv, client_t *cl) {
-    cl->enforce_deadline = 0;
-    if (!srv->cfg.accounts.enabled || !srv->cfg.accounts.enforce_nicks || cl->is_service || !cl->registered) return;
-    const char *owner = accounts_owner_of_nick(&srv->accounts, cl->nick); /* the account named so, or whose group holds it */
-    if (!owner) return;
-    snprintf(cl->enforce_owner, sizeof cl->enforce_owner, "%s", owner);
-    if (cl->account[0] && strcasecmp(cl->account, owner) == 0) return; /* already logged in as the owner */
-    cl->enforce_deadline = time(NULL) + srv->cfg.accounts.enforce_grace;
-    char m[300];
-    snprintf(m, sizeof m, "This nickname is registered. Log in (SASL, or /msg NickServ IDENTIFY <password>) within %d seconds "
-                          "or you will be renamed.", srv->cfg.accounts.enforce_grace);
-    ns_say(srv, cl, m);
+/* The local client a services line is about: "<sid>.<conn_id>" (a connection, maybe not registered yet), a UID, or a
+ * nick. NULL if it isn't ours; *route then names where to relay it ("" = nowhere: unknown). */
+static client_t *svc_target(server_t *srv, const char *id, char *route, size_t routesz) {
+    route[0] = '\0';
+    const char *dot = strchr(id, '.');
+    if (dot) {
+        if ((size_t)(dot - id) == strlen(srv->self_srv->sid) && strncmp(id, srv->self_srv->sid, (size_t)(dot - id)) == 0)
+            return server_find_by_conn_id(srv, strtoull(dot + 1, NULL, 10));
+        snprintf(route, routesz, "%s", id); /* another server's connection: relayed by its SID */
+        return NULL;
+    }
+    client_t *c = strlen(id) == UID_LEN ? netsync_find_uid(srv, id) : NULL;
+    if (!c) c = server_find_user(srv, id);
+    if (!c || c->is_service) return NULL;
+    if (c->remote) { snprintf(route, routesz, "%s", c->uid); return NULL; }
+    return c;
 }
 
-/* Once a second from net.c's tick: rename anyone whose grace ran out. */
-void nick_enforce_tick(server_t *srv, time_t now) {
-    for (client_t *cl = srv->all_clients; cl; cl = cl->all_next) {
-        if (!cl->enforce_deadline || cl->quitting) continue;
-        if (cl->account[0] && strcasecmp(cl->account, cl->enforce_owner) == 0) { cl->enforce_deadline = 0; continue; }
-        if (now < cl->enforce_deadline) continue;
-        cl->enforce_deadline = 0;
-        char guest[NICKLEN];
-        pick_guest_nick(srv, guest, sizeof guest);
-        ns_say(srv, cl, "You did not identify in time -- changing your nickname.");
-        force_nick_change(srv, cl, guest);
+/* A line from services (its own link, or relayed by netsync): SVSLOGIN, SVSNICK, KILL, SVCSASL, SVCREGRESULT. Every one
+ * names its target first; one that isn't ours is passed on toward its server. `svc` is the bot it came from (NULL when
+ * relayed -- the sending services' server already checked that). */
+void svc_command(server_t *srv, client_t *svc, irc_message_t *msg) {
+    if (msg->nparams < 1) return;
+    char route[64];
+    client_t *cl = svc_target(srv, msg->params[0], route, sizeof route);
+    if (!cl) {
+        if (!route[0]) return;
+        char line[900];
+        irc_build(line, sizeof line, NULL, 0, NULL, msg->command, (const char **)msg->params, msg->nparams - 1,
+                  msg->params[msg->nparams - 1]);
+        netsync_svcrelay(srv, route, line);
+        return;
+    }
+    const char *c = msg->command;
+    if (!strcmp(c, "SVSLOGIN") && msg->nparams >= 2) {
+        if (strcmp(msg->params[1], "*") == 0) { if (cl->account[0]) server_logout(srv, cl); return; }
+        cl->acct_created = msg->nparams > 2 ? atol(msg->params[2]) : 0;
+        snprintf(cl->acct_created_for, sizeof cl->acct_created_for, "%s", msg->params[1]);
+        server_login(srv, cl, msg->params[1]);
+        log_info("sasl", "%s logged in as %s", cl->nick[0] ? cl->nick : cl->ip, msg->params[1]);
+    } else if (!strcmp(c, "SVSNICK") && msg->nparams >= 2) {
+        if (cl->registered) force_nick_change(srv, cl, msg->params[1]);
+    } else if (!strcmp(c, "KILL")) {
+        snprintf(cl->quit_reason, sizeof cl->quit_reason, "Killed (%s (%s))", svc ? svc->nick : "NickServ",
+                 msg->nparams > 1 ? msg->params[msg->nparams - 1] : "");
+        cl->quitting = 1;
+    } else if (!strcmp(c, "SVCSASL") && msg->nparams >= 3) {
+        if (!cl->sasl_mech[0]) return; /* aborted or timed out meanwhile */
+        if (!strcmp(msg->params[1], "C")) {
+            char line[600];
+            irc_build(line, sizeof line, NULL, 0, NULL, "AUTHENTICATE", (const char *[]){msg->params[2]}, 1, NULL);
+            client_send(cl, line);
+        } else if (!strcmp(msg->params[1], "D")) sasl_finish(srv, cl, !strcmp(msg->params[2], "S"));
+    } else if (!strcmp(c, "SVCREGRESULT") && msg->nparams >= 5) {
+        int style = cl->auth_style;
+        cl->auth_style = AUTH_STYLE_LEGACY;
+        const char *text = msg->params[msg->nparams - 1];
+        if (strcmp(msg->params[1], "SUCCESS") != 0) { send_fail(srv, cl, "REGISTER", msg->params[2], text); return; }
+        if (style == AUTH_STYLE_DRAFT) {
+            char line[500];
+            irc_build(line, sizeof line, NULL, 0, srv->cfg.server.name, "REGISTER", (const char *[]){"SUCCESS", msg->params[3]}, 2, text);
+            client_send(cl, line);
+        } else notice_self(srv, cl, text);
+        log_info("main", "%s registered account %s", cl->nick, msg->params[3]);
     }
 }

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Back up everything you need to carry over to a new SekurIRCd version:
-# live configs, accounts, K-lines, MOTDs, TLS keys and ChanServ registrations.
+# live configs, accounts (and their rotating backups), K-lines, MOTDs, TLS keys and ChanServ registrations.
 # Usage: tools/backup-config.sh [DEST_DIR]     (prompts if omitted)
 set -u
 
@@ -36,6 +36,7 @@ patterns=(
   'config/*.toml' 'config/*.json' 'config/*.motd' 'config/*.rules' 'config/*.conf'
   'config/tls/*.pem'
   'services/*.toml' 'services/*.json'
+  'config/*.json.bak*' 'services/*.json.bak*'
 )
 files=()
 for p in "${patterns[@]}"; do

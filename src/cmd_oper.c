@@ -259,7 +259,7 @@ void cmd_testline(server_t *srv, client_t *cl, irc_message_t *msg) {
 void cmd_chgident(server_t *srv, client_t *cl, irc_message_t *msg) {
     client_t *target = server_find_user(srv, msg->params[0]);
     if (!target || !target->registered) { err_no_such_nick(cl, msg->params[0]); return; }
-    if (target->remote) { notice_self(srv, cl, "That user is on another server -- CHGIDENT works on local users only"); return; }
+    if (target->remote) { netsync_encap(srv, cl, target, "CHGIDENT", msg->params + 1, msg->nparams - 1); return; }
     const char *ident = msg->params[1];
     if (!irc_valid_user(ident, USERLEN - 1)) {
         char m[300]; snprintf(m, sizeof m, "Invalid ident: %s", ident);
@@ -306,7 +306,7 @@ int force_nick_change(server_t *srv, client_t *target, const char *newnick) {
 void cmd_sanick(server_t *srv, client_t *cl, irc_message_t *msg) {
     client_t *target = server_find_user(srv, msg->params[0]);
     if (!target || !target->registered || target->is_service) { err_no_such_nick(cl, msg->params[0]); return; }
-    if (target->remote) { notice_self(srv, cl, "That user is on another server -- SANICK works on local users only"); return; }
+    if (target->remote) { netsync_encap(srv, cl, target, "SANICK", msg->params + 1, msg->nparams - 1); return; }
     const char *newnick = msg->params[1];
     char old_nick[NICKLEN];
     snprintf(old_nick, sizeof old_nick, "%s", target->nick);
@@ -479,7 +479,7 @@ void cmd_vhost(server_t *srv, client_t *cl, irc_message_t *msg) {
 void cmd_chghost(server_t *srv, client_t *cl, irc_message_t *msg) {
     client_t *target = server_find_user(srv, msg->params[0]);
     if (!target) { err_no_such_nick(cl, msg->params[0]); return; }
-    if (target->remote) { notice_self(srv, cl, "That user is on another server -- CHGHOST works on local users only"); return; }
+    if (target->remote) { netsync_encap(srv, cl, target, "CHGHOST", msg->params + 1, msg->nparams - 1); return; }
     const char *new_host = msg->params[1];
     if (!irc_valid_host(new_host)) {
         char m[300]; snprintf(m, sizeof m, "Invalid hostname: %s", new_host);

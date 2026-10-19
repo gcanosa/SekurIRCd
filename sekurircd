@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# start/stop/status wrapper around bin/sekurircd and bin/chanserv's own
+# start/stop/restart/status wrapper around bin/sekurircd and bin/services' own
 # --daemon/--stop/--pidfile flags (see src/main.c / services/chanserv.c --
 # both already refuse a double-start and clean up a stale pidfile on
 # --stop, so this script just calls through rather than re-implementing
-# that logic). Linux + macOS: no GNU-only flags, no bash4+ features.
+# that logic). bin/services is the services daemon: NickServ (accounts, SASL)
+# and ChanServ in one process. Linux + macOS: no GNU-only flags, no bash4+ features.
 set -uo pipefail
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -11,11 +12,17 @@ IRCD_BIN=bin/sekurircd
 IRCD_CONFIG=config/sekurircd.toml
 IRCD_PIDFILE=sekurircd.pid
 
-CHANSERV_BIN=bin/chanserv
-CHANSERV_CONFIG=services/services.toml
-CHANSERV_PIDFILE=services/chanserv.pid
+SERVICES_BIN=bin/services
+# Installed by an older upgrade.py, the services binary may only exist under its old name (same program, see Makefile).
+# (A real pre-services chanserv answers --version with 1.3 or older and is never used as the services daemon.)
+if [ ! -x "$SERVICES_BIN" ] && [ -x bin/chanserv ] && ! bin/chanserv --version 2>/dev/null | grep -qE '^chanserv (0\.|1\.[0-3]\.)'; then
+    SERVICES_BIN=bin/chanserv
+fi
+SERVICES_CONFIG=services/services.toml
+SERVICES_PIDFILE=services/services.pid
+OLD_CHANSERV_PIDFILE=services/chanserv.pid # the standalone bin/chanserv that bin/services replaced
 
-chanserv_configured() { [ -f "$CHANSERV_CONFIG" ]; }
+services_configured() { [ -f "$SERVICES_CONFIG" ]; }
 
 pid_running() {
     local pidfile="$1" pid
@@ -39,27 +46,43 @@ require_bin() {
     [ -x "$1" ] || { echo "$1 not found -- run 'make' first" >&2; exit 1; }
 }
 
+# An old bin/chanserv still running next to bin/services would put two ChanServs on the link: stop it through its own
+# pidfile (by PID, never by name pattern).
+stop_old_chanserv() {
+    pid_running "$OLD_CHANSERV_PIDFILE" || return 0
+    local pid
+    pid=$(cat "$OLD_CHANSERV_PIDFILE")
+    echo "chanserv:  stopping the old standalone ChanServ (pid $pid) -- bin/services replaces it"
+    kill "$pid" 2>/dev/null
+    for _ in $(seq 1 20); do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
+    kill -0 "$pid" 2>/dev/null && { echo "chanserv:  pid $pid did not stop -- not starting services next to it" >&2; return 1; }
+    rm -f "$OLD_CHANSERV_PIDFILE"
+}
+
 cmd_start() {
     [ "$(id -u)" != 0 ] || echo "WARNING: running as root is not recommended -- the daemons never need it (ports are >1024). Use an unprivileged user." >&2
     require_bin "$IRCD_BIN"
-    # Don't bring chanserv up against an ircd that refused to start (port in use, bad config...).
+    # Don't bring services up against an ircd that refused to start (port in use, bad config...).
     "$IRCD_BIN" --config "$IRCD_CONFIG" --daemon --pidfile "$IRCD_PIDFILE" || {
         echo "sekurircd: failed to start (exit $?)" >&2
         return 1
     }
-    if chanserv_configured; then
-        require_bin "$CHANSERV_BIN"
-        "$CHANSERV_BIN" --config "$CHANSERV_CONFIG" --daemon --pidfile "$CHANSERV_PIDFILE"
+    if services_configured; then
+        require_bin "$SERVICES_BIN"
+        stop_old_chanserv || return 1
+        "$SERVICES_BIN" --config "$SERVICES_CONFIG" --daemon --pidfile "$SERVICES_PIDFILE" || {
+            echo "services:  failed to start (exit $?) -- see services/services.log" >&2
+            return 1
+        }
     else
-        echo "chanserv: not configured ($CHANSERV_CONFIG missing) -- skipping"
+        echo "services:  not configured ($SERVICES_CONFIG missing) -- skipping (no NickServ/ChanServ, no SASL)"
     fi
 }
 
 cmd_stop() {
-    if chanserv_configured; then
-        [ -x "$CHANSERV_BIN" ] && "$CHANSERV_BIN" --stop --pidfile "$CHANSERV_PIDFILE"
-    else
-        echo "chanserv: not configured ($CHANSERV_CONFIG missing) -- skipping"
+    if services_configured; then
+        [ -x "$SERVICES_BIN" ] && pid_running "$SERVICES_PIDFILE" && "$SERVICES_BIN" --stop --pidfile "$SERVICES_PIDFILE"
+        stop_old_chanserv
     fi
     [ -x "$IRCD_BIN" ] && "$IRCD_BIN" --stop --pidfile "$IRCD_PIDFILE"
     true # stopping an already-stopped daemon exits non-zero upstream; that's not a script failure
@@ -68,10 +91,10 @@ cmd_stop() {
 cmd_restart() {
     cmd_stop
     for _ in $(seq 1 20); do
-        pid_running "$CHANSERV_PIDFILE" || pid_running "$IRCD_PIDFILE" || break
+        pid_running "$SERVICES_PIDFILE" || pid_running "$IRCD_PIDFILE" || break
         sleep 0.5
     done
-    if pid_running "$CHANSERV_PIDFILE" || pid_running "$IRCD_PIDFILE"; then
+    if pid_running "$SERVICES_PIDFILE" || pid_running "$IRCD_PIDFILE"; then
         echo "restart: old daemon(s) still running after 10s -- not starting a second copy" >&2
         return 1
     fi
@@ -86,16 +109,19 @@ cmd_status() {
     else
         echo "sekurircd: stopped"
     fi
-    if chanserv_configured; then
-        if pid_running "$CHANSERV_PIDFILE"; then
-            echo "chanserv:  running (pid $(cat "$CHANSERV_PIDFILE"))"
-        elif proc_running "chanserv .*--daemon"; then
-            echo "chanserv:  running, but pidfile $CHANSERV_PIDFILE is missing/stale -- found a matching process by scanning instead. stop/restart via this script won't work until it's started through here (or the pidfile is pointed at the right pid)."
+    if services_configured; then
+        if pid_running "$SERVICES_PIDFILE"; then
+            echo "services:  running (pid $(cat "$SERVICES_PIDFILE")) -- NickServ + ChanServ"
+        elif proc_running "bin/services .*--daemon"; then
+            echo "services:  running, but pidfile $SERVICES_PIDFILE is missing/stale -- found a matching process by scanning instead. stop/restart via this script won't work until it's started through here (or the pidfile is pointed at the right pid)."
         else
-            echo "chanserv:  stopped"
+            echo "services:  stopped (no NickServ/ChanServ: accounts and SASL are unavailable)"
+        fi
+        if pid_running "$OLD_CHANSERV_PIDFILE"; then
+            echo "chanserv:  the OLD standalone ChanServ is still running (pid $(cat "$OLD_CHANSERV_PIDFILE")) -- '$0 restart' replaces it with bin/services"
         fi
     else
-        echo "chanserv:  not configured ($CHANSERV_CONFIG missing)"
+        echo "services:  not configured ($SERVICES_CONFIG missing)"
     fi
 }
 

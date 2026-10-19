@@ -7,7 +7,10 @@
  * Handshake: dialer sends "PASS <secret>", (CAPAB), "SERVER <name> <proto> :<desc>"; the acceptor verifies the peer
  * against [[links.peers]] (name + password/password_hash, allowed_ips) and replies in kind, then bursts.
  * A service link then speaks:
- *   NICK <nick> <user> <host> :<realname>   -- introduce a service pseudo-client
+ *   NICK <nick> <user> <host> :<realname>   -- introduce a service pseudo-client (up to LINK_MAX_BOTS; a later line
+ *                                              acts as the bot its ":nick!user@host" prefix names, else the first)
+ *   SVCWATCH USERS                          -- subscribe to the user feed (link_svc_user)
+ *   SVSLOGIN/SVSNICK/KILL/SVCSASL/SVCREGRESULT <id> ...  -- account services (cmd_reg.c's svc_command)
  *   PRIVMSG/NOTICE <target> :<text>         -- literal IRC lines, relayed verbatim
  *   PING / PONG                             -- keepalive
  * A pseudo-client (client_t with fd == -1) forwards client_send() over its link_conn's socket (see client.c).
@@ -25,6 +28,8 @@ struct client;
 struct channel;
 
 #define LINK_BUF 8192
+#define LINK_MAX_BOTS 4
+#define LINK_SENDQ_MAX (16u * 1024 * 1024) /* a peer this far behind is dead or desynced: drop the link, it relinks and rebursts */
 
 typedef struct link_conn {
     int fd;
@@ -40,15 +45,19 @@ typedef struct link_conn {
     time_t last_ping;        /* when link_tick last sent a keepalive PING */
     char rbuf[LINK_BUF];
     size_t rbuf_len;
-    char sbuf[LINK_BUF * 4];
-    size_t sbuf_len;
+    char *sbuf;              /* send queue, grown on demand (a burst to a new peer can be megabytes), freed when drained */
+    size_t sbuf_len, sbuf_off, sbuf_cap; /* queued bytes are sbuf[sbuf_off .. sbuf_len) */
     time_t created;         /* absolute deadline for the handshake -- an unauthenticated
                               * peer can otherwise hold the slot forever just by
                               * sending junk, since that keeps last_activity fresh */
     time_t last_activity;
-    struct client *service; /* the pseudo-client this link introduced, or NULL */
+    struct client *service; /* the first pseudo-client this link introduced (ChanServ), or NULL -- the default actor */
+    struct client *bots[LINK_MAX_BOTS]; /* every one it introduced (a services daemon hosts ChanServ + NickServ) */
+    int n_bots;
+    int watch_users;        /* sent SVCWATCH USERS: gets the network's users and their changes (NickServ) */
     int is_server;          /* negotiated the SEKURNET state-sync protocol (see netsync.h); else a plain/service link */
     int peer_capab_sekurnet; /* acceptor side: the dialer sent CAPAB :SEKURNET before SERVER */
+    char peer_capab[200];    /* the peer's CAPAB text ("SEKURNET PROTO=n MINPROTO=n VERSION=..."), see netsync_check_peer */
     struct netserver *nserver; /* is_server: the directly linked server's table entry */
     struct link_conn *next;
 } link_conn_t;
@@ -57,16 +66,9 @@ typedef struct link_conn {
  * (also stored on srv) or -1 if links aren't enabled (not an error). */
 int link_start_hub(struct server *srv);
 
-/* Leaf mode: dial the single configured uplink peer (PASS/SERVER
- * handshake, briefly blocking -- link establishment is rare, not a
- * per-request path, see link.c's dial_uplink comment). On success, the new
- * authenticated link_conn_t joins srv->links (so /LINKS, /SQUIT, and the
- * existing ping/timeout tick all just work). Returns 0 on success, -1 on
- * failure (logged; net.c's leaf reconnect tick retries with backoff).
- * ponytail: no user/channel state mirroring over this link (see the plan)
- * -- two sekurircd nodes linked this way authenticate and stay connected,
- * but don't yet share users/channels the way the original Python design
- * did; that scope was dropped from the start of this port. */
+/* Dial every [[links.peers]] entry with a `host` that isn't linked yet (PASS/CAPAB/SERVER handshake, briefly blocking --
+ * link establishment is rare, see link.c's dial_peer). `force` ignores the reconnect backoff; `only_name` limits it to
+ * one peer (/CONNECT). An authenticated link joins srv->links. Returns how many links came up. */
 int link_dial_peers(struct server *srv, int force, const char *only_name);
 
 /* net.c's periodic tick for leaf mode: reconnects with backoff
@@ -112,5 +114,10 @@ void link_forward_line(link_conn_t *lc, const char *line);
  * after a JOIN is announced locally. */
 void link_notify_channel_join(struct channel *chan, struct client *joiner);
 void link_notify_channel_new(struct server *srv, struct channel *chan, struct client *creator);
+
+/* The services user feed (links with watch_users): SVCUSER <uid> <nick> <user> <realhost> <ip> <account|*> <certfp|*>
+ * <server> on connect/update, SVCNICK <uid> <nick>, SVCQUIT <uid>, SVCACCOUNT <uid> <account|*>. Service bots are skipped. */
+enum { SVC_EV_USER, SVC_EV_NICK, SVC_EV_QUIT, SVC_EV_ACCOUNT };
+void link_svc_user(struct server *srv, struct client *cl, int ev);
 
 #endif /* SEKURIRCD_LINK_H */

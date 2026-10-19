@@ -209,9 +209,9 @@ void cmd_send_welcome_if_ready(server_t *srv, client_t *cl) {
     snprintf(snote, sizeof snote, "Client connecting: %s (%s@%s) [%s] {users}", cl->nick, cl->user, cl->realhost[0] ? cl->realhost : cl->host, cl->ip);
     server_notify_opers(srv, snote);
 
+    if (!cl->certfp[0]) client_cert_fingerprint(cl, cl->certfp, sizeof cl->certfp);
     server_send_welcome(srv, cl);
-    netsync_introduce_user(srv, cl); /* the rest of the network learns about them */
-    nick_enforce_check(srv, cl);
+    netsync_introduce_user(srv, cl); /* the rest of the network (and services' user feed) learns about them */
     server_monitor_notify(srv, cl, 1);
     server_watch_notify(srv, cl, 1);
 

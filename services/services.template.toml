@@ -1,10 +1,19 @@
-# ChanServ (channel registration service) config TEMPLATE for the C port.
+# SekurIRCd services config TEMPLATE: bin/services, one process hosting
+# NickServ (accounts, SASL, REGISTER) and ChanServ (channel registration).
 #
-# Separate process from sekurircd itself -- it dials the ircd's [links] hub
-# listener as a leaf, using the small line-based link protocol described in
-# src/link.h (not compatible with the Python project's JSON link protocol).
-# Enabling the feature is entirely: turn on [links] hub mode in the ircd's
-# config, add a [[links.peers]] entry matching this file's [link]
+# A separate process from sekurircd -- it dials the ircd's [links] listener,
+# using the small line-based link protocol described in src/link.h. Enabling
+# it is entirely: turn on [links] in the ircd's config, add a [[links.peers]]
+# entry matching this file's [link] name/password (or password_hash on the
+# ircd side), and run bin/services (./sekurircd start does). Not running it
+# means no NickServ, no ChanServ and no SASL on the whole network. On a
+# network of several servers, run exactly ONE copy, linked to one server.
+#
+# Copy this file to services.toml (or point --config elsewhere) and edit --
+# like config/, this template is the only version meant to be committed;
+# your live copy shouldn't be.
+
+[link]
 # name/password (or password_hash on the ircd side), and run chanserv.
 # Not running it is the same as disabled.
 #
@@ -40,6 +49,44 @@ realname = "Channel Registration Service"
 # Rank the channel founder gets when they IDENTIFY (or CLAIM): "o" = channel op
 # (@, the default and the old behaviour) or "q" = channel owner (~).
 #founder_mode = "o"
+
+[nickserv]
+# The account service. On by default; false = ChanServ only (then nothing on
+# the network offers accounts or SASL).
+#enabled = true
+#nick = "NickServ"
+#host = "services.sekurircd.local"   # defaults to [chanserv] host
+
+# The account database (JSON). Unset = use the one the ircd's built-in
+# NickServ kept before services hosted it -- ../config/accounts.json (a git
+# clone) or accounts.json beside this file (make install) -- in place, so an
+# upgrade moves nothing; else a new nickserv.json beside this file. Relative
+# paths are resolved against this file's directory. Rotating backups
+# (<file>.bak1..N) are kept, and a corrupt file is never replaced: services
+# load the newest good backup or refuse to start.
+#store_file = "../config/accounts.json"
+#backup_count = 5
+
+# Upper bound on registered accounts. 0 (the default) = unlimited.
+#max_accounts = 10000
+
+# Services admins: accounts allowed SUSPEND/UNSUSPEND/FDROP/SASET PASSWORD and
+# the full INFO of any account. By account name, as with Atheme/Anope.
+#admins = ["youraccount"]
+
+# Nick ownership: someone using a registered nick must log in (SASL, or
+# /msg NickServ IDENTIFY <password>) within enforce_grace seconds, or is
+# renamed to Guest<number>. Applies on every server of the network.
+#enforce_nicks = false
+#enforce_grace = 60
+
+# Email verification and password resets. SET EMAIL / RESETPASS run
+#     <email_command> <address> <code> <account> <network> verify|reset
+# directly (no shell): point it at a small script that mails the code. Empty
+# = no mail (addresses stored unverified, no self-service reset). `network`
+# defaults to the ircd's [server] network.
+#email_command = "/usr/local/bin/send-verification"
+#network = "SekurNet"
 
 [storage]
 # Where channel registrations are persisted (JSON, rewritten on every

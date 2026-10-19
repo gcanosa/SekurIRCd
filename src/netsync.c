@@ -1,6 +1,5 @@
 #include "netsync.h"
 
-#include "accounts.h"
 #include "channel.h"
 #include "client.h"
 #include "cmd.h"
@@ -165,6 +164,10 @@ static void send_uid_line(server_t *srv, link_conn_t *to, const client_t *u) {
                        u->account[0] ? u->account : "*", u->ident_confirmed ? "1" : "0"};
     irc_build(line, sizeof line, NULL, 0, u->nserver->sid, "UID", p, 11, u->realname);
     send_link(to, line);
+    if (u->certfp[0]) { /* services need it for SASL EXTERNAL / NickServ CERT, wherever they are */
+        irc_build(line, sizeof line, NULL, 0, u->uid, "CERTFP", (const char *[]){u->certfp}, 1, NULL);
+        send_link(to, line);
+    }
     if (u->is_away) {
         irc_build(line, sizeof line, NULL, 0, u->uid, "AWAY", NULL, 0, u->away);
         send_link(to, line);
@@ -266,24 +269,7 @@ static void send_burst(server_t *srv, link_conn_t *lc) {
         }
         (void)theirs;
     }
-    /* 4. the account database (each server also persists its own copy) */
-    if (srv->cfg.accounts.enabled) {
-        int na = 0;
-        const char **names = accounts_all_names(&srv->accounts, &na);
-        for (int i = 0; i < na && names; i++) {
-            char *json = accounts_record_json(&srv->accounts, names[i]);
-            if (!json) continue;
-            long long ts = accounts_updated_at(&srv->accounts, names[i]);
-            char tsb[24];
-            snprintf(tsb, sizeof tsb, "%lld", ts > 0 ? ts : 1);
-            char big[3000];
-            irc_build(big, sizeof big, NULL, 0, self_sid(srv), "ACCT", (const char *[]){tsb, names[i]}, 2, json);
-            send_link(lc, big);
-            free(json);
-        }
-        free(names);
-    }
-    /* 5. global lines */
+    /* 4. global lines */
     for (kline_entry_t *k = srv->klines; k; k = k->next) {
         if (k->line_type[0] != 'G') continue;
         char exp[24];
@@ -294,6 +280,41 @@ static void send_burst(server_t *srv, link_conn_t *lc) {
     }
     irc_build(line, sizeof line, NULL, 0, self_sid(srv), "EOB", NULL, 0, NULL);
     send_link(lc, line);
+}
+
+void netsync_capab_line(server_t *srv, char *out, size_t outsz) {
+    char ver[96];
+    server_software_version(srv, ver, sizeof ver);
+    snprintf(out, outsz, "CAPAB :SEKURNET PROTO=%d MINPROTO=%d VERSION=%s", NETSYNC_PROTO, NETSYNC_PROTO_MIN, ver);
+}
+
+static int capab_int(const char *capab, const char *key, int dflt) {
+    const char *p = strstr(capab, key);
+    return p ? atoi(p + strlen(key)) : dflt;
+}
+
+int netsync_check_peer(server_t *srv, link_conn_t *lc, const char *name) {
+    int proto = capab_int(lc->peer_capab, "PROTO=", 1), minproto = capab_int(lc->peer_capab, "MINPROTO=", 1);
+    char theirs[96] = "an unknown version (older than version reporting)", ours[96], m[400];
+    const char *v = strstr(lc->peer_capab, "VERSION=");
+    if (v) sscanf(v + 8, "%95s", theirs);
+    server_software_version(srv, ours, sizeof ours);
+    if (proto < NETSYNC_PROTO_MIN || minproto > NETSYNC_PROTO) {
+        snprintf(m, sizeof m, "Link with %s refused: it runs %s (link protocol %d, needs >= %d), we run %s (protocol %d, need >= %d)",
+                 name, theirs, proto, minproto, ours, NETSYNC_PROTO, NETSYNC_PROTO_MIN);
+        log_error("netsync", "%s", m);
+        server_notify_opers(srv, m);
+        return -1;
+    }
+    if (v && strcmp(theirs, ours) == 0) {
+        log_info("netsync", "%s runs the same version (%s)", name, ours);
+        return 0;
+    }
+    snprintf(m, sizeof m, "Link with %s: it runs %s, we run %s -- compatible (link protocol %d)%s", name, theirs, ours,
+             proto < NETSYNC_PROTO ? proto : NETSYNC_PROTO, proto == NETSYNC_PROTO ? "" : ", upgrade the older one when you can");
+    log_warn("netsync", "%s", m);
+    server_notify_opers(srv, m);
+    return 0;
 }
 
 int netsync_link_up(server_t *srv, link_conn_t *lc, const char *name, const char *sid, const char *desc) {
@@ -496,6 +517,7 @@ static void handle_uid(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     server_add_user(srv, cl);
     server_monitor_notify(srv, cl, 1);
     server_watch_notify(srv, cl, 1);
+    link_svc_user(srv, cl, SVC_EV_USER);
     /* forward with hop + 1 */
     char line[1100], hopb[8];
     snprintf(hopb, sizeof hopb, "%d", atoi(msg->params[1]) + 1);
@@ -547,6 +569,7 @@ static void handle_nick(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     server_watch_notify(srv, u, 0);
     rekey_nick(srv, u, newnick);
     u->nick_ts = ts;
+    link_svc_user(srv, u, SVC_EV_NICK);
     server_monitor_notify(srv, u, 1);
     server_watch_notify(srv, u, 1);
     char fl[300];
@@ -634,6 +657,7 @@ static void handle_account(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     client_prefix(u, prefix, sizeof prefix);
     if (strcmp(acct, "*") == 0) { u->account[0] = '\0'; u->umodes &= ~UMODE_R; }
     else { snprintf(u->account, sizeof u->account, "%s", acct); u->umodes |= UMODE_R; }
+    link_svc_user(srv, u, SVC_EV_ACCOUNT);
     irc_build(line, sizeof line, NULL, 0, prefix, "ACCOUNT", (const char *[]){acct}, 1, NULL);
     server_send_common_channels(srv, u, line, CAP_ACCOUNT_NOTIFY);
     server_monitor_extend(srv, u, line, CAP_ACCOUNT_NOTIFY);
@@ -1174,53 +1198,56 @@ static void handle_rsquit(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     (void)lc;
 }
 
-static void handle_acct(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
-    netserver_t *s = src_server(srv, lc, msg->prefix);
-    if (!s && msg->prefix && lc->nserver && strcmp(msg->prefix, lc->nserver->sid) == 0) s = lc->nserver;
-    if (!s || !srv->cfg.accounts.enabled || msg->nparams < 3) return;
-    long long ts = atoll(msg->params[0]);
-    srv->accounts.applying = 1; /* don't echo it back out through the replication hook */
-    int applied = accounts_apply_remote(&srv->accounts, msg->params[1], ts, msg->params[msg->nparams - 1]);
-    srv->accounts.applying = 0;
-    if (applied && accounts_suspended(&srv->accounts, msg->params[1], NULL, NULL))
-        for (client_t *c = srv->all_clients; c; c = c->all_next) /* suspended elsewhere: our sessions of it are logged out too */
-            if (c->fd >= 0 && c->account[0] && strcasecmp(c->account, msg->params[1]) == 0) server_logout(srv, c);
-    char fl[3000];
-    irc_build(fl, sizeof fl, NULL, 0, s->sid, "ACCT", (const char *[]){msg->params[0], msg->params[1]}, 2, msg->params[msg->nparams - 1]);
+static void handle_certfp(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
+    client_t *u = src_user(srv, lc, msg->prefix);
+    if (!u || msg->nparams < 1 || strlen(msg->params[0]) >= sizeof u->certfp) return;
+    snprintf(u->certfp, sizeof u->certfp, "%s", msg->params[0]);
+    link_svc_user(srv, u, SVC_EV_USER);
+    char fl[200];
+    irc_build(fl, sizeof fl, NULL, 0, u->uid, "CERTFP", (const char *[]){u->certfp}, 1, NULL);
     flood(srv, lc, fl);
 }
 
-static void handle_acctdel(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
-    netserver_t *s = src_server(srv, lc, msg->prefix);
-    if (!s && msg->prefix && lc->nserver && strcmp(msg->prefix, lc->nserver->sid) == 0) s = lc->nserver;
-    if (!s || !srv->cfg.accounts.enabled || msg->nparams < 2) return;
-    long long ts = atoll(msg->params[0]);
-    if (accounts_apply_remote_delete(&srv->accounts, msg->params[1], ts)) {
-        for (client_t *c = srv->all_clients; c; c = c->all_next) /* local sessions of a dropped account are logged out */
-            if (c->fd >= 0 && c->account[0] && strcasecmp(c->account, msg->params[1]) == 0) server_logout(srv, c);
+/* Toward `dest`: a UID (its server), or a connection id "<sid>.<conn_id>" (that server). */
+static const netserver_t *svc_route(server_t *srv, const char *dest) {
+    const char *dot = strchr(dest, '.');
+    if (dot) {
+        char sid[SID_LEN + 1];
+        if (dot - dest != SID_LEN) return NULL;
+        snprintf(sid, sizeof sid, "%.*s", SID_LEN, dest);
+        return netsync_find_sid(srv, sid);
     }
-    char fl[400];
-    irc_build(fl, sizeof fl, NULL, 0, s->sid, "ACCTDEL", (const char *[]){msg->params[0], msg->params[1]}, 2, NULL);
-    flood(srv, lc, fl);
+    client_t *u = netsync_find_uid(srv, dest);
+    return u ? u->nserver : NULL;
 }
 
-void netsync_account_changed(void *ud, const char *name, long long ts, int deleted) {
-    server_t *srv = ud;
-    if (!netsync_has_links(srv) || !srv->self_srv) return;
-    char tsb[24];
-    snprintf(tsb, sizeof tsb, "%lld", ts);
-    if (deleted) {
-        char line[400];
-        irc_build(line, sizeof line, NULL, 0, self_sid(srv), "ACCTDEL", (const char *[]){tsb, name}, 2, NULL);
-        flood(srv, NULL, line);
+void netsync_svcrelay(server_t *srv, const char *dest, const char *line) {
+    const netserver_t *to = svc_route(srv, dest);
+    if (!to || to == srv->self_srv) return;
+    char out[1000];
+    irc_build(out, sizeof out, NULL, 0, self_sid(srv), "SVCRELAY", (const char *[]){dest}, 1, line);
+    route_to(srv, to, out);
+}
+
+/* :<sid> SVCRELAY <dest> :<line> -- account-services traffic between a user's server and the one services link to. Ours:
+ * to the services link (dest is its NickServ) or applied to our client (svc_command); else passed on. */
+static void handle_svcrelay(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
+    if (msg->nparams < 2 || !src_server(srv, lc, msg->prefix)) return;
+    const char *dest = msg->params[0], *line = msg->params[msg->nparams - 1];
+    const netserver_t *to = svc_route(srv, dest);
+    if (!to) return;
+    if (to != srv->self_srv) {
+        char out[1000];
+        irc_build(out, sizeof out, NULL, 0, msg->prefix, "SVCRELAY", (const char *[]){dest}, 1, line);
+        route_to(srv, to, out);
         return;
     }
-    char *json = accounts_record_json(&srv->accounts, name);
-    if (!json) return;
-    char big[3000];
-    irc_build(big, sizeof big, NULL, 0, self_sid(srv), "ACCT", (const char *[]){tsb, name}, 2, json);
-    free(json);
-    flood(srv, NULL, big);
+    client_t *u = strchr(dest, '.') ? NULL : netsync_find_uid(srv, dest);
+    if (u && u->is_service && u->link_conn) { link_forward_line(u->link_conn, line); return; }
+    char buf[1000];
+    snprintf(buf, sizeof buf, "%s", line);
+    irc_message_t m;
+    if (irc_parse_line(buf, &m) == 0) svc_command(srv, NULL, &m);
 }
 
 static void handle_rename(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
@@ -1232,6 +1259,49 @@ static void handle_rename(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     char fl[500];
     irc_build(fl, sizeof fl, NULL, 0, u->uid, "RENAME", (const char *[]){msg->params[0], msg->params[1]}, 2, reason);
     flood(srv, lc, fl);
+}
+
+/* :<operuid> ENCAP <uid> <CMD> [args...] -- an oper override aimed at a user on another server, run by that user's server
+ * as if the (remote) oper had typed it there. The oper's own server already checked its privileges; replies to it are
+ * dropped (it sees the effect -- the JOIN, NICK, host change -- through normal propagation). */
+static void handle_encap(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
+    static const struct { const char *name; void (*fn)(server_t *, client_t *, irc_message_t *); } CMDS[] = {
+        {"SAJOIN", cmd_sajoin}, {"SAPART", cmd_sapart}, {"SANICK", cmd_sanick}, {"CHGHOST", cmd_chghost}, {"CHGIDENT", cmd_chgident},
+    };
+    client_t *oper = src_user(srv, lc, msg->prefix);
+    if (!oper || !(oper->umodes & UMODE_O) || msg->nparams < 3) return;
+    client_t *target = netsync_find_uid(srv, msg->params[0]);
+    if (!target) return;
+    if (target->remote) { /* not ours yet: pass it on toward the user's server */
+        char fl[900];
+        irc_build(fl, sizeof fl, NULL, 0, msg->prefix, "ENCAP", (const char **)msg->params, msg->nparams, NULL);
+        route_to(srv, target->nserver, fl);
+        return;
+    }
+    for (size_t i = 0; i < sizeof CMDS / sizeof CMDS[0]; i++) {
+        if (strcasecmp(msg->params[1], CMDS[i].name) != 0) continue;
+        irc_message_t m;
+        memset(&m, 0, sizeof m);
+        m.command = msg->params[1];
+        m.params[m.nparams++] = target->nick;
+        for (int k = 2; k < msg->nparams && m.nparams < IRC_MAX_PARAMS; k++) m.params[m.nparams++] = msg->params[k];
+        log_info("netsync", "%s (on %s) used %s on %s", oper->nick, oper->nserver->name, CMDS[i].name, target->nick);
+        CMDS[i].fn(srv, oper, &m);
+        return;
+    }
+}
+
+void netsync_encap(server_t *srv, client_t *oper, client_t *target, const char *cmd, char **args, int nargs) {
+    if (!oper->uid[0] || !target->remote || !target->nserver) return;
+    const char *p[IRC_MAX_PARAMS] = {target->uid, cmd};
+    int np = 2;
+    for (int i = 0; i < nargs && np < IRC_MAX_PARAMS; i++) p[np++] = args[i];
+    char line[900];
+    irc_build(line, sizeof line, NULL, 0, oper->uid, "ENCAP", p, np, NULL);
+    route_to(srv, target->nserver, line);
+    char m[300];
+    snprintf(m, sizeof m, "%s is on %s -- %s sent there", target->nick, target->nserver->name, cmd);
+    notice_self(srv, oper, m);
 }
 
 void netsync_handle(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
@@ -1264,8 +1334,9 @@ void netsync_handle(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     else if (!strcmp(c, "UNGLINE")) handle_ungline(srv, lc, msg);
     else if (!strcmp(c, "RENAME")) handle_rename(srv, lc, msg);
     else if (!strcmp(c, "RSQUIT")) handle_rsquit(srv, lc, msg);
-    else if (!strcmp(c, "ACCT")) handle_acct(srv, lc, msg);
-    else if (!strcmp(c, "ACCTDEL")) handle_acctdel(srv, lc, msg);
+    else if (!strcmp(c, "SVCRELAY")) handle_svcrelay(srv, lc, msg);
+    else if (!strcmp(c, "CERTFP")) handle_certfp(srv, lc, msg);
+    else if (!strcmp(c, "ENCAP")) handle_encap(srv, lc, msg);
     else if (!strcmp(c, "EOB")) log_info("netsync", "end of burst from %s", lc->peer_name);
     /* PING/PONG are answered in link.c; anything unknown is ignored (forward compatibility). */
 }
@@ -1275,6 +1346,7 @@ void netsync_handle(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
 void netsync_introduce_user(server_t *srv, client_t *cl) {
     netsync_assign_uid(srv, cl);
     if (!cl->nick_ts) cl->nick_ts = (long)time(NULL);
+    link_svc_user(srv, cl, SVC_EV_USER);
     if (!netsync_has_links(srv)) return;
     for (link_conn_t *lc = srv->links; lc; lc = lc->next) send_uid_line(srv, lc, cl);
 }
@@ -1288,6 +1360,7 @@ void netsync_user_quit(server_t *srv, client_t *cl, const char *reason) {
 
 void netsync_user_nick(server_t *srv, client_t *cl) {
     cl->nick_ts = (long)time(NULL);
+    link_svc_user(srv, cl, SVC_EV_NICK);
     if (!cl->uid[0] || !netsync_has_links(srv)) return;
     char line[300], ts[24];
     snprintf(ts, sizeof ts, "%ld", cl->nick_ts);
@@ -1327,6 +1400,7 @@ void netsync_user_setname(server_t *srv, client_t *cl) {
 }
 
 void netsync_user_account(server_t *srv, client_t *cl) {
+    link_svc_user(srv, cl, SVC_EV_ACCOUNT);
     if (!cl->uid[0] || !netsync_has_links(srv)) return;
     char line[300];
     const char *p[] = {cl->uid, cl->account[0] ? cl->account : "*"};

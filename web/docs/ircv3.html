@@ -68,9 +68,12 @@ history_size = 50                # messages kept per conversation; 0 turns histo
   so a conversation you read on one device shows as read on the others. <code>MARKREAD &lt;target&gt;</code> without a timestamp asks for the stored one.</p>
 
 <h2 id="accounts">accounts</h2>
-<pre>[accounts]
-enabled    = true
-store_file = "accounts.json"</pre>
+<p>Accounts are provided by NickServ in the services daemon (<code>bin/services</code>, see <a href="chanserv.html">services</a>). Every server relays
+  SASL and REGISTER to it, so the whole network shares one account database. While services are down, <code>sasl</code> and
+  <code>draft/account-registration</code> are not offered (cap-notify announces them coming and going) and users already logged in stay logged in.</p>
+<pre># services/services.toml
+[nickserv]
+#store_file = "../config/accounts.json"   # unset: the existing database is found and used in place</pre>
 <p>Ways to register, all creating the same account and logging you in at once:</p>
 <div class="tablewrap"><table>
 <tr><th>Method</th><th>Command</th></tr>
@@ -79,9 +82,9 @@ store_file = "accounts.json"</pre>
 <tr><td>Classic</td><td><code>/REGISTER &lt;account&gt; &lt;password&gt;</code></td></tr>
 </table></div>
 <p>To log in later: <code>/msg NickServ IDENTIFY [account] &lt;password&gt;</code> (account defaults to your nick). The best way is SASL, below, which logs you in during connection so no IDENTIFY is needed.
-  NickServ here is built in: it answers only when no real user or service is called NickServ, and <code>/WHOIS NickServ</code> shows it as a network service. Forgot your password? <code>/msg NickServ RESETPASS &lt;account&gt;</code> mails a code to your verified address. Accounts back <code>330 RPL_WHOISACCOUNT</code>
+  Forgot your password? <code>/msg NickServ RESETPASS &lt;account&gt;</code> mails a code to your verified address. Accounts back <code>330 RPL_WHOISACCOUNT</code>
   and the extban <code>a:&lt;account&gt;</code> for <code>+b</code>, <code>+e</code> and <code>+I</code>, matching by account instead of hostmask.
-  The store is independent of ChanServ.</p>
+  Clients without SASL can log in with <code>PASS account:password</code> at connect.</p>
 
 <h2>SASL PLAIN</h2>
 <p>Configure your client for SASL PLAIN with your account name and password. It sends <code>AUTHENTICATE PLAIN</code> during connection setup.

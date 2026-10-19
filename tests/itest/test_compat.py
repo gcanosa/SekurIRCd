@@ -109,7 +109,7 @@ def test_rename_keeps_history():
 
 
 def test_cap_notify_values_only_for_302():
-    with Server() as s:
+    with Server(cfg={"accounts": {"enabled": True, "store_file": "acc.json"}}) as s:
         new = s.client("cn302", caps=["cap-notify"])  # harness sends CAP LS 302
         old = s.client("cn301", register=False)
         old.send("CAP LS")
@@ -118,7 +118,9 @@ def test_cap_notify_values_only_for_302():
         old.send("NICK cn301")
         old.send("USER cn301 0 * :x")
         old.expect(" 001 ")
-        s.cfg["accounts"] = {"enabled": True, "store_file": "acc.json"}
-        s.reload()
-        assert new.saw(r"CAP cn302 NEW :sasl=PLAIN,SCRAM-SHA-256 ")
-        assert old.saw(r"CAP cn301 NEW :sasl draft/account-registration$")
+        s.services.stop()  # account services leave the network: sasl goes away...
+        assert new.saw(r"CAP cn302 DEL :sasl draft/account-registration", 3)
+        assert old.saw(r"CAP cn301 DEL :sasl draft/account-registration", 1)
+        s._start_services()  # ...and comes back with them, values only for 302
+        assert new.saw(r"CAP cn302 NEW :sasl=PLAIN,SCRAM-SHA-256 ", 3)
+        assert old.saw(r"CAP cn301 NEW :sasl draft/account-registration$", 1)

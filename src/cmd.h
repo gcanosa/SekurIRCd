@@ -51,8 +51,11 @@ void cmd_pass(server_t *srv, client_t *cl, irc_message_t *msg);
 /* Force `target` to `newnick` (announced like a NICK). 0 ok, -1 invalid/taken. */
 int force_nick_change(server_t *srv, client_t *target, const char *newnick);
 /* [accounts] enforce_nicks: call after a registered client's nick is set. */
-void nick_enforce_check(server_t *srv, client_t *cl);
-void nick_enforce_tick(server_t *srv, time_t now);
+/* account services relay (cmd_reg.c) */
+client_t *services_agent(server_t *srv);           /* the NickServ service user, or NULL while services are down */
+void cmd_services_tick(server_t *srv, time_t now);
+void svc_command(server_t *srv, client_t *svc, irc_message_t *msg); /* SVSLOGIN/SVSNICK/KILL/SVCSASL/SVCREGRESULT */
+int client_cert_fingerprint(client_t *cl, char *out, size_t outsz);
 void cmd_accept(server_t *srv, client_t *cl, irc_message_t *msg);
 struct member;
 void channel_reveal_member(struct channel *chan, struct member *m); /* +D: first message / rank reveals a hidden member */
@@ -84,18 +87,12 @@ void cmd_pong(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_quit(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_authenticate(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_register(server_t *srv, client_t *cl, irc_message_t *msg);
-void nickserv_message(server_t *srv, client_t *cl, const char *text);
 /* Bind/clear/report the caller's own account's SASL EXTERNAL cert fingerprint. */
 void cmd_cert(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_service_alias(server_t *srv, client_t *cl, irc_message_t *msg); /* NS/NICKSERV/CS/CHANSERV */
-/* net.c: apply a finished JOB_SASL (is_register=0) / JOB_HASH (is_register=1,
- * `hash` = the new scrypt string) for cl->pending_account. */
-void cmd_finish_auth(server_t *srv, client_t *cl, int is_register, int success, const char *hash);
 /* net.c: apply a finished JOB_SASL for AUTH_OPER/AUTH_DIE/AUTH_RESTART
  * (cmd_oper.c) -- `purpose` is an auth_purpose_t (worker.h), passed as int
  * so this header doesn't need to pull in worker.h. */
-/* net.c: a finished worker job for NickServ SET PASSWORD / DROP (`text` is the new hash for AUTH_PASSWD_HASH). */
-void cmd_finish_account_op(server_t *srv, client_t *cl, int purpose, int success, const char *text);
 void cmd_finish_privileged_auth(server_t *srv, client_t *cl, int purpose, int success);
 
 /* Channel handlers (cmd_chan.c) */
