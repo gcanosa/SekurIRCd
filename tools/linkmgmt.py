@@ -11,9 +11,11 @@ commands to bring the link up.
   tools/linkmgmt.py add             link a new server
   tools/linkmgmt.py edit            change a link (password, address, allowed IPs, who dials)
   tools/linkmgmt.py del             remove a link
+  tools/linkmgmt.py test            optional network checks for a link: DNS, port open/firewall, TLS
+  tools/linkmgmt.py test HOST PORT [--tls]   the same against any host (run it on the other server too)
   tools/linkmgmt.py -c my.toml ...  another sekurircd config
 """
-import argparse, hashlib, json, os, re, secrets, socket, subprocess, sys
+import argparse, fnmatch, hashlib, json, os, re, secrets, socket, ssl, subprocess, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from upgrade import ROOT, bold, dim, red, green, yellow, cyan  # noqa: E402
@@ -160,12 +162,12 @@ def wizard(cfg, path, old=None):
 
     lport = lk.get("port", DEFAULT_PORT)
     if we_dial:
-        rhost = ask(f"Address of {name} (host or IP we dial)", (old or {}).get("host"), lambda a: None if a and " " not in a else "required")
+        rhost = ask(f"Public hostname or IP of {name} that this server will connect to", (old or {}).get("host"), lambda a: None if a and " " not in a else "required")
         rport = int(ask(f"Its link port", str(old.get("port", DEFAULT_PORT)) if old else str(DEFAULT_PORT), chk_port))
         ips = None
     else:
         guess = socket.getfqdn()
-        rhost = ask(f"Address of {me} as {name} reaches it", guess if "." in guess and not guess.endswith((".arpa", ".local")) else None, lambda a: None if a and " " not in a else "required")
+        rhost = ask(f"Public hostname or IP of THIS server ({me}) that {name} will connect to", guess if "." in guess and not guess.endswith((".arpa", ".local")) else None, lambda a: None if a and " " not in a else "required")
         rport = lport
         cur = " ".join(old.get("allowed_ips", [])) if old else ""
         ips = ask(f"IPs {name} connects from (locks the link port to them; empty = anywhere)", cur, chk_ips).replace(",", " ").split()
@@ -233,6 +235,102 @@ def wizard(cfg, path, old=None):
     ]
     for i, s in enumerate(steps, 1): print(f"  {i}. {s}")
     print()
+    if yes("Run network checks now? (optional: DNS, ports, firewall, TLS)", False):
+        nettest(cfg, name, we_dial, rhost, rport, tls, ips, fresh=True)
+
+
+# --- network checks (optional) -------------------------------------------------
+
+def probe(host, port, tls=False, timeout=5.0):
+    """[(ok, text)] for DNS, TCP and (with tls) the TLS handshake to host:port. ok None = a note, not a failure."""
+    try:
+        ips = sorted({a[4][0] for a in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)})
+    except socket.gaierror as e:
+        return [(False, f"DNS  {host} does not resolve ({e.strerror}) -- fix the DNS record or use the IP")]
+    out = [(True, f"DNS  {host} -> {', '.join(ips)}")]
+    for ip in ips:
+        where = f"TCP  {ip} port {port}"
+        try:
+            s = socket.create_connection((ip, port), timeout)
+        except ConnectionRefusedError:
+            out.append((False, f"{where}: refused -- the host answers but nothing listens on that port "
+                               "(ircd not running, links off / not restarted, or another port)")); continue
+        except socket.timeout:
+            out.append((False, f"{where}: no answer in {timeout:.0f}s -- a firewall drops it (ufw/firewalld/pf, "
+                               "or the provider's security group) or the host is down")); continue
+        except OSError as e:
+            out.append((False, f"{where}: {e.strerror}")); continue
+        out.append((True, f"{where}: open"))
+        if tls: out.append(tls_check(s, host))
+        s.close()
+    return out
+
+
+def tls_check(sock, host):
+    try:
+        with ssl.create_default_context().wrap_socket(sock, server_hostname=host) as t:
+            return (True, f"TLS  {t.version()}, certificate valid for {host}")
+    except ssl.SSLCertVerificationError as e:
+        return (None, f"TLS  works, but the certificate is not trusted ({e.verify_message}) -- "
+                      "the dialing side needs tls_insecure_skip_verify = true")
+    except (ssl.SSLError, OSError) as e:
+        return (False, f"TLS  handshake failed ({e}) -- is [links] tls = true on that side?")
+
+
+def listening(lk, port):
+    """Is something listening on our link port right now?"""
+    bind = lk.get("bind", "0.0.0.0")
+    try:
+        socket.create_connection(("127.0.0.1" if bind in ("0.0.0.0", "::", "") else bind, port), 2).close()
+    except OSError:
+        return (False, f"LOCAL  nothing listens on link port {port} here yet -- paste the config and restart the ircd")
+    if not lk.get("enabled"):
+        return (False, f"LOCAL  port {port} is already taken by another program (links are off here) -- pick another port")
+    return (True, f"LOCAL  link listener is up on port {port}")
+
+
+def allowed(name, ips):
+    """Does `name` resolve to an address its allowed_ips accept?"""
+    try:
+        addrs = {a[4][0] for a in socket.getaddrinfo(name, None)}
+    except socket.gaierror:
+        return (None, f"ALLOW  {name} does not resolve, so allowed_ips {ips} can't be checked")
+    hit = [a for a in addrs if any(fnmatch.fnmatchcase(a, g) for g in ips)]
+    if hit: return (True, f"ALLOW  {name} ({', '.join(sorted(addrs))}) matches allowed_ips")
+    return (None, f"ALLOW  {name} resolves to {', '.join(sorted(addrs))}, which allowed_ips {ips} does not match "
+                  "-- fine if it connects from another address, otherwise the link will be refused")
+
+
+def nettest(cfg, name, we_dial, host, port, tls, ips=None, fresh=False):
+    heading(f"Network checks from this machine ({socket.gethostname()})")
+    rows = []
+    if we_dial:
+        rows += probe(host, port, tls)
+        if fresh: rows.append((None, f"Until {name} has its config pasted and is restarted, 'refused' is expected."))
+    else:
+        rows.append(listening(cfg.get("links", {}), port))
+        rows += probe(host, port, tls)
+        if ips: rows.append(allowed(name, ips))
+        rows.append((None, f"This is only from inside. The real test is from {name}, after copying this tool there: "
+                           f"tools/linkmgmt.py test {host} {port}{' --tls' if tls else ''}"))
+    for ok, t in rows:
+        print(f"  {green('OK  ') if ok else red('FAIL') if ok is False else yellow('NOTE')} {t}")
+    bad = sum(1 for ok, _ in rows if ok is False)
+    print("\n" + (red(f"{bad} problem(s) found.") if bad else green("No problems found.")) + "\n")
+
+
+def test(cfg, target, tls):
+    lk = cfg.get("links", {})
+    if target:
+        if len(target) != 2 or chk_port(target[1]): sys.exit(red("usage: tools/linkmgmt.py test HOST PORT [--tls]"))
+        return nettest(cfg, target[0], True, target[0], int(target[1]), tls)
+    p = choose(cfg, "test")
+    if p.get("host"):
+        return nettest(cfg, p["name"], True, p["host"], p.get("port", DEFAULT_PORT), bool(lk.get("tls")))
+    me = cfg.get("server", {}).get("name", "")
+    host = ask(f"Public hostname or IP of THIS server ({me}) that {p['name']} connects to", None,
+               lambda a: None if a and " " not in a else "required")
+    nettest(cfg, p["name"], False, host, lk.get("port", DEFAULT_PORT), bool(lk.get("tls")), p.get("allowed_ips"))
 
 
 def delete(cfg, path):
@@ -272,12 +370,20 @@ def selftest():
     assert c["server"]["name"] == "a.b" and c["links"] == {"enabled": True, "mode": "hub", "port": 7070}
     assert [p["name"] for p in c["peers"]] == ["x.y", "z.y"] and c["peers"][0]["allowed_ips"] == ["1.2.3.4"]
     assert c["peers"][1]["port"] == 7000 and c["tls"]["enabled"] is False
+    assert probe("nonexistent.invalid", 7000)[0][0] is False
+    srv = socket.socket(); srv.bind(("127.0.0.1", 0)); srv.listen(1); port = srv.getsockname()[1]
+    r = probe("127.0.0.1", port); srv.close()
+    assert r[0][0] and r[1] == (True, f"TCP  127.0.0.1 port {port}: open")
+    assert probe("127.0.0.1", port)[1][0] is False  # closed now: refused
+    assert allowed("localhost", ["127.0.0.*", "::1"])[0] is True and allowed("localhost", ["10.*"])[0] is None
     print("selftest ok")
 
 
 def main():
     ap = argparse.ArgumentParser(description="Server-link wizard: prints the config for both sides, writes nothing.")
-    ap.add_argument("action", nargs="?", choices=["list", "add", "edit", "del"])
+    ap.add_argument("action", nargs="?", choices=["list", "add", "edit", "del", "test"])
+    ap.add_argument("target", nargs="*", help="test only: HOST PORT")
+    ap.add_argument("--tls", action="store_true", help="test HOST PORT: also try a TLS handshake")
     ap.add_argument("-c", "--config", default=os.path.join(ROOT, "config/sekurircd.toml"))
     ap.add_argument("--no-banner", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--selftest", action="store_true", help=argparse.SUPPRESS)
@@ -287,10 +393,11 @@ def main():
     if not os.path.exists(a.config): sys.exit(red(f"{a.config} not found (use -c)"))
     cfg = read_config(a.config)
     show(cfg)
-    act = a.action or ["add", "edit", "del", None][pick("What now?", ["Link a new server", "Edit a link", "Remove a link", "Quit"])]
+    act = a.action or ["add", "edit", "del", "test", None][pick("What now?", ["Link a new server", "Edit a link", "Remove a link", "Test a link (network)", "Quit"])]
     if act == "add": wizard(cfg, a.config)
     elif act == "edit": wizard(cfg, a.config, choose(cfg, "edit"))
     elif act == "del": delete(cfg, a.config)
+    elif act == "test": return test(cfg, a.target, a.tls)
     print(dim("Nothing was written -- paste the blocks above into each server's config."))
 
 
