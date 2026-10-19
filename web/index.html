@@ -4,12 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SekurIRCd</title>
-<meta name="description" content="SekurIRCd is a lightweight, secure IRC daemon written in C11 for macOS, Linux and the BSDs. TLS, SASL, IRCv3, server linking and ChanServ. MIT licensed.">
+<meta name="description" content="SekurIRCd is a lightweight, secure IRC daemon written in C11 for macOS, Linux and the BSDs. TLS, SASL, IRCv3, server linking and services (NickServ + ChanServ). MIT licensed.">
 <meta name="google-site-verification" content="X9H5mFTmDWg8ktJSEcmN1iy6Y3tfXJKRK9VbffkwNWQ" />
 <link rel="canonical" href="https://gcanosa.github.io/SekurIRCd/">
 <meta property="og:url" content="https://gcanosa.github.io/SekurIRCd/">
 <meta property="og:title" content="SekurIRCd">
-<meta property="og:description" content="A lightweight, secure IRC daemon written in C11. TLS, SASL, IRCv3, server linking, ChanServ. MIT licensed.">
+<meta property="og:description" content="A lightweight, secure IRC daemon written in C11. TLS, SASL, IRCv3, server linking, NickServ + ChanServ. MIT licensed.">
 <meta property="og:image" content="https://gcanosa.github.io/SekurIRCd/img/og.png">
 <meta property="og:type" content="website">
 <meta name="twitter:card" content="summary_large_image">
@@ -46,7 +46,7 @@
   <div class="term">
     <div class="term-bar"><i></i><i></i><i></i><span>bash</span></div>
 <pre><span class="hl-p">$ </span>git clone https://github.com/gcanosa/SekurIRCd.git &amp;&amp; cd SekurIRCd
-<span class="hl-p">$ </span>make                                   <span class="hl-c"># bin/sekurircd, bin/chanserv</span>
+<span class="hl-p">$ </span>make                                   <span class="hl-c"># bin/sekurircd, bin/services</span>
 <span class="hl-p">$ </span>cp config/sekurircd.template.toml config/sekurircd.toml
 <span class="hl-p">$ </span>./bin/sekurircd --config config/sekurircd.toml</pre>
   </div>
@@ -64,7 +64,7 @@
     <div class="card"><h3>Host cloaking</h3><p>Hide real IPs and hostnames behind per-connection cloaks, with named vhosts and oper <code>CHGHOST</code>/<code>SETHOST</code>. Opers and the user still see the truth in WHOIS.</p></div>
     <div class="card"><h3>Protection bundle</h3><p>An optional protection layer in one config file: DNSBL blacklists with per-zone reply rules, an active open-proxy scanner (HTTP, SOCKS4, SOCKS5), connection limits, connect-flood auto-bans, flood and spam protection, all reported live in your debug channel. <a href="docs/protection.html">Read more</a>.</p></div>
     <div class="card"><h3>Server linking</h3><p>Hub-and-leaf topology with scrypt-authenticated peers, optional TLS, network-wide KILL/WALLOPS/ban propagation and exponential-backoff reconnect.</p></div>
-    <div class="card"><h3>ChanServ</h3><p>A separate, optional process that links in and keeps channels registered: IDENTIFY, ACCESS, AKICK, GUARD, TOPICLOCK, SUCCESSOR, SET MLOCK.</p></div>
+    <div class="card"><h3>Services</h3><p>One services process links in for the whole network: NickServ (accounts, SASL, enforcement, GHOST/REGAIN, email resets) and ChanServ (IDENTIFY, ACCESS, AKICK, GUARD, TOPICLOCK, SUCCESSOR, SET MLOCK).</p></div>
     <div class="card"><h3>Operator tooling</h3><p>Snomask-style server notices, an oper-only debug channel, SAJOIN/SAPART/SAMODE overrides, and live <code>REHASH</code> without dropping anyone.</p></div>
     <div class="card"><h3>Daemon-friendly</h3><p><code>--daemon</code>, <code>--stop</code>, <code>--rehash</code>, PID files, rotating logs, and ready-made systemd user units. No root required.</p></div>
     <div class="card"><h3>Small &amp; testable</h3><p>Plain C11, <code>-Wall -Wextra</code>, an ASan+UBSan debug build and an assert-based self-check via <code>make check</code>.</p></div>
@@ -101,7 +101,7 @@
     <a class="card" href="docs/configuration.html"><h3>Configuration</h3><p>Every section of <code>sekurircd.toml</code>, operators, TLS.</p></a>
     <a class="card" href="docs/commands.html"><h3>Commands &amp; modes</h3><p>User, channel and operator commands.</p></a>
     <a class="card" href="docs/ircv3.html"><h3>IRCv3 &amp; SASL</h3><p>Capabilities, accounts and certificate login.</p></a>
-    <a class="card" href="docs/chanserv.html"><h3>ChanServ</h3><p>Setting up and using channel services.</p></a>
+    <a class="card" href="docs/chanserv.html"><h3>Services</h3><p>Setting up NickServ and ChanServ.</p></a>
     <a class="card" href="changelog.html"><h3>Changelog</h3><p>What changed in each release.</p></a>
   </div>
 </section>

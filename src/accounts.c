@@ -2,6 +2,7 @@
 #include "proto.h"
 
 #include <ctype.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -65,29 +66,28 @@ static void derive(account_store_t *st) {
     st->derived_stale = 0;
 }
 
-void accounts_init(account_store_t *st, const char *path) {
-    memset(st, 0, sizeof *st);
-    if (path && path[0]) snprintf(st->path, sizeof st->path, "%s", path);
+/* Reads and parses `path`. 1 = a JSON object (in *out), 0 = no file / empty file, -1 = present but unreadable or corrupt. */
+static int load_json_object(const char *path, cJSON **out) {
+    *out = NULL;
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return errno == ENOENT ? 0 : -1;
+    fseek(fp, 0, SEEK_END);
+    long len = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+    if (len <= 0) { fclose(fp); return 0; }
+    char *buf = malloc((size_t)len + 1);
+    if (!buf) { fclose(fp); return -1; }
+    size_t rd = fread(buf, 1, (size_t)len, fp);
+    fclose(fp);
+    buf[rd] = '\0';
+    cJSON *parsed = cJSON_Parse(buf);
+    free(buf);
+    if (!parsed || !cJSON_IsObject(parsed)) { cJSON_Delete(parsed); return -1; } /* `[]`, `null`... would lose every key on save */
+    *out = parsed;
+    return 1;
+}
 
-    if (st->path[0]) {
-        FILE *fp = fopen(st->path, "rb");
-        if (fp) {
-            fseek(fp, 0, SEEK_END);
-            long len = ftell(fp);
-            fseek(fp, 0, SEEK_SET);
-            if (len > 0) {
-                char *buf = malloc((size_t)len + 1);
-                if (buf) {
-                    size_t rd = fread(buf, 1, (size_t)len, fp);
-                    buf[rd] = '\0';
-                    st->data = cJSON_Parse(buf);
-                    free(buf);
-                }
-            }
-            fclose(fp);
-        }
-    }
-    if (!st->data) st->data = cJSON_CreateObject();
+static void index_all(account_store_t *st) {
     cJSON *rec;
     cJSON_ArrayForEach(rec, st->data) {
         cJSON *n = cJSON_GetObjectItemCaseSensitive(rec, "nicks");
@@ -95,6 +95,42 @@ void accounts_init(account_store_t *st, const char *path) {
         if (rec->string) idx_put(&st->by_name, rec->string, rec);
     }
     st->derived_stale = 1;
+}
+
+void accounts_init(account_store_t *st, const char *path) {
+    memset(st, 0, sizeof *st);
+    if (path && path[0]) snprintf(st->path, sizeof st->path, "%s", path);
+    if (st->path[0]) load_json_object(st->path, &st->data);
+    if (!st->data) st->data = cJSON_CreateObject();
+    index_all(st);
+}
+
+int accounts_load(account_store_t *st, const char *path, int backup_count, char *err, size_t errsz) {
+    memset(st, 0, sizeof *st);
+    snprintf(st->path, sizeof st->path, "%s", path);
+    st->backup_count = backup_count;
+    int live = load_json_object(path, &st->data);
+    if (live < 0) { /* corrupt: never start empty over it -- the newest readable backup, or refuse */
+        for (int gen = 1; gen <= backup_count && !st->data; gen++) {
+            char bak[sizeof st->path + 16];
+            snprintf(bak, sizeof bak, "%s.bak%d", path, gen);
+            if (load_json_object(bak, &st->data) == 1) {
+                snprintf(err, errsz, "%s is unreadable -- loaded backup %s (the bad file is kept as %s.corrupt)", path, bak, path);
+                char keep[sizeof st->path + 16];
+                snprintf(keep, sizeof keep, "%s.corrupt", path);
+                rename(path, keep);
+                st->dirty = 1; /* write the recovered copy back as the live file */
+            }
+        }
+        if (!st->data) {
+            snprintf(err, errsz, "%s exists but is unreadable or corrupt, and no backup could be loaded -- refusing to start "
+                                 "(fix or restore it; it is left untouched)", path);
+            return -1;
+        }
+    } else err[0] = '\0';
+    if (!st->data) st->data = cJSON_CreateObject();
+    index_all(st);
+    return 0;
 }
 
 void accounts_free(account_store_t *st) {
@@ -112,8 +148,37 @@ static void save(account_store_t *st) {
     if (st->path[0]) st->dirty = 1; /* accounts disabled -- never touch disk */
 }
 
+/* Copies the live file to <path>.bak1 after shifting the older ones up -- at most every 5 minutes, so a burst of writes
+ * can't fill every slot with nearly the same file. */
+static void rotate_backups(account_store_t *st) {
+    time_t now = time(NULL);
+    if (st->backup_count <= 0 || now - st->last_backup < 300) return;
+    st->last_backup = now;
+    char from[sizeof st->path + 16], to[sizeof st->path + 16];
+    snprintf(to, sizeof to, "%s.bak%d", st->path, st->backup_count);
+    unlink(to);
+    for (int i = st->backup_count - 1; i >= 1; i--) {
+        snprintf(from, sizeof from, "%s.bak%d", st->path, i);
+        snprintf(to, sizeof to, "%s.bak%d", st->path, i + 1);
+        rename(from, to);
+    }
+    snprintf(to, sizeof to, "%s.bak1", st->path);
+    FILE *src = fopen(st->path, "rb");
+    if (!src) return;
+    int fd = open(to, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    FILE *dst = fd >= 0 ? fdopen(fd, "wb") : NULL;
+    if (dst) {
+        char buf[4096];
+        size_t n;
+        while ((n = fread(buf, 1, sizeof buf, src)) > 0) fwrite(buf, 1, n, dst);
+        fclose(dst);
+    } else if (fd >= 0) close(fd);
+    fclose(src);
+}
+
 void accounts_flush(account_store_t *st) {
     if (!st->dirty || !st->path[0]) return;
+    rotate_backups(st);
     char tmp[sizeof st->path + 5];
     snprintf(tmp, sizeof tmp, "%s.tmp", st->path);
     /* O_CREAT with an explicit 0600 (not fopen()+chmod after the fact,

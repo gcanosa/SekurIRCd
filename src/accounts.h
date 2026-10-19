@@ -32,9 +32,15 @@ typedef struct {
     void (*on_change)(void *ud, const char *name, long long ts, int deleted);
     void *ud;
     int applying;     /* set while applying a change that came from another server (it must not be echoed back) */
+    int backup_count; /* rotating <path>.bak1..N kept by accounts_flush (0 = none) */
+    long last_backup; /* when the last rotation ran */
 } account_store_t;
 
 void accounts_init(account_store_t *st, const char *path /* may be NULL */);
+/* The services daemon's loader: like accounts_init, but a present-and-corrupt file is never replaced by an empty store --
+ * the newest readable <path>.bakN is loaded instead (err says so), or -1 is returned (err says why) and the file is left
+ * alone. Also turns on backup rotation. */
+int accounts_load(account_store_t *st, const char *path, int backup_count, char *err, size_t errsz);
 /* Writes pending changes to `path` (atomically: temp file, fsync, rename). Cheap no-op when nothing changed; call it from the
  * periodic tick. accounts_free flushes too. A failed write leaves the store dirty so the next call retries. */
 void accounts_flush(account_store_t *st);

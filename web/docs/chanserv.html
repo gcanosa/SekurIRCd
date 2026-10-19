@@ -3,11 +3,11 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ChanServ · SekurIRCd docs</title>
-<meta name="description" content="Set up and use ChanServ, SekurIRCd's optional channel services process.">
+<title>Services · SekurIRCd docs</title>
+<meta name="description" content="Set up and use SekurIRCd's services process: NickServ (accounts, SASL) and ChanServ (channel registration).">
 <link rel="canonical" href="https://gcanosa.github.io/SekurIRCd/docs/chanserv.html">
 <meta property="og:title" content="ChanServ · SekurIRCd docs">
-<meta property="og:description" content="Set up and use ChanServ, SekurIRCd's optional channel services process.">
+<meta property="og:description" content="Set up and use SekurIRCd's services process: NickServ (accounts, SASL) and ChanServ (channel registration).">
 <meta property="og:image" content="https://gcanosa.github.io/SekurIRCd/img/og.png">
 <meta property="og:type" content="website">
 <meta name="twitter:card" content="summary_large_image">
@@ -21,11 +21,26 @@
 <div class="wrap docs-layout">
 <aside id="docs-nav" class="docs-nav"></aside>
 <main class="docs">
-<h1>ChanServ</h1>
-<p><code>bin/chanserv</code> is a completely separate, optional process. It links to the ircd as an ordinary server peer and introduces one bot,
-  <code>ChanServ</code>, that lets a channel be registered behind a password so its ops survive an empty channel instead of going to
-  whoever joins first. Registrations are JSON on disk with rotating backups (<code>[storage] backup_count</code>, default 5); if the live file is
-  corrupt, the newest readable backup loads automatically.</p>
+<h1>Services: NickServ + ChanServ</h1>
+<p><code>bin/services</code> is a separate process. It links to the ircd as an ordinary server peer and introduces two bots:</p>
+<ul>
+  <li><strong>NickServ</strong>, the network's account service. It owns the account database; every server relays SASL (PLAIN, SCRAM-SHA-256,
+    EXTERNAL), <code>REGISTER</code> and <code>PASS</code> logins to it, so all servers share one set of accounts. Without services running there are
+    no accounts and no SASL anywhere (users already logged in stay logged in).</li>
+  <li><strong>ChanServ</strong>, which lets a channel be registered behind a password so its ops survive an empty channel instead of going to
+    whoever joins first.</li>
+</ul>
+<p>Both stores are JSON on disk with rotating backups (<code>backup_count</code>, default 5). A corrupt file is never replaced by an empty one:
+  the newest readable backup loads, or services refuse to start and leave the file alone. On a network of several servers, run exactly one copy,
+  linked to one of them.</p>
+
+<h2 id="upgrade">upgrading from the built-in NickServ</h2>
+<p>Older releases kept accounts inside every ircd (<code>[accounts]</code> in sekurircd.toml). Nothing has to be converted: with no
+  <code>[nickserv] store_file</code> set, NickServ finds that <code>config/accounts.json</code> (or <code>accounts.json</code> beside services.toml after
+  <code>make install</code>) and uses it in place, keeping a copy of the pre-upgrade file as <code>accounts.json.bak1</code>. ChanServ keeps its
+  <code>chanserv.json</code>. The old <code>[accounts]</code> section is ignored with a warning; move settings such as <code>enforce_nicks</code>,
+  <code>max_accounts</code> and <code>email_command</code> to <code>[nickserv]</code>. Services admins (SUSPEND/FDROP/SASET) are now accounts listed
+  in <code>[nickserv] admins</code>, not an oper privilege.</p>
 
 <h2>enable it</h2>
 <h3>1. ircd side: turn on linking and add a peer</h3>
@@ -43,12 +58,28 @@ password_hash = "scrypt$16384$8$1$&lt;salt-hex&gt;$&lt;digest-hex&gt;"   # from 
 <p>See the full <a href="https://github.com/gcanosa/SekurIRCd/blob/main/services/services.template.toml"><code>services.template.toml</code></a> on GitHub for every option, including <code>[storage] backup_count</code>.</p>
 
 <h2>run it</h2>
-<pre>./bin/chanserv --config services/services.toml                     # foreground
-./bin/chanserv --config services/services.toml --daemon --pidfile services/chanserv.pid
-./bin/chanserv --stop --pidfile services/chanserv.pid</pre>
-<p>A second <code>--daemon</code> against a live pidfile is refused. If the ircd is down or the link drops, ChanServ keeps retrying.
-  Easiest: <code>./sekurircd start</code> from the repo root starts ChanServ automatically when <code>services/services.toml</code> exists (see <a href="install.html">install</a>).
-  Under systemd: <code>systemctl --user enable --now chanserv</code>.</p>
+<pre>./bin/services --config services/services.toml                     # foreground
+./bin/services --config services/services.toml --daemon --pidfile services/services.pid
+./bin/services --stop --pidfile services/services.pid</pre>
+<p>A second <code>--daemon</code> against a live pidfile is refused. If the ircd is down or the link drops, services keep retrying.
+  Easiest: <code>./sekurircd start</code> from the repo root starts services automatically when <code>services/services.toml</code> exists (see <a href="install.html">install</a>).
+  Under systemd: <code>systemctl --user enable --now services</code> (it then follows <code>sekurircd</code>: stopping or restarting the ircd takes services with it).</p>
+
+<h2 id="nickserv">NickServ</h2>
+<pre>[nickserv]
+#admins        = ["youraccount"]   # SUSPEND/UNSUSPEND/FDROP/SASET PASSWORD, full INFO
+#enforce_nicks = false             # rename unidentified users of registered nicks...
+#enforce_grace = 60                # ...after this many seconds
+#max_accounts  = 0                 # 0 = unlimited
+#email_command = "/usr/local/bin/send-verification"   # mails SET EMAIL / RESETPASS codes</pre>
+<pre>/msg NickServ REGISTER &lt;password&gt; [email]       # the account is named after your nick
+/msg NickServ IDENTIFY [account] &lt;password&gt;     # or log in with SASL while connecting
+/msg NickServ GHOST &lt;nick&gt;  |  REGAIN &lt;nick&gt;   # free your nick, on any server
+/msg NickServ SET PASSWORD &lt;old&gt; &lt;new&gt;  |  SET EMAIL &lt;address&gt;  |  VERIFY &lt;code&gt;
+/msg NickServ RESETPASS &lt;account&gt;               # mails a code to the verified address
+/msg NickServ GROUP  |  UNGROUP &lt;nick&gt;  |  CERT ADD|DEL|INFO  |  INFO [account]  |  DROP &lt;password&gt;</pre>
+
+<h2 id="chanserv">ChanServ</h2>
 
 <h2>commands</h2>
 <pre>/msg ChanServ REGISTER #chan &lt;password&gt;            # you must be opped on #chan

@@ -25,6 +25,9 @@ TEMPLATES = {  # template -> the live file an admin copied it to
     "config/protection.template.toml": "config/protection.toml",
     "services/services.template.toml": "services/services.toml",
 }
+# bin/services is the services daemon (NickServ + ChanServ); bin/chanserv is the same program under its old name, kept so
+# an install upgraded by an older upgrade.py keeps working (see the Makefile).
+BINARIES = ("sekurircd", "services", "chanserv")
 BACKUP_EXCLUDE = {".git", "build", "build-debug", "build.new", "bin.new", "logs",
                   "plans", ".codegraph", ".claude", "node_modules"}
 
@@ -284,12 +287,12 @@ def show_config_news(news, limit=25):
 def daemon_status():
     p = run(["./sekurircd", "status"], check=False)
     return {m[1]: m[2] == "running" for ln in p.stdout.splitlines()
-            if (m := re.match(r"(sekurircd|chanserv):\s+(\w+)", ln))}
+            if (m := re.match(r"(sekurircd|services|chanserv):\s+(\w+)", ln))}
 
 
 def restart_daemons():
     out(); warn(bold("Restarting disconnects every connected user"))
-    info("Users are dropped and must reconnect; ChanServ re-links after the ircd is back.")
+    info("Users are dropped and must reconnect; services (NickServ + ChanServ) re-link after the ircd is back.")
     info("Usually a few seconds -- pick a quiet moment.")
     if ARGS.restart: go = True
     elif ARGS.no_restart: go = False
@@ -300,7 +303,14 @@ def restart_daemons():
         return False
     if shutil.which("systemctl") and run(["systemctl", "--user", "is-active", "--quiet", "sekurircd"], check=False).returncode == 0:
         # systemd owns the daemons: a wrapper stop would just get them respawned (Restart=on-failure)
-        run(["systemctl", "--user", "restart", "sekurircd", "chanserv"], check=False)
+        ud = unit_dir()
+        if os.path.exists(f"{ud}/services.service") and os.path.exists(f"{ud}/chanserv.service"):
+            run(["systemctl", "--user", "stop", "chanserv"], check=False)  # retired: services.service hosts ChanServ now
+            os.remove(f"{ud}/chanserv.service")
+            run(["systemctl", "--user", "daemon-reload"], check=False)
+            ok("stopped and removed the old chanserv.service")
+        units = [u for u in ("sekurircd", "services", "chanserv") if os.path.exists(f"{ud}/{u}.service")]
+        run(["systemctl", "--user", "restart", *units], check=False)
         time.sleep(2)
         st = daemon_status()
         for name, up in st.items(): (ok if up else fail)(f"{name}: {'running' if up else 'NOT running'} (systemd)")
@@ -423,23 +433,29 @@ def build(expect_version, expect_full=None):
     if rc:
         for l in tail: info(dim(l))
         raise RuntimeError(f"make failed (exit {rc})")
-    for name in ("sekurircd", "chanserv"):
+    built = [n for n in BINARIES if os.path.exists(f"bin.new/{n}")]  # an older release (a rollback rebuild) has no bin/services
+    if "sekurircd" not in built or not ({"services", "chanserv"} & set(built)):
+        raise RuntimeError(f"the build did not produce the expected binaries (got: {', '.join(built) or 'none'})")
+    for name in built:
         v = subprocess.run([f"bin.new/{name}", "--version"], capture_output=True, text=True).stdout.strip()
         LOG.w(f"bin.new/{name} --version -> {v}")
-        # chanserv carries its own version number; only the ircd must match the release
+        # services carry their own version number; only the ircd must match the release
         # "sekurircd 1.2.3", or "sekurircd 1.2.3-git.20261018, commits after release 1.2.3" off a release tag (see the
         # Makefile); without expect_full any dated build of this release is fine
         reported = v.split()[1].rstrip(",") if len(v.split()) > 1 else ""
         good = reported == expect_full if expect_full else re.fullmatch(re.escape(expect_version) + r"(-git\.\d{8})?", reported)
         if not v.startswith(name) or (name == "sekurircd" and not good):
             raise RuntimeError(f"bin.new/{name} reports '{v}', expected {name} {(expect_full or expect_version) if name == 'sekurircd' else '...'}")
-    ok(f"Build OK: sekurircd {expect_full or expect_version}, chanserv runs")
+    ok(f"Build OK: sekurircd {expect_full or expect_version}, services run")
 
 
 def install_binaries():
     had_prev = []
-    for name in ("sekurircd", "chanserv"):
+    for name in BINARIES:
         cur = f"bin/{name}"
+        if not os.path.exists(f"bin.new/{name}"):  # not part of this version
+            if os.path.exists(cur): os.replace(cur, cur + ".prev"); had_prev.append(name)
+            continue
         if os.path.exists(cur):
             os.replace(cur, cur + ".prev"); had_prev.append(name)
         os.makedirs("bin", exist_ok=True)
@@ -455,8 +471,9 @@ def install_binaries():
 # systemd/*.service are templates for `make install`'s layout (/usr/local/bin,
 # /etc/sekurircd, /var/lib/sekurircd). A git-clone install lives in ROOT and is
 # driven by ./sekurircd (config/sekurircd.toml, services/services.toml, pidfiles
-# sekurircd.pid + services/chanserv.pid), so render the templates for that layout.
-UNITS = {"sekurircd": None, "chanserv": "services/services.toml"}  # unit -> config it needs
+# sekurircd.pid + services/services.pid), so render the templates for that layout.
+# services.service replaced chanserv.service (bin/services hosts NickServ + ChanServ); the old unit is retired below.
+UNITS = {"sekurircd": None, "services": "services/services.toml"}  # unit -> config it needs
 
 
 def unit_dir():
@@ -468,6 +485,8 @@ def render_unit(name):
     for a, b in (("/etc/sekurircd/sekurircd.toml", f"{ROOT}/config/sekurircd.toml"),
                  ("/etc/sekurircd/services.toml", f"{ROOT}/services/services.toml"),
                  ("/var/lib/sekurircd/chanserv/chanserv.pid", f"{ROOT}/services/chanserv.pid"),
+                 ("/var/lib/sekurircd/services/services.pid", f"{ROOT}/services/services.pid"),
+                 ("/var/lib/sekurircd/services", ROOT),
                  ("/usr/local/bin", f"{ROOT}/bin"),
                  ("/var/lib/sekurircd/ircd", ROOT), ("/var/lib/sekurircd/chanserv", ROOT),
                  ("/etc/sekurircd", f"{ROOT}/config")):
@@ -496,6 +515,11 @@ def systemd_step():
     for n in units:
         open(f"{ud}/{n}.service", "w").write(render_unit(n))
         ok(f"wrote {ud}/{n}.service")
+    if os.path.exists(f"{ud}/chanserv.service") and "services" in units:
+        # Two units would mean two ChanServs. Disabled now; stopped and removed at the restart, when services.service
+        # takes over (until then it keeps running the old ChanServ).
+        run(["systemctl", "--user", "disable", "chanserv"], check=False)
+        ok("chanserv.service disabled -- services.service (NickServ + ChanServ) replaces it at the restart")
     run(["systemctl", "--user", "daemon-reload"], check=False)
     if mode == "enable":
         p = run(["systemctl", "--user", "enable", *units], check=False)
@@ -703,6 +727,10 @@ def upgrade(cur, st, tgt):
     info(f"log:    {LOG.path}")
     info(f"undo:   {bold('tools/upgrade.py --rollback')}")
     info(dim("Re-check your config any time with tools/confcheck.py (lists new, moved and unknown options)."))
+    if os.path.exists("services/nickserv.c") and run(["git", "cat-file", "-e", f"{cur['sha']}:services/nickserv.c"], check=False).returncode:
+        out(); info(bold("NickServ now runs in the services daemon") + " (bin/services, with ChanServ): accounts, SASL and")
+        info("REGISTER need it running. It uses your existing config/accounts.json in place -- nothing was moved.")
+        info("Settings that used to be [accounts] in sekurircd.toml go in [nickserv] in services/services.toml.")
     LOG.w("RESULT: SUCCESS")
 
 
@@ -725,11 +753,26 @@ def rollback():
     kept = switch([["checkout", "--detach", prev["sha"]]] + (
         [["branch", "-f", prev["branch"], prev["sha"]], ["checkout", prev["branch"]]] if prev["branch"] else []), prev["sha"], park=False)
     for f in kept: warn(f"kept your local edits to {f}")
-    if len(s["prev_binaries"]) == 2 and all(os.path.exists(f"bin/{n}.prev") for n in ("sekurircd", "chanserv")):
-        for n in ("sekurircd", "chanserv"): os.replace(f"bin/{n}.prev", f"bin/{n}")
+    prev = s["prev_binaries"]
+    if "sekurircd" in prev and all(os.path.exists(f"bin/{n}.prev") for n in prev):
+        for n in prev: os.replace(f"bin/{n}.prev", f"bin/{n}")
+        for n in BINARIES:  # a binary the old version didn't have (bin/services): gone with it
+            if n not in prev and os.path.exists(f"bin/{n}"): os.remove(f"bin/{n}")
         ok("restored previous binaries (no rebuild needed)")
     else:
         warn("previous binaries not available -- rebuilding"); build(s["from"]["version"], s["from"].get("full")); install_binaries()
+    ud = unit_dir()
+    if os.path.exists(f"{ud}/services.service") and not os.path.exists("systemd/services.service"):
+        # back to a version before bin/services: its ChanServ ran as chanserv.service
+        run(["systemctl", "--user", "disable", "--now", "services"], check=False)
+        os.remove(f"{ud}/services.service")
+        if os.path.exists("systemd/chanserv.service"):
+            open(f"{ud}/chanserv.service", "w").write(render_unit("chanserv"))
+            run(["systemctl", "--user", "daemon-reload"], check=False)
+            run(["systemctl", "--user", "enable", "chanserv"], check=False)
+            ok("restored chanserv.service in place of services.service")
+        else:
+            run(["systemctl", "--user", "daemon-reload"], check=False)
     st = daemon_status()
     if any(st.values()): restart_daemons()
     for f in s.get("parked", []):

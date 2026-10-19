@@ -1,4 +1,7 @@
-/* ChanServ -- standalone channel-registration service for SekurIRCd (C port).
+/* SekurIRCd services: one process hosting ChanServ (this file: the link, config, main loop and the channel service) and
+ * NickServ (nickserv.c, the account service). Built as bin/services.
+ *
+ * ChanServ -- channel-registration service.
  *
  * A completely separate process from sekurircd itself (ported from
  * services/chanserv.py): it dials the ircd's [links] hub listener as a
@@ -15,6 +18,7 @@
  * JOIN/PART/MODE/KICK) -- see src/link.h and src/link.c's `lc->service`
  * branch for the hub side.
  */
+#include "svc.h"
 #include "../src/crypto.h"
 #include "../src/log.h"
 #include "../src/proto.h"
@@ -37,9 +41,9 @@
 #include <time.h>
 #include <unistd.h>
 
-#define CHANSERV_VERSION "1.2.3"
+#define CHANSERV_VERSION SERVICES_VERSION
 #define RBUF_SZ 8192
-#define SBUF_SZ (8192 * 2)
+#define SBUF_SZ (64 * 1024)
 #define MLOCK_LETTERS "niptsm"
 #define MAX_LIST_ENTRIES 100 /* per-channel ACCESS / AKICK cap */
 
@@ -146,6 +150,7 @@ static int load_app_config(const char *path, app_cfg_t *cfg, char *errbuf, size_
     if (cfg->backup_count > 50) cfg->backup_count = 50; /* each rotation is that many rename()s */
     resolve_against_dir(path, cfg->storage_path, cfg->storage_path, sizeof cfg->storage_path);
 
+    if (ns_config(raw, path, errbuf, errbufsz) != 0) { toml_free(raw); return -1; }
     toml_free(raw);
     if (!cfg->link_name[0] || !cfg->link_password[0]) {
         snprintf(errbuf, errbufsz, "[link] name and password are required");
@@ -174,6 +179,7 @@ static app_cfg_t g_cfg;
 /* Returns 0, or -1 if the live store exists but can't be read -- starting empty
  * would let the next save overwrite every registration. */
 static int store_load(void) {
+    int live_corrupt = 0;
     for (int gen = 0; gen <= g_cfg.backup_count; gen++) {
         char path[600];
         if (gen == 0) snprintf(path, sizeof path, "%s", g_cfg.storage_path);
@@ -208,7 +214,13 @@ static int store_load(void) {
             return 0;
         }
         cJSON_Delete(parsed);
+        if (gen == 0) live_corrupt = 1;
         log_warn("chanserv", "%s was corrupt (not a JSON object), trying an older backup", path);
+    }
+    if (live_corrupt) { /* starting empty would overwrite every registration on the next save */
+        log_error("chanserv", "%s is corrupt and no backup could be loaded -- refusing to start (fix or restore it; it is left untouched)",
+                  g_cfg.storage_path);
+        return -1;
     }
     log_info("chanserv", "no existing store found -- starting with zero registered channels");
     g_store = cJSON_CreateObject();
@@ -424,6 +436,8 @@ static void queue_line(const char *line) {
     g_sbuf[g_sbuf_len++] = '\r';
     g_sbuf[g_sbuf_len++] = '\n';
 }
+
+void svc_queue_line(const char *line) { queue_line(line); }
 
 static void flush_sbuf(void) {
     /* Bounded by wall-clock time, not iteration count: if the hub stops
@@ -1973,9 +1987,10 @@ static void process_line(char *line) {
 
     if (strcasecmp(msg.command, "PRIVMSG") == 0) {
         if (msg.nparams < 2 || !msg.prefix) return;
-        if (strcasecmp(msg.params[0], g_cfg.nick) != 0) return; /* not addressed to us (e.g. channel chatter while GUARD-joined) */
         char from_nick[64];
         nick_from_prefix(msg.prefix, from_nick, sizeof from_nick);
+        if (ns_privmsg(msg.params[0], from_nick, msg.params[msg.nparams - 1])) return;
+        if (strcasecmp(msg.params[0], g_cfg.nick) != 0) return; /* not addressed to us (e.g. channel chatter while GUARD-joined) */
         g_from_account[0] = '\0';
         for (int i = 0; i < msg.ntags; i++)
             if (strcmp(msg.tags[i].key, "account") == 0) snprintf(g_from_account, sizeof g_from_account, "%s", msg.tags[i].val);
@@ -1983,6 +1998,7 @@ static void process_line(char *line) {
         g_from_account[0] = '\0';
         return;
     }
+    if (ns_event(&msg)) return;
     if (strcasecmp(msg.command, "SVCJOIN") == 0) { handle_svcjoin(&msg); return; }
     if (strcasecmp(msg.command, "SVCNEW") == 0) { handle_svcnew(&msg); return; }
     if (strcasecmp(msg.command, "SVCSYNC") == 0) { handle_svcsync(&msg); return; }
@@ -2039,7 +2055,8 @@ static int run_session(void) {
     g_n_identified = 0;
     g_n_granted = 0;
     g_last_activity = time(NULL);
-    log_info("chanserv", "session established as '%s'", g_cfg.nick);
+    log_info("services", "session established as '%s'%s", g_cfg.nick, ns_enabled() ? " + NickServ" : "");
+    ns_session_start();
     guard_join_all();
 
     while (!g_term) {
@@ -2077,6 +2094,7 @@ static int run_session(void) {
         if (g_sbuf_len > 0) flush_sbuf();
         expire_sweep();
         store_flush();
+        ns_tick();
         if (g_pending_register.active && difftime(time(NULL), g_pending_register.sent_at) > 5) {
             g_pending_register.active = 0;
             reply(g_pending_register.nick, "Timed out waiting for the server -- try REGISTER again.");
@@ -2119,25 +2137,26 @@ static int pidfile_is_live(const char *path) {
 
 static int stop_daemon(const char *pidfile) {
     long pid = read_pidfile(pidfile);
-    if (pid <= 0) { fprintf(stderr, "chanserv: no running daemon (can't read a pid from %s)\n", pidfile); return 1; }
+    if (pid <= 0) { fprintf(stderr, "services: no running daemon (can't read a pid from %s)\n", pidfile); return 1; }
     if (kill((pid_t)pid, SIGTERM) != 0) {
-        fprintf(stderr, "chanserv: could not signal process %ld: %s\n", pid, strerror(errno));
+        fprintf(stderr, "services: could not signal process %ld: %s\n", pid, strerror(errno));
         return 1;
     }
     time_t deadline = time(NULL) + 10;
     while (time(NULL) < deadline) {
-        if (kill((pid_t)pid, 0) != 0 && errno == ESRCH) { printf("chanserv: stopped (pid %ld)\n", pid); return 0; }
+        if (kill((pid_t)pid, 0) != 0 && errno == ESRCH) { printf("services: stopped (pid %ld)\n", pid); return 0; }
         struct timespec ts = {0, 200000000L};
         nanosleep(&ts, NULL);
     }
-    fprintf(stderr, "chanserv: process %ld did not stop in time\n", pid);
+    fprintf(stderr, "services: process %ld did not stop in time\n", pid);
     return 1;
 }
 
 int main(int argc, char **argv) {
     const char *config_path = "services/services.toml";
-    const char *pidfile = getenv("CHANSERV_PIDFILE");
-    if (!pidfile) pidfile = "chanserv.pid";
+    const char *pidfile = getenv("SERVICES_PIDFILE");
+    if (!pidfile) pidfile = getenv("CHANSERV_PIDFILE");
+    if (!pidfile) pidfile = "services.pid";
     int do_daemon = 0, do_stop = 0, do_check = 0;
 
     for (int i = 1; i < argc; i++) {
@@ -2147,7 +2166,11 @@ int main(int argc, char **argv) {
         else if (strcmp(a, "--pidfile") == 0 && i + 1 < argc) pidfile = argv[++i];
         else if (strcmp(a, "--stop") == 0) do_stop = 1;
         else if (strcmp(a, "-t") == 0 || strcmp(a, "--check") == 0) do_check = 1;
-        else if (strcmp(a, "--version") == 0) { printf("chanserv %s\n", CHANSERV_VERSION); return 0; }
+        else if (strcmp(a, "--version") == 0) { /* under its old name (bin/chanserv, see the Makefile) it answers as that */
+            const char *b = strrchr(argv[0], '/');
+            printf("%s %s\n", strcmp(b ? b + 1 : argv[0], "chanserv") == 0 ? "chanserv" : "services", SERVICES_VERSION);
+            return 0;
+        }
         else { fprintf(stderr, "unrecognized argument: %s\n", a); return 2; }
     }
 
@@ -2155,10 +2178,10 @@ int main(int argc, char **argv) {
 
     char errbuf[256];
     if (load_app_config(config_path, &g_cfg, errbuf, sizeof errbuf) != 0) {
-        fprintf(stderr, "chanserv: %s\n", errbuf);
+        fprintf(stderr, "services: %s\n", errbuf);
         return 2;
     }
-    if (do_check) { printf("chanserv: configuration OK (%s)\n", config_path); return 0; }
+    if (do_check) { printf("services: configuration OK (%s)\n", config_path); return 0; }
 
     /* Unlike sekurircd's own main.c (see its pidfile_is_live), this was
      * missing entirely -- starting chanserv twice against the same pidfile
@@ -2167,7 +2190,7 @@ int main(int argc, char **argv) {
      * peer name twice in /MAP. */
     if (pidfile[0] && pidfile_is_live(pidfile)) {
         long existing = read_pidfile(pidfile);
-        fprintf(stderr, "chanserv: a daemon is already running (pid %ld, pidfile %s) "
+        fprintf(stderr, "services: a daemon is already running (pid %ld, pidfile %s) "
                          "-- refusing to start a second one and clobber its pidfile\n",
                 existing, pidfile);
         return 2;
@@ -2192,7 +2215,7 @@ int main(int argc, char **argv) {
         if (slash) *slash = '\0'; else snprintf(dir, sizeof dir, ".");
         lcfg.enabled = 1;
         snprintf(lcfg.directory, sizeof lcfg.directory, "%s", dir);
-        snprintf(lcfg.file, sizeof lcfg.file, "chanserv.log");
+        snprintf(lcfg.file, sizeof lcfg.file, "services.log");
         lcfg.max_bytes = 1 << 20;
         lcfg.backup_count = 3;
     }
@@ -2206,9 +2229,15 @@ int main(int argc, char **argv) {
     sigaction(SIGINT, &sa, NULL);
 
     if (store_load() != 0) return 1;
-    log_info("chanserv", "starting (v%s), storage=%s", CHANSERV_VERSION, g_cfg.storage_path);
+    if (ns_start(errbuf, sizeof errbuf) != 0) {
+        log_error("nickserv", "%s", errbuf);
+        fprintf(stderr, "services: %s\n", errbuf);
+        if (pidfile[0]) unlink(pidfile);
+        return 1;
+    }
+    log_info("services", "starting (v%s), ChanServ storage=%s", SERVICES_VERSION, g_cfg.storage_path);
     if (geteuid() == 0)
-        log_warn("chanserv", "running as root is not recommended: chanserv never needs it; "
+        log_warn("chanserv", "running as root is not recommended: services never need it; "
                              "use a dedicated unprivileged user");
 
     int backoff = 2;
@@ -2232,8 +2261,9 @@ int main(int argc, char **argv) {
         if (rc != 0) backoff = backoff < 60 ? backoff * 2 : 60;
     }
 
-    log_info("chanserv", "shutting down");
+    log_info("services", "shutting down");
     store_flush();
+    ns_shutdown();
     if (pidfile[0]) unlink(pidfile);
     cJSON_Delete(g_store);
     return 0;

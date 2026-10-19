@@ -2,6 +2,7 @@
  * No framework: each test is a function that asserts; main() runs them all
  * and prints "OK" on a clean exit. A failing assert aborts with a stack
  * trace, which is enough to find the break. */
+#include "accounts.h"
 #include "channel.h"
 #include "client.h"
 #include "cmd.h"
@@ -613,12 +614,13 @@ static void test_spam_filters_and_check(void) {
     assert(spam_check_message(&srv, cl, "#x4", "hello there", 0) == 1);
 
     /* exempt: an identified account whose registration predates
-     * new_user_period skips everything (accounts_created_at must actually
-     * find a real account -- a bare cl->account with nothing registered
-     * behind it, or one too fresh, is NOT exempt: see spam_check_message's
-     * trusted_account gate, closing the instant-/REGISTER spam bypass). */
-    accounts_register_hashed(&srv.accounts, "bob", "unused-in-this-test");
+     * new_user_period skips everything (the registration time comes with the
+     * services login -- a bare cl->account without it, or one too fresh, is
+     * NOT exempt: see spam_check_message's trusted_account gate, closing the
+     * instant-REGISTER spam bypass). */
     snprintf(cl->account, sizeof cl->account, "bob");
+    snprintf(cl->acct_created_for, sizeof cl->acct_created_for, "bob");
+    cl->acct_created = (long)time(NULL);
     assert(spam_check_message(&srv, cl, "#chan", "free viagra", 0) == 0);
 
     /* the "fresh connection can't PM users" gate: "bob" registered moments

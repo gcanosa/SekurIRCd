@@ -214,7 +214,10 @@ static int dial_peer(server_t *srv, int peer_idx) {
             close(fd); free(lc); return -1;
         }
         lc->ssl = SSL_new(ctx);
+        SSL_set_mode(lc->ssl, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER | SSL_MODE_ENABLE_PARTIAL_WRITE); /* the sendq moves/grows between retries */
         SSL_set_fd(lc->ssl, fd);
+        struct in_addr ip4;
+        if (inet_pton(AF_INET, up->host, &ip4) != 1) SSL_set_tlsext_host_name(lc->ssl, up->host); /* SNI (never for an IP literal) */
         if (!srv->cfg.links.tls_insecure_skip_verify) {
             SSL_set_verify(lc->ssl, SSL_VERIFY_PEER, NULL);
             SSL_set1_host(lc->ssl, up->host); /* checked against the cert's SAN/CN, not just chain trust */
@@ -234,7 +237,8 @@ static int dial_peer(server_t *srv, int peer_idx) {
     char line[512];
     snprintf(line, sizeof line, "PASS %s", up->password);
     if (write_line_blocking(lc, line) != 0) goto wfail;
-    if (write_line_blocking(lc, "CAPAB :SEKURNET") != 0) goto wfail; /* ask for the state-sync protocol */
+    netsync_capab_line(srv, line, sizeof line);
+    if (write_line_blocking(lc, line) != 0) goto wfail; /* ask for the state-sync protocol */
     const char *p[] = {srv->cfg.server.name, "1", srv->self_srv->sid};
     irc_build(line, sizeof line, NULL, 0, NULL, "SERVER", p, 3, srv->self_srv->desc);
     if (write_line_blocking(lc, line) != 0) goto wfail;
@@ -249,7 +253,13 @@ static int dial_peer(server_t *srv, int peer_idx) {
         }
         if (irc_parse_line(resp, &msg) != 0) continue;
         if (strcasecmp(msg.command, "ERROR") == 0) { log_warn("link", "peer '%s' refused the link: %s", up->name, msg.nparams ? msg.params[msg.nparams - 1] : "?"); goto fail; }
-        if (strcasecmp(msg.command, "CAPAB") == 0) { if (msg.nparams && strstr(msg.params[msg.nparams - 1], "SEKURNET")) got_capab = 1; continue; }
+        if (strcasecmp(msg.command, "CAPAB") == 0) {
+            if (msg.nparams && strstr(msg.params[msg.nparams - 1], "SEKURNET")) {
+                got_capab = 1;
+                snprintf(lc->peer_capab, sizeof lc->peer_capab, "%s", msg.params[msg.nparams - 1]);
+            }
+            continue;
+        }
         break;
     }
     if (strcasecmp(msg.command, "SERVER") != 0 || msg.nparams < 1 || strcmp(msg.params[0], up->name) != 0) {
@@ -257,6 +267,10 @@ static int dial_peer(server_t *srv, int peer_idx) {
         goto fail;
     }
     int server_link = got_capab && msg.nparams >= 4;
+    if (server_link && netsync_check_peer(srv, lc, up->name) != 0) {
+        write_line_blocking(lc, "ERROR :Incompatible link protocol");
+        goto fail;
+    }
 
     net_set_nonblocking(fd);
     lc->authenticated = 1;
@@ -273,6 +287,9 @@ static int dial_peer(server_t *srv, int peer_idx) {
         snprintf(sid, sizeof sid, "%s", msg.params[2]);
         if (netsync_link_up(srv, lc, up->name, sid, msg.params[3]) != 0) { link_close(srv, lc); return -1; }
     }
+    /* The handshake read a whole TLS record; whatever followed the peer's SERVER line (the start of its burst) now sits
+     * decrypted inside OpenSSL where poll() can't see it -- without this it waited for the next PING. */
+    if (lc->ssl && SSL_pending(lc->ssl) > 0) link_handle_readable(srv, lc);
     return 0;
 
 wfail:
@@ -322,7 +339,7 @@ void link_leaf_tick(server_t *srv) { if (srv->cfg.links.autoconnect) link_dial_p
  * than that from one address is noise or a flood, not a legitimate peer. */
 #define LINK_MAX_UNAUTH_PER_IP 3
 /* Per-IP alone left srv->links itself unbounded, and each link_conn_t is
- * ~40KB of fixed rbuf+sbuf (link.h) -- an attacker with many source addresses
+ * ~8KB of fixed rbuf plus its sendq (link.h) -- an attacker with many source addresses
  * could allocate freely. Only pre-configured peers ever belong here, so a
  * couple of dozen is already far more than any real topology needs. */
 #define LINK_MAX_TOTAL 64
@@ -453,6 +470,7 @@ void link_accept(server_t *srv) {
     lc->created = lc->last_activity = time(NULL);
     if (srv->cfg.links.tls) {
         lc->ssl = SSL_new(srv->tls_ctx);
+        SSL_set_mode(lc->ssl, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER | SSL_MODE_ENABLE_PARTIAL_WRITE);
         SSL_set_fd(lc->ssl, fd);
         lc->tls_handshaking = 1;
     }
@@ -464,10 +482,26 @@ void link_accept(server_t *srv) {
 
 void link_forward_line(link_conn_t *lc, const char *line) {
     if (lc->closing) return;
-    size_t len = strlen(line);
-    if (lc->sbuf_len + len + 2 >= sizeof lc->sbuf) {
-        log_warn("link", "link '%s' sendq overflow, dropping a line", lc->peer_name);
+    size_t len = strlen(line), need = lc->sbuf_len - lc->sbuf_off + len + 2;
+    if (need > LINK_SENDQ_MAX) { /* dropping one line silently desyncs the network; dropping the link resyncs it */
+        log_warn("link", "link '%s' sendq exceeded (%zu bytes), closing it", lc->peer_name, need);
+        lc->closing = 1;
         return;
+    }
+    if (lc->sbuf_len + len + 2 > lc->sbuf_cap) {
+        if (lc->sbuf_off) { /* reclaim what the socket already took before growing */
+            memmove(lc->sbuf, lc->sbuf + lc->sbuf_off, lc->sbuf_len - lc->sbuf_off);
+            lc->sbuf_len -= lc->sbuf_off;
+            lc->sbuf_off = 0;
+        }
+        if (lc->sbuf_len + len + 2 > lc->sbuf_cap) {
+            size_t cap = lc->sbuf_cap ? lc->sbuf_cap : 16384;
+            while (cap < lc->sbuf_len + len + 2) cap *= 2;
+            char *nb = realloc(lc->sbuf, cap);
+            if (!nb) { log_error("link", "link '%s': out of memory for the sendq, closing it", lc->peer_name); lc->closing = 1; return; }
+            lc->sbuf = nb;
+            lc->sbuf_cap = cap;
+        }
     }
     memcpy(lc->sbuf + lc->sbuf_len, line, len);
     lc->sbuf_len += len;
@@ -476,11 +510,14 @@ void link_forward_line(link_conn_t *lc, const char *line) {
 }
 
 void link_handle_writable(server_t *srv, link_conn_t *lc) {
-    if (lc->sbuf_len == 0 || lc->closing) return;
-    ssize_t n = link_io_write(lc, lc->sbuf, lc->sbuf_len);
+    if (lc->sbuf_len == lc->sbuf_off || lc->closing) return;
+    ssize_t n = link_io_write(lc, lc->sbuf + lc->sbuf_off, lc->sbuf_len - lc->sbuf_off);
     if (n > 0) {
-        memmove(lc->sbuf, lc->sbuf + n, lc->sbuf_len - (size_t)n);
-        lc->sbuf_len -= (size_t)n;
+        lc->sbuf_off += (size_t)n;
+        if (lc->sbuf_off == lc->sbuf_len) { /* drained: give a burst-sized buffer back */
+            lc->sbuf_off = lc->sbuf_len = 0;
+            if (lc->sbuf_cap > 65536) { free(lc->sbuf); lc->sbuf = NULL; lc->sbuf_cap = 0; }
+        }
     } else if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
         link_close(srv, lc);
     }
@@ -498,10 +535,13 @@ void link_reap(server_t *srv) {
         if (!lc->closing) { pp = &lc->next; continue; }
         *pp = lc->next;
         if (lc->is_server) netsync_link_down(srv, lc, "Link closed");
-        if (lc->service) {
-            log_info("link", "link '%s' lost -- removing service nick '%s'", lc->peer_name, lc->service->nick);
-            server_remove_client(srv, lc->service, "Service disconnected");
+        for (int b = 0; b < lc->n_bots; b++) {
+            log_info("link", "link '%s' lost -- removing service nick '%s'", lc->peer_name, lc->bots[b]->nick);
+            server_remove_client(srv, lc->bots[b], "Service disconnected");
         }
+        if (lc->sbuf_len > lc->sbuf_off && !lc->tls_handshaking) /* best effort: a parting ERROR tells the peer why */
+            (void)link_io_write(lc, lc->sbuf + lc->sbuf_off, lc->sbuf_len - lc->sbuf_off);
+        free(lc->sbuf);
         if (lc->ssl) SSL_free(lc->ssl); /* abrupt close, no SSL_shutdown close_notify -- fine for a teardown path */
         if (lc->fd >= 0) close(lc->fd);
         if (lc->peer_name[0]) {
@@ -516,6 +556,34 @@ void link_reap(server_t *srv) {
     }
 }
 
+/* The bot a services line acts as: the one its ":nick!user@host" prefix names, else the first one introduced. */
+static client_t *link_bot(link_conn_t *lc, const char *prefix) {
+    if (prefix) {
+        size_t n = strcspn(prefix, "!");
+        for (int b = 0; b < lc->n_bots; b++)
+            if (strlen(lc->bots[b]->nick) == n && strncasecmp(lc->bots[b]->nick, prefix, n) == 0) return lc->bots[b];
+    }
+    return lc->service;
+}
+
+static void send_svc_user(server_t *srv, link_conn_t *lc, client_t *u, int ev) {
+    char line[700];
+    if (ev == SVC_EV_USER) {
+        const char *p[] = {u->uid, u->nick, u->user, u->realhost, u->ip, u->account[0] ? u->account : "*",
+                           u->certfp[0] ? u->certfp : "*", netsync_server_name_of(srv, u)};
+        irc_build(line, sizeof line, NULL, 0, NULL, "SVCUSER", p, 8, NULL);
+    } else if (ev == SVC_EV_NICK) irc_build(line, sizeof line, NULL, 0, NULL, "SVCNICK", (const char *[]){u->uid, u->nick}, 2, NULL);
+    else if (ev == SVC_EV_QUIT) irc_build(line, sizeof line, NULL, 0, NULL, "SVCQUIT", (const char *[]){u->uid}, 1, NULL);
+    else irc_build(line, sizeof line, NULL, 0, NULL, "SVCACCOUNT", (const char *[]){u->uid, u->account[0] ? u->account : "*"}, 2, NULL);
+    link_forward_line(lc, line);
+}
+
+void link_svc_user(server_t *srv, client_t *cl, int ev) {
+    if (cl->is_service || !cl->uid[0] || !cl->registered) return;
+    for (link_conn_t *lc = srv->links; lc; lc = lc->next)
+        if (lc->watch_users && !lc->closing) send_svc_user(srv, lc, cl, ev);
+}
+
 /* Returns -1 if `lc` was closed while handling this line, so the caller
  * (link_handle_readable) stops processing further lines from it. */
 static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
@@ -528,7 +596,10 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
             return 0;
         }
         if (strcasecmp(msg.command, "CAPAB") == 0) { /* CAPAB :SEKURNET -- the peer wants the state-sync protocol */
-            if (msg.nparams >= 1 && strstr(msg.params[msg.nparams - 1], "SEKURNET")) lc->peer_capab_sekurnet = 1;
+            if (msg.nparams >= 1 && strstr(msg.params[msg.nparams - 1], "SEKURNET")) {
+                lc->peer_capab_sekurnet = 1;
+                snprintf(lc->peer_capab, sizeof lc->peer_capab, "%s", msg.params[msg.nparams - 1]);
+            }
             return 0;
         }
         if (strcasecmp(msg.command, "SERVER") == 0) {
@@ -578,7 +649,16 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
                 int sid_ok = strlen(sid) == 3 && isdigit((unsigned char)sid[0]);
                 for (int k = 1; k < 3 && sid_ok; k++) sid_ok = isdigit((unsigned char)sid[k]) || (sid[k] >= 'A' && sid[k] <= 'Z');
                 if (!sid_ok) { link_forward_line(lc, "ERROR :Bad SID"); link_close(srv, lc); return -1; }
-                link_forward_line(lc, "CAPAB :SEKURNET");
+                if (netsync_find_sid(srv, sid) || netsync_find_name(srv, name)) { /* refuse before answering, or the dialer thinks it's up */
+                    log_warn("netsync", "refusing link to '%s' (%s): name or SID already on the network", name, sid);
+                    link_forward_line(lc, "ERROR :Server or SID already exists on this network");
+                    link_close(srv, lc);
+                    return -1;
+                }
+                if (netsync_check_peer(srv, lc, name) != 0) { link_forward_line(lc, "ERROR :Incompatible link protocol"); link_close(srv, lc); return -1; }
+                char capab[200];
+                netsync_capab_line(srv, capab, sizeof capab);
+                link_forward_line(lc, capab);
                 char me[300];
                 const char *mp[] = {srv->cfg.server.name, "1", srv->self_srv->sid};
                 irc_build(me, sizeof me, NULL, 0, NULL, "SERVER", mp, 3, srv->self_srv->desc);
@@ -612,13 +692,7 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
 
     if (strcasecmp(msg.command, "NICK") == 0) {
         if (msg.nparams < 4) return 0;
-        if (lc->service) {
-            /* One service identity per link: a second NICK would orphan the
-             * first pseudo-client (never removed on link loss, dangling
-             * link_conn pointer) -- ignore it. */
-            log_warn("link", "link '%s' sent a second NICK -- ignored", lc->peer_name);
-            return 0;
-        }
+        if (lc->n_bots >= LINK_MAX_BOTS) { log_warn("link", "link '%s' introduced too many service nicks -- ignored", lc->peer_name); return 0; }
         const char *nick = msg.params[0], *user = msg.params[1], *host = msg.params[2];
         const char *realname = msg.params[msg.nparams - 1];
         if (server_find_user(srv, nick)) {
@@ -630,6 +704,7 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
         if (!svc) return 0;
         svc->link_conn = lc;
         svc->is_service = 1;
+        svc->ident_confirmed = 1; /* a service's user part is its own, never "~"-marked */
         svc->caps |= CAP_ACCOUNT_TAG; /* PRIVMSGs forwarded to the service carry the sender's account (@account=...) */
         svc->nick_ts = (long)time(NULL);
         svc->registered = 1;
@@ -642,8 +717,8 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
         snprintf(svc->realhost, sizeof svc->realhost, "%s", host);
         snprintf(svc->realname, sizeof svc->realname, "%s", realname);
         server_add_user(srv, svc);
-        lc->service = svc;
-        sync_ranks_to(srv, lc);
+        lc->bots[lc->n_bots++] = svc;
+        if (!lc->service) { lc->service = svc; sync_ranks_to(srv, lc); } /* the channel service vets the ranks */
         netsync_introduce_user(srv, svc); /* a service nick is a user to the rest of the network too */
         log_info("link", "link '%s' introduced service nick '%s'", lc->peer_name, nick);
         return 0;
@@ -655,14 +730,14 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
         if (msg.nparams < 2) return 0;
         const char *target = msg.params[0];
         client_t *dst = server_find_user(srv, target);
-        if (dst && dst->remote && !dst->is_service && lc->service) { /* a user on another server: relay as the service's own message */
-            netsync_message(srv, lc->service, msg.command, target, dst, msg.params[msg.nparams - 1], NULL, 0);
+        client_t *svc = link_bot(lc, msg.prefix);
+        if (dst && dst->remote && !dst->is_service && svc) { /* a user on another server: relay as the service's own message */
+            netsync_message(srv, svc, msg.command, target, dst, msg.params[msg.nparams - 1], NULL, 0);
             return 0;
         }
         if (!dst || dst->fd < 0) return 0; /* no such local user, or it's another service */
 
         char prefix[320];
-        client_t *svc = lc->service;
         const char *from_nick = svc ? svc->nick : lc->peer_name;
         const char *from_user = svc ? svc->user : lc->peer_name;
         const char *from_host = svc ? svc->host : lc->peer_name;
@@ -678,7 +753,22 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
      * identity (NICK) may act as that identity -- these are all "do this
      * AS my service bot" commands. */
     if (!lc->service) return 0;
-    client_t *svc = lc->service;
+    client_t *svc = link_bot(lc, msg.prefix);
+
+    if (strcasecmp(msg.command, "SVCWATCH") == 0) { /* the user feed: everyone now, changes from here on */
+        lc->watch_users = 1;
+        char info[300];
+        irc_build(info, sizeof info, NULL, 0, NULL, "SVCINFO", (const char *[]){srv->cfg.server.name}, 1, srv->cfg.server.network);
+        link_forward_line(lc, info); /* the network name, for NickServ's mails */
+        client_t *u, *tmp;
+        HASH_ITER(hh, srv->users, u, tmp) if (u->registered) send_svc_user(srv, lc, u, SVC_EV_USER);
+        return 0;
+    }
+    if (!strcmp(msg.command, "SVSLOGIN") || !strcmp(msg.command, "SVSNICK") || !strcmp(msg.command, "KILL") ||
+        !strcmp(msg.command, "SVCSASL") || !strcmp(msg.command, "SVCREGRESULT")) {
+        svc_command(srv, svc, &msg);
+        return 0;
+    }
 
     if (strcasecmp(msg.command, "JOIN") == 0) {
         if (msg.nparams < 1) return 0;
@@ -696,6 +786,7 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
             const char *p[] = {chan->name, "+o", svc->nick};
             irc_build(modeline, sizeof modeline, NULL, 0, prefix, "MODE", p, 3, NULL);
             server_broadcast_channel(chan, modeline, svc);
+            netsync_chan_mode(srv, chan, svc, "+o", (const char *[]){svc->nick}, 1); /* the rest of the network sees @ChanServ too */
         }
         return 0;
     }
@@ -811,6 +902,7 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
             const char *p[] = {chan->name, "-b", mask};
             irc_build(line, sizeof line, NULL, 0, prefix, "MODE", p, 3, NULL);
             server_broadcast_channel(chan, line, NULL);
+            netsync_chan_mode(srv, chan, svc, "-b", (const char *[]){mask}, 1); /* lifted network-wide, not just here */
         }
         return 0;
     }

@@ -33,7 +33,7 @@ Website & docs: <https://gcanosa.github.io/SekurIRCd/> (source in [`web/`](web/)
   topic, and membership from anyone not already in it; `+z` restricts JOIN to
   clients connected over TLS). `+r` (registered-with-services) is also a
   real mode, but services-only: no local client can set/clear it via
-  `/MODE`, op or server oper alike -- `services/chanserv` sets/clears it
+  `/MODE`, op or server oper alike -- ChanServ (`bin/services`) sets/clears it
   on `REGISTER`/`DROP` over the trusted link protocol, so `/MODE #chan`
   reliably shows whether a channel is actually registered
 - User modes via `MODE`: self-togglable `+i` (invisible -- hidden from
@@ -101,10 +101,9 @@ Website & docs: <https://gcanosa.github.io/SekurIRCd/> (source in [`web/`](web/)
   `~j:#chan`; caller-ID (`+g` with `/ACCEPT`); `[[classes]]` connection classes
   (per-IP-range client caps, sendq and flood limits); NickServ `GHOST`, `REGAIN`
   (take your nick back in one step), `RESETPASS` (emailed reset code) and optional
-  nick-ownership enforcement (`[accounts] enforce_nicks`). Opers with the `accounts`
-  privilege get NickServ `SUSPEND`/`UNSUSPEND`, `FDROP` and `SASET PASSWORD`.
-  `/NS` and `/CS` (or `/NICKSERV`, `/CHANSERV`) work as shorthands, and
-  `/WHOIS NickServ` answers like a real service.
+  nick-ownership enforcement (`[nickserv] enforce_nicks`). Services admins
+  (`[nickserv] admins`, by account) get NickServ `SUSPEND`/`UNSUSPEND`, `FDROP` and
+  `SASET PASSWORD`. `/NS` and `/CS` (or `/NICKSERV`, `/CHANSERV`) work as shorthands.
   Caller-ID `/ACCEPT` entries bind to the person's account (or connection), so
   renaming keeps access and a stranger taking the nick doesn't inherit it.
   ChanServ can grant the new ranks: `ACCESS ... <v|h|o|a|q>`, `ADMIN`/`DEADMIN`/
@@ -118,21 +117,19 @@ Website & docs: <https://gcanosa.github.io/SekurIRCd/> (source in [`web/`](web/)
   `echo-message`, `message-tags`/`server-time`/`account-tag`,
   `account-notify`, `invite-notify`, `standard-replies`, and `sasl` (see
   Accounts below)
-- Self-service accounts (`[accounts]`, off by default) + SASL PLAIN and
-  EXTERNAL (`AUTHENTICATE`), `/REGISTER <account> <password>`, IRCv3
-  `draft/account-registration` (`REGISTER <account|*> <email|*> <password>`,
-  `*` = your nick; email accepted but not stored) and a virtual NickServ
-  (`/msg NickServ REGISTER <password>`, `/msg NickServ IDENTIFY [account]
-  <password>`; the account is your nick, only answers when no real user of
-  that name exists) -- backs
-  `330 RPL_WHOISACCOUNT` and `EXTBAN=,a` (`+b`/`+e`/`+I` masks like
-  `a:<account>`, matching by SASL account instead of hostmask). A small
-  standalone store in core, independent of channel services below. SASL
-  EXTERNAL logs an already-registered account in by matching its TLS client
-  certificate's fingerprint instead of a password -- bind one with
-  `/CERT ADD` (while logged in over a connection presenting a client cert),
-  and enable `[tls] request_client_cert` so the server actually asks
-  clients for one (see Configuration below)
+- Accounts through NickServ in the services daemon (`bin/services`, see
+  "Services" below): SASL PLAIN, SCRAM-SHA-256 and EXTERNAL (`AUTHENTICATE`),
+  `/REGISTER <account> <password>`, IRCv3 `draft/account-registration`
+  (`REGISTER <account|*> <email|*> <password>`, `*` = your nick),
+  `/msg NickServ REGISTER <password>` / `IDENTIFY [account] <password>`, and
+  `PASS account:password` for clients without SASL. Every server relays logins
+  to the one services daemon, so the whole network shares one account database
+  (no copies to diverge in a netsplit). Backs `330 RPL_WHOISACCOUNT` and
+  `EXTBAN=,a` (`+b`/`+e`/`+I` masks like `a:<account>`). SASL EXTERNAL logs in
+  by TLS client certificate fingerprint -- bind one with `/msg NickServ CERT ADD`
+  (`/CERT ADD` is a shorthand) over a connection presenting a client cert, with
+  `[tls] request_client_cert` on. While services are down, `sasl` is not
+  offered and existing logins stay logged in.
 - `TRACE`, `SERVLIST`/`SQUERY` (services pseudo-users, e.g. ChanServ, flag
   themselves for these), and `WHOX` (`WHO <mask> %<fields>,<token>` for
   custom field selection)
@@ -235,9 +232,9 @@ Website & docs: <https://gcanosa.github.io/SekurIRCd/> (source in [`web/`](web/)
   `KILL`, `WALLOPS`, K/G-line, and oper-notice propagation; `/SQUIT` and
   `/CONNECT` for manual control, with exponential-backoff auto-reconnect on
   a leaf
-- Channel services (`services/chanserv`) -- an entirely separate,
-  optional process (not part of the ircd) that connects in over `[links]`
-  and adds a `ChanServ` bot: `REGISTER`/`IDENTIFY`/`DROP` a channel behind a
+- Services (`bin/services`) -- a separate process (not part of the ircd)
+  that connects in over `[links]` and hosts `NickServ` (accounts, above) and
+  a `ChanServ` bot: `REGISTER`/`IDENTIFY`/`DROP` a channel behind a
   shared password so ops survive an empty channel instead of going to
   whoever joins first, plus `JOIN`/`PART` (GUARD), `SETPASS`, `TOPICLOCK`,
   `ACCESS` (auto-`+v`/`+h`/`+o` by hostmask or by services account),
@@ -251,7 +248,7 @@ Website & docs: <https://gcanosa.github.io/SekurIRCd/> (source in [`web/`](web/)
 sekurircd/
 ├── config/            # versioned config TEMPLATE (sekurircd.toml + ircd.motd)
 ├── src/               # source (ircd core)
-├── services/          # optional, SEPARATE channel-services process (ChanServ)
+├── services/          # the SEPARATE services process (NickServ + ChanServ)
 ├── tests/             # assert-based self-check (tests/unit.c)
 ├── logs/              # runtime logs (gitignored)
 ├── bin/               # build output (gitignored)
@@ -276,12 +273,16 @@ copy with `--config`.
 
 ```bash
 # 1. build
-make            # -> bin/sekurircd, bin/chanserv
+make            # -> bin/sekurircd, bin/services
 
 # 2. configure
 cp config/sekurircd.template.toml config/sekurircd.toml
 cp config/ircd.motd config/ircd.motd   # already present; edit to taste
-# edit config/sekurircd.toml (port, operators, [links] if you want chanserv, ...)
+# edit config/sekurircd.toml (port, operators, [links] for services, ...)
+# and services/services.toml for NickServ + ChanServ (see "Services" below)
+
+# or start/stop/status both daemons with the wrapper:
+./sekurircd start      # ./sekurircd stop | restart | status
 
 # 3. run it (uses config/sekurircd.toml, listens on 0.0.0.0:6667 by default)
 ./bin/sekurircd --config config/sekurircd.toml
@@ -308,11 +309,11 @@ Once daemonized, stdout/stderr are redirected to `/dev/null` -- enable
 
 ## Running as a systemd service
 
-`systemd/{sekurircd,chanserv}.service` + `make install` set both daemons up
+`systemd/{sekurircd,services}.service` + `make install` set both daemons up
 as systemd **user** units instead of managing pidfiles/backgrounding by
 hand (Linux + systemd only). No `sudo`/root anywhere -- everything installs
 under `$HOME`, and `systemctl --user` runs against your own user manager,
-not the system one. (sekurircd/chanserv never needed root to begin with:
+not the system one. (sekurircd/services never needed root to begin with:
 their ports, 6667/6697, are both >1024.) `Type=forking` + `PIDFile=` just
 wraps the existing `--daemon`/`--pidfile` flags above, and `ExecReload=`
 wraps `--rehash`.
@@ -323,14 +324,15 @@ make install
 #   -> binaries in ~/.local/bin
 #   -> config/sekurircd.template.toml, services.template.toml, ircd.motd in ~/.config/sekurircd
 #      (never overwrites a live sekurircd.toml/services.toml already there)
-#   -> state (pidfile, logs/, chanserv's JSON store) in ~/.local/state/sekurircd/{ircd,chanserv}
+#   -> state (pidfiles, logs/) in ~/.local/state/sekurircd/{ircd,services}
 #   -> units in ~/.config/systemd/user
 #      ($XDG_CONFIG_HOME/$XDG_STATE_HOME honored instead of ~/.config, ~/.local/state if set)
 
 cp ~/.config/sekurircd/sekurircd.template.toml ~/.config/sekurircd/sekurircd.toml   # then edit it
 systemctl --user enable --now sekurircd
-# once services/services.toml is set up too (see "Channel services" below):
-systemctl --user enable --now chanserv
+# once services.toml is set up too (see "Services" below) -- it then starts, stops
+# and restarts together with sekurircd:
+systemctl --user enable --now services
 
 systemctl --user reload sekurircd     # live config reload, same as --rehash
 systemctl --user restart sekurircd
@@ -383,7 +385,7 @@ through the `$(OBJ_DIR)/%.o` pattern rule, it doesn't need this (it always
 recompiles from source), but any target that reuses cached `.o` files does.
 
 ```bash
-make            # release build -> bin/sekurircd, bin/chanserv
+make            # release build -> bin/sekurircd, bin/services
 make debug      # ASan+UBSan build -> bin/sekurircd-debug
 make check      # build + run tests/unit.c
 make clean
@@ -421,9 +423,9 @@ See [`config/sekurircd.template.toml`](config/sekurircd.template.toml). Key sect
   / `key_file` (PEM, required if enabled), `request_client_cert` (default
   `false`, needed for SASL EXTERNAL -- see below); runs alongside
   `[server]`'s plaintext listener, never in place of it
-- `[accounts]` — `enabled` (default `false`), `store_file`, `max_accounts`
-  (default `10000`, `0` = unlimited); backs SASL
-  PLAIN/EXTERNAL, `/REGISTER`, `/CERT`, and the `a:` EXTBAN type
+- accounts: no ircd section any more -- `[nickserv]` in `services/services.toml`
+  (an old `[accounts]` here is ignored with a warning; its `accounts.json` is used
+  in place by the services daemon)
 - `[debug_channel]` — `enabled` (default `false`), `name` (default
   `"#server-debug"`, oper-only -- JOIN is refused to anyone else),
   `min_level` (default `"WARNING"`)
@@ -486,8 +488,8 @@ a TLS client certificate instead -- the connection's certificate fingerprint
 (SHA-256 of the DER cert) stands in for the password. The server never
 validates the certificate against a CA -- it doesn't need to be signed by
 anyone, self-signed is fine -- it only checks whether that exact fingerprint
-is the one bound to an account. Requires `[accounts] enabled = true` (same
-store as PLAIN/`/REGISTER`).
+is the one bound to an account. Requires the services daemon (NickServ keeps
+the fingerprints with the accounts).
 
 **1. Ask the server for client certificates.** Off by default -- a TLS
 listener normally never requests one. Set, then `/REHASH` or restart:
@@ -511,12 +513,12 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
 and log in the normal way (SASL PLAIN or `/REGISTER`), then:
 
 ```
-/CERT ADD
+/msg NickServ CERT ADD        (or the shorthand /CERT ADD)
 ```
 
-The server replies with the fingerprint it just bound. `/CERT INFO` shows
-the current one; `/CERT DEL` removes it (also disabling EXTERNAL for the
-account until you `/CERT ADD` again).
+NickServ replies with the fingerprint it just bound. `CERT INFO` shows
+the current one; `CERT DEL` removes it (also disabling EXTERNAL for the
+account until you `CERT ADD` again).
 
 **4. From then on**, connecting with that same certificate and sending
 `AUTHENTICATE EXTERNAL` logs the account in with no password at all -- most
@@ -531,25 +533,42 @@ Servers link into a tree and share users, channels, modes, topics, messages and 
 Give every server a unique `[server] sid` (digit + 2 alphanumerics) and, in `[links]`, `mode = "both"`.
 Each `[[links.peers]]` entry needs `name` + `password`; add `host`/`port` on the side that dials out.
 `/CONNECT <name>`, `/SQUIT <name>`, `/MAP`, `/LINKS` work across the network; `autoconnect = false`
-keeps a peer from being dialled automatically. ChanServ links to any one server and serves all of them.
+keeps a peer from being dialled automatically. ChanServ links to any one server and serves all of them
+(run only one copy): its NickServ is the network's account service, and every server relays SASL/REGISTER to it.
+Use the same `host_masking_secret` on every server so cloaks match. Opers are per server, but KILL, GLINE,
+SQUIT and SAJOIN/SAPART/SANICK/CHGHOST/CHGIDENT reach users on any server.
 
-## Channel services (ChanServ)
+Versions: each side sends its link protocol and software version in the handshake. Same protocol, different
+version -> the link comes up and opers get a notice naming both versions; no overlapping protocol -> the link is
+refused with `ERROR :Incompatible link protocol` (logged and noticed to opers). Builds older than this check are
+treated as protocol 1.
 
-`services/chanserv` is a **completely separate, optional process** --
-not part of `sekurircd`, not started by it, and not required for the ircd
-to run. It connects to the ircd as an ordinary link peer (the same
-`[links]` server-to-server linking feature above) and introduces one bot,
-`ChanServ`, that lets a channel be registered to a password so its ops
-survive an empty channel instead of going to whoever joins first.
-Registrations are JSON on disk with rotating backups (`[storage]
-backup_count` in `services.toml`, default 5) so a corrupted file or bad
-write doesn't erase them -- the newest readable backup is loaded
-automatically if the live file won't parse.
+## Services (NickServ + ChanServ)
+
+`bin/services` is a **separate process** -- not part of `sekurircd` and
+not started by the ircd binary itself (`./sekurircd start` and the systemd
+units start both). It connects to the ircd as an ordinary link peer (the same
+`[links]` server-to-server linking feature above) and introduces two bots:
+
+- **NickServ** -- the network's account service. It owns the account
+  database; every server relays SASL, `REGISTER` and `PASS` logins to it.
+  Settings are `[nickserv]` in `services.toml` (`admins`, `enforce_nicks`,
+  `email_command`, `max_accounts`, ...). Without it running there are no
+  accounts and no SASL anywhere (users already logged in stay logged in).
+- **ChanServ** -- lets a channel be registered to a password so its ops
+  survive an empty channel instead of going to whoever joins first.
+
+Both stores are JSON on disk with rotating backups (`backup_count`, default
+5), and a corrupted file is never replaced by an empty one -- the newest
+readable backup is loaded, or services refuse to start and leave the file
+alone. **Upgrading from the built-in NickServ** needs no data step: with no
+`store_file` set, NickServ uses the existing `config/accounts.json` in place
+(the old `[accounts]` section in sekurircd.toml is then ignored).
 
 **Enabling it** (two independent processes, both need config):
 
 1. On the **ircd side** (`config/sekurircd.toml`), turn on `[links]` in hub
-   mode and add a peer entry for the bot -- `password_hash` (scrypt, from
+   mode and add a peer entry for the services -- `password_hash` (scrypt, from
    `sekurircd --hash-password`) is preferred over plain `password` here, the
    same as `[[operators]]`, so this config doesn't hold the raw secret (the
    services side still needs the actual plain secret to send it):
@@ -570,28 +589,22 @@ automatically if the live file won't parse.
    # bind/port, name/password = the [[links.peers]] entry above
    ```
 
-**Running it** -- same shape as `sekurircd` itself:
+**Running it** -- `./sekurircd start|stop|restart|status` handles both
+daemons; by hand it is the same shape as `sekurircd` itself:
 
 ```bash
 # foreground (Ctrl-C to stop)
-./bin/chanserv --config services/services.toml
+./bin/services --config services/services.toml
 
-# as a detached daemon (POSIX double-fork)
-./bin/chanserv --config services/services.toml --daemon --pidfile services/chanserv.pid
-./bin/chanserv --stop --pidfile services/chanserv.pid
-#    — equivalent to: kill -TERM "$(cat services/chanserv.pid)"
+# as a detached daemon (POSIX double-fork); logs to services/services.log
+./bin/services --config services/services.toml --daemon --pidfile services/services.pid
+./bin/services --stop --pidfile services/services.pid
 ```
 
-`--daemon` writes the running process's PID to a pidfile (default
-`./chanserv.pid`, or `--pidfile <path>` to use another location), and
-`--stop` reads that same file back to find the process -- neither side
-needs the PID typed in by hand. `--stop` sends SIGTERM and waits for the
-process to actually exit before returning; the pidfile is removed for you
-on a clean shutdown, and starting a second `--daemon` while one is already
-running (per that same pidfile) is refused rather than clobbering it. Both
-SIGINT and SIGTERM trigger a clean disconnect from the ircd either way
-(daemonized or not). If the ircd isn't up yet, or the link drops, chanserv
-retries the connection rather than exiting.
+`--stop` sends SIGTERM and waits for the process to exit; starting a second
+`--daemon` against a live pidfile is refused. If the ircd isn't up yet, or
+the link drops, services retry the connection rather than exiting. On a
+network of several servers, run exactly one copy, linked to one of them.
 
 **Using the bot**, from any IRC client already connected to the ircd:
 
@@ -623,7 +636,7 @@ channel record, so anyone who knows it can `IDENTIFY` as its founder.
 destroyed the moment it has no members left -- `JOIN` makes ChanServ itself
 sit in the channel as a member, which means it can never go empty (and so
 can never be destroyed or squatted) even with every human gone. This is
-persisted on the registration (survives a `chanserv` restart -- it rejoins
+persisted on the registration (survives a services restart -- it rejoins
 every such channel automatically right after linking) and self-healing: if
 someone `/KICK`s ChanServ out, it rejoins immediately, since a kick doesn't
 turn the setting off. `PART` turns it back off and makes ChanServ leave.

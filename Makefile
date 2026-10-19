@@ -100,7 +100,7 @@ build-debug/$(SRC_DIR)/build.o: CPPFLAGS += -DSEKURIRCD_BUILD='"$(BUILD_ID)-asan
 
 .DEFAULT_GOAL := all
 .PHONY: fuzz all debug check itest clean
-all: $(BIN_DIR)/sekurircd $(BIN_DIR)/chanserv
+all: $(BIN_DIR)/sekurircd $(BIN_DIR)/services $(BIN_DIR)/chanserv
 
 $(OBJ_DIR)/%.o: %.c
 	@mkdir -p $(dir $@)
@@ -136,7 +136,7 @@ check: $(BIN_DIR)/unit
 	./$(BIN_DIR)/unit
 
 # These two compile straight from sources (no .o/.d files), so list the headers explicitly.
-# End-to-end tests: real ircd/chanserv processes on localhost ports (tests/itest/).
+# End-to-end tests: real ircd/services processes on localhost ports (tests/itest/).
 itest: all
 	python3 tests/itest/run.py
 
@@ -144,10 +144,18 @@ $(BIN_DIR)/unit: $(UNIT_SRCS) $(HEADERS)
 	@mkdir -p $(BIN_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(UNIT_SRCS) $(LDLIBS)
 
-CHANSERV_SRCS := services/chanserv.c $(SRC_DIR)/proto.c $(SRC_DIR)/crypto.c $(SRC_DIR)/log.c $(VEND_SRCS)
-$(BIN_DIR)/chanserv: $(CHANSERV_SRCS) $(HEADERS)
+# The services daemon (NickServ + ChanServ). Shares the ircd's account store, SCRAM and crypto code, nothing else.
+SERVICES_SRCS := services/chanserv.c services/nickserv.c $(SRC_DIR)/proto.c $(SRC_DIR)/crypto.c $(SRC_DIR)/log.c \
+                 $(SRC_DIR)/accounts.c $(SRC_DIR)/scram.c $(VEND_SRCS)
+$(BIN_DIR)/services: $(SERVICES_SRCS) $(HEADERS) services/svc.h
 	@mkdir -p $(BIN_DIR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(CHANSERV_SRCS) $(LDLIBS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(SERVICES_SRCS) $(LDLIBS)
+
+# ponytail: bin/chanserv = the same program under its old name, so an install upgraded by the previous upgrade.py
+# (which builds, checks and installs bin/chanserv) still gets working services. It answers --version as "chanserv".
+# Drop once nothing older than this release is being upgraded from.
+$(BIN_DIR)/chanserv: $(BIN_DIR)/services
+	cp $< $@
 
 clean:
 	rm -rf $(OBJ_DIR) build-debug $(BIN_DIR)
@@ -156,18 +164,17 @@ clean:
 #
 # Fully rootless: everything lives under $HOME and units are systemd *user*
 # units (systemctl --user ...), not system units -- no useradd, no /etc, no
-# sudo anywhere in this recipe. sekurircd/chanserv never needed root anyway:
+# sudo anywhere in this recipe. sekurircd/services never needed root anyway:
 # their ports (6667/6697) are both >1024.
 #
 # Layout ($XDG_CONFIG_HOME/$XDG_STATE_HOME honored if set):
-#   $(PREFIX)/bin/{sekurircd,chanserv}    -- binaries (default ~/.local/bin)
+#   $(PREFIX)/bin/{sekurircd,services}    -- binaries (default ~/.local/bin)
 #   $(SYSCONFDIR)/                        -- config (default ~/.config/sekurircd;
 #                                             [accounts] writes accounts.json here)
 #   $(STATEDIR)/ircd/                     -- ircd WorkingDirectory (pidfile, logs/)
-#   $(STATEDIR)/chanserv/                 -- chanserv WorkingDirectory (pidfile,
-#                                             chanserv.json + rotating backups)
+#   $(STATEDIR)/services/                 -- services WorkingDirectory (pidfile)
 #                                             (default state dir ~/.local/state/sekurircd)
-#   $(UNITDIR)/{sekurircd,chanserv}.service (default ~/.config/systemd/user)
+#   $(UNITDIR)/{sekurircd,services}.service (default ~/.config/systemd/user)
 #
 # Only ships config/*.template.toml + ircd.motd -- never writes a live
 # sekurircd.toml/services.toml itself (those need operator-chosen operators/
@@ -182,9 +189,11 @@ install: all
 	@[ "$$(uname -s)" = Linux ] || { echo "make install: Linux + systemd only" >&2; exit 1; }
 	@[ "$$(id -u)" != 0 ] || echo "WARNING: running as root is not recommended -- the daemons never need it (ports 6667/6697 are >1024). Use a dedicated unprivileged user." >&2
 	install -d $(PREFIX)/bin
-	install -m755 $(BIN_DIR)/sekurircd $(BIN_DIR)/chanserv $(PREFIX)/bin/
-	install -d $(SYSCONFDIR) $(STATEDIR)/ircd/logs $(STATEDIR)/chanserv $(UNITDIR)
-	sed -e 's|^chanserv_pidfile = ""|chanserv_pidfile = "$(STATEDIR)/chanserv/chanserv.pid"|' \
+	install -m755 $(BIN_DIR)/sekurircd $(BIN_DIR)/services $(PREFIX)/bin/
+	install -d $(SYSCONFDIR) $(STATEDIR)/ircd/logs $(STATEDIR)/services $(STATEDIR)/chanserv $(UNITDIR)
+	@# bin/services replaces the standalone chanserv: retire its unit (its data files are left where they are)
+	-systemctl --user disable --now chanserv 2>/dev/null; rm -f $(UNITDIR)/chanserv.service $(PREFIX)/bin/chanserv
+	sed -e 's|^chanserv_pidfile = ""|chanserv_pidfile = "$(STATEDIR)/services/services.pid"|' \
 	    config/sekurircd.template.toml > $(SYSCONFDIR)/sekurircd.template.toml
 	chmod 644 $(SYSCONFDIR)/sekurircd.template.toml
 	install -m644 config/protection.template.toml config/spamfilters.conf $(SYSCONFDIR)/
@@ -193,21 +202,21 @@ install: all
 	sed -e 's|/usr/local/bin|$(PREFIX)/bin|g' -e 's|/etc/sekurircd|$(SYSCONFDIR)|g' -e 's|/var/lib/sekurircd|$(STATEDIR)|g' \
 	    systemd/sekurircd.service > $(UNITDIR)/sekurircd.service
 	sed -e 's|/usr/local/bin|$(PREFIX)/bin|g' -e 's|/etc/sekurircd|$(SYSCONFDIR)|g' -e 's|/var/lib/sekurircd|$(STATEDIR)|g' \
-	    systemd/chanserv.service > $(UNITDIR)/chanserv.service
+	    systemd/services.service > $(UNITDIR)/services.service
 	systemctl --user daemon-reload
 	@echo "installed under $(PREFIX), $(SYSCONFDIR), $(STATEDIR)."
 	@echo "next: cp $(SYSCONFDIR)/sekurircd.template.toml $(SYSCONFDIR)/sekurircd.toml (edit it), then:"
 	@echo "  optional Protection bundle (DNSBL, proxy scanner, limits, spam): cp $(SYSCONFDIR)/protection.template.toml $(SYSCONFDIR)/protection.toml"
-	@echo "  systemctl --user enable --now sekurircd chanserv"
+	@echo "  systemctl --user enable --now sekurircd services"
 	@echo "firewall: allow the ports you enable in sekurircd.toml (plain 6667, TLS 6697, WebSocket 8080, server-link 7000 only for remote servers;"
-	@echo "  chanserv links over loopback so it needs none). ufw: sudo ufw allow 6667,6697/tcp | firewalld: sudo firewall-cmd --permanent --add-port=6697/tcp && sudo firewall-cmd --reload"
+	@echo "  services link over loopback so they need none). ufw: sudo ufw allow 6667,6697/tcp | firewalld: sudo firewall-cmd --permanent --add-port=6697/tcp && sudo firewall-cmd --reload"
 	@echo "  BSD pf: add 'pass in proto tcp to port { 6667 6697 }' to /etc/pf.conf, then 'pfctl -f /etc/pf.conf' | cloud hosts: also open them in the provider's security group"
 	@echo "to keep running after logout / before login: loginctl enable-linger \$$(whoami)  (no sudo; may prompt for your own password)"
 
 uninstall:
 	@[ "$$(uname -s)" = Linux ] || { echo "make uninstall: Linux + systemd only" >&2; exit 1; }
-	rm -f $(PREFIX)/bin/sekurircd $(PREFIX)/bin/chanserv
-	rm -f $(UNITDIR)/sekurircd.service $(UNITDIR)/chanserv.service
+	rm -f $(PREFIX)/bin/sekurircd $(PREFIX)/bin/services $(PREFIX)/bin/chanserv
+	rm -f $(UNITDIR)/sekurircd.service $(UNITDIR)/services.service $(UNITDIR)/chanserv.service
 	systemctl --user daemon-reload
 	@echo "uninstalled binaries + unit files. left in place (remove by hand if you want):" \
 	      "$(SYSCONFDIR), $(STATEDIR)"

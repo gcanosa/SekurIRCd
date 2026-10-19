@@ -13,7 +13,7 @@ void cmd_version(server_t *srv, client_t *cl, irc_message_t *msg) {
     (void)msg;
     /* ircu/solanum style: "351 <nick> <version>(<build>). <server> :<flags>",
      * then the 005 lines. The flags are the optional features switched on
-     * here: A accounts/SASL, D DNSBL, L server links, P proxy scanner (Protection bundle), S spam protection,
+     * here: A accounts/SASL (services online), D DNSBL, L server links, P proxy scanner (Protection bundle), S spam protection,
      * T TLS listener ("-" when none). */
     char swver[CFG_STR + 48];
     server_software_version(srv, swver, sizeof swver);
@@ -21,7 +21,7 @@ void cmd_version(server_t *srv, client_t *cl, irc_message_t *msg) {
     swver[vl] = '.'; swver[vl + 1] = '\0'; /* room reserved by the +48 above */
     char flags[8];
     int n = 0;
-    if (srv->cfg.accounts.enabled) flags[n++] = 'A';
+    if (services_agent(srv)) flags[n++] = 'A'; /* account services reachable */
     if (srv->cfg.protection.bl_enabled && srv->cfg.protection.n_blacklists) flags[n++] = 'D';
     if (srv->cfg.protection.scan_enabled) flags[n++] = 'P';
     if (srv->cfg.links.enabled) flags[n++] = 'L';
@@ -107,7 +107,7 @@ void cmd_stats(server_t *srv, client_t *cl, irc_message_t *msg) {
         for (link_conn_t *lc = srv->links; lc; lc = lc->next) {
             long idle = (long)difftime(time(NULL), lc->last_activity);
             char idlebuf[16]; snprintf(idlebuf, sizeof idlebuf, "%ld", idle);
-            char sq[16]; snprintf(sq, sizeof sq, "%zu", lc->sbuf_len);
+            char sq[16]; snprintf(sq, sizeof sq, "%zu", lc->sbuf_len - lc->sbuf_off);
             const char *name = lc->peer_name[0] ? lc->peer_name : lc->ip;
             const char *p[] = {name, sq, idlebuf};
             client_reply(cl, N_STATSLINKINFO, p, 3, NULL);
@@ -269,17 +269,17 @@ static const help_entry_t HELP_TABLE[] = {
     {"REGISTER", {"REGISTER <account> <password> | REGISTER <account|*> <email|*> <password>",
                   "Create a self-service account and log in as it (the second form is IRCv3 "
                   "draft/account-registration; * means your nick). Also: /msg NickServ REGISTER <password> "
-                  "and /msg NickServ IDENTIFY [account] <password>. Only available when the "
-                  "server has [accounts] enabled -- ask a server operator if this fails."}},
+                  "and /msg NickServ IDENTIFY [account] <password>. Handled by NickServ in the network's "
+                  "services -- unavailable while they are down."}},
     {"NS", {"NS <command> [args...]",
             "Shorthand for /msg NickServ <command> (also NICKSERV); CS and CHANSERV do the same for ChanServ. "
             "/NS HELP lists the NickServ commands: REGISTER, IDENTIFY, GHOST, REGAIN, RESETPASS, GROUP, SET, DROP and more."}},
-    {"AUTHENTICATE", {"AUTHENTICATE PLAIN|EXTERNAL",
+    {"AUTHENTICATE", {"AUTHENTICATE PLAIN|SCRAM-SHA-256|EXTERNAL",
                        "SASL login to an existing account -- normally sent by your client automatically "
                        "during connection setup, not typed by hand. EXTERNAL logs in via a TLS client "
-                       "certificate bound with /CERT ADD, instead of a password."}},
+                       "certificate bound with /msg NickServ CERT ADD, instead of a password."}},
     {"CERT", {"CERT ADD|DEL|INFO",
-              "Non-standard: bind (ADD), clear (DEL), or show (INFO) the TLS client certificate fingerprint "
+              "Shorthand for /msg NickServ CERT: bind (ADD), clear (DEL), or show (INFO) the TLS client certificate fingerprint "
               "SASL EXTERNAL logs your account in with. Requires being logged in and connected with a "
               "certificate ([tls] request_client_cert must be enabled server-side)."}},
     {"CAP", {"CAP LS|REQ|END|LIST", "IRCv3 capability negotiation -- normally handled by your client, not typed by hand."}},

@@ -27,7 +27,9 @@
  *               :<sid> PUSH <uid> :<raw line>    (deliver a reply/notice to a user on the receiving server)
  *               :<uid> WALLOPS|GLOBOPS :<text>   :<uid> RENAME <#old> <#new> :<reason>
  *               :<sid> GLINE ... / UNGLINE <mask>
- *               :<sid> ACCT <ts> <name> :<json record>   :<sid> ACCTDEL <ts> <name>    (the account database, last writer wins)
+ *               :<operuid> ENCAP <uid> SAJOIN|SAPART|SANICK|CHGHOST|CHGIDENT <args...>   (routed to the user's server)
+ *               :<uid> CERTFP <sha256-hex>    (TLS client certificate, after UID; services use it)
+ *               :<sid> SVCRELAY <uid|sid.connid> :<line>   (account-services traffic, routed: see cmd_reg.c / link.h)
  * Channel state converges by timestamp (TS6-style): the older channel wins; the younger side drops its modes and
  * strips its members' ranks. A nick collision is settled by nick timestamp (older wins, a tie kills both).
  */
@@ -44,6 +46,12 @@ struct server;
 struct client;
 struct channel;
 struct link_conn;
+
+/* Link protocol version, exchanged in CAPAB ("SEKURNET PROTO=<n> MINPROTO=<n> VERSION=<software>"). Bump NETSYNC_PROTO when
+ * the wire changes in a way an older server would misread; raise NETSYNC_PROTO_MIN only when we stop speaking an old
+ * one. A new verb an older server just ignores (ENCAP) doesn't need a bump. A peer that sends no PROTO is protocol 1. */
+#define NETSYNC_PROTO 2 /* 2: accounts moved to services (SVCRELAY/CERTFP; no ACCT replication) */
+#define NETSYNC_PROTO_MIN 1
 
 #define SID_LEN 3
 #define UID_LEN 9
@@ -78,6 +86,11 @@ const char *netsync_server_name_of(struct server *srv, const struct client *cl);
 /* Handshake finished on `lc` with a SEKURNET peer `name`/`sid`/`desc` (hop = 1): register it, send our burst.
  * Returns 0, or -1 (after sending an ERROR) if the name or SID is already on the network. */
 int netsync_link_up(struct server *srv, struct link_conn *lc, const char *name, const char *sid, const char *desc);
+/* Our CAPAB line for the handshake. */
+void netsync_capab_line(struct server *srv, char *out, size_t outsz);
+/* Compare the peer's CAPAB (lc->peer_capab) with ours: logs and snotices the versions, returns -1 if the protocols
+ * don't overlap (the caller refuses the link), 0 otherwise. */
+int netsync_check_peer(struct server *srv, struct link_conn *lc, const char *name);
 /* The link is gone (or was SQUIT): remove the servers and users behind it. */
 void netsync_link_down(struct server *srv, struct link_conn *lc, const char *reason);
 /* One line from a SEKURNET link, already parsed. */
@@ -109,10 +122,13 @@ void netsync_wallops(struct server *srv, struct client *from, const char *verb, 
 void netsync_gline(struct server *srv, const char *mask, const char *setter, long expires, const char *reason);
 void netsync_ungline(struct server *srv, const char *mask);
 /* Reply/notice for a user on another server. */
-/* accounts.c's replication hook (installed by server_init): a registration/password/email/group/drop reaches every
- * linked server, last writer wins. */
-void netsync_account_changed(void *ud, const char *name, long long ts, int deleted);
+/* Route a services line toward `dest` (a UID, or a connection id "<sid>.<conn_id>"). */
+void netsync_svcrelay(struct server *srv, const char *dest, const char *line);
+/* Reply/notice for a user on another server. */
 void netsync_push(struct server *srv, struct client *target, const char *line);
+/* An oper override (SAJOIN/SAPART/SANICK/CHGHOST/CHGIDENT) on a user of another server: routed there and run by it.
+ * `args` are the command's parameters after the target nick. */
+void netsync_encap(struct server *srv, struct client *oper, struct client *target, const char *cmd, char **args, int nargs);
 
 /* --- remote -> local application, implemented in cmd_*.c ---------------------------------------------- */
 void cmd_deliver_remote_message(struct server *srv, struct client *from, const char *verb, const char *target,

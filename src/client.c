@@ -36,7 +36,6 @@ void client_free(client_t *cl) {
     free(cl->rbuf);
     free(cl->ml);
     free(cl->label_buf);
-    free(cl->scram);
     if (cl->srv && (cl->n_monitor || cl->n_watch)) server_watch_index_drop(cl->srv, cl); /* a path that skipped server_remove_client */
     free(cl->monitor); free(cl->watch); free(cl->silence); free(cl->accept);
     if (cl->auth_tmp) { OPENSSL_cleanse(cl->auth_tmp, sizeof *cl->auth_tmp); free(cl->auth_tmp); } /* e.g. a PASS never tried (gone before registering) */
@@ -45,7 +44,7 @@ void client_free(client_t *cl) {
     free(cl);
 }
 
-static const size_t AUTHTMP_MAX[AUTHTMP_N] = {255, 255, 159, 159}; /* the sizes the separate fields used to have, less the NUL */
+static const size_t AUTHTMP_MAX[AUTHTMP_N] = {255}; /* less the NUL */
 
 const char *client_auth_get(const client_t *cl, int field) {
     return cl->auth_tmp ? cl->auth_tmp->v[field] : "";

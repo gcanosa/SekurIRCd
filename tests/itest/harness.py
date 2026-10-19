@@ -1,11 +1,12 @@
-"""Integration-test harness: spawns real bin/sekurircd (and bin/chanserv) processes
+"""Integration-test harness: spawns real bin/sekurircd (and bin/services) processes
 on free localhost ports with a generated config, and gives tests a tiny IRC client.
 Stdlib only. Everything lives in a temp directory that is removed afterwards."""
 import os, re, shutil, signal, socket, subprocess, tempfile, time, base64, struct, hashlib
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 IRCD = os.environ.get("IRCD_BIN", os.path.join(ROOT, "bin", "sekurircd"))        # IRCD_BIN=bin/sekurircd-debug runs the suite under ASan/UBSan
-CHANSERV = os.environ.get("CHANSERV_BIN", os.path.join(ROOT, "bin", "chanserv"))
+SERVICES = os.environ.get("SERVICES_BIN", os.path.join(ROOT, "bin", "services"))
+SVC_NAME, SVC_PW = "services.test.net", "svcsecret"
 
 
 def free_port():
@@ -66,6 +67,42 @@ class Server:
             else:
                 self.cfg.setdefault(sec, {}).update(body)
         self.proc = None
+        self.services = None
+        self.auto_services = True  # [accounts] enabled -> also run bin/services (NickServ) linked to this server
+
+    def wants_services(self):
+        return self.auto_services and self.cfg.get("accounts", {}).get("enabled")
+
+    def _prepare_services(self):
+        """Accounts live in the services daemon now: link it in as a peer of this server."""
+        links = self.cfg.setdefault("links", {"enabled": True, "mode": "hub", "bind": "127.0.0.1", "port": self.link_port})
+        links.setdefault("enabled", True)
+        peers = self.cfg.setdefault("links.peers", [])
+        if not any(p.get("name") == SVC_NAME for p in peers):
+            peers.append({"name": SVC_NAME, "password": SVC_PW})
+
+    def _start_services(self):
+        acc = self.cfg.get("accounts", {})
+        ns = []
+        for k in ("enforce_nicks", "enforce_grace", "max_accounts", "email_command", "admins", "network"):
+            if k in acc:
+                ns.append(f"{k} = {toml_value(acc[k])}")
+        store = os.path.join(self.dir, acc.get("store_file", "accounts.json"))
+        self.services = Services(self, self.cfg["links"]["port"], nickserv="\n".join(ns), store=store)
+        self.services.start()
+        self.wait_services()
+
+    def wait_services(self, timeout=8):
+        deadline = time.time() + timeout
+        while time.time() < deadline:  # until NickServ is on the network
+            probe = Client(self.port, f"svcwait{int(time.time() * 1000) % 100000}", register=True)
+            up = any(" 311 " in l for l in probe.say("WHOIS NickServ", 0.3))
+            probe.send("QUIT")
+            probe.close()
+            if up:
+                return
+            time.sleep(0.2)
+        raise RuntimeError("services did not link:\n" + self.services.output() + self.output()[-2000:])
 
     def write_config(self):
         self.cfg_path = os.path.join(self.dir, "ircd.toml")
@@ -73,6 +110,8 @@ class Server:
             f.write(render_toml(self.cfg))
 
     def start(self):
+        if self.wants_services():
+            self._prepare_services()
         self.write_config()
         self.out = open(os.path.join(self.dir, "ircd.out"), "w")
         self.proc = subprocess.Popen([IRCD, "-c", self.cfg_path, "--pidfile", os.path.join(self.dir, "ircd.pid")],
@@ -83,6 +122,11 @@ class Server:
                 raise RuntimeError("ircd exited early:\n" + self.output())
             try:
                 socket.create_connection(("127.0.0.1", self.port), timeout=0.3).close()
+                if self.wants_services():
+                    if self.services and self.services.proc and self.services.proc.poll() is None:
+                        self.wait_services()  # a restart: services relink on their own
+                    else:
+                        self._start_services()
                 return self
             except OSError:
                 time.sleep(0.05)
@@ -96,6 +140,9 @@ class Server:
             return ""
 
     def stop(self):
+        if self.services:
+            self.services.stop()
+            self.services = None
         if self.proc and self.proc.poll() is None:
             self.proc.terminate()
             try:
@@ -243,20 +290,30 @@ def ws_parse(buf):
     return out, buf
 
 
-class ChanServ:
-    def __init__(self, srv, link_port, peer_name="services.test.net", password="svcsecret", extra=""):
-        self.dir = tempfile.mkdtemp(prefix="itest-cs-")
-        self.pidfile = os.path.join(self.dir, "cs.pid")
+class Services:
+    """bin/services (ChanServ + NickServ) linked to `srv`. `nickserv` / `chanserv_extra` are extra lines for those sections."""
+
+    def __init__(self, srv, link_port, peer_name=SVC_NAME, password=SVC_PW, extra="", nickserv="", store=None):
+        self.dir = tempfile.mkdtemp(prefix="itest-svc-")
+        self.pidfile = os.path.join(self.dir, "services.pid")
+        store_line = f'store_file = "{store}"\n' if store else ""
         with open(os.path.join(self.dir, "services.toml"), "w") as f:
             f.write(f'[link]\nhost = "127.0.0.1"\nport = {link_port}\nname = "{peer_name}"\npassword = "{password}"\n'
-                    f'[chanserv]\nnick = "ChanServ"\n{extra}\n[storage]\npath = "cs.json"\nbackup_count = 1\n')
+                    f'[chanserv]\nnick = "ChanServ"\n{extra}\n[nickserv]\n{store_line}{nickserv}\n'
+                    f'[storage]\npath = "cs.json"\nbackup_count = 1\n')
         self.proc = None
 
     def start(self):
-        self.proc = subprocess.Popen([CHANSERV, "-c", "services.toml"], cwd=self.dir,
+        self.proc = subprocess.Popen([SERVICES, "-c", "services.toml"], cwd=self.dir,
                                      stdout=open(os.path.join(self.dir, "out"), "w"), stderr=subprocess.STDOUT)
         time.sleep(1.2)
         return self
+
+    def output(self):
+        try:
+            return open(os.path.join(self.dir, "out")).read()
+        except OSError:
+            return ""
 
     def stop(self):
         if self.proc and self.proc.poll() is None:
@@ -272,6 +329,11 @@ class ChanServ:
 
     def __exit__(self, *a):
         self.stop()
+
+
+def ChanServ(srv, link_port, peer_name=SVC_NAME, password=SVC_PW, extra=""):
+    """ChanServ alone (the services daemon with NickServ off), as the ChanServ tests always ran it."""
+    return Services(srv, link_port, peer_name, password, extra, nickserv="enabled = false")
 
 
 class Network:
@@ -296,6 +358,7 @@ class Network:
         s.cfg["links"] = {"enabled": True, "mode": "both", "bind": "127.0.0.1", "port": s.link_port, "reconnect_delay": 1.0,
                           "reconnect_delay_max": 2.0, "ping_interval": 60.0, "ping_timeout": 180.0}
         s.cfg["links.peers"] = []
+        s.auto_services = not self.order  # one services daemon per network, on the first server
         self.servers[name] = s
         self.parents[name] = parent
         self.order.append(name)

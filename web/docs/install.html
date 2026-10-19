@@ -35,7 +35,7 @@
 <h2>build</h2>
 <pre>git clone https://github.com/gcanosa/SekurIRCd.git
 cd SekurIRCd
-make            # release build -> bin/sekurircd, bin/chanserv
+make            # release build -> bin/sekurircd, bin/services
 make debug      # ASan+UBSan build -> bin/sekurircd-debug
 make check      # build and run tests/unit.c
 make clean</pre>
@@ -62,14 +62,15 @@ QUIT</pre>
 <h2>start/stop/status script</h2>
 <p>The repo root ships a small wrapper, <code>./sekurircd</code>, that runs both daemons in the background with the right flags and pidfiles, so you
   don't manage them by hand:</p>
-<pre>./sekurircd start     # sekurircd, plus chanserv if services/services.toml exists
+<pre>./sekurircd start     # sekurircd, plus services (NickServ + ChanServ) if services/services.toml exists
 ./sekurircd status    # running/stopped for each, with pid
-./sekurircd stop      # stops chanserv first, then sekurircd (graceful)</pre>
+./sekurircd restart   # stop both, wait, start both
+./sekurircd stop      # stops services first, then sekurircd (graceful)</pre>
 <p>It always works from the repo directory, using <code>config/sekurircd.toml</code>, <code>services/services.toml</code> and the pidfiles
-  <code>sekurircd.pid</code> and <code>services/chanserv.pid</code>. It refuses to start if <code>bin/</code> isn't built yet, ChanServ is skipped when it isn't
-  configured, and starting an already-running daemon is refused rather than duplicated. If <code>status</code> finds a matching process but no valid
-  pidfile, it says so instead of reporting "stopped". There is no <code>restart</code> subcommand: run <code>./sekurircd stop &amp;&amp; ./sekurircd start</code>,
-  or <code>./bin/sekurircd --rehash</code> to reload the config without restarting.</p>
+  <code>sekurircd.pid</code> and <code>services/services.pid</code>. It refuses to start if <code>bin/</code> isn't built yet, services are skipped when they aren't
+  configured (then there is no NickServ, ChanServ or SASL), and starting an already-running daemon is refused rather than duplicated. A still-running
+  standalone ChanServ from an older release (<code>services/chanserv.pid</code>) is stopped first, so there are never two. If <code>status</code> finds a
+  matching process but no valid pidfile, it says so instead of reporting "stopped". <code>./bin/sekurircd --rehash</code> reloads the config without restarting.</p>
 
 <h2>daemon mode</h2>
 <pre>./bin/sekurircd --config config/sekurircd.toml --daemon --pidfile /var/run/sekurircd.pid
@@ -85,12 +86,12 @@ QUIT</pre>
 make install
 #  binaries         -> ~/.local/bin
 #  config templates -> ~/.config/sekurircd   (never overwrites a live sekurircd.toml)
-#  state and logs   -> ~/.local/state/sekurircd/{ircd,chanserv}
+#  state and logs   -> ~/.local/state/sekurircd/{ircd,services}
 #  units            -> ~/.config/systemd/user
 
 cp ~/.config/sekurircd/sekurircd.template.toml ~/.config/sekurircd/sekurircd.toml
 cp ~/.config/sekurircd/protection.template.toml ~/.config/sekurircd/protection.toml   # optional: the Protection bundle
-systemctl --user enable --now sekurircd
+systemctl --user enable --now sekurircd services   # services start, stop and restart with sekurircd
 systemctl --user reload sekurircd      # same as --rehash
 journalctl --user -u sekurircd -f</pre>
 <p>A user unit stops when your last session ends. To keep it running after logout or start it at boot:
@@ -99,7 +100,7 @@ journalctl --user -u sekurircd -f</pre>
   <code>UNITDIR</code> on the <code>make</code> command line to relocate any of it.</p>
 
 <h2>next</h2>
-<p>Continue with <a href="configuration.html">configuration</a>, or add <a href="chanserv.html">ChanServ</a>.</p>
+<p>Continue with <a href="configuration.html">configuration</a>, or set up <a href="chanserv.html">services (NickServ + ChanServ)</a>.</p>
 </main>
 </div>
 <footer id="site-footer"></footer>

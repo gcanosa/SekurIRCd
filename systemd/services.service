@@ -1,0 +1,26 @@
+# A systemd *user* unit (installs under ~/.config/systemd/user, run via
+# `systemctl --user ...`) -- no root/sudo anywhere. `make install` rewrites
+# the /usr/local/bin, /etc/sekurircd and /var/lib/sekurircd paths below to
+# $(PREFIX)/$(SYSCONFDIR)/$(STATEDIR) -- see the Makefile's install target.
+# Edit those by hand if installing this file directly.
+[Unit]
+Description=SekurIRCd services (NickServ + ChanServ)
+# Started and stopped with the ircd: `systemctl --user restart sekurircd` restarts services too.
+After=network.target sekurircd.service
+PartOf=sekurircd.service
+
+[Service]
+Type=forking
+WorkingDirectory=/var/lib/sekurircd/services
+PIDFile=/var/lib/sekurircd/services/services.pid
+ExecStart=/usr/local/bin/services --config /etc/sekurircd/services.toml --daemon --pidfile /var/lib/sekurircd/services/services.pid
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+ProtectSystem=strict
+# /etc/sekurircd: the account database the ircd's built-in NickServ kept there (accounts.json) is used in place;
+# /var/lib/sekurircd/chanserv: where the standalone chanserv kept chanserv.json, for a [storage] path still pointing there
+ReadWritePaths=/var/lib/sekurircd/services /var/lib/sekurircd/chanserv /etc/sekurircd
+
+[Install]
+WantedBy=default.target sekurircd.service

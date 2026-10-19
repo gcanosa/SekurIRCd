@@ -3,7 +3,7 @@
 
 For each live config (sekurircd.toml, protection.toml, services.toml):
   1. TOML syntax, with line/column (Python 3.11+; older Pythons rely on step 2)
-  2. the daemon's own validation: `bin/sekurircd --check` / `bin/chanserv --check`
+  2. the daemon's own validation: `bin/sekurircd --check` / `bin/services --check`
      -- the exact rules the server applies at start and /REHASH (types, ranges,
      durations, required fields, the Protection bundle, ...)
   3. against its template: unknown keys (typos / removed options, with
@@ -27,7 +27,7 @@ except ImportError:
 
 CHECKERS = {  # live file -> daemon binary that validates it
     "config/sekurircd.toml": "bin/sekurircd",
-    "services/services.toml": "bin/chanserv",
+    "services/services.toml": "bin/services" if os.path.exists(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin/services")) else "bin/chanserv",
 }
 P = "config/protection.toml"
 LEGACY = {  # (section, key or None for the whole section) -> where it lives now; the server still reads the old spot
@@ -39,6 +39,10 @@ LEGACY = {  # (section, key or None for the whole section) -> where it lives now
     ("security", "connect_flood_max"): f"[connection] connect_flood_max in {P}",
     ("security", "connect_flood_window"): f"[connection] connect_flood_window in {P}",
     ("security", "connect_flood_kline_duration"): f"[connection] connect_flood_ban_duration in {P}",
+}
+RETIRED = {  # sections the ircd no longer reads at all -> where the settings went
+    "accounts": "accounts are the services daemon's now: put these under [nickserv] in services/services.toml "
+                "(its accounts.json is used in place)",
 }
 OPTIONAL = {"config/protection.toml"}  # sekurircd.toml settings apply when it's absent
 
@@ -109,6 +113,10 @@ def check_template(path, tpl, quiet):
             continue
         if sec and sec not in ref_secs:
             if sec in moved:
+                continue
+            if sec in RETIRED:
+                moved.add(sec)
+                warn(f"[{sec}]: no longer read by the ircd -- {RETIRED[sec]}")
                 continue
             if (sec, None) in LEGACY:
                 moved.add(sec)

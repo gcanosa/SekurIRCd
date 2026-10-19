@@ -446,10 +446,6 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
          * finish registering (or reconnect and hold a different identity
          * under the same nick). */
         if (dst && !dst->registered) dst = NULL;
-        if (!dst && !is_notice && strcasecmp(target, "NickServ") == 0) {
-            nickserv_message(srv, cl, textbuf); /* virtual NickServ -- see cmd_reg.c */
-            return;
-        }
         if (!dst) {
             if (!is_notice) err_no_such_nick(cl, target);
             return;
@@ -578,16 +574,6 @@ void cmd_service_alias(server_t *srv, client_t *cl, irc_message_t *msg) {
 static void whois_one(server_t *srv, client_t *cl, const char *nick) {
     client_t *target = server_find_user(srv, nick);
     if (target && !target->registered) target = NULL; /* not yet USER/welcomed -- see send_msg's dst check */
-    if (!target && srv->cfg.accounts.enabled && strcasecmp(nick, "NickServ") == 0) { /* the virtual one (cmd_reg.c) */
-        const char *p1[] = {"NickServ", "NickServ", srv->cfg.server.name};
-        client_reply(cl, N_WHOISUSER, p1, 3, "Nickname Services");
-        const char *p2[] = {"NickServ", srv->cfg.server.name};
-        client_reply(cl, N_WHOISSERVER, p2, 2, srv->cfg.server.network);
-        const char *p3[] = {"NickServ"};
-        client_reply(cl, N_WHOISOPERATOR, p3, 1, "is a Network Service");
-        client_reply(cl, N_ENDOFWHOIS, p3, 1, "End of /WHOIS list.");
-        return;
-    }
     if (!target) {
         err_no_such_nick(cl, nick);
         const char *pe[] = {nick};
@@ -601,7 +587,10 @@ static void whois_one(server_t *srv, client_t *cl, const char *nick) {
     client_reply(cl, N_WHOISSERVER, p2, 2, target->remote && target->nserver ? target->nserver->desc : srv->cfg.server.network);
 
     int self_or_oper = (cl == target) || (cl->umodes & UMODE_O);
-    if ((target->umodes & UMODE_O) && (!(target->umodes & UMODE_H) || self_or_oper)) {
+    if (target->is_service) {
+        const char *p3[] = {target->nick};
+        client_reply(cl, N_WHOISOPERATOR, p3, 1, "is a Network Service");
+    } else if ((target->umodes & UMODE_O) && (!(target->umodes & UMODE_H) || self_or_oper)) {
         const char *p3[] = {target->nick};
         client_reply(cl, N_WHOISOPERATOR, p3, 1, "is an IRC operator");
     }
@@ -1339,8 +1328,8 @@ void cmd_chathistory(server_t *srv, client_t *cl, irc_message_t *msg) {
     } else {
         if (!cl->account[0] || !srv->cfg.messages.history_dm) { chathistory_fail(srv, cl, "INVALID_TARGET", target, "Messages could not be retrieved"); return; }
         client_t *other = server_find_user(srv, target);
-        const char *oacct = (other && other->registered && other->account[0]) ? other->account : (accounts_exists(&srv->accounts, target) ? target : NULL);
-        if (!oacct) { chathistory_fail(srv, cl, "INVALID_TARGET", target, "Messages could not be retrieved"); return; }
+        /* offline: the target is taken as an account name (accounts live in services; an unknown one just has no history) */
+        const char *oacct = (other && other->registered && other->account[0]) ? other->account : target;
         history_key_dm(key, sizeof key, cl->account, oacct);
     }
     b = history_get(srv, key);
