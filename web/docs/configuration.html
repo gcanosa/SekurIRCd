@@ -101,12 +101,74 @@ hosts = ["*@*"]                                       # or restrict, e.g. ["*@20
   <code>link</code> (SQUIT/CONNECT) and <code>all</code>. NickServ SUSPEND/UNSUSPEND/FDROP/SASET are for services admins
   (<code>[nickserv] admins</code>, by account), not an oper privilege. <code>privileges = []</code> makes a helper oper with none of them.</p>
 
+<h2 id="ipv6">IPv6</h2>
+<p>Off by default, so an upgrade changes nothing: without it the server listens and resolves exactly as before, over IPv4 only. Turn it on in
+  <code>[server]</code>:</p>
+<pre>[server]
+ipv6 = true
+#bind6 = "::"              # every interface; [links] bind6 for the link listener
+#ipv6_limit_prefix = 64    # per-IP limits and cloaks count an IPv6 client by its /64</pre>
+<p>Every listener (clients, TLS, WebSocket, server links) then also gets an IPv6 socket next to its IPv4 one. These are separate, IPv6-only
+  sockets, so IPv4 clients keep plain IPv4 addresses and every existing ban keeps matching them. <code>/REHASH</code> turns it on or off.</p>
+<ul>
+  <li><strong>Addresses:</strong> an IPv6 client shows as e.g. <code>2001:db8::5</code>. One that would start with <code>:</code> is written
+    <code>0::1</code>, because an IRC parameter can't start with <code>:</code>. Type IPv6 ban masks the same way (<code>0::1</code>, <code>0::/64</code>).</li>
+  <li><strong>CIDR masks</strong> work everywhere an IP is matched, as well as globs: K/G/Z-lines and E-lines, <code>allowed_ips</code>, oper
+    <code>hosts</code>, WEBIRC/class/proxy hosts and protection exemptions, e.g. <code>KLINE *@2001:db8::/32</code> or
+    <code>ZLINE 203.0.113.0/24</code>. A literal IP is stored in canonical form, and a <code>/0</code> (everyone) is refused like <code>*</code>.</li>
+  <li><strong>Limits and cloaks per /64:</strong> providers give each IPv6 customer a whole block, so connections per IP, the connect-flood
+    throttle with its automatic Z-lines, and host cloaks count an IPv6 client by its <code>/64</code>. Rotating addresses inside it gets
+    around none of them. IPv4 is unaffected.</li>
+  <li><strong>Lookups:</strong> reverse DNS (forward-confirmed), ident, DNSBL (reversed-nibble queries) and link dialing work over IPv6. The
+    proxy scanner stays IPv4-only and skips IPv6 clients.</li>
+</ul>
+
 <h2 id="links">server links</h2>
 <p>Servers link into a tree. One server listens (<code>[links] port</code>, a single port for every server that dials in: each one is told apart by the name
-  it sends, not by port); the others dial it with <code>host</code>/<code>port</code> in their peer entry. <code>tools/linkmgmt.py add</code> (also <code>edit</code> and <code>del</code>) asks a few questions,
-  writes this server's side after showing the diff (a backup is kept, the ircd's own <code>--check</code> validates it, and a refused change is restored),
-  and prints the other server's side to paste there, plus the firewall and restart steps (<code>--dry-run</code> only prints); <code>tools/linkmgmt.py test HOST PORT --tls</code> checks DNS, the port and
-  TLS from either side.</p>
+  it sends, not by port); the others dial it with <code>host</code>/<code>port</code> in their peer entry. You rarely edit these blocks by hand:
+  the link wizard below does it.</p>
+
+<h3 id="linkmgmt">the link wizard: add, edit and remove links</h3>
+<p><code>tools/linkmgmt.py</code> manages this server's links and tells you exactly what to put on the other one. It asks a few questions (the other
+  server's name, who dials whom, its address and port, the IPs it may connect from, TLS and certificate pinning, the password, or it generates a strong
+  one), then:</p>
+<ul>
+  <li><strong>writes this server's side</strong>: the <code>[[links.peers]]</code> block and any <code>[links]</code> changes (<code>enabled</code>, <code>mode</code>,
+    <code>tls</code>, <code>port</code>). You see the diff and confirm first; comments and layout are kept.</li>
+  <li><strong>keeps it safe</strong>: a backup <code>sekurircd.toml.pre-linkmgmt-&lt;date&gt;</code> (private, <code>0600</code>), an atomic write, and the ircd's own
+    <code>--check</code> on the result. If the server would refuse it, your config is restored untouched.</li>
+  <li><strong>brings it live</strong>: offers to rehash the running ircd, or says when a restart is needed (enabling links, changing TLS, a new listener).</li>
+  <li><strong>prints the other server's side</strong>, which it can't reach: its <code>[links]</code> section and peer block (the dialing side gets the password,
+    the accepting side only its scrypt hash), the shared password, and the firewall, restart and <code>/CONNECT</code> steps. Optionally saved to
+    <code>link-for-&lt;name&gt;.toml</code> (<code>0600</code>) to <code>scp</code> across. Delete it afterwards: it holds the password.</li>
+</ul>
+<pre>tools/linkmgmt.py                  # menu: list, add, edit, remove, test
+tools/linkmgmt.py add              # link a new server
+tools/linkmgmt.py edit             # password, address, IPs, who dials, pins
+tools/linkmgmt.py del              # remove a link
+tools/linkmgmt.py fingerprint      # this server's cert, for the other to pin
+tools/linkmgmt.py test HOST PORT --tls   # DNS, port, firewall, TLS
+tools/linkmgmt.py --dry-run add    # change nothing, print both sides</pre>
+<pre>$ tools/linkmgmt.py add
+Name of the other server (its [server] name): irc2.example.net
+Who opens the connection?
+  1) irc2.example.net dials irc1.example.net  (this server accepts -- usual for a new leaf)
+  2) irc1.example.net dials irc2.example.net  (irc2.example.net accepts)
+Choice [1]: 1
+...
+  +[[links.peers]]
+  +name = "irc2.example.net"
+  +password_hash = "scrypt$16384$8$1$..."
+  +fingerprint = "sha256:..."
+  +allowed_ips = ["203.0.113.7"]
+Write this to config/sekurircd.toml? (y/n) [y]: y
+Written.  Backup: config/sekurircd.toml.pre-linkmgmt-20261021-142227
+Rehash the running ircd now? (y/n) [y]: y
+Rehashed.
+2) On the OTHER server (irc2.example.net) -- paste these there
+...</pre>
+<p>The services link is left alone (it lives in <code>services/services.toml</code>), and the template's commented examples are never touched.
+  Removing a link doesn't turn <code>tls</code> off, since other links may rely on it.</p>
 <p>Encrypt and pin: set <code>[links] tls = true</code> on both servers (the listening one needs <code>[tls]</code> enabled; its certificate is reused) and put
   the other server's certificate fingerprint in each peer entry. <code>tools/linkmgmt.py fingerprint</code> prints a server's own.</p>
 <pre># on the hub: the leaf that dials in

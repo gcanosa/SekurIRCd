@@ -1,5 +1,16 @@
 [
   {
+    "tag": "v1.3.0",
+    "date": "2026-10-21",
+    "changes": [
+      "IPv6 (opt-in): [server] ipv6 = true gives every listener (clients, TLS, WebSocket, server links) an IPv6 socket next to its IPv4 one. Off by default, so an upgrade changes nothing; separate IPv6-only sockets keep IPv4 clients and existing bans exactly as they were. IPv6 clients show as e.g. 2001:db8::5 (::1 as 0::1, since an IRC parameter can't start with ':'); reverse DNS, ident, DNSBL and link dialing work over IPv6; the proxy scanner stays IPv4-only",
+      "CIDR masks: K/G/Z-lines and E-lines, allowed_ips, oper hosts, WEBIRC/class/proxy hosts and protection exemptions take CIDR as well as globs (2001:db8::/32, 203.0.113.0/24). Per-IP limits, connect-flood auto-bans and host cloaks count an IPv6 client by its /64 (ipv6_limit_prefix), so rotating addresses inside it gets around none of them",
+      "Fix: every WEBIRC or X-Forwarded-For connection leaked one slot of the gateway's per-IP count, so a busy web chat gateway was eventually refused with \"Too many connections from your host\"",
+      "Link wizard: tools/linkmgmt.py add, edit and del now write this server's side of a link themselves: the [[links.peers]] block and any [links] changes, after showing the diff and asking. A private backup is kept, the ircd's own --check validates the result and a refused change is restored; then it rehashes the running ircd or says a restart is needed. The other server's side is still printed to paste there, and can be saved to a private file to copy over. --dry-run keeps the print-only behaviour",
+      "Testing: 139 end-to-end integration tests (IPv6 clients, CIDR bans, per-/64 limits, IPv6 links, rehash on/off, the gateway count fix)"
+    ]
+  },
+  {
     "tag": "v1.2.5",
     "date": "2026-10-21",
     "changes": [
