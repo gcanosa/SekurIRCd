@@ -66,6 +66,8 @@ typedef struct client {
     char quit_reason[256];
 
     char ip[64];
+    char count_key[64];      /* what server_add_connection counted this connection under (its accept-time address, an
+                              * IPv6 one as its /N): kept, because WEBIRC/X-Forwarded-For later change ip */
     int port;
     char host[HOSTLEN];       /* displayed host */
     char realhost[HOSTLEN];   /* actual resolved/connecting host, for oper WHOIS */

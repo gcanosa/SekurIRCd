@@ -754,7 +754,7 @@ static int who_mask_hit(server_t *srv, client_t *cl, client_t *u, const char *ma
     char full[400];
     client_prefix(u, full, sizeof full);
     if (irc_glob_match(mask, full)) return 1;
-    return (cl->umodes & UMODE_O) && (irc_glob_match(mask, u->realhost) || irc_glob_match(mask, u->ip));
+    return (cl->umodes & UMODE_O) && (irc_glob_match(mask, u->realhost) || irc_ip_mask_match(mask, u->ip));
 }
 
 void cmd_who(server_t *srv, client_t *cl, irc_message_t *msg) {

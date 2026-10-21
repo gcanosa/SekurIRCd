@@ -126,26 +126,44 @@ int worker_poll_results(job_result_t *out, int max) {
     return n;
 }
 
+/* `ip` (IPv4, or IPv6 in any form including our "0::1") as a socket address with `port`. Its length, 0 if not an IP. */
+static socklen_t ip_sockaddr(const char *ip, int port, struct sockaddr_storage *ss) {
+    memset(ss, 0, sizeof *ss);
+    struct sockaddr_in *s4 = (struct sockaddr_in *)ss;
+    struct sockaddr_in6 *s6 = (struct sockaddr_in6 *)ss;
+    if (inet_pton(AF_INET, ip, &s4->sin_addr) == 1) {
+        s4->sin_family = AF_INET; s4->sin_port = htons((uint16_t)port);
+        return sizeof *s4;
+    }
+    if (inet_pton(AF_INET6, ip, &s6->sin6_addr) == 1) {
+        s6->sin6_family = AF_INET6; s6->sin6_port = htons((uint16_t)port);
+        return sizeof *s6;
+    }
+    return 0;
+}
+
 static int do_rdns(const char *ip, char *out, size_t outsz) {
-    struct sockaddr_in sa;
-    memset(&sa, 0, sizeof sa);
-    sa.sin_family = AF_INET;
-    if (inet_pton(AF_INET, ip, &sa.sin_addr) != 1) return 0;
+    struct sockaddr_storage sa;
+    socklen_t salen = ip_sockaddr(ip, 0, &sa);
+    if (!salen) return 0;
     char host[256];
     /* NI_NAMEREQD: fail (rather than fall back to the numeric IP) when
      * there's no PTR record -- "not found" must look like "not found". */
-    if (getnameinfo((struct sockaddr *)&sa, sizeof sa, host, sizeof host, NULL, 0, NI_NAMEREQD) != 0) return 0;
+    if (getnameinfo((struct sockaddr *)&sa, salen, host, sizeof host, NULL, 0, NI_NAMEREQD) != 0) return 0;
     /* The PTR record is controlled by whoever owns the IP block: reject
      * junk characters and require forward confirmation (the name must
      * resolve back to this IP), or anyone could claim e.g. staff.example. */
     if (!irc_valid_host(host)) return 0;
     struct addrinfo hints, *res, *ai;
     memset(&hints, 0, sizeof hints);
-    hints.ai_family = AF_INET;
+    hints.ai_family = sa.ss_family;
+    hints.ai_socktype = SOCK_STREAM; /* one entry per address, not one per socket type */
     if (getaddrinfo(host, NULL, &hints, &res) != 0) return 0;
+    char want[64], got[64];
+    if (irc_ip_normalize(ip, want, sizeof want) != 0) { freeaddrinfo(res); return 0; }
     int confirmed = 0;
     for (ai = res; ai && !confirmed; ai = ai->ai_next)
-        confirmed = ((struct sockaddr_in *)ai->ai_addr)->sin_addr.s_addr == sa.sin_addr.s_addr;
+        confirmed = irc_sockaddr_ip(ai->ai_addr, got, sizeof got, NULL) == 0 && strcmp(got, want) == 0;
     freeaddrinfo(res);
     if (!confirmed) return 0;
     snprintf(out, outsz, "%s", host);
@@ -159,12 +177,24 @@ static int do_rdns(const char *ip, char *out, size_t outsz) {
  * zone listed the address, with the first listing's zone in `out`. */
 static int do_dnsbl(const job_t *j, char *out, size_t outsz, int *codes) {
     for (int i = 0; i < WORKER_MAX_ZONES; i++) codes[i] = -1;
+    /* The reversed name: 4.3.2.1 for IPv4, the 32 nibbles backwards for IPv6 (the convention zones that list IPv6 use;
+     * one that doesn't simply answers "not listed"). */
+    char rev[80];
+    unsigned char a6[16];
     unsigned int a, b, c, d;
-    if (sscanf(j->ip, "%u.%u.%u.%u", &a, &b, &c, &d) != 4) return 0;
+    if (sscanf(j->ip, "%u.%u.%u.%u", &a, &b, &c, &d) == 4 && strchr(j->ip, ':') == NULL) {
+        snprintf(rev, sizeof rev, "%u.%u.%u.%u", d, c, b, a);
+    } else if (inet_pton(AF_INET6, j->ip, a6) == 1) {
+        char *w = rev;
+        for (int i = 15; i >= 0; i--) w += sprintf(w, "%x.%x.", a6[i] & 0xf, a6[i] >> 4);
+        w[-1] = '\0';
+    } else {
+        return 0;
+    }
     int listed = 0;
     for (int i = 0; j->zones && i < j->n_zones && i < WORKER_MAX_ZONES; i++) {
         char query[300];
-        snprintf(query, sizeof query, "%u.%u.%u.%u.%s", d, c, b, a, j->zones[i]);
+        snprintf(query, sizeof query, "%s.%s", rev, j->zones[i]);
         /* getaddrinfo, not gethostbyname: this runs on N_WORKERS threads at
          * once and gethostbyname returns a shared static buffer. */
         struct addrinfo hints, *res;
@@ -322,7 +352,10 @@ static int connect_with_timeout(int fd, const struct sockaddr *sa, socklen_t sle
  * "<remote_port>,<local_port>", parse "...:USERID:...:<name>" from the reply. */
 static int do_ident(const char *ip, int remote_port, int local_port, double timeout, char *out, size_t outsz) {
     if (timeout <= 0) timeout = 3.0;
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_storage sa;
+    socklen_t salen = ip_sockaddr(ip, 113, &sa);
+    if (!salen) return 0;
+    int fd = socket(sa.ss_family, SOCK_STREAM, 0);
     if (fd < 0) return 0;
     struct timeval tv;
     tv.tv_sec = (long)timeout;
@@ -330,12 +363,7 @@ static int do_ident(const char *ip, int remote_port, int local_port, double time
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
 
-    struct sockaddr_in sa;
-    memset(&sa, 0, sizeof sa);
-    sa.sin_family = AF_INET;
-    sa.sin_port = htons(113);
-    if (inet_pton(AF_INET, ip, &sa.sin_addr) != 1) { close(fd); return 0; }
-    if (connect_with_timeout(fd, (struct sockaddr *)&sa, sizeof sa, timeout) != 0) { close(fd); return 0; }
+    if (connect_with_timeout(fd, (struct sockaddr *)&sa, salen, timeout) != 0) { close(fd); return 0; }
 
     char req[64];
     snprintf(req, sizeof req, "%d,%d\r\n", remote_port, local_port);

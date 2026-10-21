@@ -319,6 +319,8 @@ void config_defaults(config_t *out) {
     snprintf(out->server.network, CFG_STR, "SekuriIRC Network");
     snprintf(out->server.version, CFG_STR, "%s", sekurircd_version);
     snprintf(out->server.bind, CFG_STR, "0.0.0.0");
+    snprintf(out->server.bind6, CFG_STR, "::");
+    out->server.ipv6_limit_prefix = 64;
     out->server.port = 6667;
 
     out->security.max_line_length = 512;
@@ -380,6 +382,7 @@ void config_defaults(config_t *out) {
 
     snprintf(out->links.mode, sizeof out->links.mode, "hub");
     snprintf(out->links.bind, CFG_STR, "0.0.0.0");
+    snprintf(out->links.bind6, CFG_STR, "::");
     out->links.port = 7000;
     out->links.ping_interval = 60.0;
     out->links.ping_timeout = 180.0;
@@ -481,6 +484,20 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
         }
     }
     if (cfg_get_str(srv, "bind", "0.0.0.0", out->server.bind, CFG_STR, errbuf, errbufsz, "server.bind")) return -1;
+    if (cfg_get_bool(srv, "ipv6", 0, &out->server.ipv6, errbuf, errbufsz, "server.ipv6")) return -1;
+    if (cfg_get_str(srv, "bind6", "::", out->server.bind6, CFG_STR, errbuf, errbufsz, "server.bind6")) return -1;
+    if (cfg_get_int(srv, "ipv6_limit_prefix", 64, &out->server.ipv6_limit_prefix, errbuf, errbufsz, "server.ipv6_limit_prefix")) return -1;
+    if (out->server.ipv6_limit_prefix < 16 || out->server.ipv6_limit_prefix > 128) {
+        snprintf(errbuf, errbufsz, "server.ipv6_limit_prefix must be 16-128 (64 = one subscriber's block, 128 = one address)");
+        return -1;
+    }
+    {
+        unsigned char a6[16];
+        if (inet_pton(AF_INET6, out->server.bind6, a6) != 1) {
+            snprintf(errbuf, errbufsz, "server.bind6 must be an IPv6 address (\"::\" = every interface)");
+            return -1;
+        }
+    }
     if (cfg_get_str_array(srv, "proxy_protocol_hosts", out->server.proxy_hosts, CFG_MAX_HOSTS_PER_WEBIRC, &out->server.n_proxy_hosts, errbuf, errbufsz, "server.proxy_protocol_hosts")) return -1;
     if (cfg_get_int(srv, "port", 6667, &out->server.port, errbuf, errbufsz, "server.port")) return -1;
     if (out->server.port < 1 || out->server.port > 65535) {
@@ -931,6 +948,7 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
         if (cfg_get_str(lk, "mode", "hub", out->links.mode, sizeof out->links.mode, errbuf, errbufsz, "links.mode")) return -1;
         if (cfg_get_bool(lk, "autoconnect", 1, &out->links.autoconnect, errbuf, errbufsz, "links.autoconnect")) return -1;
         if (cfg_get_str(lk, "bind", "0.0.0.0", out->links.bind, CFG_STR, errbuf, errbufsz, "links.bind")) return -1;
+        if (cfg_get_str(lk, "bind6", "::", out->links.bind6, CFG_STR, errbuf, errbufsz, "links.bind6")) return -1;
         if (cfg_get_int(lk, "port", 7000, &out->links.port, errbuf, errbufsz, "links.port")) return -1;
         if (cfg_get_bool(lk, "tls", 0, &out->links.tls, errbuf, errbufsz, "links.tls")) return -1;
         if (cfg_get_bool(lk, "tls_insecure_skip_verify", 0, &out->links.tls_insecure_skip_verify, errbuf, errbufsz, "links.tls_insecure_skip_verify")) return -1;

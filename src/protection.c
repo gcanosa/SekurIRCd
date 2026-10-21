@@ -108,7 +108,7 @@ int protection_bl_match(const cfg_protection_t *p, const int *codes, int n, char
 
 int protection_exempt(const cfg_protection_t *p, const char *ip) {
     for (int i = 0; i < p->n_exempt; i++)
-        if (irc_glob_match(p->exempt[i], ip)) return 1;
+        if (irc_ip_mask_match(p->exempt[i], ip)) return 1;
     return 0;
 }
 

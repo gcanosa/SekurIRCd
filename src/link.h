@@ -78,7 +78,7 @@ int link_dial_peers(struct server *srv, int force, const char *only_name);
 void link_leaf_tick(struct server *srv); /* dials any due dial-out peer */
 
 /* net.c integration: accept a new inbound link connection. */
-void link_accept(struct server *srv);
+void link_accept(struct server *srv, int listen_fd); /* the IPv4 listener or its IPv6 twin */
 /* net.c integration, hub side, lc->tls_handshaking only: drives (or re-drives)
  * SSL_accept() until it completes or genuinely needs to wait for more I/O
  * (mirrors net.c's own tls_try_handshake for client connections). */

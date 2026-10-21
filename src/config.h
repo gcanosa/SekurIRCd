@@ -48,6 +48,9 @@ typedef struct {
     char sid[4];          /* 3-character server id for linked networks (digit + 2 of [0-9A-Z]); "" = derived from the name */
     char bind[CFG_STR];
     int port;
+    int ipv6;             /* also listen on IPv6 (bind6): every listener gets an IPv6-only twin; off = IPv4 only, as before */
+    char bind6[CFG_STR];  /* "::" */
+    int ipv6_limit_prefix; /* per-IP limits count an IPv6 client's whole /N (64): one subscriber's block, not one address */
     char proxy_hosts[CFG_MAX_HOSTS_PER_WEBIRC][CFG_MASK]; /* IP globs of trusted PROXY-protocol load balancers */
     int n_proxy_hosts;
 } cfg_server_t;
@@ -202,6 +205,7 @@ typedef struct {
     int enabled;
     char mode[8]; /* "hub" (accept) | "leaf" (dial the one peer) | "both" (accept + dial every peer with a host) */
     char bind[CFG_STR];
+    char bind6[CFG_STR]; /* the link listener's IPv6 twin ([server] ipv6), "::" */
     int port;
     int tls;
     int tls_insecure_skip_verify;

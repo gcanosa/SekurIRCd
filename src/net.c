@@ -156,6 +156,21 @@ int net_set_nonblocking(int fd) {
 }
 
 int net_listen(const char *bind_addr, int port) {
+    if (bind_addr && strchr(bind_addr, ':')) { /* IPv6, and only IPv6: the IPv4 side has its own socket */
+        struct sockaddr_in6 a6;
+        memset(&a6, 0, sizeof a6);
+        a6.sin6_family = AF_INET6;
+        a6.sin6_port = htons((uint16_t)port);
+        if (inet_pton(AF_INET6, bind_addr, &a6.sin6_addr) != 1) return -1;
+        int fd = socket(AF_INET6, SOCK_STREAM, 0);
+        if (fd < 0) return -1;
+        int one = 1;
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+        setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &one, sizeof one);
+        if (bind(fd, (struct sockaddr *)&a6, sizeof a6) < 0 || listen(fd, 128) < 0) { close(fd); return -1; }
+        net_set_nonblocking(fd);
+        return fd;
+    }
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
     int one = 1;
@@ -383,7 +398,7 @@ static ssize_t ws_read(client_t *cl, void *buf, size_t len) {
             /* Behind a trusted reverse proxy the socket peer is the proxy: believe its forwarded client address. */
             if (wr.forwarded[0]) {
                 for (int i = 0; i < srv->cfg.websocket.n_trusted_proxies; i++) {
-                    if (irc_glob_match(srv->cfg.websocket.trusted_proxies[i], cl->ip)) {
+                    if (irc_ip_mask_match(srv->cfg.websocket.trusted_proxies[i], cl->ip)) {
                         char real[64];
                         if (ws_forwarded_client(wr.forwarded, srv->cfg.websocket.trusted_proxies, srv->cfg.websocket.n_trusted_proxies, real, sizeof real) == 0)
                             client_apply_real_address(srv, cl, real, NULL);
@@ -514,8 +529,12 @@ static void apply_masked_host(server_t *srv, client_t *cl, const char *basis, co
     irc_casefold(network, sizeof network, srv->cfg.server.network);
     for (char *p = network; *p; p++) if (*p == ' ') *p = '-';
 
+    /* An IPv6 address is cloaked by its /64 (ipv6_limit_prefix): the same subscriber keeps one cloak however the
+     * address rotates inside it, so a channel ban on the cloak sticks. IPv4 addresses and hostnames are unchanged. */
+    char key[64];
+    server_ip_key(srv, basis, key, sizeof key);
     char token[80];
-    crypto_hmac_hex(srv->cloak_secret, basis, token, sizeof token, srv->cfg.security.host_masking_token_bytes);
+    crypto_hmac_hex(srv->cloak_secret, key, token, sizeof token, srv->cfg.security.host_masking_token_bytes);
 
     char suffix[CFG_STR];
     if (resolved_host && srv->cfg.security.host_masking_keep_labels > 0) {
@@ -533,7 +552,7 @@ int net_assign_class(server_t *srv, client_t *cl) {
     for (int i = 0; i < srv->cfg.n_classes; i++) {
         const cfg_class_t *cc = &srv->cfg.classes[i];
         int hit = 0;
-        for (int j = 0; j < cc->n_hosts && !hit; j++) hit = irc_glob_match(cc->hosts[j], cl->ip);
+        for (int j = 0; j < cc->n_hosts && !hit; j++) hit = irc_ip_mask_match(cc->hosts[j], cl->ip);
         if (!hit) continue;
         if (cc->max_clients > 0 && srv->class_count[i] >= cc->max_clients) return -1;
         srv->class_count[i]++;
@@ -567,7 +586,7 @@ void net_reset_host(server_t *srv, client_t *cl) {
 }
 
 static client_t *accept_common(server_t *srv, int listen_fd) {
-    struct sockaddr_in peer;
+    struct sockaddr_storage peer;
     socklen_t plen = sizeof peer;
     int fd = accept(listen_fd, (struct sockaddr *)&peer, &plen);
     if (fd < 0) { g_accept_errno = errno; return NULL; }
@@ -575,7 +594,8 @@ static client_t *accept_common(server_t *srv, int listen_fd) {
     srv->total_connections++;
 
     char ipbuf[64];
-    inet_ntop(AF_INET, &peer.sin_addr, ipbuf, sizeof ipbuf);
+    int peer_port = 0;
+    if (irc_sockaddr_ip((struct sockaddr *)&peer, ipbuf, sizeof ipbuf, &peer_port) != 0) { close(fd); return NULL; }
 
     if (srv->cfg.security.max_connections > 0 && srv->n_clients >= srv->cfg.security.max_connections) {
         const char *msg = "ERROR :Too many connections\r\n";
@@ -609,11 +629,13 @@ static client_t *accept_common(server_t *srv, int listen_fd) {
      * DNSBL lookup or scan. */
     int scan_related = protection_ip_related(srv, ipbuf);
 
-    if (!scan_related && net_connect_flood_hit(&srv->cfg.security, ipbuf)) {
+    char limit_key[64]; /* an IPv6 client counts as its whole /64 (ipv6_limit_prefix): rotating addresses in it doesn't help */
+    server_ip_key(srv, ipbuf, limit_key, sizeof limit_key);
+    if (!scan_related && net_connect_flood_hit(&srv->cfg.security, limit_key)) {
         long dur = srv->cfg.security.connect_flood_kline_duration[0]
             ? irc_parse_duration(srv->cfg.security.connect_flood_kline_duration) : 0;
         if (dur < 0) dur = 0;
-        server_kline_add(srv, ipbuf, "Connecting too fast (connect flood protection)",
+        server_kline_add(srv, limit_key, "Connecting too fast (connect flood protection)",
                           "connect-flood", "Z", dur); /* pure-IP pre-registration ban; itself calls server_notify_opers */
         const char *msg = "ERROR :Closing Link: reconnecting too fast\r\n";
         if (write(fd, msg, strlen(msg)) < 0) { /* best effort; peer may already be gone */ }
@@ -624,7 +646,7 @@ static client_t *accept_common(server_t *srv, int listen_fd) {
     client_t *cl = client_new(fd, srv);
     if (!cl) { close(fd); return NULL; }
     snprintf(cl->ip, sizeof cl->ip, "%s", ipbuf);
-    cl->port = ntohs(peer.sin_port);
+    cl->port = peer_port;
     snprintf(cl->realhost, sizeof cl->realhost, "%s", ipbuf);
 
     cl->class_idx = -1;
@@ -664,7 +686,7 @@ static client_t *accept_common(server_t *srv, int listen_fd) {
     }
 
     for (int i = 0; i < srv->cfg.server.n_proxy_hosts; i++)
-        if (irc_glob_match(srv->cfg.server.proxy_hosts[i], ipbuf)) { cl->expect_proxy = 1; break; }
+        if (irc_ip_mask_match(srv->cfg.server.proxy_hosts[i], ipbuf)) { cl->expect_proxy = 1; break; }
 
     cl->conn_id = ++srv->next_conn_id;
     crypto_random_hex(cl->your_id, sizeof cl->your_id, 8);
@@ -702,14 +724,17 @@ static client_t *accept_common(server_t *srv, int listen_fd) {
         if (worker_submit(&j) != 0) cl->rdns_pending = 0;
     }
     if (srv->cfg.security.ident_enabled) {
-        struct sockaddr_in local;
+        struct sockaddr_storage local;
         socklen_t llen = sizeof local;
+        char lip[64];
+        int lport = 0;
         job_t j; memset(&j, 0, sizeof j);
         j.type = JOB_IDENT;
         j.conn_id = cl->conn_id;
         snprintf(j.ip, sizeof j.ip, "%s", ipbuf);
         j.remote_port = cl->port;
-        j.local_port = (getsockname(fd, (struct sockaddr *)&local, &llen) == 0) ? ntohs(local.sin_port) : 0;
+        if (getsockname(fd, (struct sockaddr *)&local, &llen) == 0) irc_sockaddr_ip((struct sockaddr *)&local, lip, sizeof lip, &lport);
+        j.local_port = lport;
         j.timeout = srv->cfg.security.ident_timeout;
         cl->ident_pending = 1;
         if (worker_submit(&j) != 0) cl->ident_pending = 0;
@@ -1141,6 +1166,17 @@ static int rebind_one(const char *what, int *fd, char *cur_bind, size_t cur_bind
     return 1;
 }
 
+/* The IPv6 twins ([server] ipv6), each wanted exactly when its IPv4 listener is up. At start and on every rehash. */
+static void apply_v6_listeners(server_t *srv) {
+    const config_t *c = &srv->cfg;
+    static const char *what[] = {"client (IPv6)", "TLS (IPv6)", "WebSocket (IPv6)", "link (IPv6)"};
+    int want[] = {srv->listen_fd >= 0, srv->tls_listen_fd >= 0, srv->ws_listen_fd >= 0, srv->link_listen_fd >= 0};
+    int port[] = {c->server.port, c->tls.port, c->websocket.port, c->links.port};
+    for (int i = 0; i < 4; i++)
+        rebind_one(what[i], &srv->l6[i].fd, srv->l6[i].bind, sizeof srv->l6[i].bind, &srv->l6[i].port,
+                   c->server.ipv6 && want[i], i == L6_LINK ? c->links.bind6 : c->server.bind6, port[i]);
+}
+
 void net_apply_listeners(server_t *srv) {
     const config_t *c = &srv->cfg;
     rebind_one("client", &srv->listen_fd, srv->bound_main.bind, sizeof srv->bound_main.bind, &srv->bound_main.port,
@@ -1161,6 +1197,7 @@ void net_apply_listeners(server_t *srv) {
                c->websocket.enabled && (!c->websocket.tls || srv->tls_ctx), c->server.bind, c->websocket.port);
     rebind_one("link", &srv->link_listen_fd, srv->bound_link.bind, sizeof srv->bound_link.bind, &srv->bound_link.port,
                c->links.enabled && strcmp(c->links.mode, "leaf") != 0, c->links.bind, c->links.port);
+    apply_v6_listeners(srv);
 }
 
 int net_run(server_t *srv) {
@@ -1201,6 +1238,7 @@ int net_run(server_t *srv) {
     if (srv->ws_listen_fd >= 0) { snprintf(srv->bound_ws.bind, sizeof srv->bound_ws.bind, "%s", srv->cfg.server.bind); srv->bound_ws.port = srv->cfg.websocket.port; }
     link_start_hub(srv);
     if (srv->link_listen_fd >= 0) { snprintf(srv->bound_link.bind, sizeof srv->bound_link.bind, "%s", srv->cfg.links.bind); srv->bound_link.port = srv->cfg.links.port; }
+    apply_v6_listeners(srv);
     if (srv->cfg.links.autoconnect) link_dial_peers(srv, 1, NULL); /* every dial-out peer, now (later attempts back off per peer in link_leaf_tick) */
 
     server_install_debug_log_hook(srv);
@@ -1224,7 +1262,7 @@ int net_run(server_t *srv) {
             else log_error("net", "rehash failed: %s", err);
         }
 
-        size_t nfds = 5 + (size_t)srv->n_clients;
+        size_t nfds = 9 + (size_t)srv->n_clients;
         for (link_conn_t *lc = srv->links; lc; lc = lc->next) nfds++;
         nfds += (size_t)srv->prot.n_scans;
         if (nfds > fds_cap) {
@@ -1269,6 +1307,13 @@ int net_run(server_t *srv) {
         if (srv->tls_listen_fd >= 0) {
             tls_listen_idx = n;
             fds[n].fd = srv->tls_listen_fd; fds[n].events = listen_events; fds[n].revents = 0; n++;
+        }
+        int l6_idx[4];
+        for (int i = 0; i < 4; i++) {
+            l6_idx[i] = -1;
+            if (srv->l6[i].fd < 0) continue;
+            l6_idx[i] = n;
+            fds[n].fd = srv->l6[i].fd; fds[n].events = listen_events; fds[n].revents = 0; n++;
         }
         int any_quitting = 0; /* seen while building the set, so the timeout below needs no second walk */
         for (client_t *cl = srv->all_clients; cl; cl = cl->all_next) {
@@ -1315,7 +1360,12 @@ int net_run(server_t *srv) {
         }
         if (rc > 0) {
             if (fds[0].revents & POLLIN) accept_clients(srv, srv->listen_fd, 0);
-            if (link_listen_idx >= 0 && (fds[link_listen_idx].revents & POLLIN)) link_accept(srv);
+            if (link_listen_idx >= 0 && (fds[link_listen_idx].revents & POLLIN)) link_accept(srv, srv->link_listen_fd);
+            for (int i = 0; i < 4; i++) {
+                if (l6_idx[i] < 0 || !(fds[l6_idx[i]].revents & POLLIN)) continue;
+                if (i == L6_LINK) link_accept(srv, srv->l6[i].fd);
+                else accept_clients(srv, srv->l6[i].fd, i == L6_MAIN ? 0 : i == L6_TLS ? 1 : srv->cfg.websocket.tls ? 3 : 2);
+            }
             if (tls_listen_idx >= 0 && (fds[tls_listen_idx].revents & POLLIN)) accept_clients(srv, srv->tls_listen_fd, 1);
             if (ws_listen_idx >= 0 && (fds[ws_listen_idx].revents & POLLIN)) accept_clients(srv, srv->ws_listen_fd, srv->cfg.websocket.tls ? 3 : 2);
 
@@ -1420,6 +1470,7 @@ int net_run(server_t *srv) {
     if (srv->link_listen_fd >= 0) close(srv->link_listen_fd);
     if (srv->tls_listen_fd >= 0) close(srv->tls_listen_fd);
     if (srv->ws_listen_fd >= 0) close(srv->ws_listen_fd);
+    for (int i = 0; i < 4; i++) if (srv->l6[i].fd >= 0) close(srv->l6[i].fd);
     if (srv->tls_ctx) SSL_CTX_free(srv->tls_ctx);
     link_tls_cleanup();
     config_free(&srv->cfg);

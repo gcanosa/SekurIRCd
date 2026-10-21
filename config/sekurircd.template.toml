@@ -65,6 +65,26 @@ bind = "0.0.0.0"
 # TCP port to listen on.
 port = 6667
 
+# IPv6. Off by default: the server then listens and resolves exactly as it
+# always has (IPv4 only). On: every listener (clients, TLS, WebSocket, server
+# links) also gets an IPv6 socket on bind6, beside the IPv4 one -- separate
+# sockets, so IPv4 clients keep plain IPv4 addresses and every existing ban
+# still matches them. Reverse DNS, ident, DNSBL (reversed-nibble queries) and
+# link dialing then work over IPv6 too; the proxy scanner stays IPv4-only.
+# An IPv6 client is shown as e.g. 2001:db8::5 -- one that would start with
+# ':' as 0::1 (an IRC parameter can't start with ':'). Toggling it applies on
+# /REHASH. Masks everywhere (K/G/Z-lines, allowed_ips, oper hosts, exemptions,
+# classes) take CIDR as well as globs: "2001:db8::/32", "203.0.113.0/24".
+#ipv6 = false
+#bind6 = "::"
+
+# Providers give each IPv6 customer a whole block (a /64, sometimes /56 or
+# /48), so per-IP limits -- max connections per IP, the connect-flood throttle
+# and its automatic Z-lines -- and host cloaks count an IPv6 client by its
+# first ipv6_limit_prefix bits. 64 = one subscriber; 128 = one address
+# (trivially dodged by rotating addresses). IPv4 is unaffected.
+#ipv6_limit_prefix = 64
+
 
 # -----------------------------------------------------------------------------
 # [security] -- limits, flood guards, cloaking, connection caps
@@ -594,6 +614,8 @@ mode = "hub"
 # (AirPlay/ControlCenter) -- pick another port if the hub fails to bind.
 bind = "0.0.0.0"
 port = 7000
+# The link listener's IPv6 socket, when [server] ipv6 is on.
+#bind6 = "::"
 
 # Wrap the link connection in TLS: on a hub, reuses the [tls] cert/key above
 # on the link listener; on a leaf, requires TLS when dialing its uplink.

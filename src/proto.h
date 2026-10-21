@@ -96,6 +96,22 @@ int irc_mask_match(const char *nick, const char *user, const char *host, const c
  * shortcut; a mask with no '@' means "*@<mask>". */
 int irc_host_mask_match(const char *user, const char *host, const char *mask);
 
+/* --- IP addresses (IPv4 and, with [server] ipv6, IPv6) ---------------------
+ * An IP's text form on this server: inet_ntop's canonical one (RFC 5952), an IPv4-mapped IPv6 address as plain IPv4,
+ * and "0" in front of an address that would start with ':' -- a middle IRC parameter can't, so ::1 is "0::1" (still a
+ * valid address). irc_ip_normalize: -1 if `in` isn't an IP. irc_sockaddr_ip: the same from accept()'s peer address. */
+struct sockaddr;
+int irc_ip_normalize(const char *in, char *out, size_t outsz);
+int irc_sockaddr_ip(const struct sockaddr *sa, char *out, size_t outsz, int *port);
+
+/* `ip` against an IP mask: CIDR ("203.0.113.0/24", "2001:db8::/32") when it has a '/', else a glob. irc_host_mask_match
+ * applies the same to the host part of a user@host mask. */
+int irc_ip_mask_match(const char *mask, const char *ip);
+
+/* The key per-IP limits count by: an IPv6 address cut to its first `prefix6` bits ("2001:db8:1:2::/64" -- providers hand
+ * every customer a whole /64, so one address each would be no limit), anything else unchanged. */
+void irc_ip_limit_key(const char *ip, int prefix6, char *out, size_t outsz);
+
 /* Parse "1d"/"12h"/"30m"/"3600" into seconds. Returns -1 if not a duration
  * token at all (bare digits default to seconds). */
 long irc_parse_duration(const char *token);

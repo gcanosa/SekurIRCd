@@ -98,6 +98,7 @@ int server_init(server_t *srv, const config_t *cfg) {
     srv->tls_listen_fd = -1;
     srv->ws_listen_fd = -1;
     srv->link_listen_fd = -1;
+    for (int i = 0; i < 4; i++) srv->l6[i].fd = -1;
     srv->start_time = time(NULL);
     server_load_motd(srv);
 
@@ -228,9 +229,15 @@ typedef struct ipcount {
     UT_hash_handle hh;
 } ipcount_t;
 
+void server_ip_key(const server_t *srv, const char *ip, char *out, size_t outsz) {
+    irc_ip_limit_key(ip, srv->cfg.server.ipv6_limit_prefix, out, outsz);
+}
+
 int server_ip_count(server_t *srv, const char *ip) {
+    char key[64];
+    server_ip_key(srv, ip, key, sizeof key);
     ipcount_t *e;
-    HASH_FIND_STR(srv->ip_counts, ip, e);
+    HASH_FIND_STR(srv->ip_counts, key, e);
     return e ? e->n : 0;
 }
 
@@ -259,7 +266,8 @@ void server_add_connection(server_t *srv, client_t *cl) {
     if (srv->all_clients) srv->all_clients->all_prev = cl;
     srv->all_clients = cl;
     srv->n_clients++;
-    ip_count_inc(srv, cl->ip);
+    server_ip_key(srv, cl->ip, cl->count_key, sizeof cl->count_key);
+    ip_count_inc(srv, cl->count_key);
     HASH_ADD(hh_conn, srv->by_conn_id, conn_id, sizeof cl->conn_id, cl);
 }
 
@@ -282,7 +290,7 @@ static void unlink_connection(server_t *srv, client_t *cl) {
     else srv->all_clients = cl->all_next;
     if (cl->all_next) cl->all_next->all_prev = cl->all_prev;
     srv->n_clients--;
-    ip_count_dec(srv, cl->ip);
+    ip_count_dec(srv, cl->count_key); /* not cl->ip: a gateway's client has the real address there by now */
     HASH_DELETE(hh_conn, srv->by_conn_id, cl);
 }
 
@@ -882,7 +890,7 @@ int server_kline_remove(server_t *srv, const char *mask) { return server_kline_r
 
 int server_line_mask_hits(const char *mask, const char *line_type, const char *ip,
                            const char *user, const char *host, int ident_confirmed) {
-    if (ip && ip[0] && irc_glob_match(mask, ip)) return 1;
+    if (ip && ip[0] && irc_ip_mask_match(mask, ip)) return 1;
     /* A Z-line is deliberately IP-only: it's the pre-registration ban that
      * connect-flood and DNSBL apply at accept(), before any user/host exists.
      * K and G also match user@host -- which is what /HELP KLINE has always
