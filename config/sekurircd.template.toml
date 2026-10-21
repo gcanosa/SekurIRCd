@@ -446,6 +446,8 @@ backup_count = 5
 #   - `password` (legacy): plain text, compared with a constant-time check,
 #     but readable by anyone who can read this file -- protect its
 #     permissions if you use this instead of password_hash.
+#     `tools/confcheck.py --fix --write` turns it into a password_hash for
+#     you (same password; the ircd logs a reminder at start and /REHASH).
 #
 # `hosts` is required: a list of ident@host/IP masks (like [[vhosts]]
 # allowed_hosts) the login may /OPER from, matched against the connection's
