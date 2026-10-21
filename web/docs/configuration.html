@@ -52,7 +52,8 @@
 <tr><td><code>[channels]</code></td><td><code>restrict_creation</code>, <code>allowed_channels</code>, <code>default_modes</code> (default <code>"nt"</code>), <code>auto_join</code>.</td></tr>
 <tr><td><em>Protection bundle</em></td><td>A separate optional file, <code>protection.toml</code> (found via <code>[security] protection_file</code>): <code>[exempt]</code>, <code>[connection]</code> (caps and connect-flood throttle), <code>[flood]</code>, <code>[spam]</code>, <code>[blacklist]</code> (DNSBL zones and reply rules) and <code>[scanner]</code> (active open-proxy scan). Overrides the matching legacy keys below. See the <a href="protection.html">protection bundle</a> page.</td></tr>
 <tr><td><code>[debug_channel]</code></td><td>Oper-only channel (default <code>#server-debug</code>) that relays WARNING+ log lines as notices.</td></tr>
-<tr><td><code>[links]</code></td><td>Server-to-server linking: <code>mode</code> (<code>"hub"</code> or <code>"leaf"</code>), <code>bind</code>/<code>port</code>, <code>tls</code>, reconnect delays and <code>[[links.peers]]</code>. See <a href="chanserv.html">ChanServ</a> for a worked example.</td></tr>
+<tr><td><code>[links]</code></td><td>Server-to-server linking: <code>mode</code> (<code>"hub"</code>, <code>"leaf"</code> or <code>"both"</code>), <code>bind</code>/<code>port</code>, <code>tls</code>, reconnect delays and <code>[[links.peers]]</code>
+  (each with a password and/or a pinned certificate <code>fingerprint</code>). See <a href="#links">server links</a> below, and <a href="chanserv.html">services</a> for the services link.</td></tr>
 </table></div>
 
 <h2>tls</h2>
@@ -87,6 +88,10 @@ tools/mkcert.sh --domain irc.example.org --dry-run    # show what would happen</
 name = "admin"
 password_hash = "scrypt$16384$8$1$&lt;salt-hex&gt;$&lt;digest-hex&gt;"   # from the step above
 hosts = ["*@*"]                                       # or restrict, e.g. ["*@203.0.113.42"]</pre>
+<p>Already have plain-text passwords in the file? <code>tools/confcheck.py --fix --write</code> turns every one the server can check as a hash
+  (operators, <code>die_password</code>/<code>restart_password</code>, link peers it only accepts from) into a <code>password_hash</code>: the same passwords keep working.
+  The ircd logs a reminder at start and on every <code>/REHASH</code> while any are left. The backup it makes still holds the old passwords, so delete it once
+  <code>/OPER</code> works.</p>
 <p>Apply it with <code>/REHASH</code> from an already-opered client, <code>sekurircd --rehash</code>, or a restart, then confirm with
   <code>/OPER admin &lt;password&gt;</code>. Rotating a password is the same edit in place. Removing an entry does not deop clients
   that are already opered under it until they reconnect.</p>
@@ -95,6 +100,42 @@ hosts = ["*@*"]                                       # or restrict, e.g. ["*@20
   <code>host</code> (CHGHOST/SETHOST/CHGIDENT/USERIP), <code>wallops</code>, <code>rehash</code>, <code>die</code>,
   <code>link</code> (SQUIT/CONNECT) and <code>all</code>. NickServ SUSPEND/UNSUSPEND/FDROP/SASET are for services admins
   (<code>[nickserv] admins</code>, by account), not an oper privilege. <code>privileges = []</code> makes a helper oper with none of them.</p>
+
+<h2 id="links">server links</h2>
+<p>Servers link into a tree. One server listens (<code>[links] port</code>, a single port for every server that dials in: each one is told apart by the name
+  it sends, not by port); the others dial it with <code>host</code>/<code>port</code> in their peer entry. <code>tools/linkmgmt.py add</code> asks a few questions
+  and prints the blocks for both servers, plus the firewall and restart steps; <code>tools/linkmgmt.py test HOST PORT --tls</code> checks DNS, the port and
+  TLS from either side.</p>
+<p>Encrypt and pin: set <code>[links] tls = true</code> on both servers (the listening one needs <code>[tls]</code> enabled; its certificate is reused) and put
+  the other server's certificate fingerprint in each peer entry. <code>tools/linkmgmt.py fingerprint</code> prints a server's own.</p>
+<pre># on the hub: the leaf that dials in
+[[links.peers]]
+name = "irc2.example.net"
+password_hash = "scrypt$16384$8$1$&lt;salt-hex&gt;$&lt;digest-hex&gt;"   # optional once a fingerprint is set
+fingerprint = "sha256:&lt;the leaf's certificate&gt;"
+allowed_ips = ["203.0.113.7"]
+
+# on the leaf: the hub it dials
+[[links.peers]]
+name = "irc1.example.net"
+password = "the-shared-secret"                                 # optional once a fingerprint is set
+host = "irc1.example.net"
+port = 17000
+fingerprint = "sha256:&lt;the hub's certificate&gt;"</pre>
+<p>With a fingerprint, a self-signed certificate is enough (no CA and no <code>tls_insecure_skip_verify</code>), and a server that doesn't show the pinned
+  certificate is refused before any password is sent or checked. Leave both password keys out and the certificate alone authenticates the link, so
+  neither server keeps a plain-text secret. After renewing a certificate with a new key, update the fingerprint on the other side and <code>/REHASH</code>.
+  The services daemon doesn't speak TLS: a TLS link listener still accepts plain links from <code>127.0.0.1</code> for it, and only TLS from anywhere else.</p>
+<p>The port: anything free works; a number outside the 6660&ndash;7000 range that IRC scanners probe (and below 32768, the system's outgoing-port range),
+  e.g. <code>17000</code>, cuts the noise. What actually protects it is a firewall rule that only lets your servers in, <code>allowed_ips</code> on each peer,
+  and the pinned TLS above, or <code>[links] bind</code> on a private network address (WireGuard, your provider's private network) so it isn't public at all.
+  Changing the port needs a restart of the listening server.</p>
+
+<h2>file permissions</h2>
+<p><code>sekurircd.toml</code>, <code>services.toml</code>, the TLS key, <code>accounts.json</code> and the ChanServ store hold secrets.
+  <code>tools/confcheck.py</code> warns about any of them other local users can read or change, and prints the exact fix for each: <code>chmod 600</code> for
+  your own files, <code>sudo</code> when another user owns one, or <code>chown</code> to the daemon's user (or <code>640</code> through its group) when it runs as
+  someone else, so the daemon isn't locked out.</p>
 
 <h2>host cloaking</h2>
 <pre>[security]
