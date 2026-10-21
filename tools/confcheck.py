@@ -27,7 +27,7 @@ password_hash lines: the same passwords keep working, and only the .pre-fix back
 Exit status: 0 = OK (warnings allowed), 1 = errors found (--fix: refused / not applied),
 2 = --fix found changes (preview only).
 """
-import argparse, contextlib, difflib, io, json, os, re, shutil, subprocess, sys, time
+import argparse, contextlib, difflib, glob, grp, io, json, os, pwd, re, shutil, stat, subprocess, sys, time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from upgrade import ROOT, TEMPLATES, SEC_RE, KEY_RE, VAL_RE, parse_settings, bold, dim, red, green, yellow, cyan  # noqa: E402
@@ -357,6 +357,72 @@ def renamed(val, key):
     return [KEY_RE.sub(lambda m: m[0].replace(m[2], key, 1), val[0], 1), *val[1:]]
 
 
+PIDFILES = ("sekurircd.pid", "services/services.pid", "services/chanserv.pid")  # as ./sekurircd writes them
+
+
+def daemon_users():
+    """Who the running ircd/services run as (they must still be able to read their files), from their pidfiles."""
+    users = set()
+    for f in PIDFILES:
+        with contextlib.suppress(OSError, ValueError):
+            pid = int(open(f).read().split()[0])
+            r = subprocess.run(["ps", "-o", "user=", "-p", str(pid)], capture_output=True, text=True)
+            if r.stdout.strip():
+                users.add(r.stdout.strip())
+    return users
+
+
+def secret_files():
+    """[(path, what it holds)] for the files that hold secrets, as they exist right now."""
+    out = [(S, "oper/link passwords, cloak secret"), (SV, "the services link password"),
+           (P, "DNSBL zone keys, if any")]
+    if os.path.exists(S):
+        v = parse_settings(open(S).read())[0].get(("tls", "key_file"))
+        if v and v["active"]:
+            out.append((os.path.normpath(os.path.join(os.path.dirname(S), v["value"].split("#")[0].strip().strip("\"'"))),
+                        "the TLS private key"))
+    out += [(f, "account password hashes and e-mails") for f in sorted(glob.glob("config/accounts.json*"))]
+    out += [(f, "channel password hashes") for f in sorted(glob.glob("services/*.json*"))]
+    out += [(f, "a --fix backup: may hold the old plain-text passwords") for f in sorted(glob.glob("*/*.pre-fix-*"))]
+    return [(f, what) for f, what in dict(out).items() if os.path.isfile(f)]
+
+
+def check_permissions(paths=None):
+    """Warns about secret files other local users can read or change, each with the exact command that fixes it."""
+    me, users = pwd.getpwuid(os.getuid()).pw_name, daemon_users()
+    bad = 0
+    for d in ("config", "services", "config/tls"):
+        if os.path.isdir(d) and os.stat(d).st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            warn(f"{d}/ is writable by {'everyone' if os.stat(d).st_mode & stat.S_IWOTH else 'its group'}: anyone who can "
+                 f"write there can swap in their own config -- fix: {sudo_for(d, me)}chmod go-w {d}"); bad += 1
+    for f, what in paths or secret_files():
+        st = os.stat(f)
+        owner = pwd.getpwuid(st.st_uid).pw_name
+        group = grp.getgrgid(st.st_gid).gr_name
+        others = users - {owner}
+        # a daemon running as someone other than the owner reads it through the group: keep group read for it then
+        via_group = others and all(st.st_gid in os.getgrouplist(u, pwd.getpwnam(u).pw_gid) for u in others)
+        mode = st.st_mode & 0o777
+        want = 0o640 if via_group else 0o600
+        if not mode & ~want & 0o077:
+            continue
+        who = ("everyone on this machine" if mode & 0o006 else f"group {group}")
+        how = "change" if mode & 0o022 else "read"
+        if others and not via_group:  # chmod 600 alone would lock the daemon out
+            u = sorted(others)[0]
+            fix = f"sudo chown {u} {f} && sudo chmod 600 {f}  (the daemon runs as {u}; or add {u} to group {group} " \
+                  f"and chmod 640 {f})"
+        else:
+            fix = f"{sudo_for(f, me)}chmod {want:o} {f}"
+        warn(f"{f} ({what}) can be {how} by {who} ({mode:o}) -- fix: {fix}"); bad += 1
+    if not bad:
+        ok("secret files are private to their owner")
+
+
+def sudo_for(path, me):
+    return "" if me == "root" or pwd.getpwuid(os.stat(path).st_uid).pw_name == me else "sudo "
+
+
 def protection_path(lines):
     """Where sekurircd.toml's protection file is (relative to ROOT), or None when it's turned off."""
     v = parse_settings("\n".join(lines))[0].get(("security", "protection_file"))
@@ -557,10 +623,11 @@ def apply_fix(changes):
         bak = f"{p}.pre-fix-{stamp}" if old is not None else None
         if bak:
             shutil.copy2(p, bak)
+            os.chmod(bak, 0o600)  # it may hold the plain-text passwords --fix just hashed
         tmp = p + ".fix-tmp"
         with open(tmp, "w") as f:
             f.write(new)
-        shutil.copymode(bak or S, tmp)
+        shutil.copymode(p if old is not None else S, tmp)
         os.replace(tmp, p)
         done.append((p, bak))
     for path, binary in CHECKERS.items():
@@ -630,6 +697,14 @@ def selftest():
     assert "max_accounts = 3\n" in sv and 'store_file = "../config/accounts.json"' in sv, sv  # services' own value wins
     if tomllib:
         tomllib.loads(s); tomllib.loads(pr); tomllib.loads(sv)
+    with tempfile.TemporaryDirectory() as d:  # permissions: the warning carries the exact fix
+        f = os.path.join(d, "s.toml"); open(f, "w").write("")
+        for mode, expect in ((0o644, f"everyone on this machine (644) -- fix: chmod 600 {f}"), (0o600, "private")):
+            os.chmod(f, mode)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                check_permissions([(f, "x")])
+            assert expect in buf.getvalue(), buf.getvalue()
     print("selftest ok")
 
 
@@ -661,6 +736,9 @@ def report(config, quiet):
             note("no template to compare against")
     if not config and os.path.exists("config/protection.toml"):
         note(dim("protection.toml is validated by sekurircd --check above"))
+    if not config:
+        print(f"\n{bold('file permissions')}")
+        check_permissions()
 
 
 def summary():
