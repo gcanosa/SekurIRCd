@@ -876,7 +876,10 @@ static void handle_tb(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     channel_t *chan = server_find_channel(srv, msg->params[0]);
     if (chan) {
         long ts = atol(msg->params[1]);
-        if (!chan->topic[0] || ts < (long)chan->topic_time) {
+        /* The newer topic wins, so one changed during a netsplit survives the relink (it used to revert to the older one).
+         * Same second: the text decides, so both sides still pick the same one. */
+        int cmp = strcmp(msg->params[3], chan->topic);
+        if (cmp && (!chan->topic[0] || ts > (long)chan->topic_time || (ts == (long)chan->topic_time && cmp > 0))) {
             snprintf(chan->topic, sizeof chan->topic, "%.*s", TOPIC_MAX_LEN, msg->params[3]);
             snprintf(chan->topic_setter, sizeof chan->topic_setter, "%s", msg->params[2]);
             chan->topic_time = (time_t)ts;

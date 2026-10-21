@@ -351,9 +351,11 @@ fail:
     return -1;
 }
 
+/* A closing link counts until link_reap removes it: redialing before that is refused by our own "already on the network"
+ * check, after the peer has already accepted -- one wasted link up/down on its side. */
 static int peer_is_linked(server_t *srv, const cfg_link_peer_t *p) {
     for (link_conn_t *lc = srv->links; lc; lc = lc->next)
-        if (!lc->closing && lc->authenticated && strcasecmp(lc->peer_name, p->name) == 0) return 1;
+        if (lc->authenticated && strcasecmp(lc->peer_name, p->name) == 0) return 1;
     return 0;
 }
 

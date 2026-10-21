@@ -607,3 +607,33 @@ def test_replies_and_queries_reach_users_on_other_servers():
         assert "K-line" in r and "G-line" not in r, r
     finally:
         n.stop()
+
+
+def test_topic_changed_during_a_split_survives_the_relink():
+    n = Network(cfg=OPERS)
+    n.add("a")
+    n.add("b", parent="a")
+    n["b"].cfg["links"]["autoconnect"] = False
+    n["a"].start()
+    n["b"].start()
+    try:
+        boss, bop = n.client("a", "boss"), n.client("b", "bop")
+        boss.say("OPER boss bosspw", 0.8)
+        bop.say("OPER boss bosspw", 0.8)
+        bop.say("CONNECT a.test.net", 1.5)
+        n.wait_converged()
+        pa, pb = n.client("a", "pa"), n.client("b", "pb")
+        pa.say("JOIN #t", 0.4)
+        pb.say("JOIN #t", 0.6)
+        pa.say("TOPIC #t :before the split", 0.6)
+        boss.say("SQUIT b.test.net :split", 1.5)
+        time.sleep(1.1)  # a later second than the old topic
+        pa.say("TOPIC #t :changed during the split", 0.4)
+        bop.say("CONNECT a.test.net", 1.5)
+        n.wait_converged()
+        time.sleep(1)
+        for c in (pa, pb):
+            c.drain()
+            assert any(":changed during the split" in l for l in c.say("TOPIC #t", 0.5) if " 332 " in l), c.nick
+    finally:
+        n.stop()

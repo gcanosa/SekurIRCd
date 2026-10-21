@@ -8,7 +8,9 @@
       "SHUN/UNSHUN are network-wide like GLINE (also sent to servers that link later); a SHUN set on one server used to do nothing to users on the others",
       "KILL of a user on another server: the victim now gets the KILL line, and the quit reason names the oper (Killed (oper (reason))) the way a local KILL does; that server's opers get the 'Received KILL' notice",
       "UNGLINE coming over a link removed the first line of any type with that mask, possibly a local K- or Z-line instead of the G-line. It now removes only the G-line",
-      "SQUERY to a service linked to another server reaches it (it used to be dropped silently)"
+      "SQUERY to a service linked to another server reaches it (it used to be dropped silently)",
+      "Netsplits: a topic changed on one side during a split now survives the relink (the newer topic wins; it used to revert to the older one)",
+      "A leaf that dropped a dead link (ping timeout) waits until it is torn down before redialing, instead of refusing its own first reconnect and making the hub see an extra link up/down"
     ]
   },
   {
