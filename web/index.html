@@ -37,7 +37,7 @@
     <span class="badge">C11</span>
     <span class="badge">MIT</span>
     <span class="badge">macOS &middot; Linux &middot; BSD</span>
-    <span class="badge">latest <span data-version>v1.2.5</span></span>
+    <span class="badge">latest <span data-version>v1.3.0</span></span>
   </div>
 </section>
 
@@ -63,7 +63,7 @@
     <div class="card"><h3>Scrypt operators</h3><p>Operator passwords stored as scrypt hashes, each login limited to an ident@host mask list. Generate with <code>--hash-password</code>.</p></div>
     <div class="card"><h3>Host cloaking</h3><p>Hide real IPs and hostnames behind per-connection cloaks, with named vhosts and oper <code>CHGHOST</code>/<code>SETHOST</code>. Opers and the user still see the truth in WHOIS.</p></div>
     <div class="card"><h3>Protection bundle</h3><p>An optional protection layer in one config file: DNSBL blacklists with per-zone reply rules, an active open-proxy scanner (HTTP, SOCKS4, SOCKS5), connection limits, connect-flood auto-bans, flood and spam protection, all reported live in your debug channel. <a href="docs/protection.html">Read more</a>.</p></div>
-    <div class="card"><h3>Server linking</h3><p>Hub-and-leaf topology with scrypt-authenticated peers, optional TLS, network-wide KILL/WALLOPS/ban propagation and exponential-backoff reconnect.</p></div>
+    <div class="card"><h3>Server linking</h3><p>Hub-and-leaf topology over TLS with pinned certificates (self-signed is fine) and scrypt-authenticated peers, network-wide KILL/WALLOPS/ban propagation and backoff reconnect. A <a href="docs/configuration.html#linkmgmt">link wizard</a> adds, edits and removes links, writes this server's side safely and tells you what to paste on the other.</p></div>
     <div class="card"><h3>Services</h3><p>One services process links in for the whole network: NickServ (accounts, SASL, enforcement, GHOST/REGAIN, email resets) and ChanServ (IDENTIFY, ACCESS, AKICK, GUARD, TOPICLOCK, SUCCESSOR, SET MLOCK).</p></div>
     <div class="card"><h3>Operator tooling</h3><p>Snomask-style server notices, an oper-only debug channel, SAJOIN/SAPART/SAMODE overrides, and live <code>REHASH</code> without dropping anyone.</p></div>
     <div class="card"><h3>Daemon-friendly</h3><p><code>--daemon</code>, <code>--stop</code>, <code>--rehash</code>, PID files, rotating logs, and ready-made systemd user units. No root required.</p></div>
