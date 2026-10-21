@@ -22,7 +22,7 @@
 <aside id="docs-nav" class="docs-nav"></aside>
 <main class="docs">
 <h1>install</h1>
-<p>SekurIRCd builds from source with a C11 compiler and <code>make</code>. It runs on macOS, Linux and the BSDs.</p>
+<p>SekurIRCd builds from source with a C11 compiler and <code>make</code>. It runs on macOS, Linux and the BSDs, and on Windows through <a href="#windows">WSL2</a>.</p>
 
 <h2>dependencies</h2>
 <ul>
@@ -40,7 +40,7 @@ make debug      # ASan+UBSan build -> bin/sekurircd-debug
 make check      # build and run tests/unit.c
 make clean</pre>
 
-<h2>run</h2>
+<h2 id="run">run</h2>
 <pre>cp config/sekurircd.template.toml config/sekurircd.toml
 # edit config/sekurircd.toml (port, operators, TLS, ...)
 cp config/protection.template.toml config/protection.toml   # optional: the Protection bundle
@@ -79,7 +79,7 @@ QUIT</pre>
 <p>Without <code>--pidfile</code> the default is <code>./sekurircd.pid</code> (or <code>$SEKURIRCD_PIDFILE</code>).
   Once daemonized, stdout and stderr go to <code>/dev/null</code>, so enable <code>[logging]</code> in the config.</p>
 
-<h2>systemd user service</h2>
+<h2 id="systemd-user-service">systemd user service</h2>
 <p><code>make install</code> sets both daemons up as systemd <strong>user</strong> units (Linux only). Nothing needs root:
   everything installs under <code>$HOME</code>, and the default ports (6667/6697) are above 1024.</p>
 <pre>make
@@ -98,6 +98,32 @@ journalctl --user -u sekurircd -f</pre>
   <code>loginctl enable-linger $(whoami)</code>. <code>make uninstall</code> removes binaries and units but leaves
   your config and state. Override <code>PREFIX</code>, <code>SYSCONFDIR</code>, <code>STATEDIR</code> or
   <code>UNITDIR</code> on the <code>make</code> command line to relocate any of it.</p>
+
+<h2 id="windows">windows (WSL2)</h2>
+<p>There is no native Windows build. On Windows, run the Linux build inside WSL2: it's the same code and the same steps as on Linux.</p>
+<pre># PowerShell as Administrator, then reboot
+wsl --install -d Ubuntu
+
+# inside Ubuntu
+sudo apt update &amp;&amp; sudo apt install -y build-essential libssl-dev git
+git clone https://github.com/gcanosa/SekurIRCd.git &amp;&amp; cd SekurIRCd &amp;&amp; make</pre>
+<p>Then follow <a href="#run">run</a> or the <a href="#systemd-user-service">systemd user service</a> above. For systemd, turn it on in WSL first:
+  put <code>[boot]</code> / <code>systemd=true</code> in <code>/etc/wsl.conf</code>, run <code>wsl --shutdown</code> from PowerShell, reopen Ubuntu,
+  and also run <code>loginctl enable-linger $(whoami)</code>.</p>
+<p><strong>Networking.</strong> By default WSL2 sits behind NAT: Windows itself reaches the server on <code>localhost</code>, but other machines can't.
+  For a server others connect to, use mirrored networking (Windows 11 22H2 or later), so WSL shares the Windows network interfaces.
+  Put this in <code>%UserProfile%\.wslconfig</code>, then run <code>wsl --shutdown</code>:</p>
+<pre>[wsl2]
+networkingMode=mirrored</pre>
+<p>Then open the ports in Windows (PowerShell as Administrator). Use the ports you configured: client, TLS, WebSocket and the <code>[links]</code> port.</p>
+<pre>New-NetFirewallRule -DisplayName "SekurIRCd" -Direction Inbound -Protocol TCP -LocalPort 6667,6697,7070 -Action Allow
+# mirrored mode also filters WSL's own inbound traffic (Hyper-V firewall):
+Set-NetFirewallHyperVVMSetting -Name '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}' -DefaultInboundAction Allow</pre>
+<p>Avoid the older <code>netsh interface portproxy</code> method: every client then appears to come from the Windows host's address, which breaks
+  per-IP limits, K/Z-lines, the DNSBL and the proxy scanner.</p>
+<p><strong>Keeping it running.</strong> WSL shuts the Linux side down a while after the last Windows terminal into it closes, taking the daemons with it.
+  To keep it up and start it with Windows, add a Task Scheduler task that runs at startup (whether the user is logged on or not):
+  <code>wsl.exe -d Ubuntu -- sleep infinity</code>. With systemd on, that starts the daemons too.</p>
 
 <h2>next</h2>
 <p>Continue with <a href="configuration.html">configuration</a>, or set up <a href="chanserv.html">services (NickServ + ChanServ)</a>.</p>
