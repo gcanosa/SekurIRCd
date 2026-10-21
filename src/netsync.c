@@ -271,11 +271,11 @@ static void send_burst(server_t *srv, link_conn_t *lc) {
     }
     /* 4. global lines */
     for (kline_entry_t *k = srv->klines; k; k = k->next) {
-        if (k->line_type[0] != 'G') continue;
+        if (k->line_type[0] != 'G' && k->line_type[0] != 'S') continue;
         char exp[24];
         snprintf(exp, sizeof exp, "%ld", (long)k->expires_at);
         const char *p[] = {k->mask, k->set_by, exp};
-        irc_build(line, sizeof line, NULL, 0, self_sid(srv), "GLINE", p, 3, k->reason);
+        irc_build(line, sizeof line, NULL, 0, self_sid(srv), k->line_type[0] == 'G' ? "GLINE" : "SHUN", p, 3, k->reason);
         send_link(lc, line);
     }
     irc_build(line, sizeof line, NULL, 0, self_sid(srv), "EOB", NULL, 0, NULL);
@@ -673,8 +673,17 @@ static void handle_kill(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     if (!target) return;
     const char *reason = msg->nparams > 1 ? msg->params[msg->nparams - 1] : "Killed";
     if (!target->remote) { /* ours: disconnect it (its QUIT then floods out through server_remove_client) */
-        snprintf(target->quit_reason, sizeof target->quit_reason, "Killed (%s)", reason);
+        client_t *killer = msg->prefix ? netsync_find_uid(srv, msg->prefix) : NULL;
+        netserver_t *ks = killer ? NULL : msg->prefix ? netsync_find_sid(srv, msg->prefix) : NULL;
+        const char *by = killer ? killer->nick : ks ? ks->name : "*";
+        char prefix[320], kl[500], snote[400];
+        if (killer) client_prefix(killer, prefix, sizeof prefix); else snprintf(prefix, sizeof prefix, "%s", by);
+        irc_build(kl, sizeof kl, NULL, 0, prefix, "KILL", (const char *[]){target->nick}, 1, reason); /* as for a local KILL */
+        client_send(target, kl);
+        snprintf(target->quit_reason, sizeof target->quit_reason, "Killed (%s (%s))", by, reason);
         target->quitting = 1;
+        snprintf(snote, sizeof snote, "Received KILL message for %s. From %s: %s", target->nick, by, reason);
+        server_notify_opers(srv, snote);
         return;
     }
     /* someone else's: pass it on toward them, and drop the user here right away so a collision resolves at once */
@@ -1163,21 +1172,24 @@ static void handle_gline(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     long exp = atol(msg->params[2]);
     long dur = exp > 0 ? exp - (long)time(NULL) : 0;
     if (exp > 0 && dur <= 0) return; /* already expired */
-    server_kline_add(srv, msg->params[0], msg->params[3], msg->params[1], "G", dur);
-    char rsn[300];
-    snprintf(rsn, sizeof rsn, "G-Lined: %s", msg->params[3]);
-    server_kline_enforce(srv, msg->params[0], "G", rsn, NULL);
+    int shun = !strcmp(msg->command, "SHUN"); /* SHUN travels the same way; it disconnects nobody */
+    server_kline_add(srv, msg->params[0], msg->params[3], msg->params[1], shun ? "S" : "G", dur);
+    if (!shun) {
+        char rsn[300];
+        snprintf(rsn, sizeof rsn, "G-Lined: %s", msg->params[3]);
+        server_kline_enforce(srv, msg->params[0], "G", rsn, NULL);
+    }
     char fl[600];
     const char *p[] = {msg->params[0], msg->params[1], msg->params[2]};
-    irc_build(fl, sizeof fl, NULL, 0, s->sid, "GLINE", p, 3, msg->params[3]);
+    irc_build(fl, sizeof fl, NULL, 0, s->sid, msg->command, p, 3, msg->params[3]);
     flood(srv, lc, fl);
 }
 
 static void handle_ungline(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     if (msg->nparams < 1) return;
-    server_kline_remove(srv, msg->params[0]);
+    server_kline_remove_typed(srv, msg->params[0], !strcmp(msg->command, "UNSHUN") ? 'S' : 'G'); /* never a local K/Z with that mask */
     char fl[300];
-    irc_build(fl, sizeof fl, NULL, 0, msg->prefix, "UNGLINE", (const char *[]){msg->params[0]}, 1, NULL);
+    irc_build(fl, sizeof fl, NULL, 0, msg->prefix, msg->command, (const char *[]){msg->params[0]}, 1, NULL);
     flood(srv, lc, fl);
 }
 
@@ -1261,6 +1273,44 @@ static void handle_rename(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     flood(srv, lc, fl);
 }
 
+/* :<uid> RQUERY <sid> <VERB> [args] -- a user elsewhere asked this server (WHOIS of one of ours, VERSION <us>...); client_reply
+ * sends the answers back to them as PUSH lines. */
+static void handle_rquery(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
+    static const struct { const char *name; void (*fn)(server_t *, client_t *, irc_message_t *); } CMDS[] = {
+        {"WHOIS", cmd_whois}, {"VERSION", cmd_version}, {"TIME", cmd_time}, {"ADMIN", cmd_admin}, {"MOTD", cmd_motd}, {"INFO", cmd_info},
+    };
+    client_t *u = src_user(srv, lc, msg->prefix);
+    if (!u || msg->nparams < 2) return;
+    netserver_t *dest = netsync_find_sid(srv, msg->params[0]);
+    if (!dest) return;
+    if (dest != srv->self_srv) {
+        char fl[600];
+        irc_build(fl, sizeof fl, NULL, 0, u->uid, "RQUERY", (const char **)msg->params, msg->nparams, NULL);
+        route_to(srv, dest, fl);
+        return;
+    }
+    for (size_t i = 0; i < sizeof CMDS / sizeof CMDS[0]; i++) {
+        if (strcasecmp(msg->params[1], CMDS[i].name) != 0) continue;
+        irc_message_t m;
+        memset(&m, 0, sizeof m);
+        m.command = msg->params[1];
+        for (int k = 2; k < msg->nparams && m.nparams < IRC_MAX_PARAMS; k++) m.params[m.nparams++] = msg->params[k];
+        if (CMDS[i].fn == cmd_whois && m.nparams != 1) return; /* exactly the nick: no further forwarding */
+        CMDS[i].fn(srv, u, &m);
+        return;
+    }
+}
+
+void netsync_rquery(server_t *srv, client_t *cl, const netserver_t *dest, const char *verb, char **args, int nargs) {
+    if (!cl->uid[0] || !dest || dest == srv->self_srv) return;
+    const char *p[IRC_MAX_PARAMS] = {dest->sid, verb};
+    int np = 2;
+    for (int i = 0; i < nargs && np < IRC_MAX_PARAMS; i++) p[np++] = args[i];
+    char line[600];
+    irc_build(line, sizeof line, NULL, 0, cl->uid, "RQUERY", p, np, NULL);
+    route_to(srv, dest, line);
+}
+
 /* :<operuid> ENCAP <uid> <CMD> [args...] -- an oper override aimed at a user on another server, run by that user's server
  * as if the (remote) oper had typed it there. The oper's own server already checked its privileges; replies to it are
  * dropped (it sees the effect -- the JOIN, NICK, host change -- through normal propagation). */
@@ -1330,8 +1380,9 @@ void netsync_handle(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     else if (!strcmp(c, "INVITE")) handle_invite(srv, lc, msg);
     else if (!strcmp(c, "PUSH")) handle_push(srv, lc, msg);
     else if (!strcmp(c, "WALLOPS") || !strcmp(c, "GLOBOPS")) handle_wallops(srv, lc, msg);
-    else if (!strcmp(c, "GLINE")) handle_gline(srv, lc, msg);
-    else if (!strcmp(c, "UNGLINE")) handle_ungline(srv, lc, msg);
+    else if (!strcmp(c, "GLINE") || !strcmp(c, "SHUN")) handle_gline(srv, lc, msg);
+    else if (!strcmp(c, "UNGLINE") || !strcmp(c, "UNSHUN")) handle_ungline(srv, lc, msg);
+    else if (!strcmp(c, "RQUERY")) handle_rquery(srv, lc, msg);
     else if (!strcmp(c, "RENAME")) handle_rename(srv, lc, msg);
     else if (!strcmp(c, "RSQUIT")) handle_rsquit(srv, lc, msg);
     else if (!strcmp(c, "SVCRELAY")) handle_svcrelay(srv, lc, msg);
@@ -1522,6 +1573,21 @@ void netsync_ungline(server_t *srv, const char *mask) {
     if (!netsync_has_links(srv)) return;
     char line[300];
     irc_build(line, sizeof line, NULL, 0, self_sid(srv), "UNGLINE", (const char *[]){mask}, 1, NULL);
+    flood(srv, NULL, line);
+}
+
+void netsync_shun(server_t *srv, const char *mask, const char *setter, long expires, const char *reason) {
+    if (!netsync_has_links(srv)) return;
+    char line[600], exp[24];
+    snprintf(exp, sizeof exp, "%ld", expires);
+    irc_build(line, sizeof line, NULL, 0, self_sid(srv), "SHUN", (const char *[]){mask, setter, exp}, 3, reason);
+    flood(srv, NULL, line);
+}
+
+void netsync_unshun(server_t *srv, const char *mask) {
+    if (!netsync_has_links(srv)) return;
+    char line[300];
+    irc_build(line, sizeof line, NULL, 0, self_sid(srv), "UNSHUN", (const char *[]){mask}, 1, NULL);
     flood(srv, NULL, line);
 }
 

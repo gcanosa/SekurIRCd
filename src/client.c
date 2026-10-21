@@ -1,5 +1,6 @@
 #include "client.h"
 #include "link.h"
+#include "netsync.h"
 #include "proto.h"
 #include "server.h"
 
@@ -205,7 +206,8 @@ void client_reply(client_t *cl, const char *code, const char **params, int npara
     char out[1024];
     const char *srvname = (cl->srv && cl->srv->cfg.server.name[0]) ? cl->srv->cfg.server.name : "server";
     irc_build(out, sizeof out, NULL, 0, srvname, code, allparams, n, trailing);
-    client_send(cl, out);
+    if (cl->remote) netsync_push(cl->srv, cl, out); /* a user on another server (KNOCK, a remote WHOIS/VERSION...): over the link */
+    else client_send(cl, out);
 }
 
 int client_flood_ok(client_t *cl, int max_msgs, double window_seconds) {

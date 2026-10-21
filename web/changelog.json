@@ -1,5 +1,17 @@
 [
   {
+    "tag": "Unreleased",
+    "date": "",
+    "changes": [
+      "Linked servers: numeric replies now reach users on other servers. KNOCK reaches chanops on every server (it used to reach only those on the knocker's server)",
+      "WHOIS <nick> <nick> is answered by the user's own server, so idle time shows across links; MOTD, ADMIN, INFO, VERSION and TIME take a server name to ask that server",
+      "SHUN/UNSHUN are network-wide like GLINE (also sent to servers that link later); a SHUN set on one server used to do nothing to users on the others",
+      "KILL of a user on another server: the victim now gets the KILL line, and the quit reason names the oper (Killed (oper (reason))) the way a local KILL does; that server's opers get the 'Received KILL' notice",
+      "UNGLINE coming over a link removed the first line of any type with that mask, possibly a local K- or Z-line instead of the G-line. It now removes only the G-line",
+      "SQUERY to a service linked to another server reaches it (it used to be dropped silently)"
+    ]
+  },
+  {
     "tag": "v1.3.0",
     "date": "2026-10-21",
     "changes": [
