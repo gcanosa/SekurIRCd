@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""SekurIRCd server-link wizard (Python 3.8+, stdlib only). Writes nothing.
+"""SekurIRCd server-link wizard (Python 3.8+, stdlib only).
 
-Asks a few questions and prints the config to paste on THIS server and on the
-OTHER one: the [[links.peers]] blocks for both sides, any [links] changes they
-need, a fresh shared password (scrypt hash on the accepting side), and the
-commands to bring the link up.
+Asks a few questions, then writes THIS server's side into its config (after
+showing the diff and asking; a backup is kept, and the ircd's own --check must
+accept the result or it is restored) and prints the OTHER server's side to
+paste there: its [[links.peers]] block, any [links] changes, a fresh shared
+password (scrypt hash on the accepting side), and the steps to bring the link up.
 
   tools/linkmgmt.py                 menu
   tools/linkmgmt.py list            show this server's links
@@ -16,11 +17,18 @@ commands to bring the link up.
                                     --tls it also prints the certificate fingerprint to pin
   tools/linkmgmt.py fingerprint     this server's own certificate fingerprint (what the other side pins)
   tools/linkmgmt.py -c my.toml ...  another sekurircd config
+  tools/linkmgmt.py --dry-run ...   change nothing: print this server's side to paste too
 """
-import argparse, fnmatch, hashlib, json, os, re, secrets, socket, ssl, subprocess, sys
+import argparse, contextlib, difflib, fnmatch, io, hashlib, json, os, re, secrets, shutil, socket, ssl, subprocess, sys, time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from upgrade import ROOT, bold, dim, red, green, yellow, cyan  # noqa: E402
+from upgrade import ROOT, SEC_RE, KEY_RE, bold, dim, red, green, yellow, cyan  # noqa: E402
+from confcheck import is_comment, is_setting, value_end, toml_str, insert_at  # noqa: E402 -- same line surgery as --fix
+
+try:
+    import tomllib  # 3.11+
+except ImportError:
+    tomllib = None
 
 DEFAULT_PORT = 7000
 
@@ -82,7 +90,8 @@ def mode_for(dials, accepts):
 
 def peer_block(name, pw=None, pw_hash=None, host=None, port=None, ips=None, fp=None):
     out = ["[[links.peers]]", f'name = "{name}"']
-    out.append(f'password_hash = "{pw_hash}"' if pw_hash else f'password = "{pw}"')
+    if pw_hash: out.append(f'password_hash = "{pw_hash}"')
+    elif pw: out.append(f'password = "{pw}"')
     if fp: out.append(f'fingerprint = "{fp}"')
     if host: out += [f'host = "{host}"', f"port = {port}"]
     if ips: out.append("allowed_ips = " + json.dumps(ips))
@@ -95,6 +104,160 @@ def links_block(mode, port, tls, pinned=False):
     out.append(f"tls = {'true' if tls else 'false'}")
     if tls and mode != "hub" and not pinned: out.append("#tls_insecure_skip_verify = true   # only if the other side's cert is self-signed")
     return "\n".join(out)
+
+
+# --- editing this server's config -----------------------------------------------
+# Line surgery (confcheck's helpers), so comments and layout survive; only uncommented headers count, so the
+# template's #[[links.peers]] examples are never touched.
+
+def headers(lines):
+    return [(i, SEC_RE.match(l)[1]) for i, l in enumerate(lines) if SEC_RE.match(l) and not is_comment(l)]
+
+
+def body_end(lines, start, stop):
+    """One past the last setting of the table whose header is lines[start] (comments after it belong to what follows)."""
+    end, i = start + 1, start + 1
+    while i < stop:
+        if is_setting(lines[i]) and not is_comment(lines[i]):
+            i = value_end(lines, i) + 1; end = i
+        else:
+            i += 1
+    return end
+
+
+def peer_spans(lines):
+    """[(start, end, name)] of every [[links.peers]] block."""
+    hs, out = headers(lines), []
+    for n, (i, h) in enumerate(hs):
+        if h != "[[links.peers]]": continue
+        end = body_end(lines, i, hs[n + 1][0] if n + 1 < len(hs) else len(lines))
+        name = next((toml_str(KEY_RE.match(l)[3]) for l in lines[i + 1:end]
+                     if KEY_RE.match(l) and not is_comment(l) and KEY_RE.match(l)[2] == "name"), None)
+        out.append((i, end, name))
+    return out
+
+
+def set_links_keys(lines, kv):
+    """Set [links] key = value for each item (an existing line is replaced, a new one goes after the last setting)."""
+    hs = headers(lines)
+    at = next((n for n, (_, h) in enumerate(hs) if h == "[links]"), None)
+    if at is None:
+        pos = peer_spans(lines)[0][0] if peer_spans(lines) else len(lines)  # [links] before its peers
+        lines[pos:pos] = ["[links]", *[f"{k} = {v}" for k, v in kv.items()], ""]
+        return
+    start = hs[at][0]
+    stop = hs[at + 1][0] if at + 1 < len(hs) else len(lines)
+    for k, v in kv.items():
+        for i in range(start + 1, stop):
+            m = KEY_RE.match(lines[i])
+            if m and not is_comment(lines[i]) and m[2] == k:
+                lines[i:value_end(lines, i) + 1] = [f"{k} = {v}"]
+                break
+        else:
+            end = body_end(lines, start, stop)
+            lines[end:end] = [f"{k} = {v}"]
+        hs = headers(lines); stop = hs[at + 1][0] if at + 1 < len(hs) else len(lines)
+
+
+def put_peer(lines, block, name=None):
+    """Replace the [[links.peers]] block called `name` with `block` (lines), or add it after the last one (or [links])."""
+    spans = peer_spans(lines)
+    old = next(((a, e) for a, e, n in spans if n == name), None) if name else None
+    if old:
+        lines[old[0]:old[1]] = block
+    elif spans:
+        e = spans[-1][1]
+        lines[e:e] = ["", *block]
+    elif any(h == "[links]" for _, h in headers(lines)):
+        e = insert_at(lines, "links")
+        lines[e:e] = ["", *block]
+    else:
+        lines += ["", *block]
+
+
+def drop_peer(lines, name):
+    a, e = next((a, e) for a, e, n in peer_spans(lines) if n == name)
+    del lines[a:e]
+    while 0 < a < len(lines) and not lines[a - 1].strip() and not lines[a].strip():  # don't leave a double blank line
+        del lines[a]
+    while lines and a >= len(lines) and not lines[-1].strip():  # nor a blank one at the end of the file
+        del lines[-1]
+
+
+def write_config(path, new):
+    """Backup (0600: it may hold passwords), atomic write, then the ircd's own --check; restored if it refuses.
+    Returns the backup path, or None (nothing changed)."""
+    if tomllib:
+        try:
+            tomllib.loads(new)
+        except tomllib.TOMLDecodeError as e:  # a bug here, never the user's file
+            print(red(f"The edited config would not parse ({e}) -- nothing written.")); return None
+    bak = f"{path}.pre-linkmgmt-{time.strftime('%Y%m%d-%H%M%S')}"
+    n = 1
+    while os.path.exists(bak):  # two writes in the same second keep both backups
+        n += 1; bak = f"{path}.pre-linkmgmt-{time.strftime('%Y%m%d-%H%M%S')}-{n}"
+    shutil.copy2(path, bak); os.chmod(bak, 0o600)
+    tmp = path + ".linkmgmt-tmp"
+    with open(tmp, "w") as f:
+        f.write(new)
+    shutil.copymode(path, tmp)
+    os.replace(tmp, path)
+    binary = os.path.join(ROOT, "bin/sekurircd")
+    if os.path.exists(binary):
+        r = subprocess.run([binary, "--check", "-c", path], capture_output=True, text=True)
+        if r.returncode:
+            os.replace(bak, path)
+            msg = (r.stdout + r.stderr).strip().splitlines()
+            print(red(f"bin/sekurircd --check refused it: {msg[-1] if msg else r.returncode} -- your config was restored."))
+            return None
+    else:
+        print(yellow("bin/sekurircd isn't built, so the result wasn't validated -- run make, then tools/confcheck.py."))
+    return bak
+
+
+def apply_local(path, edit, restart):
+    """Run `edit(lines)` on a copy of the config, show the diff, ask, write. False if nothing was written."""
+    old = open(path, encoding="utf-8").read()
+    lines = old.splitlines()
+    edit(lines)
+    new = "\n".join(lines) + "\n"
+    if new == old:
+        print(dim("This server's config already has all of it.\n")); return True
+    for l in list(difflib.unified_diff(old.splitlines(), new.splitlines(), lineterm="", n=1))[2:]:
+        print("  " + (green(l) if l.startswith("+") else red(l) if l.startswith("-") else cyan(l) if l.startswith("@@") else dim(l)))
+    print()
+    if not yes(f"Write this to {rel(path)}?"):
+        return False
+    bak = write_config(path, new)
+    if not bak:
+        return False
+    print(green(f"Written.") + dim(f"  Backup: {rel(bak)} (delete it once the link works: it may hold the old password)"))
+    pidfile = os.path.join(ROOT, "sekurircd.pid")
+    if restart:
+        print(yellow("This change needs an ircd restart (the link listener / TLS / enabling links): ./sekurircd restart\n"))
+    elif os.path.abspath(path) == os.path.join(ROOT, "config/sekurircd.toml") and os.path.exists(pidfile) and \
+            yes("Rehash the running ircd now?"):
+        r = subprocess.run([os.path.join(ROOT, "bin/sekurircd"), "--rehash", "--pidfile", pidfile], capture_output=True, text=True)
+        print(green("Rehashed.\n") if r.returncode == 0 else red(f"Rehash failed: {(r.stdout + r.stderr).strip()} -- /REHASH by hand.\n"))
+    else:
+        print(dim("Then /REHASH (or bin/sekurircd --rehash).\n"))
+    return True
+
+
+def rel(p):
+    """`p` relative to the repo when it's inside it, else absolute."""
+    r = os.path.relpath(os.path.abspath(p), ROOT)
+    return os.path.abspath(p) if r.startswith("..") else r
+
+
+def save_remote(name, text):
+    """Optionally keep the other server's part in a private file, to copy over instead of pasting."""
+    if not yes("Save the other server's part to a file to copy over?", False): return
+    f = os.path.join(ROOT, f"link-for-{re.sub(r'[^A-Za-z0-9._-]', '_', name)}.toml")
+    with open(os.open(f, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as fh:
+        fh.write(text + "\n")
+    print(green(f"Saved {rel(f)}") + dim(f" (0600). Copy it: scp {rel(f)} {name}:  -- then delete it "
+                                                         "here, it holds the link password.\n"))
 
 
 # --- prompts -------------------------------------------------------------------
@@ -169,8 +332,8 @@ def snippet(t):
     print(green(t) + "\n")
 
 
-def wizard(cfg, path, old=None):
-    """add (old=None) or edit `old`. Prints both sides' config."""
+def wizard(cfg, path, old=None, dry_run=False):
+    """add (old=None) or edit `old`: writes this server's side (unless dry_run) and prints the other server's."""
     me = cfg.get("server", {}).get("name", "")
     lk = cfg.get("links", {})
     others = [p for p in cfg["peers"] if p is not old]
@@ -212,59 +375,76 @@ def wizard(cfg, path, old=None):
         pw = secrets.token_hex(24) if a == "gen" else a or old.get("password")  # None: only its hash is known
     else:
         pw = ask("Link password (empty = generate a strong one)", "", chk_pw) or secrets.token_hex(24)
+    if we_dial and not pw:  # it used to dial us and we only kept a hash: dialing needs the real password
+        pw = secrets.token_hex(24)
+        print(yellow(f"  {me} now dials, so it needs the password in clear -- generated a new one (shown at the end)."))
 
     # --- this server
     dials = sum(1 for p in others if p.get("host")) + we_dial
     accepts = sum(1 for p in others if not p.get("host")) + (not we_dial)
     need_mode = mode_for(dials, accepts)
-    heading(f"1) On THIS server ({me}) -- {os.path.relpath(path, ROOT)}")
-    changes = []
-    if not lk.get("enabled"): changes.append("enabled = true")
-    if lk.get("mode", "hub") != need_mode: changes.append(f'mode = "{need_mode}"  (was "{lk.get("mode", "hub")}")')
-    if bool(lk.get("tls")) != tls: changes.append(f"tls = {'true' if tls else 'false'}  (applies to ALL links of this server)")
+    heading(f"1) On THIS server ({me}) -- {rel(path)}")
+    kv, changes = {}, []
+    if not lk.get("enabled"): kv["enabled"] = "true"
+    if lk.get("mode", "hub") != need_mode: kv["mode"] = f'"{need_mode}"'
+    if bool(lk.get("tls")) != tls:
+        kv["tls"] = "true" if tls else "false"
+        print(yellow(f"[links] tls = {kv['tls']} applies to ALL links of this server."))
+    if need_mode != "leaf" and "port" not in lk: kv["port"] = str(lport)
     if tls and need_mode != "leaf" and not cfg.get("tls", {}).get("enabled"):
-        changes.append("and [tls] enabled = true -- a TLS link listener reuses the client TLS cert")
-    if changes:
-        print("In [links], set:")
-        snippet("\n".join(changes))
-    if old:
-        print(f"Replace the [[links.peers]] block with name = \"{name}\" by:")
-    else:
-        print("Add:")
+        print(yellow("A TLS link listener reuses the client [tls] certificate: set [tls] enabled = true with cert_file/key_file "
+                     "first, or the ircd will refuse this config."))
+    changes = [f"{k} = {v}" for k, v in kv.items()]
     if we_dial:
-        snippet(peer_block(name, pw=pw or "<the current password>", host=rhost, port=rport, fp=their_fp))
+        mine = peer_block(name, pw=pw, host=rhost, port=rport, fp=their_fp)
     elif pw:
-        snippet(peer_block(name, pw_hash=scrypt_hash(pw), ips=ips, fp=their_fp))
-    else:
-        snippet(peer_block(name, pw_hash=old.get("password_hash") or "<keep the current password/password_hash line>", ips=ips, fp=their_fp))
+        mine = peer_block(name, pw_hash=scrypt_hash(pw), ips=ips, fp=their_fp)
+    else:  # edit, password kept: keep whatever it has (hash, plain, or only a fingerprint)
+        mine = peer_block(name, pw_hash=old.get("password_hash"), pw=old.get("password"), ips=ips, fp=their_fp)
+    restart = (not lk.get("enabled")) or "tls" in kv or (lk.get("mode", "hub") == "leaf" and need_mode != "leaf")
+
+    def edit(lines):
+        if kv: set_links_keys(lines, kv)
+        put_peer(lines, mine.splitlines(), old["name"] if old else None)
+
+    if dry_run or not apply_local(path, edit, restart):
+        print("Not written. To do it by hand:" if not dry_run else "")
+        if changes:
+            print("In [links], set:")
+            snippet("\n".join(changes))
+        print(f"Replace the [[links.peers]] block with name = \"{name}\" by:" if old else "Add:")
+        snippet(mine)
 
     # --- the other server
-    heading(f"2) On the OTHER server ({name}) -- its config/sekurircd.toml")
+    heading(f"2) On the OTHER server ({name}) -- its config/sekurircd.toml (this tool can't reach it: paste these there)")
     print(f"[server] name must be exactly \"{name}\".\n")
     print("Its [links] section (if it already links elsewhere, keep its mode compatible: one dial-out + accepts = \"both\"):")
-    snippet(links_block("hub" if we_dial else "leaf", rport, tls, pinned=bool(my_fp)))
+    theirs_links = links_block("hub" if we_dial else "leaf", rport, tls, pinned=bool(my_fp))
+    snippet(theirs_links)
     print(("Replace its block for" if old else "Add") + (f' "{me}":' if old else ":"))
     if we_dial:
-        snippet(peer_block(me, pw_hash=scrypt_hash(pw), fp=my_fp) if pw else
-                peer_block(me, pw_hash="<keep its current password_hash line>", fp=my_fp))
+        theirs = peer_block(me, pw_hash=scrypt_hash(pw), fp=my_fp)
+        snippet(theirs)
         print(dim(f"Optional, on {name}: allowed_ips = [\"<{me}'s public IP>\"] in that block.\n"))
     else:
-        snippet(peer_block(me, pw=pw or "<the current password>", host=rhost, port=rport, fp=my_fp))
+        theirs = peer_block(me, pw=pw or "<the current password>", host=rhost, port=rport, fp=my_fp)
+        snippet(theirs)
     if my_fp or their_fp:
         print(dim("Pinned: the link is refused unless the certificate matches. After renewing a certificate (e.g. a new "
                   "Let's Encrypt cert with a new key), update the other side's fingerprint, then /REHASH.\n"))
+
+    save_remote(name, f"# for {name}, from tools/linkmgmt.py on {me}: merge into its config/sekurircd.toml\n"
+                      f"# [server] name must be exactly \"{name}\"\n{theirs_links}\n\n{theirs}")
 
     # --- next steps
     heading("3) Then")
     if pw:
         print(f"Shared password (store it somewhere safe; only the dialing side keeps it in clear): {bold(pw)}\n")
     listen_side = name if we_dial else me
-    restart = (not lk.get("enabled")) or any(c.startswith(("enabled", "tls")) for c in changes) \
-        or (lk.get("mode", "hub") == "leaf" and need_mode != "leaf")
     steps = [
         f"Check both configs:  tools/confcheck.py",
         f"Open TCP {rport} on {listen_side}'s firewall to the other server.",
-        f"{me}: {'restart the ircd (link listener / TLS / enabling links needs it)' if restart else '/REHASH'}",
+        f"{me}: {'restart the ircd (link listener / TLS / enabling links needs it)' if restart else '/REHASH (if not done above)'}",
         f"{name}: restart its ircd (or /REHASH if links were already on with the same port/tls)",
         f"Bring it up: /CONNECT {name if we_dial else me}  on {me if we_dial else name}"
         + "  (autoconnect does it by itself unless set to false)",
@@ -379,24 +559,32 @@ def test(cfg, target, tls):
     nettest(cfg, p["name"], False, host, lk.get("port", DEFAULT_PORT), bool(lk.get("tls")), p.get("allowed_ips"))
 
 
-def delete(cfg, path):
+def delete(cfg, path, dry_run=False):
     me = cfg.get("server", {}).get("name", "")
     p = choose(cfg, "remove")
     name = p["name"]
-    if not yes(f"Show how to remove the link to {name}?"): return
+    if not yes(f"Remove the link to {name}?"): return
     rest = [q for q in cfg["peers"] if q is not p]
-    heading(f"1) On THIS server ({me}) -- {os.path.relpath(path, ROOT)}")
-    print(f"Delete the [[links.peers]] block with name = \"{name}\".")
+    heading(f"1) On THIS server ({me}) -- {rel(path)}")
+    kv = {}
     if not rest:
-        snippet("In [links]: enabled = false   (no links left)")
+        kv["enabled"] = "false"
     else:
         m = mode_for(sum(1 for q in rest if q.get("host")), sum(1 for q in rest if not q.get("host")))
-        if m != cfg.get("links", {}).get("mode", "hub"): snippet(f'In [links]: mode = "{m}"')
+        if m != cfg.get("links", {}).get("mode", "hub"): kv["mode"] = f'"{m}"'
+
+    def edit(lines):
+        drop_peer(lines, name)
+        if kv: set_links_keys(lines, kv)
+
+    if dry_run or not apply_local(path, edit, restart=False):
+        print(f"Delete the [[links.peers]] block with name = \"{name}\".")
+        if kv: snippet("In [links]: " + ", ".join(f"{k} = {v}" for k, v in kv.items()) + ("   (no links left)" if not rest else ""))
         else: print()
     heading(f"2) On the OTHER server ({name})")
     print(f"Delete its [[links.peers]] block with name = \"{me}\"; if that was its only link, set [links] enabled = false.\n")
     heading("3) Then")
-    for i, s in enumerate([f"Drop the live link: /SQUIT {name} :link removed", f"{me}: /REHASH   {name}: /REHASH",
+    for i, s in enumerate([f"Drop the live link: /SQUIT {name} :link removed", f"{name}: /REHASH (and {me}, if not done above)",
                            "tools/confcheck.py on both"], 1):
         print(f"  {i}. {s}")
     print()
@@ -428,15 +616,53 @@ def selftest():
         f.write("-----BEGIN CERTIFICATE-----\n" + base64.b64encode(der).decode() + "\n-----END CERTIFICATE-----\n")
     assert cert_fingerprint(f.name) == "sha256:" + hashlib.sha256(der).hexdigest(); os.unlink(f.name)
     assert chk_fp("SHA256:" + ":".join(["AB"] * 32)) is None and chk_fp("abc") and chk_fp("") is None
+
+    # editing: add, re-key [links], edit, delete -- the commented example, the services peer, a multi-line value and
+    # the comment documenting the next section survive; every step parses and (when built) passes the ircd's --check
+    base = ('[server]\nname = "a.test.net"\n[links]\nenabled = true\nmode = "hub" # was\nport = 7070\n'
+            '#[[links.peers]]\n#name = "leaf1"\n[[links.peers]]\nname = "services.x"\npassword = "p"\n'
+            'allowed_ips = [\n  "127.0.0.1",\n]\n\n# --- channels\n[channels]\ndefault_modes = "nt"\n')
+    lines = base.splitlines()
+    put_peer(lines, peer_block("b.test.net", pw_hash=scrypt_hash("x"), ips=["1.2.3.4"]).splitlines())
+    assert [n for *_, n in peer_spans(lines)] == ["services.x", "b.test.net"]
+    t = "\n".join(lines)
+    assert t.index('name = "b.test.net"') < t.index("# --- channels") and '#[[links.peers]]\n#name = "leaf1"' in t
+    set_links_keys(lines, {"mode": '"both"', "tls": "false"})
+    t = "\n".join(lines)
+    assert 'mode = "both"' in t and "# was" not in t and t.index("tls = false") < t.index("#[[links.peers]]")
+    put_peer(lines, peer_block("b.test.net", pw="p2", host="b.example", port=7000).splitlines(), "b.test.net")
+    assert len(peer_spans(lines)) == 2 and 'host = "b.example"' in "\n".join(lines) and "1.2.3.4" not in "\n".join(lines)
+    if tomllib: tomllib.loads("\n".join(lines))
+    drop_peer(lines, "b.test.net"); set_links_keys(lines, {"mode": '"hub"'})
+    assert [n for *_, n in peer_spans(lines)] == ["services.x"] and "\n\n\n" not in "\n".join(lines)
+    tail = '[server]\nname = "a.test.net"\n[links]\nenabled = true\n[[links.peers]]\nname = "services.x"\npassword = "p"'
+    lines = tail.splitlines(); put_peer(lines, peer_block("b.c", pw="q", host="h", port=1).splitlines()); drop_peer(lines, "b.c")
+    assert "\n".join(lines) == tail, lines  # add + del at the end of the file is a no-op
+    with tempfile.TemporaryDirectory() as d:
+        f = os.path.join(d, "s.toml"); open(f, "w").write(base)
+        lines = base.splitlines()
+        put_peer(lines, peer_block("b.test.net", pw_hash=scrypt_hash("x")).splitlines())
+        with contextlib.redirect_stdout(io.StringIO()):
+            bak = write_config(f, "\n".join(lines) + "\n")
+        assert bak and os.stat(bak).st_mode & 0o777 == 0o600 and 'name = "b.test.net"' in open(f).read()
+        with contextlib.redirect_stdout(io.StringIO()):
+            bak2 = write_config(f, open(f).read() + "\n")
+        assert bak2 and bak2 != bak and os.path.exists(bak)  # same second: both backups kept
+        if os.path.exists(os.path.join(ROOT, "bin/sekurircd")):  # a hub peer with a host is refused -> restored
+            good = open(f).read()
+            with contextlib.redirect_stdout(io.StringIO()):
+                assert write_config(f, good.replace('name = "b.test.net"', 'name = "b.test.net"\nhost = "h"\nport = 1')) is None
+            assert open(f).read() == good
     print("selftest ok")
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Server-link wizard: prints the config for both sides, writes nothing.")
+    ap = argparse.ArgumentParser(description="Server-link wizard: writes this server's side, prints the other server's.")
     ap.add_argument("action", nargs="?", choices=["list", "add", "edit", "del", "test", "fingerprint"])
     ap.add_argument("target", nargs="*", help="test only: HOST PORT")
     ap.add_argument("--tls", action="store_true", help="test HOST PORT: also try a TLS handshake")
     ap.add_argument("-c", "--config", default=os.path.join(ROOT, "config/sekurircd.toml"))
+    ap.add_argument("--dry-run", action="store_true", help="write nothing: print this server's side to paste as well")
     ap.add_argument("--no-banner", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--selftest", action="store_true", help=argparse.SUPPRESS)
     a = ap.parse_args()
@@ -452,11 +678,12 @@ def main():
         return
     show(cfg)
     act = a.action or ["add", "edit", "del", "test", None][pick("What now?", ["Link a new server", "Edit a link", "Remove a link", "Test a link (network)", "Quit"])]
-    if act == "add": wizard(cfg, a.config)
-    elif act == "edit": wizard(cfg, a.config, choose(cfg, "edit"))
-    elif act == "del": delete(cfg, a.config)
+    if act == "add": wizard(cfg, a.config, dry_run=a.dry_run)
+    elif act == "edit": wizard(cfg, a.config, choose(cfg, "edit"), dry_run=a.dry_run)
+    elif act == "del": delete(cfg, a.config, dry_run=a.dry_run)
     elif act == "test": return test(cfg, a.target, a.tls)
-    print(dim("Nothing was written -- paste the blocks above into each server's config."))
+    if a.dry_run and act in ("add", "edit", "del"):
+        print(dim("--dry-run: nothing was written -- paste the blocks above into each server's config."))
 
 
 if __name__ == "__main__":

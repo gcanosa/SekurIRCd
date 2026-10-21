@@ -384,6 +384,8 @@ def secret_files():
     out += [(f, "account password hashes and e-mails") for f in sorted(glob.glob("config/accounts.json*"))]
     out += [(f, "channel password hashes") for f in sorted(glob.glob("services/*.json*"))]
     out += [(f, "a --fix backup: may hold the old plain-text passwords") for f in sorted(glob.glob("*/*.pre-fix-*"))]
+    out += [(f, "a linkmgmt backup: may hold link passwords") for f in sorted(glob.glob("*/*.pre-linkmgmt-*"))]
+    out += [(f, "linkmgmt's part for another server: holds the link password") for f in sorted(glob.glob("link-for-*.toml"))]
     return [(f, what) for f, what in dict(out).items() if os.path.isfile(f)]
 
 

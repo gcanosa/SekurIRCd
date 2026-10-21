@@ -103,8 +103,9 @@ hosts = ["*@*"]                                       # or restrict, e.g. ["*@20
 
 <h2 id="links">server links</h2>
 <p>Servers link into a tree. One server listens (<code>[links] port</code>, a single port for every server that dials in: each one is told apart by the name
-  it sends, not by port); the others dial it with <code>host</code>/<code>port</code> in their peer entry. <code>tools/linkmgmt.py add</code> asks a few questions
-  and prints the blocks for both servers, plus the firewall and restart steps; <code>tools/linkmgmt.py test HOST PORT --tls</code> checks DNS, the port and
+  it sends, not by port); the others dial it with <code>host</code>/<code>port</code> in their peer entry. <code>tools/linkmgmt.py add</code> (also <code>edit</code> and <code>del</code>) asks a few questions,
+  writes this server's side after showing the diff (a backup is kept, the ircd's own <code>--check</code> validates it, and a refused change is restored),
+  and prints the other server's side to paste there, plus the firewall and restart steps (<code>--dry-run</code> only prints); <code>tools/linkmgmt.py test HOST PORT --tls</code> checks DNS, the port and
   TLS from either side.</p>
 <p>Encrypt and pin: set <code>[links] tls = true</code> on both servers (the listening one needs <code>[tls]</code> enabled; its certificate is reused) and put
   the other server's certificate fingerprint in each peer entry. <code>tools/linkmgmt.py fingerprint</code> prints a server's own.</p>

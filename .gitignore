@@ -27,3 +27,6 @@ plans/
 __pycache__/
 /ircop-levels.md
 *.pre-fix-*
+*.pre-linkmgmt-*
+*.linkmgmt-tmp
+/link-for-*.toml
