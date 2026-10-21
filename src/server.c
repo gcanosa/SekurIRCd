@@ -164,6 +164,7 @@ int server_rehash(server_t *srv, char *errbuf, size_t errbufsz) {
     srv->cfg = tmp;
     server_apply_cloak_secret(srv);
     warn_plain_passwords(&srv->cfg);
+    link_tls_cleanup(); /* the next dial reloads this server's certificate (and the new [tls] paths) */
     if (srv->self_srv) snprintf(srv->self_srv->desc, sizeof srv->self_srv->desc, "%s", srv->cfg.server.network); /* LINKS/MAP description follows the network name */
     cmd_cap_notify_changes(srv, srv->services_online, old_history);
     net_reclass_all(srv);

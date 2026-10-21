@@ -58,12 +58,42 @@ static ssize_t link_io_write(link_conn_t *lc, const void *buf, size_t len) {
 
 static SSL_CTX *g_leaf_tls_ctx;
 
-static SSL_CTX *leaf_tls_ctx(void) {
+/* A certificate is never judged by its chain on a pinned link (or for a hub requesting one): the fingerprint is. */
+static int accept_any_cert(int preverify_ok, X509_STORE_CTX *ctx) { (void)preverify_ok; (void)ctx; return 1; }
+
+/* The dialing side presents this server's own [tls] certificate when it has one, so a hub can pin it. Rebuilt after
+ * a /REHASH (link_tls_cleanup) to pick up a renewed certificate. */
+static SSL_CTX *leaf_tls_ctx(server_t *srv) {
     if (!g_leaf_tls_ctx) {
         g_leaf_tls_ctx = SSL_CTX_new(TLS_client_method());
-        if (g_leaf_tls_ctx) SSL_CTX_set_default_verify_paths(g_leaf_tls_ctx);
+        if (!g_leaf_tls_ctx) return NULL;
+        SSL_CTX_set_default_verify_paths(g_leaf_tls_ctx);
+        char cert[CFG_PATH], key[CFG_PATH];
+        config_tls_cert_path(&srv->cfg, cert, sizeof cert);
+        config_tls_key_path(&srv->cfg, key, sizeof key);
+        if (access(cert, R_OK) == 0 && access(key, R_OK) == 0) {
+            if (SSL_CTX_use_certificate_chain_file(g_leaf_tls_ctx, cert) != 1 ||
+                SSL_CTX_use_PrivateKey_file(g_leaf_tls_ctx, key, SSL_FILETYPE_PEM) != 1) {
+                log_warn("link", "could not load %s / %s to present on outgoing links -- dialing without a certificate", cert, key);
+                ERR_clear_error();
+            }
+        }
     }
     return g_leaf_tls_ctx;
+}
+
+/* 1 if `lc`'s peer presented the certificate pinned as `want` (lowercase hex). Logs why not. */
+static int fingerprint_ok(link_conn_t *lc, const char *name, const char *want) {
+    char got[65];
+    if (crypto_peer_fingerprint(lc->ssl, got, sizeof got) != 0) {
+        log_warn("link", "link '%s' presented no TLS certificate, but its fingerprint is pinned", name);
+        return 0;
+    }
+    if (strcmp(got, want) != 0) {
+        log_warn("link", "link '%s' presented certificate sha256:%s, not the pinned sha256:%s", name, got, want);
+        return 0;
+    }
+    return 1;
 }
 
 void link_tls_cleanup(void) {
@@ -71,6 +101,20 @@ void link_tls_cleanup(void) {
 }
 
 void link_tls_try_handshake(server_t *srv, link_conn_t *lc) {
+    if (lc->tls_sniff) { /* loopback: a TLS ClientHello starts with 0x16, anything else is a plain link (services) */
+        unsigned char b;
+        ssize_t n = recv(lc->fd, &b, 1, MSG_PEEK);
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return;
+        if (n <= 0) { link_close(srv, lc); return; }
+        lc->tls_sniff = 0;
+        if (b != 0x16) {
+            SSL_free(lc->ssl);
+            lc->ssl = NULL;
+            lc->tls_handshaking = lc->tls_want_write = 0;
+            log_info("link", "inbound link from %s (fd=%d) is plain text -- allowed from loopback only", lc->ip, lc->fd);
+            return; /* the peeked bytes are still queued: the next poll reads them as link lines */
+        }
+    }
     ERR_clear_error();
     int rc = SSL_accept(lc->ssl);
     if (rc == 1) {
@@ -208,7 +252,7 @@ static int dial_peer(server_t *srv, int peer_idx) {
     lc->fd = fd;
 
     if (srv->cfg.links.tls) {
-        SSL_CTX *ctx = leaf_tls_ctx();
+        SSL_CTX *ctx = leaf_tls_ctx(srv);
         if (!ctx) {
             log_error("link", "TLS setup failed dialing %s:%d", up->host, up->port);
             close(fd); free(lc); return -1;
@@ -218,7 +262,9 @@ static int dial_peer(server_t *srv, int peer_idx) {
         SSL_set_fd(lc->ssl, fd);
         struct in_addr ip4;
         if (inet_pton(AF_INET, up->host, &ip4) != 1) SSL_set_tlsext_host_name(lc->ssl, up->host); /* SNI (never for an IP literal) */
-        if (!srv->cfg.links.tls_insecure_skip_verify) {
+        if (up->fingerprint[0]) {
+            SSL_set_verify(lc->ssl, SSL_VERIFY_PEER, accept_any_cert); /* pinned: checked once connected, below */
+        } else if (!srv->cfg.links.tls_insecure_skip_verify) {
             SSL_set_verify(lc->ssl, SSL_VERIFY_PEER, NULL);
             SSL_set1_host(lc->ssl, up->host); /* checked against the cert's SAN/CN, not just chain trust */
         }
@@ -232,10 +278,11 @@ static int dial_peer(server_t *srv, int peer_idx) {
         }
         log_info("link", "TLS established to %s:%d (%s/%s)", up->host, up->port,
                   SSL_get_version(lc->ssl), SSL_get_cipher_name(lc->ssl));
+        if (up->fingerprint[0] && !fingerprint_ok(lc, up->name, up->fingerprint)) goto fail; /* before PASS: never hand a password to the wrong server */
     }
 
     char line[512];
-    snprintf(line, sizeof line, "PASS %s", up->password);
+    snprintf(line, sizeof line, "PASS %s", up->password[0] ? up->password : "*"); /* fingerprint-only peer: nothing to send */
     if (write_line_blocking(lc, line) != 0) goto wfail;
     netsync_capab_line(srv, line, sizeof line);
     if (write_line_blocking(lc, line) != 0) goto wfail; /* ask for the state-sync protocol */
@@ -471,8 +518,10 @@ void link_accept(server_t *srv) {
     if (srv->cfg.links.tls) {
         lc->ssl = SSL_new(srv->tls_ctx);
         SSL_set_mode(lc->ssl, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER | SSL_MODE_ENABLE_PARTIAL_WRITE);
+        SSL_set_verify(lc->ssl, SSL_VERIFY_PEER, accept_any_cert); /* ask for (never require) the dialer's certificate, for pinning */
         SSL_set_fd(lc->ssl, fd);
         lc->tls_handshaking = 1;
+        lc->tls_sniff = strncmp(ipbuf, "127.", 4) == 0; /* the services daemon on this box doesn't speak TLS */
     }
     lc->next = srv->links;
     srv->links = lc;
@@ -612,12 +661,14 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
                 if (strcmp(p->name, name) == 0) { matched = p; break; }
             }
             int ok = 0;
-            if (matched && matched->password_hash[0] && link_verify_throttled(lc->ip)) {
+            if (matched && matched->fingerprint[0] && !fingerprint_ok(lc, name, matched->fingerprint)) {
+                matched = NULL; /* fingerprint_ok logged why */
+            } else if (matched && matched->password_hash[0] && link_verify_throttled(lc->ip)) {
                 log_warn("link", "rejected link handshake from '%s': too many recent password checks from %s", name, lc->ip);
             } else if (matched) {
-                ok = matched->password_hash[0]
-                    ? crypto_verify_password(lc->pending_pass, matched->password_hash)
-                    : crypto_secure_streq(lc->pending_pass, matched->password);
+                ok = matched->password_hash[0] ? crypto_verify_password(lc->pending_pass, matched->password_hash)
+                   : matched->password[0]      ? crypto_secure_streq(lc->pending_pass, matched->password)
+                                               : 1; /* fingerprint-only: the certificate was the credential */
             }
             if (ok && !peer_ip_allowed(matched, lc->ip)) {
                 log_warn("link", "rejected link handshake from '%s': %s is not in that peer's allowed_ips", name, lc->ip);

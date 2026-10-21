@@ -382,6 +382,17 @@ static void test_scrypt_roundtrip(void) {
     assert(crypto_verify_password("correct horse battery staple", "") == 0);
 }
 
+static void test_parse_fingerprint(void) {
+    char out[65];
+    const char *hex = "0a884e9b9cec5b74dbc7340dd46abcfa25c9f8f6177e5d0a45079c506ffae48c";
+    assert(crypto_parse_fingerprint(hex, out, sizeof out) == 0 && strcmp(out, hex) == 0);
+    assert(crypto_parse_fingerprint("SHA256:0A:88:4E:9B:9C:EC:5B:74:DB:C7:34:0D:D4:6A:BC:FA:25:C9:F8:F6:17:7E:5D:0A:45:07:9C:50:6F:FA:E4:8C",
+                                    out, sizeof out) == 0 && strcmp(out, hex) == 0);
+    assert(crypto_parse_fingerprint("0a884e9b", out, sizeof out) == -1);          /* too short */
+    assert(crypto_parse_fingerprint("sha1:0a884e9b9cec5b74dbc7340dd46abcfa25c9f8f6177e5d0a45079c506ffae48c", out, sizeof out) == -1);
+    assert(crypto_parse_fingerprint("zz884e9b9cec5b74dbc7340dd46abcfa25c9f8f6177e5d0a45079c506ffae48c", out, sizeof out) == -1);
+}
+
 /* Vector produced once by the Python daemon's own hashlib.scrypt (see
  * passwords.py) for password "hunter2" -- proves a config file's existing
  * password_hash (or accounts.json/chanserv.json pw_hash) keeps verifying
@@ -1087,6 +1098,7 @@ int main(void) {
     RUN(test_accounts_indexes);
     RUN(test_lazy_list_helpers);
     RUN(test_scrypt_roundtrip);
+    RUN(test_parse_fingerprint);
     RUN(test_scrypt_cross_compat_vector);
     RUN(test_random_hex);
     RUN(test_hmac_hex);

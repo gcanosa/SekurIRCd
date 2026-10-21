@@ -12,7 +12,9 @@ commands to bring the link up.
   tools/linkmgmt.py edit            change a link (password, address, allowed IPs, who dials)
   tools/linkmgmt.py del             remove a link
   tools/linkmgmt.py test            optional network checks for a link: DNS, port open/firewall, TLS
-  tools/linkmgmt.py test HOST PORT [--tls]   the same against any host (run it on the other server too)
+  tools/linkmgmt.py test HOST PORT [--tls]   the same against any host (run it on the other server too); with
+                                    --tls it also prints the certificate fingerprint to pin
+  tools/linkmgmt.py fingerprint     this server's own certificate fingerprint (what the other side pins)
   tools/linkmgmt.py -c my.toml ...  another sekurircd config
 """
 import argparse, fnmatch, hashlib, json, os, re, secrets, socket, ssl, subprocess, sys
@@ -50,6 +52,27 @@ def scrypt_hash(pw):
     return f"scrypt$16384$8$1${salt.hex()}${d.hex()}"
 
 
+def cert_fingerprint(pem_path):
+    """'sha256:<hex>' of the first certificate in a PEM file, the form [[links.peers]] fingerprint takes."""
+    with open(pem_path) as f:
+        return "sha256:" + hashlib.sha256(ssl.PEM_cert_to_DER_cert(f.read())).hexdigest()
+
+
+def own_fingerprint(cfg, path):
+    """(fingerprint or None, why not): this server's [tls] certificate, which it presents on links."""
+    cert = cfg.get("tls", {}).get("cert_file", "tls/cert.pem")
+    cert = os.path.join(os.path.dirname(os.path.abspath(path)), cert)
+    try:
+        return cert_fingerprint(cert), None
+    except (OSError, ValueError) as e:
+        return None, f"{cert}: {e}"
+
+
+def chk_fp(a):
+    h = re.sub(r"^sha256:", "", a.lower()).replace(":", "") if a else ""
+    return None if not a or re.fullmatch(r"[0-9a-f]{64}", h) else "64 hex digits, as printed by linkmgmt.py fingerprint"
+
+
 def mode_for(dials, accepts):
     """links.mode a server needs for `dials` outgoing and `accepts` incoming peers (src/config.c rules)."""
     if dials and accepts: return "both"
@@ -57,19 +80,20 @@ def mode_for(dials, accepts):
     return "hub"
 
 
-def peer_block(name, pw=None, pw_hash=None, host=None, port=None, ips=None):
+def peer_block(name, pw=None, pw_hash=None, host=None, port=None, ips=None, fp=None):
     out = ["[[links.peers]]", f'name = "{name}"']
     out.append(f'password_hash = "{pw_hash}"' if pw_hash else f'password = "{pw}"')
+    if fp: out.append(f'fingerprint = "{fp}"')
     if host: out += [f'host = "{host}"', f"port = {port}"]
     if ips: out.append("allowed_ips = " + json.dumps(ips))
     return "\n".join(out)
 
 
-def links_block(mode, port, tls):
+def links_block(mode, port, tls, pinned=False):
     out = ["[links]", "enabled = true", f'mode = "{mode}"']
     if mode != "leaf": out += ['bind = "0.0.0.0"', f"port = {port}"]
     out.append(f"tls = {'true' if tls else 'false'}")
-    if tls and mode != "hub": out.append("#tls_insecure_skip_verify = true   # only if the other side's cert is self-signed")
+    if tls and mode != "hub" and not pinned: out.append("#tls_insecure_skip_verify = true   # only if the other side's cert is self-signed")
     return "\n".join(out)
 
 
@@ -173,6 +197,16 @@ def wizard(cfg, path, old=None):
         ips = ask(f"IPs {name} connects from (locks the link port to them; empty = anywhere)", cur, chk_ips).replace(",", " ").split()
 
     tls = yes("Encrypt the link with TLS? (both sides' [links] tls must match)", bool(lk.get("tls")))
+    my_fp = their_fp = None
+    if tls and yes("Pin each side's certificate? (recommended: self-signed certs are fine, and a server only links "
+                   "if it shows the certificate you pinned)", bool(old and old.get("fingerprint"))):
+        my_fp, why = own_fingerprint(cfg, path)
+        if not my_fp:
+            print(yellow(f"  This server has no certificate to present ({why}) -- set [tls] cert_file/key_file first. "
+                         f"{name} won't pin this side."))
+        print(dim(f"  {name}'s fingerprint: run tools/linkmgmt.py fingerprint on it"
+                  + (f", or tools/linkmgmt.py test {rhost} {rport} --tls from here once it listens" if we_dial else "")))
+        their_fp = ask(f"{name}'s certificate fingerprint (empty = don't pin it)", (old or {}).get("fingerprint"), chk_fp) or None
     if old:
         a = ask("New link password (empty = keep the current one, 'gen' = generate)", "", chk_pw)
         pw = secrets.token_hex(24) if a == "gen" else a or old.get("password")  # None: only its hash is known
@@ -198,24 +232,27 @@ def wizard(cfg, path, old=None):
     else:
         print("Add:")
     if we_dial:
-        snippet(peer_block(name, pw=pw or "<the current password>", host=rhost, port=rport))
+        snippet(peer_block(name, pw=pw or "<the current password>", host=rhost, port=rport, fp=their_fp))
     elif pw:
-        snippet(peer_block(name, pw_hash=scrypt_hash(pw), ips=ips))
+        snippet(peer_block(name, pw_hash=scrypt_hash(pw), ips=ips, fp=their_fp))
     else:
-        snippet(peer_block(name, pw_hash=old.get("password_hash") or "<keep the current password/password_hash line>", ips=ips))
+        snippet(peer_block(name, pw_hash=old.get("password_hash") or "<keep the current password/password_hash line>", ips=ips, fp=their_fp))
 
     # --- the other server
     heading(f"2) On the OTHER server ({name}) -- its config/sekurircd.toml")
     print(f"[server] name must be exactly \"{name}\".\n")
     print("Its [links] section (if it already links elsewhere, keep its mode compatible: one dial-out + accepts = \"both\"):")
-    snippet(links_block("hub" if we_dial else "leaf", rport, tls))
+    snippet(links_block("hub" if we_dial else "leaf", rport, tls, pinned=bool(my_fp)))
     print(("Replace its block for" if old else "Add") + (f' "{me}":' if old else ":"))
     if we_dial:
-        snippet(peer_block(me, pw_hash=scrypt_hash(pw)) if pw else
-                peer_block(me, pw_hash="<keep its current password_hash line>"))
+        snippet(peer_block(me, pw_hash=scrypt_hash(pw), fp=my_fp) if pw else
+                peer_block(me, pw_hash="<keep its current password_hash line>", fp=my_fp))
         print(dim(f"Optional, on {name}: allowed_ips = [\"<{me}'s public IP>\"] in that block.\n"))
     else:
-        snippet(peer_block(me, pw=pw or "<the current password>", host=rhost, port=rport))
+        snippet(peer_block(me, pw=pw or "<the current password>", host=rhost, port=rport, fp=my_fp))
+    if my_fp or their_fp:
+        print(dim("Pinned: the link is refused unless the certificate matches. After renewing a certificate (e.g. a new "
+                  "Let's Encrypt cert with a new key), update the other side's fingerprint, then /REHASH.\n"))
 
     # --- next steps
     heading("3) Then")
@@ -267,12 +304,21 @@ def probe(host, port, tls=False, timeout=5.0):
 
 
 def tls_check(sock, host):
+    peer = sock.getpeername()[:2]
     try:
         with ssl.create_default_context().wrap_socket(sock, server_hostname=host) as t:
-            return (True, f"TLS  {t.version()}, certificate valid for {host}")
+            fp = "sha256:" + hashlib.sha256(t.getpeercert(binary_form=True)).hexdigest()
+            return (True, f"TLS  {t.version()}, certificate valid for {host}, fingerprint {fp}")
     except ssl.SSLCertVerificationError as e:
+        try:  # see the certificate anyway, to pin it
+            ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+            with ctx.wrap_socket(socket.create_connection(peer, 5), server_hostname=host) as t:
+                fp = "sha256:" + hashlib.sha256(t.getpeercert(binary_form=True)).hexdigest()
+        except (ssl.SSLError, OSError):
+            fp = None
         return (None, f"TLS  works, but the certificate is not trusted ({e.verify_message}) -- "
-                      "the dialing side needs tls_insecure_skip_verify = true")
+                      + (f"pin it on the dialing side: fingerprint = \"{fp}\" (check it matches tools/linkmgmt.py "
+                         "fingerprint on that server)" if fp else "the dialing side needs tls_insecure_skip_verify = true"))
     except (ssl.SSLError, OSError) as e:
         return (False, f"TLS  handshake failed ({e}) -- is [links] tls = true on that side?")
 
@@ -376,12 +422,18 @@ def selftest():
     assert r[0][0] and r[1] == (True, f"TCP  127.0.0.1 port {port}: open")
     assert probe("127.0.0.1", port)[1][0] is False  # closed now: refused
     assert allowed("localhost", ["127.0.0.*", "::1"])[0] is True and allowed("localhost", ["10.*"])[0] is None
+    import base64
+    der = b"\x30\x03\x02\x01\x01"  # any DER bytes: the fingerprint is the SHA-256 of them
+    with tempfile.NamedTemporaryFile("w", suffix=".pem", delete=False) as f:
+        f.write("-----BEGIN CERTIFICATE-----\n" + base64.b64encode(der).decode() + "\n-----END CERTIFICATE-----\n")
+    assert cert_fingerprint(f.name) == "sha256:" + hashlib.sha256(der).hexdigest(); os.unlink(f.name)
+    assert chk_fp("SHA256:" + ":".join(["AB"] * 32)) is None and chk_fp("abc") and chk_fp("") is None
     print("selftest ok")
 
 
 def main():
     ap = argparse.ArgumentParser(description="Server-link wizard: prints the config for both sides, writes nothing.")
-    ap.add_argument("action", nargs="?", choices=["list", "add", "edit", "del", "test"])
+    ap.add_argument("action", nargs="?", choices=["list", "add", "edit", "del", "test", "fingerprint"])
     ap.add_argument("target", nargs="*", help="test only: HOST PORT")
     ap.add_argument("--tls", action="store_true", help="test HOST PORT: also try a TLS handshake")
     ap.add_argument("-c", "--config", default=os.path.join(ROOT, "config/sekurircd.toml"))
@@ -392,6 +444,12 @@ def main():
     if not a.no_banner: subprocess.run(["bash", "-c", f'source "{ROOT}/tools/lib.sh"; banner'])
     if not os.path.exists(a.config): sys.exit(red(f"{a.config} not found (use -c)"))
     cfg = read_config(a.config)
+    if a.action == "fingerprint":
+        fp, why = own_fingerprint(cfg, a.config)
+        if not fp: sys.exit(red(f"No certificate to fingerprint: {why}"))
+        print(f"\nThis server's certificate: {bold(fp)}\nOn the other server, put fingerprint = \"{fp}\" in its "
+              f"[[links.peers]] block for {cfg.get('server', {}).get('name', 'this server')}.\n")
+        return
     show(cfg)
     act = a.action or ["add", "edit", "del", "test", None][pick("What now?", ["Link a new server", "Edit a link", "Remove a link", "Test a link (network)", "Quit"])]
     if act == "add": wizard(cfg, a.config)

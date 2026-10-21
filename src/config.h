@@ -190,6 +190,7 @@ typedef struct {
     char name[CFG_STR];
     char password[CFG_STR];
     char password_hash[CFG_STR];
+    char fingerprint[65]; /* "" or the SHA-256 (lowercase hex) of the peer's TLS certificate: pinned, see link.c */
     char host[CFG_STR];  /* "" = hub-role (accepts); set = leaf-role (dials out) */
     int port;
     char allowed_ips[CFG_MAX_LINK_ALLOWED_IPS][CFG_MASK]; /* hub-role only: IP globs this peer may

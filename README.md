@@ -537,6 +537,14 @@ keeps a peer from being dialled automatically. ChanServ links to any one server 
 (run only one copy): its NickServ is the network's account service, and every server relays SASL/REGISTER to it.
 Use the same `host_masking_secret` on every server so cloaks match. Opers are per server, but KILL, GLINE,
 SQUIT and SAJOIN/SAPART/SANICK/CHGHOST/CHGIDENT reach users on any server.
+`tools/linkmgmt.py add` asks the questions and prints both sides' blocks.
+
+Encrypted links: `[links] tls = true` on both servers (a server that accepts links needs `[tls]` enabled; its
+certificate is reused). Pin each other's certificate with `fingerprint = "sha256:..."` in the `[[links.peers]]`
+blocks (`tools/linkmgmt.py fingerprint` prints a server's own): self-signed certificates then work without
+`tls_insecure_skip_verify`, a server that doesn't show the pinned certificate is refused before any password is
+sent or checked, and the password becomes optional, so neither side has to keep one in plain text. The
+services daemon doesn't speak TLS; a TLS link listener still accepts plain links from 127.0.0.1 for it.
 
 Versions: each side sends its link protocol and software version in the handshake. Same protocol, different
 version -> the link comes up and opers get a notice naming both versions; no overlapping protocol -> the link is

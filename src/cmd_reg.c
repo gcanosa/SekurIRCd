@@ -405,20 +405,7 @@ void cmd_quit(server_t *srv, client_t *cl, irc_message_t *msg) {
  * connection or no certificate was presented ([tls] request_client_cert = true is needed for that). Set on the client at
  * registration (cl->certfp) and handed to services, which back SASL EXTERNAL and NickServ CERT with it. */
 int client_cert_fingerprint(client_t *cl, char *out, size_t outsz) {
-    if (!cl->ssl) return -1;
-#if OPENSSL_VERSION_NUMBER >= 0x30000000L
-    X509 *cert = SSL_get1_peer_certificate(cl->ssl);
-#else
-    X509 *cert = SSL_get_peer_certificate(cl->ssl);
-#endif
-    if (!cert) return -1;
-    unsigned char digest[EVP_MAX_MD_SIZE];
-    unsigned int dlen = 0;
-    int digest_ok = X509_digest(cert, EVP_sha256(), digest, &dlen);
-    X509_free(cert);
-    if (digest_ok != 1 || dlen == 0 || outsz < (size_t)dlen * 2 + 1) return -1; /* never hand back an uninitialized buffer */
-    for (unsigned int i = 0; i < dlen; i++) snprintf(out + i * 2, 3, "%02x", digest[i]);
-    return 0;
+    return crypto_peer_fingerprint(cl->ssl, out, outsz);
 }
 
 /* Per-IP failed-login throttle, applied before anything is relayed to services (they keep their own too), so a flood of

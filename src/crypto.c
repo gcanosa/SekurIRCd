@@ -4,11 +4,14 @@
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
 #include <openssl/rand.h>
+#include <openssl/ssl.h>
+#include <openssl/x509.h>
 
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 /* OWASP-minimum scrypt cost, same as passwords.py: ~16 MiB, well under 100ms
  * on any modern machine. maxmem must cover it (scrypt needs ~128*N*r bytes);
@@ -109,6 +112,36 @@ int crypto_verify_password(const char *password, const char *stored) {
         return 0;
     }
     return CRYPTO_memcmp(candidate, expected, digestlen) == 0;
+}
+
+int crypto_peer_fingerprint(SSL *ssl, char *out, size_t outsz) {
+    if (!ssl) return -1;
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+    X509 *cert = SSL_get1_peer_certificate(ssl);
+#else
+    X509 *cert = SSL_get_peer_certificate(ssl);
+#endif
+    if (!cert) return -1;
+    unsigned char digest[EVP_MAX_MD_SIZE];
+    unsigned int dlen = 0;
+    int digest_ok = X509_digest(cert, EVP_sha256(), digest, &dlen);
+    X509_free(cert);
+    if (digest_ok != 1 || dlen == 0 || outsz < (size_t)dlen * 2 + 1) return -1; /* never hand back an uninitialized buffer */
+    hex_encode(digest, dlen, out);
+    return 0;
+}
+
+int crypto_parse_fingerprint(const char *in, char *out, size_t outsz) {
+    if (strncasecmp(in, "sha256:", 7) == 0) in += 7;
+    size_t n = 0;
+    for (; *in; in++) {
+        if (*in == ':') continue;
+        int v = hexval(*in);
+        if (v < 0 || n + 1 >= outsz) return -1;
+        out[n++] = "0123456789abcdef"[v];
+    }
+    out[n] = '\0';
+    return n == 64 ? 0 : -1;
 }
 
 void crypto_random_hex(char *out, size_t outsz, int count) {
