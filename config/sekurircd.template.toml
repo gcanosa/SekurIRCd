@@ -597,11 +597,16 @@ port = 7000
 
 # Wrap the link connection in TLS: on a hub, reuses the [tls] cert/key above
 # on the link listener; on a leaf, requires TLS when dialing its uplink.
+# A dialing server presents its own [tls] cert/key too (when it has them), so
+# the other side can pin it -- see `fingerprint` below. With tls on, the link
+# listener still takes plain-text links from 127.0.0.1 (the services daemon,
+# which doesn't speak TLS); from anywhere else a link must be TLS.
 tls = false
 
 # leaf only: accept the hub's TLS certificate without CA validation (for a
 # self-signed hub cert with no shared CA infrastructure). Never set this on
-# a link exposed to the public internet without also trusting the exact peer.
+# a link exposed to the public internet without also trusting the exact peer
+# -- a `fingerprint` on the peer (below) is that, and replaces this flag.
 tls_insecure_skip_verify = false
 
 # Dial the [[links.peers]] that have a `host` at startup and again whenever the
@@ -630,6 +635,17 @@ reconnect_delay_max = 300.0
 #name = "leaf1"
 #password_hash = "scrypt$16384$8$1$<salt-hex>$<digest-hex>"
 ##password = "a-long-shared-secret-unique-to-this-pair"  # legacy plain-text alternative
+##fingerprint = "sha256:<64 hex digits>"
+
+# Any peer, optional, needs [links] tls = true: the SHA-256 fingerprint of
+# the certificate that peer presents (its [tls] cert). The link is refused
+# unless it matches -- checked before a password is ever sent or compared.
+# Works with self-signed certs (no CA, no tls_insecure_skip_verify), and
+# with a fingerprint the password becomes optional: leave both password
+# keys out and the certificate alone authenticates the peer, so neither
+# side keeps a plain-text secret. Get a server's fingerprint with
+# `tools/linkmgmt.py fingerprint` on it. After renewing a certificate with
+# a new key, update the fingerprint on the other side and /REHASH.
 
 # hub only, optional: IP globs ('*'/'?') this peer is allowed to connect
 # from. If a firewall in front of the link port isn't an option, this is the
@@ -677,3 +693,4 @@ reconnect_delay_max = 300.0
 #password = "a-long-shared-secret-unique-to-this-pair"
 #host = "hub.example.net"
 #port = 7000
+##fingerprint = "sha256:<64 hex digits>"   # the hub's certificate (see above)

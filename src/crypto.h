@@ -30,6 +30,15 @@ int crypto_verify_password(const char *password, const char *stored);
  * comparison a fixed-width one. */
 int crypto_secure_streq(const char *a, const char *b);
 
+/* SHA-256 fingerprint of the certificate the TLS peer on `ssl` presented, lowercase hex without separators, into `out`
+ * (>= 65 bytes). -1 when `ssl` is NULL or the peer presented none. Users' CertFP (SASL EXTERNAL) and link pinning. */
+struct ssl_st;
+int crypto_peer_fingerprint(struct ssl_st *ssl, char *out, size_t outsz);
+
+/* Normalizes a configured fingerprint ("sha256:" prefix optional, any case, ':' separators allowed) to the form above.
+ * -1 unless it is exactly 64 hex digits. */
+int crypto_parse_fingerprint(const char *in, char *out, size_t outsz);
+
 /* `count` random bytes, hex-encoded (lowercase) into `out` (needs at least
  * 2*count + 1 bytes). Used for host-cloak tokens. Aborts the process on
  * RAND_bytes failure (this daemon has no sane fallback for a broken CSPRNG). */

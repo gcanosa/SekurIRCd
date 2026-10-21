@@ -1,4 +1,5 @@
 #include "config.h"
+#include "crypto.h"
 
 #include <arpa/inet.h>
 #include "client.h" /* SPAM_TRACK */
@@ -956,6 +957,17 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
                 if (cfg_get_str(pe, "password", "", p->password, CFG_STR, errbuf, errbufsz, fn)) return -1;
                 snprintf(fn, sizeof fn, "links.peers[%d].password_hash", i);
                 if (cfg_get_str(pe, "password_hash", "", p->password_hash, CFG_STR, errbuf, errbufsz, fn)) return -1;
+                snprintf(fn, sizeof fn, "links.peers[%d].fingerprint", i);
+                char fp[CFG_STR];
+                if (cfg_get_str(pe, "fingerprint", "", fp, sizeof fp, errbuf, errbufsz, fn)) return -1;
+                if (fp[0] && crypto_parse_fingerprint(fp, p->fingerprint, sizeof p->fingerprint) != 0) {
+                    snprintf(errbuf, errbufsz, "%s must be the certificate's SHA-256 fingerprint: 64 hex digits, ':' and a \"sha256:\" prefix allowed", fn);
+                    return -1;
+                }
+                if (p->fingerprint[0] && !out->links.tls) {
+                    snprintf(errbuf, errbufsz, "%s needs [links] tls = true (a certificate only exists on a TLS link)", fn);
+                    return -1;
+                }
                 snprintf(fn, sizeof fn, "links.peers[%d].host", i);
                 if (cfg_get_str(pe, "host", "", p->host, CFG_STR, errbuf, errbufsz, fn)) return -1;
                 snprintf(fn, sizeof fn, "links.peers[%d].port", i);
@@ -972,16 +984,20 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
                     return -1;
                 }
                 if (p->host[0]) {
-                    if (!p->password[0] || p->password_hash[0]) {
-                        snprintf(errbuf, errbufsz, "links.peers[%d] has host set (leaf-role) and must use a plain password, not password_hash", i);
+                    if (p->password_hash[0] || (!p->password[0] && !p->fingerprint[0])) {
+                        snprintf(errbuf, errbufsz, "links.peers[%d] has host set (leaf-role) and must use a plain password (it sends it), "
+                                                   "not password_hash -- or only a fingerprint", i);
                         return -1;
                     }
                     if (p->n_allowed_ips) {
                         snprintf(errbuf, errbufsz, "links.peers[%d] has host set (leaf-role) -- allowed_ips only applies to a hub-role peer it accepts from", i);
                         return -1;
                     }
-                } else if ((p->password[0] != '\0') == (p->password_hash[0] != '\0')) {
-                    snprintf(errbuf, errbufsz, "links.peers[%d] requires exactly one of password or password_hash", i);
+                } else if (p->password[0] && p->password_hash[0]) {
+                    snprintf(errbuf, errbufsz, "links.peers[%d] takes password or password_hash, not both", i);
+                    return -1;
+                } else if (!p->password[0] && !p->password_hash[0] && !p->fingerprint[0]) {
+                    snprintf(errbuf, errbufsz, "links.peers[%d] requires password, password_hash or fingerprint", i);
                     return -1;
                 }
                 out->links.n_peers++;
