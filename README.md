@@ -537,7 +537,8 @@ keeps a peer from being dialled automatically. ChanServ links to any one server 
 (run only one copy): its NickServ is the network's account service, and every server relays SASL/REGISTER to it.
 Use the same `host_masking_secret` on every server so cloaks match. Opers are per server, but KILL, GLINE,
 SQUIT and SAJOIN/SAPART/SANICK/CHGHOST/CHGIDENT reach users on any server.
-`tools/linkmgmt.py add` asks the questions and prints both sides' blocks.
+`tools/linkmgmt.py add` (also `edit`, `del`) asks the questions, writes this server's side after showing the diff (backup kept,
+validated with `--check`, restored if refused) and prints the other server's side to paste there; `--dry-run` only prints.
 
 Encrypted links: `[links] tls = true` on both servers (a server that accepts links needs `[tls]` enabled; its
 certificate is reused). Pin each other's certificate with `fingerprint = "sha256:..."` in the `[[links.peers]]`
