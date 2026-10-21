@@ -211,8 +211,9 @@ static const help_entry_t HELP_TABLE[] = {
     {"KICK", {"KICK <channel> <nick> [:reason]", "Remove a member from a channel. Requires chanop, halfop, or server-oper."}},
     {"KILL", {"KILL <nick> [:reason]", "Disconnect a user from the network. Server-oper only."}},
     {"KLINE", {"KLINE [<mask> [<duration>] [:reason]]",
-               "List, or add, a ban. <mask> may be an IP glob (203.0.113.*), a host glob "
-               "(*.example.com), or user@host. No argument lists all active K/G/Z-lines. Server-oper only."}},
+               "List, or add, a ban. <mask> may be an IP glob (203.0.113.*), a CIDR range (203.0.113.0/24, "
+               "2001:db8::/32 -- write an IPv6 one starting with ':' as 0::...), a host glob (*.example.com), "
+               "or user@host. No argument lists all active K/G/Z-lines. Server-oper only."}},
     {"GLINE", {"GLINE [<mask> [<duration>] [:reason]]", "Same as KLINE. Server-oper only."}},
     {"ZLINE", {"ZLINE [<mask> [<duration>] [:reason]]",
                "Like KLINE, but matched at connect time against the IP only -- it cannot see a "

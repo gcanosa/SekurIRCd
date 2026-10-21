@@ -1,7 +1,11 @@
 #include "proto.h"
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 #include <ctype.h>
 #include <limits.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -345,6 +349,12 @@ int irc_mask_match(const char *nick, const char *user, const char *host, const c
 }
 
 int irc_host_mask_match(const char *user, const char *host, const char *mask) {
+    const char *at = strrchr(mask, '@');
+    if (strchr(at ? at + 1 : mask, '/')) { /* user@CIDR: the user part is a glob, the host part an address range */
+        char um[128];
+        snprintf(um, sizeof um, "%.*s", at ? (int)(at - mask) : 1, at ? mask : "*");
+        return irc_glob_match(um, user ? user : "") && irc_ip_mask_match(at ? at + 1 : mask, host ? host : "");
+    }
     char full[64 + 1 + 128 + 1 + 256 + 1] /* NICKLEN + ident + HOSTLEN */;
     snprintf(full, sizeof full, "%s@%s", user ? user : "", host ? host : "");
     if (strchr(mask, '@')) {
@@ -353,6 +363,79 @@ int irc_host_mask_match(const char *user, const char *host, const char *mask) {
     char m2[320];
     snprintf(m2, sizeof m2, "*@%s", mask);
     return irc_glob_match(m2, full);
+}
+
+/* --- IP addresses -------------------------------------------------------------- */
+
+/* 4 (IPv4) or 6 into `buf` (16 bytes), 0 if `ip` isn't an address. "0::1" (our wire form) parses as IPv6 as it is. */
+static int parse_ip(const char *ip, unsigned char *buf) {
+    if (inet_pton(AF_INET, ip, buf) == 1) return 4;
+    if (inet_pton(AF_INET6, ip, buf) == 1) return 6;
+    return 0;
+}
+
+static int format_ip(int fam, const unsigned char *buf, char *out, size_t outsz) {
+    static const unsigned char MAPPED[12] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff};
+    char tmp[64];
+    if (fam == 6 && memcmp(buf, MAPPED, 12) == 0) { fam = 4; buf += 12; } /* ::ffff:a.b.c.d is an IPv4 client */
+    if (!inet_ntop(fam == 4 ? AF_INET : AF_INET6, buf, tmp, sizeof tmp)) return -1;
+    int n = snprintf(out, outsz, "%s%s", tmp[0] == ':' ? "0" : "", tmp);
+    return n < 0 || (size_t)n >= outsz ? -1 : 0;
+}
+
+int irc_ip_normalize(const char *in, char *out, size_t outsz) {
+    unsigned char buf[16];
+    int fam = parse_ip(in, buf);
+    return fam ? format_ip(fam, buf, out, outsz) : -1;
+}
+
+int irc_sockaddr_ip(const struct sockaddr *sa, char *out, size_t outsz, int *port) {
+    if (sa->sa_family == AF_INET) {
+        const struct sockaddr_in *s4 = (const struct sockaddr_in *)sa;
+        if (port) *port = ntohs(s4->sin_port);
+        return format_ip(4, (const unsigned char *)&s4->sin_addr, out, outsz);
+    }
+    if (sa->sa_family == AF_INET6) {
+        const struct sockaddr_in6 *s6 = (const struct sockaddr_in6 *)sa;
+        if (port) *port = ntohs(s6->sin6_port);
+        return format_ip(6, (const unsigned char *)&s6->sin6_addr, out, outsz);
+    }
+    return -1;
+}
+
+/* `ip` inside `net`/`bits` (both already parsed, same family). */
+static int prefix_hit(const unsigned char *a, const unsigned char *b, int bits) {
+    int whole = bits / 8, rest = bits % 8;
+    if (memcmp(a, b, (size_t)whole) != 0) return 0;
+    if (!rest) return 1;
+    unsigned char m = (unsigned char)(0xff << (8 - rest));
+    return (a[whole] & m) == (b[whole] & m);
+}
+
+int irc_ip_mask_match(const char *mask, const char *ip) {
+    const char *slash = strchr(mask, '/');
+    if (!slash) return irc_glob_match(mask, ip);
+    char net[64];
+    if ((size_t)(slash - mask) >= sizeof net || !isdigit((unsigned char)slash[1])) return 0;
+    snprintf(net, sizeof net, "%.*s", (int)(slash - mask), mask);
+    char *end;
+    long bits = strtol(slash + 1, &end, 10);
+    unsigned char nb[16], ib[16];
+    int nf = parse_ip(net, nb), ifam = parse_ip(ip, ib);
+    if (*end || !nf || nf != ifam || bits < 0 || bits > (nf == 4 ? 32 : 128)) return 0;
+    return prefix_hit(nb, ib, (int)bits);
+}
+
+void irc_ip_limit_key(const char *ip, int prefix6, char *out, size_t outsz) {
+    unsigned char b[16];
+    if (parse_ip(ip, b) != 6 || prefix6 <= 0 || prefix6 >= 128) { snprintf(out, outsz, "%s", ip); return; }
+    for (int i = 0; i < 16; i++) {
+        int keep = prefix6 - i * 8;
+        b[i] &= keep >= 8 ? 0xff : keep <= 0 ? 0 : (unsigned char)(0xff << (8 - keep));
+    }
+    char net[64];
+    if (format_ip(6, b, net, sizeof net) != 0) { snprintf(out, outsz, "%s", ip); return; }
+    snprintf(out, outsz, "%s/%d", net, prefix6);
 }
 
 /* --- misc --------------------------------------------------------------------- */

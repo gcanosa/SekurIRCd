@@ -66,8 +66,15 @@ typedef struct server {
     char msgid_prefix[17]; /* random per run, so msgids stay unique across restarts */
     uint64_t msgid_counter;
     int listen_fd;
+#define L6_MAIN 0
+#define L6_TLS 1
+#define L6_WS 2
+#define L6_LINK 3
     /* What each listener is actually bound to, so a rehash can tell which ones to rebind (net_apply_listeners). */
     struct { char bind[256]; int port; } bound_main, bound_tls, bound_ws, bound_link;
+    /* [server] ipv6: each listener's IPv6-only twin (index L6_*), -1 when off. Separate sockets, so IPv4 clients keep
+     * plain IPv4 addresses (a dual-stack socket would show them as ::ffff:a.b.c.d and miss every existing IPv4 ban). */
+    struct { int fd; char bind[256]; int port; } l6[4];
     int ws_listen_fd;   /* -1 unless [websocket] enabled */
     int tls_listen_fd;  /* -1 unless [tls] enabled (see net.c's TLS listener) */
     SSL_CTX *tls_ctx;
@@ -158,6 +165,9 @@ channel_t *server_get_or_create_channel(server_t *srv, const char *name); /* NUL
 void server_add_connection(server_t *srv, client_t *cl);
 /* Concurrent connections currently held by `ip` (max_connections_per_ip). */
 int server_ip_count(server_t *srv, const char *ip);
+/* The key per-IP limits use for `ip`: itself, or for IPv6 its /ipv6_limit_prefix ("2001:db8:1:2::/64"), which is
+ * also a valid ban mask. */
+void server_ip_key(const server_t *srv, const char *ip, char *out, size_t outsz);
 /* Writes the K-line file if anything changed since the last flush. Called
  * from net.c's one-second tick: a connect flood or a DNSBL burst would
  * otherwise re-serialize and rewrite the whole list once per event. */

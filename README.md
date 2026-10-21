@@ -395,7 +395,8 @@ make clean
 
 See [`config/sekurircd.template.toml`](config/sekurircd.template.toml). Key sections:
 
-- `[server]` — name, network, version, `bind` (default `0.0.0.0`), `port` (default `6667`)
+- `[server]` — name, network, version, `bind` (default `0.0.0.0`), `port` (default `6667`),
+  `ipv6` (default `false`; see "IPv6" below), `bind6` (default `"::"`), `ipv6_limit_prefix` (default `64`)
 - `[security]` — line/param length limits, flood guard, keepalive
   `ping_interval` / `ping_timeout` (defaults 120s / 300s), `host_masking`
   (default `false`), `klines_file` (K/G-line persistence, empty = in-memory only),
@@ -437,6 +438,25 @@ See [`config/sekurircd.template.toml`](config/sekurircd.template.toml). Key sect
 Relative paths: `motd`, `tls.cert_file`, `tls.key_file` resolve against the
 **config file's directory**; `logging.directory` resolves against the
 **current working directory** (all also accept absolute paths).
+
+## IPv6
+
+Off by default, so an upgrade changes nothing: with `[server] ipv6 = false` the server listens and resolves exactly
+as before, over IPv4 only. With `ipv6 = true` every listener (clients, TLS, WebSocket, server links) also gets an
+IPv6 socket on `bind6` (`"::"` = every interface; `[links] bind6` for the link listener). These are separate,
+IPv6-only sockets, so IPv4 clients keep plain IPv4 addresses and existing bans keep matching them. `/REHASH`
+turns it on or off.
+
+- An IPv6 client shows as e.g. `2001:db8::5`; one that would start with `:` is written `0::1`, because an IRC
+  parameter can't start with `:`. Type IPv6 ban masks the same way (`0::1`, `0::/64`).
+- Masks take CIDR as well as globs everywhere an IP is matched: K/G/Z-lines and E-lines, `allowed_ips`, oper
+  `hosts`, `[[webirc]]`/class/proxy hosts, protection exemptions: `KLINE *@2001:db8::/32`, `ZLINE 203.0.113.0/24`.
+  A literal IP in a ban is stored in canonical form; a `/0` (everyone) is refused like `*`.
+- Per-IP limits (connections per IP, the connect-flood throttle and its automatic Z-lines) and host cloaks count
+  an IPv6 client by its `/64` (`ipv6_limit_prefix`), the block a provider gives one customer, so rotating
+  addresses inside it gets around neither. IPv4 is counted and cloaked as before.
+- Reverse DNS (forward-confirmed), ident, DNSBL (reversed-nibble queries) and link dialing work over IPv6; the
+  proxy scanner stays IPv4-only and skips IPv6 clients.
 
 ## Adding or updating an IRC operator
 

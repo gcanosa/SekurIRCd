@@ -75,7 +75,7 @@ int ws_forwarded_client(const char *list, const char globs[][CFG_MASK], int nglo
         v[strcspn(v, " \t")] = '\0';
         snprintf(out, outsz, "%s", v);
         int trusted = 0;
-        for (int i = 0; i < nglobs && !trusted; i++) trusted = irc_glob_match(globs[i], v);
+        for (int i = 0; i < nglobs && !trusted; i++) trusted = irc_ip_mask_match(globs[i], v);
         if (!trusted || !comma) return out[0] ? 0 : -1;
         *comma = '\0';
     }

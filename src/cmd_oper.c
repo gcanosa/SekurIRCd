@@ -565,11 +565,26 @@ static void line_common(server_t *srv, client_t *cl, irc_message_t *msg, const c
     /* Refuse a mask whose host component is a bare "*": that bans every
      * address on the network. Checked on the host part specifically, since
      * "*@*" and "*!*@*" are just longer spellings of the same thing. */
-    const char *hostpart = strrchr(maskbuf, '@');
+    char *hostpart = strrchr(maskbuf, '@');
     hostpart = hostpart ? hostpart + 1 : maskbuf;
-    if (strcmp(hostpart, "*") == 0) {
-        notice_self(srv, cl, "Refusing to add a line matching every address (mask '*')");
+    const char *slash = strchr(hostpart, '/');
+    if (strcmp(hostpart, "*") == 0 || (slash && strtol(slash + 1, NULL, 10) == 0)) {
+        notice_self(srv, cl, "Refusing to add a line matching every address (mask '*' or a /0)");
         return;
+    }
+    /* A literal IP (or a CIDR's network part) is stored the way client addresses are written -- canonical, and "0::1"
+     * rather than "::1" -- so 2001:DB8:0::1 still matches the client shown as 2001:db8::1. */
+    {
+        char net[64], norm[64];
+        size_t nl = slash ? (size_t)(slash - hostpart) : strlen(hostpart);
+        if (nl < sizeof net) {
+            snprintf(net, sizeof net, "%.*s", (int)nl, hostpart);
+            if (irc_ip_normalize(net, norm, sizeof norm) == 0 && strcmp(net, norm) != 0) {
+                char rest[64];
+                snprintf(rest, sizeof rest, "%s", slash ? slash : "");
+                snprintf(hostpart, sizeof maskbuf - (size_t)(hostpart - maskbuf), "%s%s", norm, rest);
+            }
+        }
     }
     long duration = 0;
     int argi = 1;

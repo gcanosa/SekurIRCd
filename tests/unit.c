@@ -382,6 +382,40 @@ static void test_scrypt_roundtrip(void) {
     assert(crypto_verify_password("correct horse battery staple", "") == 0);
 }
 
+static void test_ip_helpers(void) {
+    char o[64];
+    assert(irc_ip_normalize("::1", o, sizeof o) == 0 && strcmp(o, "0::1") == 0);              /* never starts with ':' */
+    assert(irc_ip_normalize("0::1", o, sizeof o) == 0 && strcmp(o, "0::1") == 0);             /* our own form round-trips */
+    assert(irc_ip_normalize("2001:DB8:0:0:0:0:0:1", o, sizeof o) == 0 && strcmp(o, "2001:db8::1") == 0);
+    assert(irc_ip_normalize("::ffff:203.0.113.5", o, sizeof o) == 0 && strcmp(o, "203.0.113.5") == 0);
+    assert(irc_ip_normalize("203.0.113.5", o, sizeof o) == 0 && strcmp(o, "203.0.113.5") == 0);
+    assert(irc_ip_normalize("irc.example.net", o, sizeof o) == -1);
+
+    assert(irc_ip_mask_match("203.0.113.0/24", "203.0.113.77") == 1);
+    assert(irc_ip_mask_match("203.0.113.0/24", "203.0.114.1") == 0);
+    assert(irc_ip_mask_match("203.0.113.5/32", "203.0.113.5") == 1);
+    assert(irc_ip_mask_match("0.0.0.0/0", "8.8.8.8") == 1);
+    assert(irc_ip_mask_match("2001:db8::/32", "2001:db8:ffff::1") == 1);
+    assert(irc_ip_mask_match("2001:db8:1:2::/64", "2001:db8:1:2:a:b:c:d") == 1);
+    assert(irc_ip_mask_match("2001:db8:1:2::/64", "2001:db8:1:3::1") == 0);
+    assert(irc_ip_mask_match("2001:db8::/33", "2001:db8:8000::1") == 0);                    /* a non-byte boundary */
+    assert(irc_ip_mask_match("::1/128", "0::1") == 1);
+    assert(irc_ip_mask_match("203.0.113.0/24", "2001:db8::1") == 0);                        /* families never cross */
+    assert(irc_ip_mask_match("203.0.113.0/33", "203.0.113.1") == 0 && irc_ip_mask_match("x/8", "1.2.3.4") == 0);
+    assert(irc_ip_mask_match("203.0.113.*", "203.0.113.9") == 1);                           /* globs as before */
+    assert(irc_host_mask_match("bob", "2001:db8::5", "*@2001:db8::/32") == 1);
+    assert(irc_host_mask_match("bob", "2001:db8::5", "alice@2001:db8::/32") == 0);
+    assert(irc_host_mask_match("bob", "203.0.113.9", "203.0.113.0/24") == 1);
+    assert(irc_host_mask_match("bob", "host.example", "*@203.0.113.0/24") == 0);
+
+    irc_ip_limit_key("2001:db8:1:2:a:b:c:d", 64, o, sizeof o); assert(strcmp(o, "2001:db8:1:2::/64") == 0);
+    irc_ip_limit_key("2001:db8:1:2:ffff::", 64, o, sizeof o); assert(strcmp(o, "2001:db8:1:2::/64") == 0);
+    irc_ip_limit_key("2001:db8:1:2:a:b:c:d", 48, o, sizeof o); assert(strcmp(o, "2001:db8:1::/48") == 0);
+    irc_ip_limit_key("0::1", 64, o, sizeof o); assert(strcmp(o, "0::/64") == 0);
+    irc_ip_limit_key("203.0.113.5", 64, o, sizeof o); assert(strcmp(o, "203.0.113.5") == 0);  /* IPv4 untouched */
+    irc_ip_limit_key("2001:db8::1", 128, o, sizeof o); assert(strcmp(o, "2001:db8::1") == 0);
+}
+
 static void test_parse_fingerprint(void) {
     char out[65];
     const char *hex = "0a884e9b9cec5b74dbc7340dd46abcfa25c9f8f6177e5d0a45079c506ffae48c";
@@ -1099,6 +1133,7 @@ int main(void) {
     RUN(test_lazy_list_helpers);
     RUN(test_scrypt_roundtrip);
     RUN(test_parse_fingerprint);
+    RUN(test_ip_helpers);
     RUN(test_scrypt_cross_compat_vector);
     RUN(test_random_hex);
     RUN(test_hmac_hex);

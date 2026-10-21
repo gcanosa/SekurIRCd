@@ -1778,18 +1778,16 @@ static void handle_svcmember(irc_message_t *msg) {
 static int connect_hub(void) {
     struct addrinfo hints, *res;
     memset(&hints, 0, sizeof hints);
-    hints.ai_family = AF_INET;
+    hints.ai_family = AF_UNSPEC; /* link_host may be an IPv6 address; a name is tried address by address */
     hints.ai_socktype = SOCK_STREAM;
     char portbuf[16];
     snprintf(portbuf, sizeof portbuf, "%d", g_cfg.link_port);
     if (getaddrinfo(g_cfg.link_host, portbuf, &hints, &res) != 0) return -1;
 
-    int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    if (fd < 0) { freeaddrinfo(res); return -1; }
-    if (connect(fd, res->ai_addr, res->ai_addrlen) != 0) {
-        close(fd);
-        freeaddrinfo(res);
-        return -1;
+    int fd = -1;
+    for (struct addrinfo *ai = res; ai && fd < 0; ai = ai->ai_next) {
+        fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (fd >= 0 && connect(fd, ai->ai_addr, ai->ai_addrlen) != 0) { close(fd); fd = -1; }
     }
     freeaddrinfo(res);
     return fd;

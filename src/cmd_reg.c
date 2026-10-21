@@ -177,10 +177,10 @@ void cmd_cap_notify_changes(server_t *srv, int old_accounts, int old_history) {
  * says the connection's real address is `ip`. Rewrites ip/realhost/host,
  * drops the lookups already started against the intermediary's address, and
  * re-checks K-lines. Returns -1 (and queues a disconnect) on junk. */
-int client_apply_real_address(server_t *srv, client_t *cl, const char *ip, const char *hostname) {
-    struct in_addr a4; struct in6_addr a6;
-    if (strlen(ip) >= sizeof cl->ip || (inet_pton(AF_INET, ip, &a4) != 1 && inet_pton(AF_INET6, ip, &a6) != 1)) {
-        log_warn("net", "trusted intermediary sent an invalid IP '%s'", ip);
+int client_apply_real_address(server_t *srv, client_t *cl, const char *given, const char *hostname) {
+    char ip[sizeof cl->ip]; /* normalized: an IPv6 one can't start with ':' on the wire, see irc_ip_normalize */
+    if (irc_ip_normalize(given, ip, sizeof ip) != 0) {
+        log_warn("net", "trusted intermediary sent an invalid IP '%s'", given);
         snprintf(cl->quit_reason, sizeof cl->quit_reason, "Invalid forwarded address");
         cl->quitting = 1;
         return -1;
@@ -214,7 +214,7 @@ void cmd_webirc(server_t *srv, client_t *cl, irc_message_t *msg) {
     for (int i = 0; i < srv->cfg.n_webirc && !match; i++) {
         const cfg_webirc_t *w = &srv->cfg.webirc[i];
         int host_ok = 0;
-        for (int j = 0; j < w->n_hosts; j++) if (irc_glob_match(w->hosts[j], cl->ip)) { host_ok = 1; break; }
+        for (int j = 0; j < w->n_hosts; j++) if (irc_ip_mask_match(w->hosts[j], cl->ip)) { host_ok = 1; break; }
         if (host_ok && crypto_secure_streq(msg->params[0], w->password)) match = w;
     }
     if (!match) {

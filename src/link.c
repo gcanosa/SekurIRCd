@@ -221,19 +221,22 @@ static int connect_bounded(int fd, const struct sockaddr *sa, socklen_t slen, in
     return 0;
 }
 
-static int dial_uplink(const char *host, int port) {
+/* IPv4 only unless [server] ipv6 is on; then each address `host` has, in the resolver's order (IPv6 first where it's
+ * preferred), until one connects. */
+static int dial_uplink(const char *host, int port, int ipv6) {
     struct addrinfo hints, *res;
     memset(&hints, 0, sizeof hints);
-    hints.ai_family = AF_INET;
+    hints.ai_family = ipv6 ? AF_UNSPEC : AF_INET;
     hints.ai_socktype = SOCK_STREAM;
     char portbuf[16];
     snprintf(portbuf, sizeof portbuf, "%d", port);
     if (getaddrinfo(host, portbuf, &hints, &res) != 0) return -1;
-    int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    if (fd < 0) { freeaddrinfo(res); return -1; }
-    int rc = connect_bounded(fd, res->ai_addr, res->ai_addrlen, LINK_DIAL_TIMEOUT_MS);
+    int fd = -1;
+    for (struct addrinfo *ai = res; ai && fd < 0; ai = ai->ai_next) {
+        fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (fd >= 0 && connect_bounded(fd, ai->ai_addr, ai->ai_addrlen, LINK_DIAL_TIMEOUT_MS) != 0) { close(fd); fd = -1; }
+    }
     freeaddrinfo(res);
-    if (rc != 0) { close(fd); return -1; }
     return fd;
 }
 
@@ -241,7 +244,7 @@ static int dial_uplink(const char *host, int port) {
  * by SO_RCVTIMEO, see connect_bounded); link establishment is rare, not a per-request path. */
 static int dial_peer(server_t *srv, int peer_idx) {
     cfg_link_peer_t *up = &srv->cfg.links.peers[peer_idx];
-    int fd = dial_uplink(up->host, up->port);
+    int fd = dial_uplink(up->host, up->port, srv->cfg.server.ipv6);
     if (fd < 0) {
         log_warn("link", "could not connect to %s:%d", up->host, up->port);
         return -1;
@@ -260,8 +263,8 @@ static int dial_peer(server_t *srv, int peer_idx) {
         lc->ssl = SSL_new(ctx);
         SSL_set_mode(lc->ssl, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER | SSL_MODE_ENABLE_PARTIAL_WRITE); /* the sendq moves/grows between retries */
         SSL_set_fd(lc->ssl, fd);
-        struct in_addr ip4;
-        if (inet_pton(AF_INET, up->host, &ip4) != 1) SSL_set_tlsext_host_name(lc->ssl, up->host); /* SNI (never for an IP literal) */
+        char lit[64];
+        if (irc_ip_normalize(up->host, lit, sizeof lit) != 0) SSL_set_tlsext_host_name(lc->ssl, up->host); /* SNI (never for an IP literal) */
         if (up->fingerprint[0]) {
             SSL_set_verify(lc->ssl, SSL_VERIFY_PEER, accept_any_cert); /* pinned: checked once connected, below */
         } else if (!srv->cfg.links.tls_insecure_skip_verify) {
@@ -433,14 +436,14 @@ static int link_verify_throttled(const char *ip) {
 static int peer_ip_allowed(const cfg_link_peer_t *p, const char *ip) {
     if (p->n_allowed_ips == 0) return 1;
     for (int j = 0; j < p->n_allowed_ips; j++)
-        if (irc_glob_match(p->allowed_ips[j], ip)) return 1;
+        if (irc_ip_mask_match(p->allowed_ips[j], ip)) return 1;
     return 0;
 }
 
-void link_accept(server_t *srv) {
-    struct sockaddr_in peer;
+void link_accept(server_t *srv, int listen_fd) {
+    struct sockaddr_storage peer;
     socklen_t plen = sizeof peer;
-    int fd = accept(srv->link_listen_fd, (struct sockaddr *)&peer, &plen);
+    int fd = accept(listen_fd, (struct sockaddr *)&peer, &plen);
     if (fd < 0) {
         if (errno == EMFILE || errno == ENFILE) { /* listener stays readable -- don't spin poll() */
             log_error("link", "accept failed: %s -- pausing the listeners for 1s", strerror(errno));
@@ -450,7 +453,7 @@ void link_accept(server_t *srv) {
     }
 
     char ipbuf[64];
-    inet_ntop(AF_INET, &peer.sin_addr, ipbuf, sizeof ipbuf);
+    if (irc_sockaddr_ip((struct sockaddr *)&peer, ipbuf, sizeof ipbuf, NULL) != 0) { close(fd); return; }
 
     /* Same blocklist as the client listener -- a K-lined host shouldn't get
      * a free pass at the link port just because it's a different socket. */
@@ -521,7 +524,7 @@ void link_accept(server_t *srv) {
         SSL_set_verify(lc->ssl, SSL_VERIFY_PEER, accept_any_cert); /* ask for (never require) the dialer's certificate, for pinning */
         SSL_set_fd(lc->ssl, fd);
         lc->tls_handshaking = 1;
-        lc->tls_sniff = strncmp(ipbuf, "127.", 4) == 0; /* the services daemon on this box doesn't speak TLS */
+        lc->tls_sniff = strncmp(ipbuf, "127.", 4) == 0 || strcmp(ipbuf, "0::1") == 0; /* the services daemon on this box doesn't speak TLS */
     }
     lc->next = srv->links;
     srv->links = lc;
