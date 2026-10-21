@@ -1,5 +1,17 @@
 [
   {
+    "tag": "v1.2.5",
+    "date": "2026-10-21",
+    "changes": [
+      "Server links: pin each other's TLS certificate with fingerprint = \"sha256:...\" in [[links.peers]]. Self-signed certificates work without tls_insecure_skip_verify, a server that doesn't show the pinned certificate is refused before any password is sent or checked, and with a fingerprint the password is optional, so neither side has to keep a plain-text secret. The dialing server now presents its own [tls] certificate, and the accepting one asks for it",
+      "Server links: turning on [links] tls no longer cuts off the services daemon, which doesn't speak TLS: plain links are still accepted from 127.0.0.1, and only TLS from anywhere else",
+      "Passwords: tools/confcheck.py --fix --write turns plain-text passwords into scrypt password_hash lines (operators, die/restart, link peers the server only accepts from); the same passwords keep working. The ircd logs a reminder at start and on /REHASH while any are left",
+      "File permissions: confcheck warns about configs, the TLS key, account and ChanServ stores and --fix backups that other local users can read or change, with the exact chmod/chown for each case; --fix backups are now private (0600)",
+      "Tools: tools/linkmgmt.py fingerprint prints this server's certificate fingerprint, test HOST PORT --tls shows the other server's, and the add/edit wizard offers pinning",
+      "Testing: 132 end-to-end integration tests (pinned TLS links, wrong pins on either side, services over loopback)"
+    ]
+  },
+  {
     "tag": "v1.2.4",
     "date": "2026-10-19",
     "changes": [
