@@ -20,12 +20,14 @@ For each live config (sekurircd.toml, protection.toml, services.toml):
 
 --fix never changes what the server does: a moved setting keeps its value (one already set in its new
 home wins there today, so the old copy is just commented out), and everything else it adds or disables
-is a comment or was already ignored. A [server] name without a dot is left for you.
+is a comment or was already ignored. A [server] name without a dot is left for you. Plain-text passwords
+the server can check as a hash ([[operators]], die/restart, link peers it only accepts from) become scrypt
+password_hash lines: the same passwords keep working, and only the .pre-fix backup still holds them.
 
 Exit status: 0 = OK (warnings allowed), 1 = errors found (--fix: refused / not applied),
 2 = --fix found changes (preview only).
 """
-import argparse, contextlib, difflib, io, json, os, shutil, subprocess, sys, time
+import argparse, contextlib, difflib, io, json, os, re, shutil, subprocess, sys, time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from upgrade import ROOT, TEMPLATES, SEC_RE, KEY_RE, VAL_RE, parse_settings, bold, dim, red, green, yellow, cyan  # noqa: E402
@@ -293,6 +295,64 @@ def set_key(lines, sec, val):
     lines[i:i] = val
 
 
+HASHABLE = {"operators": ("password",), "security": ("die_password", "restart_password"), "links.peers": ("password",)}
+
+
+def toml_str(raw):
+    """The string a single-line TOML value `raw` (maybe with a trailing comment) holds, or None."""
+    if tomllib:
+        try:
+            v = tomllib.loads(f"v = {raw}")["v"]
+            return v if isinstance(v, str) else None
+        except tomllib.TOMLDecodeError:
+            return None
+    m = re.match(r"'([^']*)'\s*(#.*)?$", raw)  # ponytail: pre-3.11 fallback, basic and literal strings only
+    if m:
+        return m[1]
+    with contextlib.suppress(ValueError):
+        v, end = json.JSONDecoder().raw_decode(raw)
+        if isinstance(v, str) and raw[end:].strip()[:1] in ("", "#"):
+            return v
+    return None
+
+
+def plain_passwords(lines):
+    """[(line, label, password)] for each plain-text password in a sekurircd.toml the server could check as a hash
+    instead. A link peer with a host dials out and has to send the real password, so it's left alone."""
+    res = []
+    hs = [(n, SEC_RE.match(l)[1].strip("[]")) for n, l in enumerate(lines) if SEC_RE.match(l) and not is_comment(l)]
+    count = {}
+    for n, (start, sec) in enumerate(hs):
+        end = hs[n + 1][0] if n + 1 < len(hs) else len(lines)
+        idx = count[sec] = count.get(sec, -1) + 1
+        if sec not in HASHABLE:
+            continue
+        keys, j = {}, start + 1
+        while j < end:
+            if is_setting(lines[j]) and not is_comment(lines[j]):
+                e = value_end(lines, j); keys[KEY_RE.match(lines[j])[2]] = (j, e); j = e + 1
+            else:
+                j += 1
+        if sec == "links.peers" and "host" in keys:
+            continue
+        for key in HASHABLE[sec]:
+            if key in keys and keys[key][0] == keys[key][1]:
+                pw = toml_str(KEY_RE.match(lines[keys[key][0]])[3])
+                if pw:
+                    label = f"[security] {key}" if sec == "security" else f"[[{sec}]] #{idx + 1} {key}"
+                    res.append((keys[key][0], label, pw))
+    return res
+
+
+def hash_passwords(lines):
+    from linkmgmt import scrypt_hash  # same format and cost as `sekurircd --hash-password`
+    for i, label, pw in reversed(plain_passwords(lines)):
+        k = KEY_RE.match(lines[i])
+        indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())]
+        lines[i:i + 1] = [f"{indent}{NOTE} was a plain-text password; this is its scrypt hash (log in with the same password)",
+                          f'{indent}{k[2]}_hash = "{scrypt_hash(pw)}"']
+
+
 def renamed(val, key):
     return [KEY_RE.sub(lambda m: m[0].replace(m[2], key, 1), val[0], 1), *val[1:]]
 
@@ -464,6 +524,8 @@ def plan_fix():
         else:  # first setting moved into it: start the file
             F[prot][:0] = [f"# SekurIRCd protection settings, started by tools/confcheck.py --fix.",
                            f"# Every option is documented in {prot_tpl}."]
+    if os.path.exists(S):
+        hash_passwords(load(S))
     for p in (S, SV, prot):
         if p and (p in F or os.path.exists(p)):
             fill_missing(load(p), prot_tpl if p == prot else tpl_of[p])
@@ -531,13 +593,17 @@ def selftest():
     # --fix: a deprecated key moves (into a protection.toml it starts), [dnsbl] converts, [accounts] goes to
     # [nickserv], an unknown key is commented out, missing options are added commented out -- and a second run is a no-op
     files = {
-        "config/sekurircd.template.toml": '[server]\nname = "irc.x.org"\n# Doc.\n#motd = "m"\n[security]\nping = 1\n',
+        "config/sekurircd.template.toml": '[server]\nname = "irc.x.org"\n# Doc.\n#motd = "m"\n[security]\nping = 1\n'
+                                          '#[[operators]]\n#name = "x"\n#password_hash = "h"\n#password = "p"\n'
+                                          '#[[links.peers]]\n#name = "x"\n#host = "h"\n#password_hash = "h"\n#password = "p"\n',
         "config/protection.template.toml": '[flood]\n#max_msgs = 20\n[blacklist]\n#enabled = true\n#timeout = 5.0\n'
                                            '#action = "zline"\n#ban_duration = "1d"\n#[[blacklist.zone]]\n#name = "z"\n'
                                            '#ban_unknown = true\n#reason = "r"\n',
         "services/services.template.toml": '[nickserv]\n#max_accounts = 0\n#store_file = "x"\n',
         S: '[server]\nname = "irc.x.org"\nbogus = [\n  1,\n]\n[security]\nping = 1\nflood_max_msgs = 7\n'
-           '[accounts]\nmax_accounts = 9\nstore_file = "accounts.json"\n[dnsbl]\nenabled = true\nzones = ["z.org"]\n',
+           '[accounts]\nmax_accounts = 9\nstore_file = "accounts.json"\n[dnsbl]\nenabled = true\nzones = ["z.org"]\n'
+           '[[operators]]\nname = "a"\n  password = "s3cr#t"  # old\n[[links.peers]]\nname = "hub.x.org"\npassword = "p1"\n'
+           '[[links.peers]]\nname = "leaf.x.org"\nhost = "1.2.3.4"\npassword = "p2"\n',
         SV: '[nickserv]\nmax_accounts = 3\n',
     }
     cwd = os.getcwd()
@@ -555,6 +621,11 @@ def selftest():
         finally:
             os.chdir(cwd)
     assert "# bogus = [\n#   1,\n# ]" in s and '#motd = "m"' in s and "# flood_max_msgs = 7" in s and "# [dnsbl]" in s, s
+    assert '  password_hash = "scrypt$16384$8$1$' in s and "s3cr#t" not in s and 'password = "p1"' not in s, s
+    assert 'password = "p2"' in s and len(re.findall(r"password_hash = ", s)) == 2, s  # the dialing peer keeps its own
+    import hashlib
+    salt, dig = re.search(r'scrypt\$16384\$8\$1\$(\w+)\$(\w+)', s).groups()
+    assert hashlib.scrypt(b"s3cr#t", salt=bytes.fromhex(salt), n=16384, r=8, p=1, dklen=64).hex() == dig
     assert "max_msgs = 7\n" in pr and '[[blacklist.zone]]\nname = "z.org"' in pr and 'action = "zline"' in pr, pr
     assert "max_accounts = 3\n" in sv and 'store_file = "../config/accounts.json"' in sv, sv  # services' own value wins
     if tomllib:
@@ -580,6 +651,9 @@ def report(config, quiet):
         binary = CHECKERS.get(path, "bin/sekurircd" if config else None)
         if binary:
             check_daemon(path, binary)
+        if path == S or config:
+            for _, label, _ in plain_passwords(open(path).read().splitlines()):
+                warn(f"{label} is plain text -- --fix --write turns it into a scrypt password_hash (same password)")
         tpl = tpl_of.get(path, "config/sekurircd.template.toml" if config else None)
         if tpl and os.path.exists(tpl):
             check_template(path, tpl, quiet)
@@ -619,8 +693,11 @@ def fix(write, quiet):
         print(f"  {bold(str(len(changes)))} file(s) would change. Apply with {bold('tools/confcheck.py --fix --write')} "
               f"{dim('(backups kept; the daemons validate the result first)')}")
         return 2
+    hashed = S in changes and plain_passwords((changes[S][0] or "").splitlines())
     if not apply_fix(changes):
         return 1
+    if hashed:
+        warn(f"the {S}.pre-fix-* backup still has the plain-text password(s): delete it once /OPER works")
     note("running daemons pick this up at /REHASH (services: restart) -- nothing they do changes")
     report(None, quiet); summary()
     return 1 if errors else 0

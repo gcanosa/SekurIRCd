@@ -76,6 +76,18 @@ void server_next_msgid(server_t *srv, char *out, size_t outsz) {
     snprintf(out, outsz, "%s-%llu", srv->msgid_prefix, (unsigned long long)++srv->msgid_counter);
 }
 
+/* A plain-text password still works, but anyone who can read the config can read it too. */
+static void warn_plain_passwords(const config_t *cfg) {
+    int n = 0;
+    for (int i = 0; i < cfg->n_operators; i++) n += cfg->operators[i].password[0] != '\0';
+    for (int i = 0; i < cfg->links.n_peers; i++) n += !cfg->links.peers[i].host[0] && cfg->links.peers[i].password[0];
+    n += cfg->security.die_password[0] != '\0';
+    n += cfg->security.restart_password[0] != '\0';
+    if (n)
+        log_warn("main", "%s has %d plain-text password(s) that could be scrypt hashes -- "
+                         "tools/confcheck.py --fix --write converts them (same passwords keep working)", cfg->path, n);
+}
+
 int server_init(server_t *srv, const config_t *cfg) {
     memset(srv, 0, sizeof *srv);
     srv->cfg = *cfg;
@@ -94,6 +106,7 @@ int server_init(server_t *srv, const config_t *cfg) {
         log_warn("main", "[accounts] in %s is no longer used: accounts, NickServ and SASL are served by the services daemon "
                          "(bin/services, [nickserv] in services.toml), which uses the existing account database in place",
                  srv->cfg.path);
+    warn_plain_passwords(&srv->cfg);
 
     server_kline_load(srv);
     spam_reload(srv);
@@ -150,6 +163,7 @@ int server_rehash(server_t *srv, char *errbuf, size_t errbufsz) {
     config_free(&srv->cfg); /* the new config owns its own arrays; nothing keeps a pointer into the old ones across commands */
     srv->cfg = tmp;
     server_apply_cloak_secret(srv);
+    warn_plain_passwords(&srv->cfg);
     if (srv->self_srv) snprintf(srv->self_srv->desc, sizeof srv->self_srv->desc, "%s", srv->cfg.server.network); /* LINKS/MAP description follows the network name */
     cmd_cap_notify_changes(srv, srv->services_online, old_history);
     net_reclass_all(srv);
