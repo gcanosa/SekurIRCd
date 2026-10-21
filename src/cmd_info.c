@@ -9,8 +9,17 @@
 #include <strings.h>
 #include <time.h>
 
+/* "VERSION <server>" (TIME, ADMIN, MOTD, INFO too) naming another server on the network: that server answers. */
+static int asked_elsewhere(server_t *srv, client_t *cl, irc_message_t *msg) {
+    if (msg->nparams < 1 || cl->remote) return 0;
+    netserver_t *s = netsync_find_name(srv, msg->params[0]);
+    if (!s || s == srv->self_srv) return 0;
+    netsync_rquery(srv, cl, s, msg->command, NULL, 0);
+    return 1;
+}
+
 void cmd_version(server_t *srv, client_t *cl, irc_message_t *msg) {
-    (void)msg;
+    if (asked_elsewhere(srv, cl, msg)) return;
     /* ircu/solanum style: "351 <nick> <version>(<build>). <server> :<flags>",
      * then the 005 lines. The flags are the optional features switched on
      * here: A accounts/SASL (services online), D DNSBL, L server links, P proxy scanner (Protection bundle), S spam protection,
@@ -35,7 +44,7 @@ void cmd_version(server_t *srv, client_t *cl, irc_message_t *msg) {
 }
 
 void cmd_time(server_t *srv, client_t *cl, irc_message_t *msg) {
-    (void)msg;
+    if (asked_elsewhere(srv, cl, msg)) return;
     time_t now = time(NULL);
     struct tm tmv;
     localtime_r(&now, &tmv);
@@ -45,13 +54,13 @@ void cmd_time(server_t *srv, client_t *cl, irc_message_t *msg) {
     client_reply(cl, N_TIME, p, 1, buf);
 }
 
-void cmd_motd(server_t *srv, client_t *cl, irc_message_t *msg) { (void)msg; server_send_motd(srv, cl); }
+void cmd_motd(server_t *srv, client_t *cl, irc_message_t *msg) { if (!asked_elsewhere(srv, cl, msg)) server_send_motd(srv, cl); }
 void cmd_rules(server_t *srv, client_t *cl, irc_message_t *msg) { (void)msg; server_send_rules(srv, cl); }
 void cmd_opermotd(server_t *srv, client_t *cl, irc_message_t *msg) { (void)msg; server_send_oper_motd(srv, cl); }
 void cmd_lusers(server_t *srv, client_t *cl, irc_message_t *msg) { (void)msg; server_send_lusers(srv, cl); }
 
 void cmd_admin(server_t *srv, client_t *cl, irc_message_t *msg) {
-    (void)msg;
+    if (asked_elsewhere(srv, cl, msg)) return;
     char msgbuf[128];
     snprintf(msgbuf, sizeof msgbuf, "Administrative info about %s", srv->cfg.server.name);
     client_reply(cl, N_ADMINME, NULL, 0, msgbuf);
@@ -164,7 +173,7 @@ void cmd_servlist(server_t *srv, client_t *cl, irc_message_t *msg) {
 }
 
 void cmd_info(server_t *srv, client_t *cl, irc_message_t *msg) {
-    (void)msg;
+    if (asked_elsewhere(srv, cl, msg)) return;
     char line1[CFG_STR + 64];
     snprintf(line1, sizeof line1, "%s is powered by SekurIRCd %s.",
              srv->cfg.server.network, srv->cfg.server.version);
@@ -195,7 +204,7 @@ static const help_entry_t HELP_TABLE[] = {
     {"WHO", {"WHO <channel|nick|mask> [o][%<fields>[,<token>]]",
              "List matching users. A mask globs nick, user, host, server and realname (0 = everyone); 'o' keeps only opers; "
              "+i users show only if you share a channel. The %fields form (WHOX) selects columns: t c u i h s n f d l a r."}},
-    {"WHOIS", {"WHOIS <nick>", "Show detailed information about a user."}},
+    {"WHOIS", {"WHOIS [<nick|server>] <nick>", "Show detailed information about a user. With two arguments the user's own server answers, so idle time shows for users on other servers too."}},
     {"WHOWAS", {"WHOWAS <nick> [count]",
                 "Show recent nick/user/host records for someone who has since quit or changed nick."}},
     {"AWAY", {"AWAY [:<message>]", "Mark yourself away, or (no argument) clear it."}},
@@ -214,7 +223,7 @@ static const help_entry_t HELP_TABLE[] = {
                "List, or add, a ban. <mask> may be an IP glob (203.0.113.*), a CIDR range (203.0.113.0/24, "
                "2001:db8::/32 -- write an IPv6 one starting with ':' as 0::...), a host glob (*.example.com), "
                "or user@host. No argument lists all active K/G/Z-lines. Server-oper only."}},
-    {"GLINE", {"GLINE [<mask> [<duration>] [:reason]]", "Same as KLINE. Server-oper only."}},
+    {"GLINE", {"GLINE [<mask> [<duration>] [:reason]]", "Same as KLINE, but network-wide: every linked server applies it. Server-oper only."}},
     {"ZLINE", {"ZLINE [<mask> [<duration>] [:reason]]",
                "Like KLINE, but matched at connect time against the IP only -- it cannot see a "
                "hostname, and is what DNSBL/connect-flood bans use. Server-oper only."}},
@@ -228,7 +237,7 @@ static const help_entry_t HELP_TABLE[] = {
     {"GLOBOPS", {"GLOBOPS :<text>", "IRC operators only: message every online operator."}},
     {"CHGIDENT", {"CHGIDENT <nick> <ident>", "IRC operators only: change a user's ident."}},
     {"SANICK", {"SANICK <nick> <newnick>", "IRC operators only: force a nick change."}},
-    {"SHUN", {"SHUN [<mask> [duration] [reason]]", "IRC operators only: silently drop a connected user's messages (no disconnect). Needs UNSHUN to lift."}},
+    {"SHUN", {"SHUN [<mask> [duration] [reason]]", "IRC operators only: silently drop a connected user's messages (no disconnect), on every linked server. Needs UNSHUN to lift."}},
     {"ELINE", {"ELINE [<mask> [duration] [reason]]", "IRC operators only: exempt a mask from K/G-lines."}},
     {"ACCEPT", {"ACCEPT [nick[,-nick,...]]", "Caller-ID (+g): allow/remove nicks that may message you; no argument lists them."}},
     {"LOCOPS", {"LOCOPS :<text>", "IRC operators only: message the operators on this server."}},
@@ -251,7 +260,7 @@ static const help_entry_t HELP_TABLE[] = {
     {"STATS", {"STATS <letter>", "m = command usage, u = uptime, o = operators, k/g/z = K/G/Z-lines, l = links (all oper-only except m/u)."}},
     {"LUSERS", {"LUSERS", "Re-send the user/server counts sent at registration."}},
     {"UPTIME", {"UPTIME", "Non-standard: show server uptime."}},
-    {"ADMIN", {"ADMIN", "Show administrative contact info from [admin]."}},
+    {"ADMIN", {"ADMIN [<server>]", "Show administrative contact info from [admin] (of another linked server, if named)."}},
     {"VHOST", {"VHOST [<host>|off]", "Non-standard: activate a configured virtual host, or clear it (\"off\")."}},
     {"CHGHOST", {"CHGHOST <nick> <new-host>",
                  "Non-standard, server-oper only: force-set another local user's displayed host."}},
@@ -286,10 +295,10 @@ static const help_entry_t HELP_TABLE[] = {
     {"CAP", {"CAP LS|REQ|END|LIST", "IRCv3 capability negotiation -- normally handled by your client, not typed by hand."}},
     {"PING", {"PING <token>", "Request a PONG from the server."}},
     {"QUIT", {"QUIT [:reason]", "Disconnect from the server."}},
-    {"VERSION", {"VERSION", "Show the server's software version and build, its optional-feature flags (A accounts, D dnsbl, L links, P proxy scanner, S spam, T tls), and the 005 ISUPPORT tokens."}},
-    {"TIME", {"TIME", "Show the server's current time."}},
-    {"INFO", {"INFO", "Show general information about the server software."}},
-    {"MOTD", {"MOTD", "Show the message of the day."}},
+    {"VERSION", {"VERSION [<server>]", "Show the server's software version and build, its optional-feature flags (A accounts, D dnsbl, L links, P proxy scanner, S spam, T tls), and the 005 ISUPPORT tokens."}},
+    {"TIME", {"TIME [<server>]", "Show the server's current time."}},
+    {"INFO", {"INFO [<server>]", "Show general information about the server software."}},
+    {"MOTD", {"MOTD [<server>]", "Show the message of the day."}},
     {"RULES", {"RULES", "Show the network rules."}},
     {"OPERMOTD", {"OPERMOTD", "Show the operator message of the day. Server-oper only."}},
     {"HELP", {"HELP [command]", "Show this general summary, or detailed usage for one command."}},
@@ -337,6 +346,7 @@ void cmd_squery(server_t *srv, client_t *cl, irc_message_t *msg) {
     }
     char textbuf[420];
     snprintf(textbuf, sizeof textbuf, "%.*s", srv->cfg.messages.max_message_length, msg->params[1]);
+    if (target->remote) { netsync_message(srv, cl, "PRIVMSG", target->nick, target, textbuf, NULL, 0); return; } /* services linked elsewhere */
     char prefix[320];
     client_prefix(cl, prefix, sizeof prefix);
     char line[500];

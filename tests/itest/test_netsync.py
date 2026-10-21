@@ -553,3 +553,57 @@ def test_enforcement_ghost_and_regain_across_servers():
         assert "Killed (NickServ (GHOST" in n["c"].output()
     finally:
         n.stop()
+
+
+def test_replies_and_queries_reach_users_on_other_servers():
+    n = Network(cfg={**OPERS, "accounts": {"enabled": True, "store_file": "acc.json"}})  # services on a
+    n.add("a")
+    n.add("b", parent="a")
+    n.add("c", parent="b")
+    n.start()
+    try:
+        boss = n.client("a", "boss")
+        boss.say("OPER boss bosspw", 0.8)
+        far = n.client("c", "far")
+        # KNOCK: the remote chanop hears it
+        boss.say("JOIN #knock", 0.3)
+        boss.say("MODE #knock +i", 0.5)
+        far.send("KNOCK #knock")
+        assert boss.saw(r" 710 boss #knock far!", 1.5)
+        # WHOIS <nick> <nick>: the user's own server answers, idle time included, in order
+        r = boss.say("WHOIS far far", 0.8)
+        codes = [l.split()[1] for l in r if l.startswith(":c.test.net ")]
+        assert "317" in codes and codes[-1] == "318", r
+        # VERSION / TIME / ADMIN / MOTD / INFO <server>
+        assert any(l.startswith(":c.test.net 351 boss ") for l in boss.say("VERSION c.test.net", 0.6))
+        assert any(l.startswith(":c.test.net 391 boss c.test.net") for l in boss.say("TIME c.test.net", 0.6))
+        assert any(l.startswith(":b.test.net 256 ") for l in far.say("ADMIN b.test.net", 0.6))
+        # SQUERY a service linked to another server
+        far.send("SQUERY ChanServ :HELP")
+        assert far.saw(r"ChanServ.*NOTICE far", 2)
+        # KILL from another server: the victim sees who, like a local KILL
+        vic = n.client("c", "vic")
+        boss.send("KILL vic :go away")
+        assert vic.saw(r":boss!\S+ KILL vic :go away", 2)
+        # SHUN is network-wide, and UNSHUN lifts it everywhere
+        obs = n.client("a", "obs")
+        sh = n.client("c", "shunned", user="shunu")
+        for x in (obs, sh):
+            x.say("JOIN #sh", 0.4)
+        boss.say("SHUN shunu@127.0.0.1 1h quiet", 0.6)
+        obs.drain()
+        sh.send("PRIVMSG #sh :muted?")
+        assert not obs.saw("muted\\?", 0.8), "a SHUN set on a silences a user on c"
+        boss.say("UNSHUN shunu@127.0.0.1", 0.6)
+        sh.send("PRIVMSG #sh :back")
+        assert obs.saw("PRIVMSG #sh :back", 1.5)
+        # UNGLINE from afar drops only the G-line, not a local K-line with the same mask
+        farop = n.client("c", "farop")
+        farop.say("OPER boss bosspw", 0.8)
+        boss.say("KLINE *@192.0.2.55 1h local", 0.4)
+        farop.say("GLINE *@192.0.2.55 1h net", 0.6)
+        farop.say("UNGLINE *@192.0.2.55", 0.6)
+        r = " ".join(boss.say("TESTLINE x@192.0.2.55", 0.5))
+        assert "K-line" in r and "G-line" not in r, r
+    finally:
+        n.stop()

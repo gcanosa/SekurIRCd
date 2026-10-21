@@ -594,7 +594,9 @@ static void line_common(server_t *srv, client_t *cl, irc_message_t *msg, const c
     }
     const char *reason = argi < msg->nparams ? msg->params[argi] : "No reason given";
     server_kline_add(srv, maskbuf, reason, cl->nick, line_type, duration);
-    if (line_type[0] == 'G') netsync_gline(srv, maskbuf, cl->nick, duration > 0 ? (long)time(NULL) + duration : 0, reason); /* G = network-wide */
+    long expires = duration > 0 ? (long)time(NULL) + duration : 0;
+    if (line_type[0] == 'G') netsync_gline(srv, maskbuf, cl->nick, expires, reason); /* G and SHUN are network-wide */
+    if (line_type[0] == 'S') netsync_shun(srv, maskbuf, cl->nick, expires, reason);
 
     char m[400];
     if (duration) {
@@ -636,10 +638,10 @@ static void unline_typed(server_t *srv, client_t *cl, const char *mask, char typ
     snprintf(m, sizeof m, server_kline_remove_typed(srv, mask, type) ? "Removed line: %s" : "No such line: %s", mask);
     notice_self(srv, cl, m);
 }
-void cmd_unshun(server_t *srv, client_t *cl, irc_message_t *msg) { unline_typed(srv, cl, msg->params[0], 'S'); }
+void cmd_unshun(server_t *srv, client_t *cl, irc_message_t *msg) { unline_typed(srv, cl, msg->params[0], 'S'); netsync_unshun(srv, msg->params[0]); }
 void cmd_uneline(server_t *srv, client_t *cl, irc_message_t *msg) { unline_typed(srv, cl, msg->params[0], 'E'); }
 void cmd_unkline(server_t *srv, client_t *cl, irc_message_t *msg) { unline_common(srv, cl, msg->params[0]); }
-void cmd_ungline(server_t *srv, client_t *cl, irc_message_t *msg) { unline_common(srv, cl, msg->params[0]); netsync_ungline(srv, msg->params[0]); }
+void cmd_ungline(server_t *srv, client_t *cl, irc_message_t *msg) { unline_typed(srv, cl, msg->params[0], 'G'); netsync_ungline(srv, msg->params[0]); }
 void cmd_unzline(server_t *srv, client_t *cl, irc_message_t *msg) { unline_common(srv, cl, msg->params[0]); }
 
 /* --- SQUIT (closes any link, hub or leaf side) / CONNECT (leaf-mode manual

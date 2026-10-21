@@ -655,6 +655,13 @@ static void whois_one(server_t *srv, client_t *cl, const char *nick) {
 }
 
 void cmd_whois(server_t *srv, client_t *cl, irc_message_t *msg) {
+    if (msg->nparams >= 2 && !cl->remote) { /* "WHOIS <nick|server> <nick>": the user's own server answers (idle time) */
+        client_t *t = server_find_user(srv, msg->params[1]);
+        if (t && t->remote && !t->is_service && t->registered) {
+            netsync_rquery(srv, cl, t->nserver, "WHOIS", &msg->params[1], 1);
+            return;
+        }
+    }
     char list[600];
     snprintf(list, sizeof list, "%s", msg->params[msg->nparams - 1]);
     char *save = NULL;

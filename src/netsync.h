@@ -30,6 +30,8 @@
  *               :<operuid> ENCAP <uid> SAJOIN|SAPART|SANICK|CHGHOST|CHGIDENT <args...>   (routed to the user's server)
  *               :<uid> CERTFP <sha256-hex>    (TLS client certificate, after UID; services use it)
  *               :<sid> SVCRELAY <uid|sid.connid> :<line>   (account-services traffic, routed: see cmd_reg.c / link.h)
+ *               :<uid> RQUERY <sid> WHOIS|VERSION|TIME|ADMIN|MOTD|INFO [args]   (run by that server, replies PUSHed back)
+ *               :<sid> SHUN <mask> <setter> <expires|0> :<reason>  /  UNSHUN <mask>   (like GLINE; also in the burst)
  * Channel state converges by timestamp (TS6-style): the older channel wins; the younger side drops its modes and
  * strips its members' ranks. A nick collision is settled by nick timestamp (older wins, a tie kills both).
  */
@@ -121,6 +123,11 @@ void netsync_kill(struct server *srv, struct client *oper, struct client *target
 void netsync_wallops(struct server *srv, struct client *from, const char *verb, const char *text); /* WALLOPS / GLOBOPS */
 void netsync_gline(struct server *srv, const char *mask, const char *setter, long expires, const char *reason);
 void netsync_ungline(struct server *srv, const char *mask);
+void netsync_shun(struct server *srv, const char *mask, const char *setter, long expires, const char *reason);
+void netsync_unshun(struct server *srv, const char *mask);
+/* "VERSION other.server", "WHOIS nick nick" for a remote nick...: `verb` (with `args`) is run by `dest`, which sends its
+ * replies back to `cl`. */
+void netsync_rquery(struct server *srv, struct client *cl, const netserver_t *dest, const char *verb, char **args, int nargs);
 /* Reply/notice for a user on another server. */
 /* Route a services line toward `dest` (a UID, or a connection id "<sid>.<conn_id>"). */
 void netsync_svcrelay(struct server *srv, const char *dest, const char *line);
