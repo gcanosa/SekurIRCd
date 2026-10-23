@@ -1199,6 +1199,7 @@
     if (!typing.sent || typing.to !== active || Date.now() - typing.at > 3000) { tellTyping("active", active); typing = { to: active, sent: true, at: Date.now() }; }
     typingOff = setTimeout(function () { if (typing.sent) tellTyping("paused", typing.to); typing.sent = false; }, 5000);
   });
+  var tab = null; // nick completion in progress: matches, which one is shown, and the text around it
   input.addEventListener("keydown", function (e) {
     if (e.key === "ArrowUp" || e.key === "ArrowDown") { // recall what you sent
       if (!sent.length) return;
@@ -1208,16 +1209,19 @@
       return;
     }
     if (e.key !== "Tab" || e.shiftKey) return;
-    var v = input.value, at = input.selectionStart, pre = v.slice(0, at), w = /(\S*)$/.exec(pre)[1];
-    var b = bufs[key(active)];
-    if (!w || !b) return;
-    // first alphabetical match only (no cycling through several matches)
-    var hit = Object.keys(b.users).filter(function (n) { return key(n).indexOf(key(w)) === 0; }).sort()[0];
-    if (!hit) return;
-    e.preventDefault();
-    var ins = hit + (pre.length === w.length ? ": " : " ");
-    input.value = pre.slice(0, at - w.length) + ins + v.slice(at);
-    input.selectionStart = input.selectionEnd = at - w.length + ins.length;
+    e.preventDefault(); // Tab in the input only completes nicks, it never moves focus (Shift+Tab still does)
+    var v = input.value, at = input.selectionStart;
+    if (!tab || v !== tab.val || at !== tab.end) { // a fresh completion; otherwise the next Tab cycles to the next match
+      var pre = v.slice(0, at), w = /(\S*)$/.exec(pre)[1], b = bufs[key(active)];
+      if (!w || !b) { tab = null; return; }
+      var hits = Object.keys(b.users).filter(function (n) { return key(n).indexOf(key(w)) === 0; }).sort();
+      if (!hits.length) { tab = null; return; }
+      tab = { hits: hits, i: -1, head: pre.slice(0, at - w.length), tail: v.slice(at) };
+    }
+    tab.i = (tab.i + 1) % tab.hits.length;
+    var ins = tab.hits[tab.i] + (tab.head ? " " : ": ");
+    input.value = tab.val = tab.head + ins + tab.tail;
+    input.selectionStart = input.selectionEnd = tab.end = tab.head.length + ins.length;
   });
   $("quit-btn").onclick = function () { command("/quit"); };
   // Leaving the page: say goodbye with the quit message and let the server close the socket (closing it here would race the QUIT).
