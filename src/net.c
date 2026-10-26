@@ -155,6 +155,11 @@ int net_set_nonblocking(int fd) {
     return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
+/* Room for a reconnect burst (restart, netsplit): at 128, ~100 simultaneous
+ * connects overflowed it in load testing. The kernel clamps this to its own
+ * limit (net.core.somaxconn / kern.ipc.somaxconn). */
+#define LISTEN_BACKLOG 1024
+
 int net_listen(const char *bind_addr, int port) {
     if (bind_addr && strchr(bind_addr, ':')) { /* IPv6, and only IPv6: the IPv4 side has its own socket */
         struct sockaddr_in6 a6;
@@ -167,7 +172,7 @@ int net_listen(const char *bind_addr, int port) {
         int one = 1;
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
         setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &one, sizeof one);
-        if (bind(fd, (struct sockaddr *)&a6, sizeof a6) < 0 || listen(fd, 128) < 0) { close(fd); return -1; }
+        if (bind(fd, (struct sockaddr *)&a6, sizeof a6) < 0 || listen(fd, LISTEN_BACKLOG) < 0) { close(fd); return -1; }
         net_set_nonblocking(fd);
         return fd;
     }
@@ -187,7 +192,7 @@ int net_listen(const char *bind_addr, int port) {
         return -1;
     }
     if (bind(fd, (struct sockaddr *)&addr, sizeof addr) < 0) { close(fd); return -1; }
-    if (listen(fd, 128) < 0) { close(fd); return -1; }
+    if (listen(fd, LISTEN_BACKLOG) < 0) { close(fd); return -1; }
     net_set_nonblocking(fd);
     return fd;
 }
