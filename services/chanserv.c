@@ -24,6 +24,7 @@
 #include "../src/proto.h"
 #include "../src/vendor/cJSON.h"
 #include "../src/vendor/toml.h"
+#include "../src/vendor/uthash.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -317,10 +318,54 @@ static void store_flush(void) {
     if (store_write_now()) g_store_dirty = 0;
 }
 
+/* cJSON objects are linked lists, so a lookup by name scanned every registration -- on each JOIN/TOPIC from the feed.
+ * This hash index points at the same records and must be kept in step with g_store: store_add/store_del, and
+ * store_index_all after a load. */
+struct sidx { char key[128]; cJSON *rec; UT_hash_handle hh; };
+static struct sidx *g_store_idx = NULL;
+
+static void store_index_clear(void) {
+    struct sidx *e, *tmp;
+    HASH_ITER(hh, g_store_idx, e, tmp) { HASH_DEL(g_store_idx, e); free(e); }
+}
+
+static void store_index_put(const char *cf, cJSON *rec) {
+    struct sidx *e;
+    HASH_FIND_STR(g_store_idx, cf, e);
+    if (e) return; /* first record wins, same as cJSON_GetObjectItemCaseSensitive */
+    if (strlen(cf) >= sizeof e->key || !(e = malloc(sizeof *e))) return;
+    snprintf(e->key, sizeof e->key, "%s", cf);
+    e->rec = rec;
+    HASH_ADD_STR(g_store_idx, key, e);
+}
+
+static void store_index_all(void) {
+    store_index_clear();
+    for (cJSON *rec = g_store->child; rec; rec = rec->next)
+        if (rec->string) store_index_put(rec->string, rec);
+}
+
+static void store_add(const char *cf, cJSON *rec) {
+    cJSON_AddItemToObject(g_store, cf, rec);
+    store_index_put(cf, rec);
+}
+
+static void store_del(const char *cf) {
+    struct sidx *e;
+    HASH_FIND_STR(g_store_idx, cf, e);
+    if (e) { HASH_DEL(g_store_idx, e); free(e); }
+    cJSON_DeleteItemFromObjectCaseSensitive(g_store, cf);
+    /* a duplicate key in a hand-edited file: the next one now answers lookups, as it did before the index */
+    cJSON *next = cJSON_GetObjectItemCaseSensitive(g_store, cf);
+    if (next) store_index_put(cf, next);
+}
+
 static cJSON *store_get(const char *chan) {
     char cf[128];
     irc_casefold(cf, sizeof cf, chan);
-    return cJSON_GetObjectItemCaseSensitive(g_store, cf);
+    struct sidx *e;
+    HASH_FIND_STR(g_store_idx, cf, e);
+    return e ? e->rec : NULL;
 }
 
 static int rec_bool(cJSON *rec, const char *key) {
@@ -861,7 +906,7 @@ static void finish_register(void) {
     cJSON_AddBoolToObject(rec, "secureops", 1); /* new registrations are protected against takeover while services were away */
     char cf[128];
     irc_casefold(cf, sizeof cf, chan);
-    cJSON_AddItemToObject(g_store, cf, rec);
+    store_add(cf, rec);
     store_save();
     mark_identified(chan, from_nick);
 
@@ -924,7 +969,7 @@ static void expire_sweep(void) {
         if (rec_bool(r, "guard")) wire_part(chan);
         clear_identified_chan(chan);
     granted_clear_chan(chan);
-        cJSON_DeleteItemFromObjectCaseSensitive(g_store, dead[i]);
+        store_del(dead[i]);
         store_save();
         log_info("chanserv", "%s expired after %d days without use", chan, g_cfg.expire_days);
     }
@@ -941,7 +986,7 @@ static void cmd_drop(const char *from_nick, char *args) {
     if (rec_bool(rec, "guard")) wire_part(chan);
     char cf[128];
     irc_casefold(cf, sizeof cf, chan);
-    cJSON_DeleteItemFromObjectCaseSensitive(g_store, cf);
+    store_del(cf);
     clear_identified_chan(chan);
     granted_clear_chan(chan);
     store_save();
@@ -2227,6 +2272,7 @@ int main(int argc, char **argv) {
     sigaction(SIGINT, &sa, NULL);
 
     if (store_load() != 0) return 1;
+    store_index_all();
     if (ns_start(errbuf, sizeof errbuf) != 0) {
         log_error("nickserv", "%s", errbuf);
         fprintf(stderr, "services: %s\n", errbuf);
@@ -2263,6 +2309,7 @@ int main(int argc, char **argv) {
     store_flush();
     ns_shutdown();
     if (pidfile[0]) unlink(pidfile);
+    store_index_clear();
     cJSON_Delete(g_store);
     return 0;
 }
