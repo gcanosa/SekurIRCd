@@ -1,3 +1,5 @@
+import time
+
 from harness import Server, ChanServ
 
 LINK_PW = "svcsecret"
@@ -177,3 +179,26 @@ def test_akick_restricted_secureops_hit_present_members():
             f.say("PRIVMSG ChanServ :SET #pm SECUREOPS ON pw12345", 1.2)
             names = " ".join(f.say("NAMES #pm"))
             assert "@opd" not in names and "@fnd" in names, names  # an op ChanServ didn't grant loses it now
+
+
+def test_drop_reregister_and_reload_keep_the_index_in_step():
+    s = net()
+    with s:
+        cs = ChanServ(s, s.link_port, password=LINK_PW)
+        with cs:
+            f = s.client("fnd")
+            f.say("JOIN #dx")
+            f.say("PRIVMSG ChanServ :REGISTER #dx pw12345", 1.2)
+            r = f.say("PRIVMSG ChanServ :DROP #DX pw12345", 1.0)  # casefolded lookup
+            assert any("dropped" in l for l in r), r
+            r = f.say("PRIVMSG ChanServ :INFO #dx", 1.0)
+            assert any("isn't registered" in l for l in r), r
+            f.say("PRIVMSG ChanServ :REGISTER #dx newpw123", 1.2)
+            cs.proc.terminate()  # flushes the store; a fresh process must find #dx through the rebuilt index
+            cs.proc.wait(5)
+            cs.start()
+            time.sleep(1.0)  # relink (NickServ is off, so wait_services has nothing to probe)
+            r = f.say("PRIVMSG ChanServ :INFO #dx", 1.0)
+            assert any("#dx" in l and "isn't" not in l for l in r), r
+            r = f.say("PRIVMSG ChanServ :IDENTIFY #dx newpw123", 1.0)
+            assert any("Password correct" in l for l in r), r
