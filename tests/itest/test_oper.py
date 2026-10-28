@@ -1,3 +1,4 @@
+import re
 from harness import Server
 
 CFG = {"operators": [
@@ -55,7 +56,7 @@ def test_sanick_chgident_globops():
         assert t.saw(r":tgt!.* NICK :newname")
         boss.say("CHGIDENT newname fresh")
         r = boss.say("WHOIS newname")
-        assert any(" 311 boss newname fresh " in l for l in r), r
+        assert any(re.search(r" 311 boss newname fresh \S+ \* :", l) for l in r), r  # RFC 2812: "*" before realname
         boss.send("GLOBOPS :hello opers")
         assert boss.saw(r"GLOBOPS :hello opers")
 
