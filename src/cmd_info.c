@@ -250,7 +250,7 @@ static const help_entry_t HELP_TABLE[] = {
                  "IRCv3 efficient online/offline watch list -- the modern alternative to polling ISON."}},
     {"WATCH", {"WATCH +nick | -nick | C | L | S [...]",
                "Legacy pre-MONITOR watch list (one +/-nick or C/L/S per argument). Prefer MONITOR."}},
-    {"SPAMFILTER", {"SPAMFILTER [LIST] | ADD <targets> <block|warn|kill|zline> <duration|-> <reason_with_underscores> <regex> | DEL <n>",
+    {"SPAMFILTER", {"SPAMFILTER [LIST] | ADD <targets> <block|warn|kill|zline|hide|shun> <duration|-> <reason_with_underscores> <regex> | DEL <n>",
                     "Server-oper only: manage the [spam] regex content filters (targets: p c n N a q P t)."}},
     {"PROTECT", {"PROTECT [SCAN <ipv4>]",
                  "Server-oper only: show the Protection bundle status (blacklists, proxy scanner, limits), or SCAN an address now."}},

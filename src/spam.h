@@ -31,13 +31,14 @@ void spam_reload(server_t *srv);
 void spam_free(server_t *srv);
 
 /* PRIVMSG/NOTICE gate. Returns 1 if the message must be dropped (the sender
- * has already been told, or disconnected); 0 to deliver it. `target` is the
+ * has already been told, or disconnected); 2 to drop it silently but echo it
+ * back as if sent (hide/shun); 0 to deliver it. `target` is the
  * raw command target (nick, #chan, or @#chan). `text` is the message body. */
 int spam_check_message(server_t *srv, client_t *cl, const char *target,
                        const char *text, int is_notice);
 
 /* Content filter for the non-message kinds (SPAM_T_AWAY/QUIT/PART/TOPIC).
- * Returns 1 if the text should be discarded by the caller. */
+ * Returns nonzero if the text should be discarded by the caller. */
 int spam_check_text(server_t *srv, client_t *cl, unsigned kind, const char *text);
 
 /* Records one (target, text) send in cl's ring and reports how many distinct

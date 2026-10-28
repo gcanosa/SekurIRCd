@@ -13,6 +13,7 @@
 #include "spam.h"
 #include "cmd.h"
 #include "log.h"
+#include "netsync.h"
 
 #include <ctype.h>
 #include <regex.h>
@@ -25,7 +26,7 @@
 #define SPAM_MAX_FILTERS 256
 #define SPAM_MIN_REPEAT_LEN 8 /* shorter texts ("hi", "lol") never count as a repeat */
 
-typedef enum { SPAM_BLOCK, SPAM_WARN, SPAM_KILL, SPAM_ZLINE } spam_action_t;
+typedef enum { SPAM_BLOCK, SPAM_WARN, SPAM_KILL, SPAM_ZLINE, SPAM_HIDE, SPAM_SHUN } spam_action_t;
 
 typedef struct spam_filter {
     unsigned targets;
@@ -63,12 +64,15 @@ static int parse_action(const char *s, spam_action_t *out) {
     else if (!strcasecmp(s, "warn")) *out = SPAM_WARN;
     else if (!strcasecmp(s, "kill")) *out = SPAM_KILL;
     else if (!strcasecmp(s, "zline")) *out = SPAM_ZLINE;
+    else if (!strcasecmp(s, "hide")) *out = SPAM_HIDE;
+    else if (!strcasecmp(s, "shun")) *out = SPAM_SHUN;
     else return -1;
     return 0;
 }
 
 static const char *action_name(spam_action_t a) {
-    return a == SPAM_BLOCK ? "block" : a == SPAM_WARN ? "warn" : a == SPAM_KILL ? "kill" : "zline";
+    static const char *names[] = {"block", "warn", "kill", "zline", "hide", "shun"};
+    return names[a];
 }
 
 /* Splits one file line into its fields (no regex compile). Returns 0 ok, -1
@@ -85,7 +89,7 @@ static int parse_line(const char *line, spam_filter_t *f, char *err, size_t errs
     memset(f, 0, sizeof *f);
     f->targets = spam_parse_targets(tgt);
     if (!f->targets) { snprintf(err, errsz, "bad targets '%s' (letters from p c n N a q P t)", tgt); return -1; }
-    if (parse_action(act, &f->action) != 0) { snprintf(err, errsz, "bad action '%s' (block|warn|kill|zline)", act); return -1; }
+    if (parse_action(act, &f->action) != 0) { snprintf(err, errsz, "bad action '%s' (block|warn|kill|zline|hide|shun)", act); return -1; }
     if (strcmp(dur, "-") == 0) f->duration = 0;
     else {
         f->duration = irc_parse_duration(dur);
@@ -253,7 +257,8 @@ static void snippet(const char *text, char *out, size_t outsz) {
     out[o] = '\0';
 }
 
-/* Carries out `act` for a hit. Returns 1 if the message should be dropped. */
+/* Carries out `act` for a hit. Returns 1 if the message should be dropped,
+ * 2 if it should be dropped while looking sent to the sender (hide/shun). */
 static int apply_action(server_t *srv, client_t *cl, spam_action_t act, long duration,
                         const char *reason, const char *what, const char *text, int quiet) {
     srv->spam_hits++;
@@ -275,6 +280,18 @@ static int apply_action(server_t *srv, client_t *cl, spam_action_t act, long dur
             }
             return 1;
         }
+        case SPAM_SHUN:
+            if (cl->ip[0]) { /* network-wide S-line on *@ip: every later message vanishes too */
+                long dur = duration > 0 ? duration : srv->cfg.spam.zline_duration;
+                char mask[80], sr[200];
+                snprintf(mask, sizeof mask, "*@%s", cl->ip);
+                snprintf(sr, sizeof sr, "Spam: %s", reason);
+                server_kline_add(srv, mask, sr, "spam", "S", dur);
+                netsync_shun(srv, mask, "spam", dur > 0 ? (long)time(NULL) + dur : 0, sr);
+            }
+            /* fall through */
+        case SPAM_HIDE:
+            return 2;
         case SPAM_KILL:
         case SPAM_ZLINE: {
             snprintf(cl->quit_reason, sizeof cl->quit_reason, "Spam: %s", reason);
@@ -313,7 +330,7 @@ static void strip_codes(char *dst, size_t dstsz, const char *src) {
     dst[di] = '\0';
 }
 
-/* Runs the regex rules for `kind`; first match wins. Returns 1 to drop. */
+/* Runs the regex rules for `kind`; first match wins. Returns apply_action's verdict. */
 static int run_filters(server_t *srv, client_t *cl, unsigned kind, const char *what,
                        const char *text, int quiet) {
     if (!srv->cfg.spam.filters_enabled || !srv->spam_filters) return 0;
@@ -377,7 +394,8 @@ int spam_check_message(server_t *srv, client_t *cl, const char *target, const ch
     /* 2. content filters */
     unsigned kind = is_notice ? (chan ? SPAM_T_NOTICE_CHAN : SPAM_T_NOTICE_USER)
                               : (chan ? SPAM_T_PRIVMSG_CHAN : SPAM_T_PRIVMSG_USER);
-    if (run_filters(srv, cl, kind, t, text, is_notice)) return 1;
+    int verdict = run_filters(srv, cl, kind, t, text, is_notice);
+    if (verdict) return verdict;
 
     /* 3. recipient / repeat limits */
     if (sp->max_targets == 0 && sp->max_repeat == 0) return 0;
@@ -475,7 +493,7 @@ void cmd_spamfilter(server_t *srv, client_t *cl, irc_message_t *msg) {
     if (!strcasecmp(sub, "ADD")) {
         if (!srv->cfg.spam.filters_enabled) { notice_self(srv, cl, "Filters are disabled ([spam] filters_enabled = false)"); return; }
         if (msg->nparams < 6) {
-            notice_self(srv, cl, "Usage: SPAMFILTER ADD <targets> <block|warn|kill|zline> <duration|-> <reason_with_underscores> <regex>");
+            notice_self(srv, cl, "Usage: SPAMFILTER ADD <targets> <block|warn|kill|zline|hide|shun> <duration|-> <reason_with_underscores> <regex>");
             return;
         }
         if (list_count(srv) >= SPAM_MAX_FILTERS) { notice_self(srv, cl, "Too many spam filters"); return; }

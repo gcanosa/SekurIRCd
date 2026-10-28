@@ -327,11 +327,20 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
     if (is_tagmsg) textbuf[0] = '\0';
     else snprintf(textbuf, sizeof textbuf, "%.*s", srv->cfg.messages.max_message_length, msg->params[msg->nparams - 1]);
 
-    if (!is_tagmsg && spam_check_message(srv, cl, target, textbuf, is_notice)) return;
+    int spam = is_tagmsg ? 0 : spam_check_message(srv, cl, target, textbuf, is_notice);
 
     char prefix[320];
     client_prefix(cl, prefix, sizeof prefix);
     char lines[4][LINE_SZ];
+    if (spam) {
+        /* hide/shun: echo-message clients see their line come back, so the spammer can't tell it went nowhere */
+        if (spam == 2 && (cl->caps & CAP_ECHO_MESSAGE)) {
+            const char *ep[] = {target};
+            build_lines(lines, cl, prefix, verb, ep, textbuf, &x);
+            deliver(cl, cl, lines, &x);
+        }
+        return;
+    }
 
     /* STATUSMSG (ISUPPORT STATUSMSG=~&@%+): "~#chan"/"&#chan"/"@#chan"/"%#chan"/"+#chan"
      * delivers only to members holding at least that rank. */
