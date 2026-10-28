@@ -3,6 +3,7 @@
     "tag": "Unreleased",
     "date": "",
     "changes": [
+      "WHOIS: the 311 reply now includes the standard \"*\" field before the realname; strict clients (iSekur) failed to parse it without it",
       "Spam filters: new hide and shun actions. hide drops a matching message silently: the sender gets no notice, and echo-message clients see it as sent. shun does the same and also SHUNs the sender's IP network-wide for the rule's duration. Opers are still notified",
       "Linked servers: numeric replies now reach users on other servers. KNOCK reaches chanops on every server (it used to reach only those on the knocker's server)",
       "WHOIS <nick> <nick> is answered by the user's own server, so idle time shows across links; MOTD, ADMIN, INFO, VERSION and TIME take a server name to ask that server",
