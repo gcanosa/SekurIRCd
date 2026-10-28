@@ -580,8 +580,8 @@ static void whois_one(server_t *srv, client_t *cl, const char *nick) {
         client_reply(cl, N_ENDOFWHOIS, pe, 1, "End of /WHOIS list.");
         return;
     }
-    const char *p1[] = {target->nick, target->user, target->host};
-    client_reply(cl, N_WHOISUSER, p1, 3, target->realname);
+    const char *p1[] = {target->nick, target->user, target->host, "*"};
+    client_reply(cl, N_WHOISUSER, p1, 4, target->realname);
 
     const char *p2[] = {target->nick, netsync_server_name_of(srv, target)};
     client_reply(cl, N_WHOISSERVER, p2, 2, target->remote && target->nserver ? target->nserver->desc : srv->cfg.server.network);
