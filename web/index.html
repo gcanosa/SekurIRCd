@@ -78,14 +78,15 @@
     with TLS, SASL, IRCv3, detach/attach like tmux, end-to-end encrypted queries between iSekur users and a built-in webchat.</p>
   <div class="term">
     <div class="term-bar"><i></i><i></i><i></i><span>bash</span></div>
-<pre><span class="hl-c"># macOS (Apple silicon); Linux x86_64: isekur-linux-x86_64</span>
+<pre><span class="hl-c"># macOS (Apple silicon); Linux: isekur-linux-x86_64 or isekur-linux-arm64</span>
 <span class="hl-p">$ </span>curl -L https://github.com/gcanosa/iSekur/releases/latest/download/isekur-macos-arm64.tar.gz | tar xz
 <span class="hl-p">$ </span>sudo isekur-macos-arm64/install.sh
 <span class="hl-p">$ </span>isekur</pre>
   </div>
   <div class="grid">
     <a class="card" href="https://github.com/gcanosa/iSekur/releases/latest/download/isekur-macos-arm64.tar.gz"><h3>macOS</h3><p>Apple silicon, latest release.</p></a>
-    <a class="card" href="https://github.com/gcanosa/iSekur/releases/latest/download/isekur-linux-x86_64.tar.gz"><h3>Linux</h3><p>x86_64, needs OpenSSL 3 (libssl3).</p></a>
+    <a class="card" href="https://github.com/gcanosa/iSekur/releases/latest/download/isekur-linux-x86_64.tar.gz"><h3>Linux x86_64</h3><p>Intel/AMD, needs OpenSSL 3 (libssl3).</p></a>
+    <a class="card" href="https://github.com/gcanosa/iSekur/releases/latest/download/isekur-linux-arm64.tar.gz"><h3>Linux arm64</h3><p>Raspberry Pi, ARM servers, needs libssl3.</p></a>
     <a class="card" href="https://github.com/gcanosa/iSekur/releases/latest/download/isekur-src.tar.gz"><h3>Source</h3><p>BSDs, Cygwin and everything else: <code>make &amp;&amp; sudo make install</code>.</p></a>
   </div>
 </section>
