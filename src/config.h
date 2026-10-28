@@ -247,7 +247,7 @@ typedef struct {
     int max_targets;            /* distinct recipients per window; 0 = off */
     long target_window;         /* seconds */
     int max_repeat;             /* distinct recipients of one identical text per window; 0 = off */
-    char limit_action[8];       /* block | warn | kill | zline */
+    char limit_action[8];       /* block | warn | kill | zline | hide | shun */
     long zline_duration;        /* seconds; 0 = permanent */
     int filters_enabled;        /* use the regex filters file */
     char filters_file[CFG_PATH];

@@ -446,8 +446,9 @@ static int parse_spam(toml_table_t *sp, config_t *out, char *errbuf, size_t errb
         return -1;
     }
     if (strcmp(o->limit_action, "block") && strcmp(o->limit_action, "warn") &&
-        strcmp(o->limit_action, "kill") && strcmp(o->limit_action, "zline")) {
-        snprintf(errbuf, errbufsz, "spam.limit_action must be \"block\", \"warn\", \"kill\" or \"zline\"");
+        strcmp(o->limit_action, "kill") && strcmp(o->limit_action, "zline") &&
+        strcmp(o->limit_action, "hide") && strcmp(o->limit_action, "shun")) {
+        snprintf(errbuf, errbufsz, "spam.limit_action must be \"block\", \"warn\", \"kill\", \"zline\", \"hide\" or \"shun\"");
         return -1;
     }
 

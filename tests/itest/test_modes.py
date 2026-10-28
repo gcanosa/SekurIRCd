@@ -109,3 +109,36 @@ def test_halfop_cannot_kick_op():
         c.say("JOIN #h")
         a.say("MODE #h +h b1")
         assert any(" 482 " in l for l in b.say("KICK #h a1 :no")), "halfop must not kick an op"
+
+
+SPAM = dict(OPER, spam={"enabled": True, "filters_enabled": True})
+
+
+def test_spamfilter_hide_drops_silently_but_echoes():
+    with Server(cfg=SPAM) as s:
+        o = oper(s, "boss")
+        o.say("SPAMFILTER ADD c hide - ad buyspam", 0.5)
+        rx, u = s.client("rx"), s.client("u1", caps=["echo-message"])
+        rx.say("JOIN #h")
+        u.say("JOIN #h")
+        r = u.say("PRIVMSG #h :hey buyspam now")
+        assert any("PRIVMSG #h :hey buyspam now" in l for l in r), r  # echoed: looks sent
+        assert not any("blocked" in l for l in r), r                   # no notice to the sender
+        assert not rx.saw(r"buyspam", 0.5)                             # nobody got it
+        assert o.saw(r"Spam: u1!.* hide \(ad\)", 0.5)                  # opers still see it
+        u.send("PRIVMSG #h :clean line")
+        assert rx.saw(r"PRIVMSG #h :clean line", 1.0)                  # hide does not stick
+
+
+def test_spamfilter_shun_sticks():
+    with Server(cfg=SPAM) as s:
+        o = oper(s, "boss")
+        o.say("SPAMFILTER ADD c shun 10m ad buyspam", 0.5)
+        rx, u = s.client("rx"), s.client("u1")
+        rx.say("JOIN #h")
+        u.say("JOIN #h")
+        u.send("PRIVMSG #h :buyspam")
+        assert not rx.saw(r"buyspam", 0.5)
+        u.send("PRIVMSG #h :clean line")
+        assert not rx.saw(r"clean line", 0.5)  # shunned: later messages vanish too
+        assert u.say("PING :x") and not u.saw(r"ERROR", 0.2)  # still connected

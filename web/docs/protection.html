@@ -202,7 +202,7 @@ new_user_period = "30s"      # "0" = off
 max_targets = 5              # distinct recipients per target_window; 0 = off
 target_window = "30s"
 max_repeat = 4               # same text to this many recipients; 0 = off
-limit_action = "block"       # block | warn | kill | zline
+limit_action = "block"       # block | warn | kill | zline | hide | shun
 zline_duration = "1h"
 trust_age = "0"              # connections older than this skip the limits (not the filters)
 filters_enabled = true       # false keeps the file but stops using it
@@ -217,6 +217,8 @@ filters_file = "spamfilters.conf"</pre>
 <tr><td><code>warn</code></td><td>Delivers the message but notifies opers. Use it to trial a rule before enforcing it.</td></tr>
 <tr><td><code>kill</code></td><td>Disconnects the sender.</td></tr>
 <tr><td><code>zline</code></td><td>Disconnects the sender and Z-lines their IP for the rule's duration (<code>-</code> means <code>zline_duration</code>).</td></tr>
+<tr><td><code>hide</code></td><td>Silently drops the message: no notice to the sender, and echo-message clients get their own line back so it looks delivered. Opers are still notified.</td></tr>
+<tr><td><code>shun</code></td><td>Like <code>hide</code>, and also SHUNs <code>*@ip</code> network-wide for the rule's duration (<code>-</code> means <code>zline_duration</code>): the sender stays connected but nothing they send reaches anyone.</td></tr>
 </table></div>
 <pre>pcnN block - "advertisement" (buy|cheap) +(viagra|followers|likes)
 pc warn - "possible invite spam" (join|server) .*(discord\.gg|t\.me)
