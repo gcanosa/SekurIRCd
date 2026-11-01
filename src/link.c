@@ -1049,7 +1049,8 @@ static void sync_ranks_to(server_t *srv, link_conn_t *lc) {
     }
 }
 
-/* A channel just appeared (created by a local JOIN, or by a remote SJOIN/JOIN): services restore +r/MLOCK/GUARD on it. */
+/* A channel just appeared (created by a local JOIN, or by a remote SJOIN/JOIN, or renamed onto a new name): services
+ * restore +r/MLOCK/GUARD on it. With no `creator`, every member already in it is vetted (RENAME brings its members). */
 void link_notify_channel_new(server_t *srv, channel_t *chan, client_t *creator) {
     char line[300];
     const char *p[] = {chan->name};
@@ -1057,8 +1058,14 @@ void link_notify_channel_new(server_t *srv, channel_t *chan, client_t *creator) 
     for (link_conn_t *lc = srv->links; lc; lc = lc->next) {
         if (!lc->service || lc->closing || !lc->authenticated) continue;
         link_forward_line(lc, line);
-        member_t *m = creator ? channel_find_member(chan, creator) : NULL;
-        if (m) send_svcsync(lc, chan, creator, m->rank);
+        if (creator) {
+            member_t *m = channel_find_member(chan, creator);
+            if (m) send_svcsync(lc, chan, creator, m->rank);
+            continue;
+        }
+        member_t *m, *mtmp;
+        HASH_ITER(hh, chan->members, m, mtmp)
+            if (!m->client->is_service) send_svcsync(lc, chan, m->client, m->rank);
     }
 }
 

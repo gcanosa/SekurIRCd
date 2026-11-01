@@ -92,3 +92,15 @@ def test_read_marker_syncs_account_sessions():
         anon = s.client("anon", caps=["draft/read-marker"])
         anon.send("MARKREAD #rm")
         assert anon.saw(r"FAIL MARKREAD ACCOUNT_REQUIRED")
+
+
+def test_read_marker_follows_rename():
+    with Server(cfg=ACC) as s:
+        a = s.client("rmr", caps=["draft/read-marker", "draft/channel-rename"])
+        a.say("REGISTER rmruser password1", 1.5)
+        a.say("JOIN #before")
+        a.send("MARKREAD #before timestamp=2026-01-02T03:04:05.000Z")
+        assert a.saw(r"MARKREAD #before timestamp=2026-01-02T03:04:05.000Z")
+        a.say("RENAME #before #after")
+        a.send("MARKREAD #after")
+        assert a.saw(r"MARKREAD #after timestamp=2026-01-02T03:04:05.000Z")

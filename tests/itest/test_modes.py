@@ -130,6 +130,16 @@ def test_spamfilter_hide_drops_silently_but_echoes():
         assert rx.saw(r"PRIVMSG #h :clean line", 1.0)                  # hide does not stick
 
 
+def test_spamfilter_sees_owner_and_admin_statusmsg():
+    with Server(cfg=SPAM) as s:
+        o = oper(s, "boss")
+        o.say("SPAMFILTER ADD c block - ad buyspam", 0.5)
+        u = s.client("u1")
+        u.say("JOIN #h")
+        for t in ("~#h", "&#h"):  # were treated as a nick: channel rules never ran
+            assert any("blocked" in l for l in u.say(f"PRIVMSG {t} :buyspam")), t
+
+
 def test_spamfilter_shun_sticks():
     with Server(cfg=SPAM) as s:
         o = oper(s, "boss")

@@ -72,6 +72,31 @@ long long server_marker_set(server_t *srv, const char *account, const char *targ
     return m->ms;
 }
 
+/* RENAME: every account's marker on `oldname` moves to `newname` (one walk; renames are rare). */
+void server_marker_rename(server_t *srv, const char *oldname, const char *newname) {
+    char ocf[72], ncf[72];
+    irc_casefold(ocf, sizeof ocf, oldname);
+    irc_casefold(ncf, sizeof ncf, newname);
+    if (strcmp(ocf, ncf) == 0) return;
+    marker_t *m, *tmp, *moved = NULL;
+    HASH_ITER(hh, srv->markers, m, tmp) {
+        char *sep = strchr(m->key, '\x01');
+        if (!sep || strcmp(sep + 1, ocf) != 0) continue;
+        HASH_DEL(srv->markers, m);
+        snprintf(sep + 1, sizeof m->key - (size_t)(sep + 1 - m->key), "%s", ncf);
+        m->hh.next = moved; /* re-added after the walk, so the iteration never meets it again */
+        moved = m;
+    }
+    while (moved) {
+        marker_t *next = moved->hh.next, *clash;
+        HASH_FIND_STR(srv->markers, moved->key, clash);
+        if (clash) { if (moved->ms > clash->ms) clash->ms = moved->ms; free(moved); }
+        else HASH_ADD_STR(srv->markers, key, moved);
+        moved = next;
+    }
+    srv->history_dirty = 1;
+}
+
 void server_next_msgid(server_t *srv, char *out, size_t outsz) {
     snprintf(out, outsz, "%s-%llu", srv->msgid_prefix, (unsigned long long)++srv->msgid_counter);
 }

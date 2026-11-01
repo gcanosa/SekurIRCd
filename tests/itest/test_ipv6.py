@@ -24,7 +24,7 @@ def test_ipv6_client_is_shown_as_0_colon_form():
     with Server(cfg=V6) as s:
         c = s.client("six", host="::1")
         r = c.say("WHOIS six", 0.5)
-        assert any(" 311 six six six 0::1 :" in l for l in r), r        # a middle param can't start with ':'
+        assert any(" 311 six six six 0::1 * :" in l for l in r), r        # a middle param can't start with ':'
         assert any("0::1" in l for l in c.say("USERHOST six")), "USERHOST"
         four = s.client("four", host="127.0.0.1")                       # IPv4 alongside, unchanged
         assert four

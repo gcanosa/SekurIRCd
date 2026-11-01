@@ -3,6 +3,9 @@
     "tag": "Unreleased",
     "date": "",
     "changes": [
+      "Fix: renaming a channel onto the name of a registered but empty channel walked past ChanServ, so the renamer kept op and the channel got no +r, MLOCK or SECUREOPS. A rename is now checked by services like a channel created by JOIN",
+      "Fix: spam filters skipped messages to ~#chan and &#chan (owners/admins only), treating them as private messages",
+      "Read markers (draft/read-marker) follow a channel RENAME; CHGIDENT re-checks SHUNs against the new ident",
       "WHOIS: the 311 reply now includes the standard \"*\" field before the realname; strict clients (iSekur) failed to parse it without it",
       "Spam filters: new hide and shun actions. hide drops a matching message silently: the sender gets no notice, and echo-message clients see it as sent. shun does the same and also SHUNs the sender's IP network-wide for the rule's duration. Opers are still notified",
       "Linked servers: numeric replies now reach users on other servers. KNOCK reaches chanops on every server (it used to reach only those on the knocker's server)",

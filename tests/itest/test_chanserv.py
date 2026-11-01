@@ -202,3 +202,19 @@ def test_drop_reregister_and_reload_keep_the_index_in_step():
             assert any("#dx" in l and "isn't" not in l for l in r), r
             r = f.say("PRIVMSG ChanServ :IDENTIFY #dx newpw123", 1.0)
             assert any("Password correct" in l for l in r), r
+
+
+def test_rename_onto_registered_channel_goes_through_chanserv():
+    s = net()
+    with s:
+        with ChanServ(s, s.link_port, password=LINK_PW):
+            f = s.client("fnd")
+            f.say("JOIN #rr")
+            f.say("PRIVMSG ChanServ :REGISTER #rr pw12345", 1.2)
+            f.say("PART #rr", 0.5)  # registered, now empty
+            x = s.client("intruder", caps=["draft/channel-rename"])
+            x.say("JOIN #tmp")
+            x.say("RENAME #tmp #rr :mine now", 1.5)  # used to skip ChanServ entirely: no +r, op kept
+            assert "324 intruder #rr +r" in " ".join(x.say("MODE #rr")), "renamed-onto registered name lost +r"
+            names = " ".join(x.say("NAMES #rr"))
+            assert "@intruder" not in names and "intruder" in names, names

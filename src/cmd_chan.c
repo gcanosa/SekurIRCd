@@ -402,6 +402,10 @@ void cmd_channel_rename_apply(server_t *srv, channel_t *chan, client_t *by, cons
     snprintf(chan->name, sizeof chan->name, "%s", newname);
     snprintf(chan->casefold_name, sizeof chan->casefold_name, "%s", ncf);
     HASH_ADD_STR(srv->channels, casefold_name, chan);
+    server_marker_rename(srv, old_display, newname);
+    /* To services the new name is a new channel: a registered one (empty until now) gets +r/MLOCK/SECUREOPS like after a
+     * JOIN created it. Without this, renaming any channel onto a registered name walked past ChanServ entirely. */
+    link_notify_channel_new(srv, chan, NULL);
 
     member_t *m, *tmp;
     HASH_ITER(hh, chan->members, m, tmp) {

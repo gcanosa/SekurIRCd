@@ -270,6 +270,7 @@ void cmd_chgident(server_t *srv, client_t *cl, irc_message_t *msg) {
     client_prefix(target, old_prefix, sizeof old_prefix);
     snprintf(target->user, sizeof target->user, "%s", ident);
     target->ident_confirmed = 1; /* an oper-set ident is authoritative -- no "~" self-provided marker */
+    target->shun_gen = 0; /* the cached SHUN verdict was for the old user@host */
     broadcast_chghost(srv, target, old_prefix);
     char snote[400];
     snprintf(snote, sizeof snote, "%s used CHGIDENT on %s -> %s", cl->nick, target->nick, ident);

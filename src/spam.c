@@ -357,7 +357,7 @@ int spam_check_message(server_t *srv, client_t *cl, const char *target, const ch
     if (cl->fd < 0 || cl->is_service || (sp->exempt_opers && (cl->umodes & UMODE_O))) return 0;
 
     const char *t = target;
-    if ((t[0] == '@' || t[0] == '%' || t[0] == '+') && t[1] == '#') t++; /* STATUSMSG */
+    if (t[0] && strchr("~&@%+", t[0]) && t[1] == '#') t++; /* STATUSMSG (the same prefixes send_msg accepts) */
     int chan = t[0] == '#';
     if (!chan) {
         client_t *dst = server_find_user(srv, t);

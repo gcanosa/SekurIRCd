@@ -144,6 +144,7 @@ struct marker { char key[200]; long long ms; UT_hash_handle hh; };
 /* draft/read-marker store. Keys are casefolded "account\x01target". set only moves forward. Returns the stored value (0 = none). */
 long long server_marker_get(server_t *srv, const char *account, const char *target);
 long long server_marker_set(server_t *srv, const char *account, const char *target, long long ms);
+void server_marker_rename(server_t *srv, const char *oldname, const char *newname);
 void server_next_msgid(server_t *srv, char *out, size_t outsz);
 void server_software_version(const server_t *srv, char *buf, size_t bufsz);
 /* Send the 005 RPL_ISUPPORT lines (also re-sent by /VERSION, ircu-style). */
