@@ -44,6 +44,7 @@ static const cmd_entry_t DISPATCH[] = {
     {"RENAME", cmd_rename, 2, 1, 0},
     {"BATCH", cmd_batch, 1, 1, 0},
     {"MARKREAD", cmd_markread, 1, 1, 0},
+    {"REDACT", cmd_redact, 2, 1, 0},
     {"ACCEPT", cmd_accept, 0, 1, 0},
     {"CHATHISTORY", cmd_chathistory, 2, 1, 0},
     {"USERIP", cmd_userip, 1, 1, 1},
@@ -183,7 +184,7 @@ void cmd_send_welcome_if_ready(server_t *srv, client_t *cl) {
     const char *kl = server_kline_match(srv, cl->ip, cl->user, cl->realhost, cl->ident_confirmed);
     if (kl) {
         snprintf(cl->quit_reason, sizeof cl->quit_reason, "%s", kl);
-        cl->quitting = 1;
+        client_mark_quit(cl);
         char snote[400];
         snprintf(snote, sizeof snote, "Rejected connection from %s (%s@%s): %s",
                  cl->ip, cl->user, cl->realhost, kl);

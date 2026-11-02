@@ -36,7 +36,7 @@ static void finish_oper(server_t *srv, client_t *cl, const char *op_name, int pw
         server_notify_opers(srv, snote);
         if (cl->oper_fails >= MAX_OPER_FAILS) {
             snprintf(cl->quit_reason, sizeof cl->quit_reason, "Too many failed OPER attempts");
-            cl->quitting = 1;
+            client_mark_quit(cl);
             log_warn("oper", "%s disconnected: too many failed OPER attempts", cl->nick);
             return;
         }
@@ -174,7 +174,7 @@ void cmd_kill(server_t *srv, client_t *cl, irc_message_t *msg) {
     client_send(target, killmsg);
 
     snprintf(target->quit_reason, sizeof target->quit_reason, "Killed (%s (%s))", cl->nick, reason);
-    target->quitting = 1;
+    client_mark_quit(target);
     log_info("oper", "%s KILLed %s: %s", cl->nick, target->nick, reason);
 
     char snote[400];

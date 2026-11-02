@@ -3,6 +3,10 @@
     "tag": "Unreleased",
     "date": "",
     "changes": [
+      "Event loop: kqueue (macOS/BSD) or epoll (Linux) instead of poll(), with a poll() fallback elsewhere. Each connection's interest is registered once and changed only when it changes, so a wakeup costs the number of busy connections instead of the number of connections; idle clients no longer slow everyone else down",
+      "REDACT (draft/message-redaction): take back a message still in history. Your own, or anyone's in a channel you operate (IRC operators too). It is removed from CHATHISTORY on every server, and clients with the cap hide it",
+      "PRIVMSG and NOTICE take up to 4 comma-separated targets (TARGMAX=PRIVMSG:4,NOTICE:4); each target counts against the flood limit and the spam limits like a separate message",
+      "Read markers take only the memory their key needs (they reserved 200 bytes each)",
       "Fix: renaming a channel onto the name of a registered but empty channel walked past ChanServ, so the renamer kept op and the channel got no +r, MLOCK or SECUREOPS. A rename is now checked by services like a channel created by JOIN",
       "Fix: spam filters skipped messages to ~#chan and &#chan (owners/admins only), treating them as private messages",
       "Read markers (draft/read-marker) follow a channel RENAME; CHGIDENT re-checks SHUNs against the new ident",

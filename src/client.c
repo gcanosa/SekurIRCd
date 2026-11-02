@@ -13,6 +13,31 @@
 
 struct auth_tmp { char v[AUTHTMP_N][256]; };
 
+void client_mark_dirty(client_t *cl) {
+    if (cl->dirty_q || cl->quitting || cl->fd < 0 || !cl->srv) return;
+    cl->dirty_q = 1;
+    cl->dirty_prev = NULL;
+    cl->dirty_next = cl->srv->dirty_head;
+    if (cl->dirty_next) cl->dirty_next->dirty_prev = cl;
+    cl->srv->dirty_head = cl;
+}
+
+void client_unmark_dirty(client_t *cl) {
+    if (!cl->dirty_q) return;
+    if (cl->dirty_prev) cl->dirty_prev->dirty_next = cl->dirty_next; else cl->srv->dirty_head = cl->dirty_next;
+    if (cl->dirty_next) cl->dirty_next->dirty_prev = cl->dirty_prev;
+    cl->dirty_next = cl->dirty_prev = NULL;
+    cl->dirty_q = 0;
+}
+
+void client_mark_quit(client_t *cl) {
+    cl->quitting = 1;
+    if (cl->dead_q || cl->fd < 0 || !cl->srv) return;
+    cl->dead_q = 1;
+    cl->dead_next = cl->srv->dead_head;
+    cl->srv->dead_head = cl;
+}
+
 client_t *client_new(int fd, struct server *srv) {
     client_t *cl = calloc(1, sizeof *cl);
     if (!cl) return NULL;
@@ -148,7 +173,7 @@ void client_send(client_t *cl, const char *line) {
                 size_t cap = cl->label_cap ? cl->label_cap : 1024;
                 while (cap < cl->label_len + l + 1) cap *= 2;
                 char *nb = realloc(cl->label_buf, cap);
-                if (!nb) { cl->quitting = 1; return; }
+                if (!nb) { client_mark_quit(cl); return; }
                 cl->label_buf = nb; cl->label_cap = cap;
             }
             memcpy(cl->label_buf + cl->label_len, line, l);
@@ -167,7 +192,7 @@ void client_send(client_t *cl, const char *line) {
 
     size_t total = len + tl + 2, pending = client_sendq_len(cl);
     if (pending + total > (cl->sendq_max ? cl->sendq_max : (size_t)SENDQ_MAX)) {
-        cl->quitting = 1;
+        client_mark_quit(cl);
         snprintf(cl->quit_reason, sizeof cl->quit_reason, "SendQ exceeded");
         return;
     }
@@ -181,7 +206,7 @@ void client_send(client_t *cl, const char *line) {
             size_t newcap = cl->sbuf_cap * 2;
             while (newcap < cl->sbuf_len + total) newcap *= 2;
             char *nb = realloc(cl->sbuf, newcap);
-            if (!nb) { cl->quitting = 1; return; }
+            if (!nb) { client_mark_quit(cl); return; }
             cl->sbuf = nb;
             cl->sbuf_cap = newcap;
         }
@@ -193,6 +218,7 @@ void client_send(client_t *cl, const char *line) {
     d += len + tl;
     *d++ = '\r';
     *d = '\n';
+    if (pending == 0) client_mark_dirty(cl);
     cl->sbuf_len += total;
 }
 

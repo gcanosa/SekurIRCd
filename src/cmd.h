@@ -60,6 +60,9 @@ void cmd_accept(server_t *srv, client_t *cl, irc_message_t *msg);
 struct member;
 void channel_reveal_member(struct channel *chan, struct member *m); /* +D: first message / rank reveals a hidden member */
 void cmd_markread(server_t *srv, client_t *cl, irc_message_t *msg);
+void cmd_redact(server_t *srv, client_t *cl, irc_message_t *msg);
+/* The effect of a REDACT (local or from another server): drop it from history, tell our members/the recipient with the cap. */
+void cmd_apply_redact(server_t *srv, client_t *from, channel_t *chan, client_t *dst, const char *msgid, const char *reason);
 void cmd_batch(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_rename(server_t *srv, client_t *cl, irc_message_t *msg);
 /* Tell the channel's local members that `cl` joined (honours +D/+u visibility; also pings a guarding service). */

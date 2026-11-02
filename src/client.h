@@ -185,6 +185,10 @@ typedef struct client {
      * registered or not, so net.c can build the poll() set without walking
      * the (nick-keyed, so nick-less-until-NICK) users hash. */
     struct client *all_next, *all_prev;
+    /* net.c's event loop: output waiting to be flushed (dirty list, doubly linked so a dying client unlinks in O(1)),
+     * teardown queued (dead list), and the readiness interest registered for fd (ev.h). */
+    struct client *dirty_next, *dirty_prev, *dead_next;
+    unsigned char dirty_q, dead_q, ev_mask;
 
     UT_hash_handle hh; /* server->users, keyed by casefold_nick (once NICK is known) */
     UT_hash_handle hh_conn; /* server->by_conn_id, keyed by conn_id -- O(1) lookup of a
@@ -231,6 +235,12 @@ void client_mode_string(const client_t *cl, char *out, size_t outsz);
 /* Queue a raw line (no CRLF) for sending; appends CRLF, grows sbuf, and marks
  * `cl` quitting with "SendQ exceeded" if it would exceed SENDQ_MAX. */
 void client_send(client_t *cl, const char *line);
+/* Every "this connection is done" goes through client_mark_quit: it sets quitting and queues the client for net.c's
+ * teardown (setting cl->quitting directly is still caught, by the 1-second tick). client_mark_dirty queues a flush /
+ * interest update (output queued, DNSBL verdict in, TLS state changed...). Both ignore remote/service clients. */
+void client_mark_quit(client_t *cl);
+void client_mark_dirty(client_t *cl);
+void client_unmark_dirty(client_t *cl);
 
 /* Build+queue a numeric reply: ":<server> <code> <nick> <params...> :<trailing>". */
 void client_reply(client_t *cl, const char *code, const char **params, int nparams, const char *trailing);

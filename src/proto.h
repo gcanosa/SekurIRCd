@@ -167,6 +167,7 @@ size_t irc_time_tag_insert(const char *line, char *tag, size_t tagsz, size_t *at
 #define CAP_CHANNEL_RENAME    0x100000u
 #define CAP_MULTILINE         0x200000u
 #define CAP_READ_MARKER       0x400000u
+#define CAP_MESSAGE_REDACTION 0x800000u
 #define CAP_CHATHISTORY       0x8000u
 
 /* --- numeric reply codes (protocol.N) ------------------------------------ */
@@ -288,6 +289,7 @@ size_t irc_time_tag_insert(const char *line, char *tag, size_t tagsz, size_t *at
 
 #define N_UNKNOWNERROR     "400"
 #define N_NOSUCHNICK       "401"
+#define N_TOOMANYTARGETS   "407"
 #define N_NOSUCHCHANNEL    "403"
 #define N_CANNOTSENDTOCHAN "404"
 #define N_TOOMANYCHANNELS  "405"

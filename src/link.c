@@ -1,4 +1,5 @@
 #include "link.h"
+#include "ev.h"
 #include "channel.h"
 #include "cmd.h"
 #include "crypto.h"
@@ -597,7 +598,7 @@ void link_reap(server_t *srv) {
             (void)link_io_write(lc, lc->sbuf + lc->sbuf_off, lc->sbuf_len - lc->sbuf_off);
         free(lc->sbuf);
         if (lc->ssl) SSL_free(lc->ssl); /* abrupt close, no SSL_shutdown close_notify -- fine for a teardown path */
-        if (lc->fd >= 0) close(lc->fd);
+        if (lc->fd >= 0) { ev_forget(lc->fd, &lc->ev_mask); close(lc->fd); }
         if (lc->peer_name[0]) {
             log_info("link", "link '%s' closed", lc->peer_name);
             char snote[200];

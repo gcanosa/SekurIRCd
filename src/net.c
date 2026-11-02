@@ -11,6 +11,7 @@
 #include "cmd.h"
 #include "config.h"
 #include "crypto.h"
+#include "ev.h"
 #include "history.h"
 #include "link.h"
 #include "log.h"
@@ -26,6 +27,7 @@
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <poll.h>
+#include <stdint.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -276,7 +278,7 @@ static void tls_try_handshake(client_t *cl) {
     /* Almost always a port scanner or an ancient client: DEBUG, not WARNING. */
     const char *why = ERR_reason_error_string(ERR_get_error());
     log_debug("tls", "handshake failed for %s: %s", cl->ip, why ? why : err == SSL_ERROR_SYSCALL ? "connection closed" : "unknown error");
-    cl->quitting = 1;
+    client_mark_quit(cl);
     snprintf(cl->quit_reason, sizeof cl->quit_reason, "TLS handshake failed");
 }
 
@@ -317,7 +319,7 @@ static ssize_t io_write(client_t *cl, const void *buf, size_t len) {
 
 static int ws_out_append(client_t *cl, const unsigned char *data, size_t len) {
     if (cl->ws_out_len + len > SENDQ_MAX) { /* a reader that never drains: same policy as sbuf */
-        cl->quitting = 1;
+        client_mark_quit(cl);
         snprintf(cl->quit_reason, sizeof cl->quit_reason, "SendQ exceeded");
         return -1;
     }
@@ -325,11 +327,12 @@ static int ws_out_append(client_t *cl, const unsigned char *data, size_t len) {
         size_t cap = cl->ws_out_cap ? cl->ws_out_cap : 1024;
         while (cap < cl->ws_out_len + len) cap *= 2;
         unsigned char *nb = realloc(cl->ws_out, cap);
-        if (!nb) { cl->quitting = 1; return -1; }
+        if (!nb) { client_mark_quit(cl); return -1; }
         cl->ws_out = nb;
         cl->ws_out_cap = cap;
     }
     memcpy(cl->ws_out + cl->ws_out_len, data, len);
+    if (cl->ws_out_len == 0) client_mark_dirty(cl);
     cl->ws_out_len += len;
     return 0;
 }
@@ -351,7 +354,7 @@ static void ws_reject(client_t *cl, const char *status) {
     char r[128];
     int n = snprintf(r, sizeof r, "HTTP/1.1 %s\r\nConnection: close\r\nContent-Length: 0\r\n\r\n", status);
     ws_out_append(cl, (const unsigned char *)r, (size_t)n);
-    cl->quitting = 1;
+    client_mark_quit(cl);
     snprintf(cl->quit_reason, sizeof cl->quit_reason, "WebSocket handshake refused");
 }
 
@@ -427,7 +430,7 @@ static ssize_t ws_read(client_t *cl, void *buf, size_t len) {
         if (r == 0) break;
         if (opcode == 8) { /* close */
             ws_send_frame(cl, 8, payload, plen >= 2 ? 2 : 0);
-            cl->quitting = 1;
+            client_mark_quit(cl);
             snprintf(cl->quit_reason, sizeof cl->quit_reason, "WebSocket closed");
             break;
         }
@@ -793,7 +796,7 @@ static void accept_clients(server_t *srv, int listen_fd, int mode) {
         }
         cl->ssl = SSL_new(srv->tls_ctx);
         if (!cl->ssl || SSL_set_fd(cl->ssl, cl->fd) != 1) {
-            cl->quitting = 1;
+            client_mark_quit(cl);
             snprintf(cl->quit_reason, sizeof cl->quit_reason, "TLS setup failed");
             continue;
         }
@@ -804,6 +807,19 @@ static void accept_clients(server_t *srv, int listen_fd, int mode) {
 }
 
 static void write_client(client_t *cl);
+
+/* ev udata: the owner's pointer with its kind in the low two bits (every owner is at least 4-byte aligned). */
+enum { EVK_CLIENT = 0, EVK_LINK = 1, EVK_SCAN = 2, EVK_SLOT = 3 };
+#define EV_TAG(p, k) ((void *)((uintptr_t)(p) | (uintptr_t)(k)))
+#define EV_TAG_SLOT(i) ((void *)(((uintptr_t)(i) << 2) | EVK_SLOT))
+
+/* What a client's fd should wait for now: no reading while a DNSBL verdict is pending (nothing it sends is
+ * dispatched until then), and writability only while something is queued (or OpenSSL said WANT_WRITE mid-handshake). */
+static void ev_update_client(client_t *cl) {
+    if (cl->fd < 0) return;
+    int want_w = cl->tls_handshaking ? cl->tls_want_write : (client_sendq_len(cl) > 0 || cl->ws_out_len > 0);
+    ev_set(cl->fd, EV_TAG(cl, EVK_CLIENT), !cl->dnsbl_pending, want_w, &cl->ev_mask);
+}
 
 static void close_client(server_t *srv, client_t *cl) {
     /* Unregistered clients are almost always scanners/health-checks that
@@ -825,10 +841,10 @@ static void close_client(server_t *srv, client_t *cl) {
 static int read_client_once(server_t *srv, client_t *cl) {
     char tmp[4096];
     ssize_t n = cl->ws ? ws_read(cl, tmp, sizeof tmp) : io_read(cl, tmp, sizeof tmp);
-    if (n == 0) { cl->quitting = 1; snprintf(cl->quit_reason, sizeof cl->quit_reason, "Remote host closed the connection"); return 0; }
+    if (n == 0) { client_mark_quit(cl); snprintf(cl->quit_reason, sizeof cl->quit_reason, "Remote host closed the connection"); return 0; }
     if (n < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) return 0;
-        cl->quitting = 1;
+        client_mark_quit(cl);
         snprintf(cl->quit_reason, sizeof cl->quit_reason, "Read error");
         return 0;
     }
@@ -840,12 +856,12 @@ static int read_client_once(server_t *srv, client_t *cl) {
         size_t newcap = cl->rbuf_cap;
         while (newcap < cl->rbuf_len + (size_t)n + 1) newcap *= 2;
         if (newcap > RECVQ_MAX) {
-            cl->quitting = 1;
+            client_mark_quit(cl);
             snprintf(cl->quit_reason, sizeof cl->quit_reason, "Input line too long");
             return 0;
         }
         char *nb = realloc(cl->rbuf, newcap);
-        if (!nb) { cl->quitting = 1; return 0; }
+        if (!nb) { client_mark_quit(cl); return 0; }
         cl->rbuf = nb;
         cl->rbuf_cap = newcap;
     }
@@ -860,7 +876,7 @@ static int read_client_once(server_t *srv, client_t *cl) {
         if (r == 0) return 1; /* header not complete yet */
         if (r < 0 || (pip[0] && client_apply_real_address(srv, cl, pip, NULL) != 0)) {
             log_warn("net", "%s is a proxy_protocol_hosts peer but sent no valid PROXY header -- dropping", cl->ip);
-            cl->quitting = 1;
+            client_mark_quit(cl);
             snprintf(cl->quit_reason, sizeof cl->quit_reason, "PROXY protocol required");
             return 0;
         }
@@ -899,7 +915,7 @@ static int read_client_once(server_t *srv, client_t *cl) {
                 if (nt >= 2 && strcmp(tok[1], "UNKNOWN") == 0) continue; /* LB health check / unknown family: keep the peer address */
             }
             log_warn("net", "%s is a proxy_protocol_hosts peer but sent no valid PROXY line -- dropping", cl->ip);
-            cl->quitting = 1;
+            client_mark_quit(cl);
             snprintf(cl->quit_reason, sizeof cl->quit_reason, "PROXY protocol required");
             continue;
         }
@@ -915,19 +931,7 @@ static int read_client_once(server_t *srv, client_t *cl) {
             client_reply(cl, N_INPUTTOOLONG, NULL, 0, "Input line was too long");
             continue;
         }
-        int fl_msgs = srv->cfg.security.flood_max_msgs;
-        double fl_win = srv->cfg.security.flood_window;
-        if (cl->class_idx >= 0 && cl->class_idx < srv->cfg.n_classes) { /* a class may tighten or relax the flood guard */
-            const cfg_class_t *cc = &srv->cfg.classes[cl->class_idx];
-            if (cc->flood_max_msgs > 0) fl_msgs = cc->flood_max_msgs;
-            if (cc->flood_window > 0) fl_win = cc->flood_window;
-        }
-        if (!client_flood_ok(cl, fl_msgs, fl_win)) {
-            client_reply(cl, N_UNKNOWNERROR, NULL, 0, "flood; disconnecting");
-            cl->quitting = 1;
-            snprintf(cl->quit_reason, sizeof cl->quit_reason, "Excess Flood");
-            continue;
-        }
+        if (!net_flood_charge(srv, cl)) continue;
         irc_message_t msg;
         if (irc_parse_line(line, &msg) != 0) continue;
         if (msg.nparams > srv->cfg.security.max_params) msg.nparams = srv->cfg.security.max_params;
@@ -939,6 +943,23 @@ static int read_client_once(server_t *srv, client_t *cl) {
     }
     cl->rbuf = client_buf_shrink(cl->rbuf, cl->rbuf_len, &cl->rbuf_cap, RBUF_START, RBUF_START); /* one long line doesn't pin its buffer */
     return 1;
+}
+
+/* One line's worth of the flood guard (also charged per extra PRIVMSG target). Returns 0 once the client is marked to
+ * quit for flooding. */
+int net_flood_charge(server_t *srv, client_t *cl) {
+    int fl_msgs = srv->cfg.security.flood_max_msgs;
+    double fl_win = srv->cfg.security.flood_window;
+    if (cl->class_idx >= 0 && cl->class_idx < srv->cfg.n_classes) { /* a class may tighten or relax the flood guard */
+        const cfg_class_t *cc = &srv->cfg.classes[cl->class_idx];
+        if (cc->flood_max_msgs > 0) fl_msgs = cc->flood_max_msgs;
+        if (cc->flood_window > 0) fl_win = cc->flood_window;
+    }
+    if (client_flood_ok(cl, fl_msgs, fl_win)) return 1;
+    client_reply(cl, N_UNKNOWNERROR, NULL, 0, "flood; disconnecting");
+    client_mark_quit(cl);
+    snprintf(cl->quit_reason, sizeof cl->quit_reason, "Excess Flood");
+    return 0;
 }
 
 /* A TLS record can hold more plaintext than one read takes; the rest sits
@@ -960,7 +981,7 @@ static void write_client(client_t *cl) {
             cl->ws_out_len -= (size_t)w;
             cl->ws_out = client_buf_shrink(cl->ws_out, cl->ws_out_len, &cl->ws_out_cap, SBUF_SHRINK_ABOVE, 0);
         } else if (w < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
-            cl->quitting = 1;
+            client_mark_quit(cl);
             snprintf(cl->quit_reason, sizeof cl->quit_reason, "Write error");
         }
         return;
@@ -981,7 +1002,7 @@ static void write_client(client_t *cl) {
             cl->sbuf = client_buf_shrink(cl->sbuf, 0, &cl->sbuf_cap, SBUF_SHRINK_ABOVE, SBUF_KEEP);
         }
     } else if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
-        cl->quitting = 1;
+        client_mark_quit(cl);
         snprintf(cl->quit_reason, sizeof cl->quit_reason, "Write error");
     }
 }
@@ -1007,6 +1028,7 @@ static void drain_worker_results(server_t *srv) {
             job_result_t *r = &results[i];
             client_t *cl = find_by_conn_id(srv, r->conn_id);
             if (!cl) continue;
+            client_mark_dirty(cl); /* a DNSBL verdict gives back POLLIN; a reply may now be queued */
 
             /* A lookup that outlived the 30s rescue (or a registered client):
              * dropping it keeps a late result from silently swapping the host
@@ -1065,7 +1087,7 @@ static void drain_worker_results(server_t *srv) {
                     snprintf(quit, sizeof quit, reject ? "%s" : "Z-Lined: %s", reason);
                     server_kline_enforce(srv, cl->ip, "Z", quit, cl);
                     snprintf(cl->quit_reason, sizeof cl->quit_reason, "%s", reason);
-                    cl->quitting = 1;
+                    client_mark_quit(cl);
                     log_warn("dnsbl", "%s listed in %s (%s) -- %s", cl->ip, z->zone, replytext,
                              reject ? "rejected" : strcmp(pp->bl_action, "kline") == 0 ? "K-lined" : "Z-lined");
                 }
@@ -1095,6 +1117,10 @@ static void tick(server_t *srv) {
     time_t now = time(NULL);
     cmd_services_tick(srv, now);
     for (client_t *cl = srv->all_clients; cl; cl = cl->all_next) {
+        /* Safety net for the event loop's lists: a quit set without client_mark_quit, or output queued some way
+         * that skipped client_send, is picked up here within a second instead of never. */
+        if (cl->fd >= 0 && cl->quitting && !cl->dead_q) client_mark_quit(cl);
+        if (cl->fd >= 0 && !cl->quitting && (client_sendq_len(cl) > 0 || cl->ws_out_len > 0)) client_mark_dirty(cl);
         if (cl->fd < 0 || cl->quitting) continue; /* service pseudo-clients have no timeout of their own */
         double age = difftime(now, cl->signon_time);
         /* Worker results can be lost (full result ring) or stuck on a hung
@@ -1102,6 +1128,7 @@ static void tick(server_t *srv) {
         if ((cl->rdns_pending || cl->ident_pending || cl->dnsbl_pending) && age > 30) {
             log_warn("net", "lookup for %s never finished -- continuing without it", cl->ip);
             cl->rdns_pending = cl->ident_pending = cl->dnsbl_pending = 0;
+            client_mark_dirty(cl);
             cmd_send_welcome_if_ready(srv, cl);
         }
         /* Same rescue for a scrypt job whose result was lost (full result
@@ -1118,10 +1145,10 @@ static void tick(server_t *srv) {
         }
         double idle = difftime(now, cl->last_activity);
         if (!cl->registered && age > REGISTRATION_TIMEOUT) {
-            cl->quitting = 1;
+            client_mark_quit(cl);
             snprintf(cl->quit_reason, sizeof cl->quit_reason, "Registration timeout");
         } else if (idle > srv->cfg.security.ping_timeout) {
-            cl->quitting = 1;
+            client_mark_quit(cl);
             snprintf(cl->quit_reason, sizeof cl->quit_reason, "Ping timeout: %d seconds", (int)idle);
         } else if (!cl->ping_sent && idle > srv->cfg.security.ping_interval) {
             char line[200];
@@ -1249,14 +1276,17 @@ int net_run(server_t *srv) {
     server_install_debug_log_hook(srv);
     time_t last_tick = time(NULL);
 
-    /* pollfd set reused across iterations (grown, never shrunk).
-     * ponytail: poll() is O(connections) per wakeup; kqueue/epoll is the
-     * upgrade if this ever serves thousands of concurrent clients. */
-    struct pollfd *fds = NULL;
-    client_t **fd_client = NULL;
-    link_conn_t **fd_link = NULL;
-    protection_scan_t **fd_scan = NULL;
-    size_t fds_cap = 0;
+    /* Readiness comes from kqueue/epoll (ev.c). Each fd's interest is registered once and changed only when it
+     * changes, so a wakeup costs O(ready fds), not O(connections): the poll() loop this replaced rebuilt and scanned
+     * a pollfd for every connection on every pass. What used to fall out of that full walk now has its own list:
+     * clients with output to flush (srv->dirty_head, fed by client_send) and clients to tear down (srv->dead_head,
+     * fed by client_mark_quit). Links and proxy-scan probes are few, so they are still walked each pass. */
+    if (ev_init() != 0) { log_critical("net", "event backend (%s) failed to start: %s", ev_backend(), strerror(errno)); return 1; }
+    log_info("net", "event backend: %s", ev_backend());
+    enum { SL_MAIN, SL_WAKE, SL_LINK, SL_WS, SL_TLS, SL_V6, N_SLOTS = SL_V6 + 4 };
+    struct { int fd; unsigned char mask; } slot[N_SLOTS];
+    for (int i = 0; i < N_SLOTS; i++) { slot[i].fd = -1; slot[i].mask = 0; }
+    ev_event_t evs[256];
 
     while (!srv->shutdown_requested) {
         if (g_term) { srv->shutdown_requested = 1; break; }
@@ -1267,164 +1297,124 @@ int net_run(server_t *srv) {
             else log_error("net", "rehash failed: %s", err);
         }
 
-        size_t nfds = 9 + (size_t)srv->n_clients;
-        for (link_conn_t *lc = srv->links; lc; lc = lc->next) nfds++;
-        nfds += (size_t)srv->prot.n_scans;
-        if (nfds > fds_cap) {
-            size_t cap = nfds * 2;
-            struct pollfd *nf = realloc(fds, cap * sizeof *fds);
-            if (nf) fds = nf;
-            client_t **nc = realloc(fd_client, cap * sizeof *fd_client);
-            if (nc) fd_client = nc;
-            link_conn_t **nl = realloc(fd_link, cap * sizeof *fd_link);
-            if (nl) fd_link = nl;
-            protection_scan_t **ns = realloc(fd_scan, cap * sizeof *fd_scan);
-            if (ns) fd_scan = ns;
-            if (!nf || !nc || !nl || !ns) { log_critical("net", "out of memory growing poll set"); break; }
-            fds_cap = cap;
+        /* Listeners + the worker wake fd: a rehash can reopen a listener, and an EMFILE pause (see accept_clients)
+         * takes them out of the read set for a moment so an un-acceptable connection can't spin the loop. */
+        int paused = srv->accept_paused_until > time(NULL);
+        int want_fd[N_SLOTS] = {srv->listen_fd, worker_wake_fd(), srv->link_listen_fd, srv->ws_listen_fd, srv->tls_listen_fd,
+                                srv->l6[0].fd, srv->l6[1].fd, srv->l6[2].fd, srv->l6[3].fd};
+        for (int i = 0; i < N_SLOTS; i++) {
+            if (slot[i].fd != want_fd[i]) { /* the old fd (if any) is already closed, which unregistered it */
+                if (slot[i].fd >= 0) ev_forget(slot[i].fd, &slot[i].mask);
+                slot[i].fd = want_fd[i];
+                slot[i].mask = 0;
+            }
+            if (slot[i].fd >= 0) ev_set(slot[i].fd, EV_TAG_SLOT(i), i == SL_WAKE || !paused, 0, &slot[i].mask);
         }
-        memset(fd_client, 0, nfds * sizeof *fd_client);
-        memset(fd_link, 0, nfds * sizeof *fd_link);
-        memset(fd_scan, 0, nfds * sizeof *fd_scan);
-        int n = 0;
 
-        /* While paused (see accept_clients' EMFILE handling) the listeners
-         * stay in the set but ask for no events, so an un-acceptable
-         * connection can't spin the loop. */
-        short listen_events = (srv->accept_paused_until > time(NULL)) ? 0 : POLLIN;
-        fds[n].fd = srv->listen_fd; fds[n].events = listen_events; fds[n].revents = 0; n++;
-        int wake_idx = -1;
-        if (worker_wake_fd() >= 0) {
-            wake_idx = n;
-            fds[n].fd = worker_wake_fd(); fds[n].events = POLLIN; fds[n].revents = 0; n++;
-        }
-        int link_listen_idx = -1;
-        if (srv->link_listen_fd >= 0) {
-            link_listen_idx = n;
-            fds[n].fd = srv->link_listen_fd; fds[n].events = listen_events; fds[n].revents = 0; n++;
-        }
-        int ws_listen_idx = -1;
-        if (srv->ws_listen_fd >= 0) {
-            ws_listen_idx = n;
-            fds[n].fd = srv->ws_listen_fd; fds[n].events = listen_events; fds[n].revents = 0; n++;
-        }
-        int tls_listen_idx = -1;
-        if (srv->tls_listen_fd >= 0) {
-            tls_listen_idx = n;
-            fds[n].fd = srv->tls_listen_fd; fds[n].events = listen_events; fds[n].revents = 0; n++;
-        }
-        int l6_idx[4];
-        for (int i = 0; i < 4; i++) {
-            l6_idx[i] = -1;
-            if (srv->l6[i].fd < 0) continue;
-            l6_idx[i] = n;
-            fds[n].fd = srv->l6[i].fd; fds[n].events = listen_events; fds[n].revents = 0; n++;
-        }
-        int any_quitting = 0; /* seen while building the set, so the timeout below needs no second walk */
-        for (client_t *cl = srv->all_clients; cl; cl = cl->all_next) {
-            if (cl->fd < 0) continue;
-            if (cl->quitting) { any_quitting = 1; continue; }
-            /* Flush now rather than waiting a whole extra poll() round for
-             * POLLOUT: most replies fit the socket buffer immediately. */
+        /* Clients with queued output (or changed state): flush now -- most replies fit the socket buffer at once --
+         * and ask for writability only for what is still pending. */
+        client_t *dirty = srv->dirty_head; /* a snapshot: anything queued while flushing waits for the next pass */
+        srv->dirty_head = NULL;
+        while (dirty) {
+            client_t *cl = dirty;
+            dirty = cl->dirty_next;
+            cl->dirty_next = cl->dirty_prev = NULL;
+            cl->dirty_q = 0;
+            if (cl->quitting) continue;
             if ((client_sendq_len(cl) > 0 || cl->ws_out_len > 0) && !cl->tls_handshaking) write_client(cl);
-            if (cl->quitting) { any_quitting = 1; continue; }
-            fds[n].fd = cl->fd;
-            /* A pending DNSBL verdict withholds POLLIN entirely: the client
-             * exists (a listed IP might still be disconnected below), but
-             * nothing it sends is dispatched until the lookup resolves. */
-            fds[n].events = (cl->dnsbl_pending ? 0 : POLLIN) |
-                ((cl->tls_handshaking ? cl->tls_want_write : (client_sendq_len(cl) > 0 || cl->ws_out_len > 0)) ? POLLOUT : 0);
-            fds[n].revents = 0;
-            fd_client[n] = cl;
-            n++;
+            if (!cl->quitting) ev_update_client(cl);
         }
         for (link_conn_t *lc = srv->links; lc; lc = lc->next) {
             if (lc->closing) continue;
             if (lc->sbuf_len > 0 && !lc->tls_handshaking) link_handle_writable(srv, lc);
             if (lc->closing) continue;
-            fds[n].fd = lc->fd;
-            fds[n].events = POLLIN |
-                ((lc->tls_handshaking ? lc->tls_want_write : lc->sbuf_len > 0) ? POLLOUT : 0);
-            fds[n].revents = 0;
-            fd_link[n] = lc;
-            n++;
+            ev_set(lc->fd, EV_TAG(lc, EVK_LINK), 1, lc->tls_handshaking ? lc->tls_want_write : lc->sbuf_len > 0, &lc->ev_mask);
         }
+        protection_ev_sync(srv);
 
-        protection_poll_fill(srv, fds, fd_scan, &n);
-
-        /* Anything already marked for teardown (e.g. a write error in the
-         * flush above) shouldn't wait out a full poll timeout. */
-        int timeout = any_quitting ? 0 : 1000;
+        /* Anything already marked for teardown (e.g. a write error in the flush above) shouldn't wait out a full timeout. */
+        int timeout = srv->dead_head ? 0 : 1000;
         for (link_conn_t *lc = srv->links; lc && timeout; lc = lc->next)
             if (lc->closing) timeout = 0;
 
-        int rc = poll(fds, (nfds_t)n, timeout);
-        if (rc < 0 && errno != EINTR) {
-            log_error("net", "poll() failed: %s", strerror(errno));
+        int rc = ev_wait(evs, (int)(sizeof evs / sizeof evs[0]), timeout);
+        if (rc < 0) {
+            log_error("net", "event wait failed: %s", strerror(errno));
             break;
         }
-        if (rc > 0) {
-            if (fds[0].revents & POLLIN) accept_clients(srv, srv->listen_fd, 0);
-            if (link_listen_idx >= 0 && (fds[link_listen_idx].revents & POLLIN)) link_accept(srv, srv->link_listen_fd);
-            for (int i = 0; i < 4; i++) {
-                if (l6_idx[i] < 0 || !(fds[l6_idx[i]].revents & POLLIN)) continue;
-                if (i == L6_LINK) link_accept(srv, srv->l6[i].fd);
-                else accept_clients(srv, srv->l6[i].fd, i == L6_MAIN ? 0 : i == L6_TLS ? 1 : srv->cfg.websocket.tls ? 3 : 2);
-            }
-            if (tls_listen_idx >= 0 && (fds[tls_listen_idx].revents & POLLIN)) accept_clients(srv, srv->tls_listen_fd, 1);
-            if (ws_listen_idx >= 0 && (fds[ws_listen_idx].revents & POLLIN)) accept_clients(srv, srv->ws_listen_fd, srv->cfg.websocket.tls ? 3 : 2);
-
-            for (int i = 0; i < n; i++) {
-                if (fd_client[i]) {
-                    client_t *cl = fd_client[i];
-                    if (cl->quitting) continue;
-                    if (fds[i].revents & (POLLHUP | POLLERR)) {
-                        cl->quitting = 1;
-                        if (!cl->quit_reason[0]) snprintf(cl->quit_reason, sizeof cl->quit_reason, "Connection reset");
-                        continue;
-                    }
-                    if (cl->tls_handshaking) {
-                        if (fds[i].revents & (POLLIN | POLLOUT)) tls_try_handshake(cl);
-                        continue;
-                    }
-                    if (fds[i].revents & POLLIN) read_client(srv, cl);
-                    if (!cl->quitting && (fds[i].revents & POLLOUT)) write_client(cl);
-                } else if (fd_scan[i]) {
-                    /* A hit frees every probe for that address (protection.c),
-                     * so later slots of this same address may already be gone. */
-                    if (fds[i].revents && protection_scan_live(srv, fd_scan[i])) protection_handle(srv, fd_scan[i], fds[i].revents);
-                } else if (fd_link[i]) {
-                    link_conn_t *lc = fd_link[i];
-                    if (lc->closing) continue;
-                    if (fds[i].revents & (POLLHUP | POLLERR)) { link_close(srv, lc); continue; }
-                    if (lc->tls_handshaking) {
-                        if (fds[i].revents & (POLLIN | POLLOUT)) link_tls_try_handshake(srv, lc);
-                        continue;
-                    }
-                    if (fds[i].revents & POLLIN) link_handle_readable(srv, lc);
-                    if (fds[i].revents & POLLOUT) link_handle_writable(srv, lc);
+        int woke = 0;
+        for (int i = 0; i < rc; i++) {
+            ev_event_t *e = &evs[i];
+            uintptr_t tag = (uintptr_t)e->udata;
+            switch (tag & 3u) {
+            case EVK_SLOT: {
+                int sl = (int)(tag >> 2);
+                if (sl == SL_WAKE) { woke = 1; break; }
+                if (!e->r || paused) break;
+                if (sl == SL_MAIN) accept_clients(srv, srv->listen_fd, 0);
+                else if (sl == SL_LINK) link_accept(srv, srv->link_listen_fd);
+                else if (sl == SL_TLS) accept_clients(srv, srv->tls_listen_fd, 1);
+                else if (sl == SL_WS) accept_clients(srv, srv->ws_listen_fd, srv->cfg.websocket.tls ? 3 : 2);
+                else {
+                    int k = sl - SL_V6;
+                    if (k == L6_LINK) link_accept(srv, srv->l6[k].fd);
+                    else accept_clients(srv, srv->l6[k].fd, k == L6_MAIN ? 0 : k == L6_TLS ? 1 : srv->cfg.websocket.tls ? 3 : 2);
                 }
+                break;
+            }
+            case EVK_CLIENT: {
+                client_t *cl = (client_t *)(tag & ~(uintptr_t)3u); /* teardown is deferred to the end of the pass, so this is still alive */
+                if (cl->quitting) break;
+                if (e->hup && !e->r) {
+                    if (!cl->quit_reason[0]) snprintf(cl->quit_reason, sizeof cl->quit_reason, "Connection reset");
+                    client_mark_quit(cl);
+                    break;
+                }
+                if (cl->tls_handshaking) tls_try_handshake(cl);
+                else {
+                    if (e->r) read_client(srv, cl);
+                    if (!cl->quitting && e->w) write_client(cl);
+                }
+                if (!cl->quitting) ev_update_client(cl);
+                break;
+            }
+            case EVK_SCAN: {
+                /* A hit frees every probe for that address (protection.c), so a later event may name one that's gone. */
+                protection_scan_t *sc = (protection_scan_t *)(tag & ~(uintptr_t)3u);
+                if (protection_scan_live(srv, sc))
+                    protection_handle(srv, sc, (short)((e->r ? POLLIN : 0) | (e->w ? POLLOUT : 0) | (e->hup ? POLLHUP : 0)));
+                break;
+            }
+            case EVK_LINK: {
+                link_conn_t *lc = (link_conn_t *)(tag & ~(uintptr_t)3u);
+                if (lc->closing) break;
+                if (e->hup && !e->r) { link_close(srv, lc); break; }
+                if (lc->tls_handshaking) { link_tls_try_handshake(srv, lc); break; }
+                if (e->r) link_handle_readable(srv, lc);
+                if (e->w && !lc->closing) link_handle_writable(srv, lc);
+                break;
+            }
             }
         }
 
-        if (wake_idx < 0 || rc <= 0 || (fds[wake_idx].revents & POLLIN)) drain_worker_results(srv);
+        if (slot[SL_WAKE].fd < 0 || rc == 0 || woke) drain_worker_results(srv);
 
         time_t now = time(NULL);
         if (now != last_tick) { tick(srv); last_tick = now; }
 
-        /* Deferred teardown: only now, after every fd this iteration has
-         * been serviced, do we actually free a closing link or close/free a
-         * quitting client -- see client.h's comment on why no handler ever
-         * frees one inline. */
+        /* Deferred teardown: only now, after every event of this pass has been serviced, do we actually free a
+         * closing link or close/free a quitting client -- see client.h's comment on why no handler ever frees one
+         * inline. Closing one can make others quit (a QUIT that overflows a sendq), so this drains until empty. */
         link_reap(srv);
-        client_t *cl = srv->all_clients;
-        while (cl) {
-            client_t *next = cl->all_next;
-            if (cl->quitting) close_client(srv, cl);
-            cl = next;
+        while (srv->dead_head) {
+            client_t *cl = srv->dead_head;
+            srv->dead_head = cl->dead_next; /* dead_q stays set: close_client's last write may fail and must not requeue it */
+            client_unmark_dirty(cl);
+            if (cl->fd >= 0) ev_forget(cl->fd, &cl->ev_mask);
+            close_client(srv, cl);
         }
     }
-    free(fds); free(fd_client); free(fd_link); free(fd_scan);
+    ev_shutdown();
     log_set_hook(NULL);
 
     log_info("net", "shutting down");

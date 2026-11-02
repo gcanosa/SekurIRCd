@@ -104,3 +104,34 @@ def test_read_marker_follows_rename():
         a.say("RENAME #before #after")
         a.send("MARKREAD #after")
         assert a.saw(r"MARKREAD #after timestamp=2026-01-02T03:04:05.000Z")
+
+
+RCAPS = ["draft/message-redaction", "message-tags", "batch", "draft/chathistory", "echo-message"]
+
+
+def _msgid(lines, text):
+    line = next(l for l in lines if text in l)
+    return re.search(r"msgid=([^; ]+)", line).group(1)
+
+
+def test_redact_own_and_by_chanop():
+    with Server() as s:
+        op = s.client("rop", caps=RCAPS)
+        op.say("JOIN #rd")
+        u = s.client("ru", caps=RCAPS)
+        u.say("JOIN #rd")
+        plain = s.client("rplain")
+        plain.say("JOIN #rd")
+        mid = _msgid(u.say("PRIVMSG #rd :oops"), "PRIVMSG #rd :oops")
+        u.send(f"REDACT #rd {mid} :typo")
+        assert op.saw(rf"REDACT #rd {mid} :typo") and u.saw(rf"REDACT #rd {mid}")
+        assert not plain.saw(r"REDACT", 0.3)                         # no cap: nothing to show
+        h = op.say("CHATHISTORY LATEST #rd * 10", 0.6)
+        assert not any(":oops" in l for l in h), h                    # history forgot it
+        mid2 = _msgid(op.say("PRIVMSG #rd :op says"), "PRIVMSG #rd :op says")
+        assert any("FAIL REDACT REDACT_FORBIDDEN #rd" in l for l in u.say(f"REDACT #rd {mid2}"))
+        mid3 = _msgid(u.say("PRIVMSG #rd :spam"), "PRIVMSG #rd :spam")
+        op.send(f"REDACT #rd {mid3}")                                 # chanops may redact anyone's
+        assert u.saw(rf"REDACT #rd {mid3}")
+        assert any("FAIL REDACT UNKNOWN_MSGID #rd nope" in l for l in u.say("REDACT #rd nope"))
+        assert any("FAIL REDACT INVALID_TARGET #nochan" in l for l in u.say("REDACT #nochan x"))

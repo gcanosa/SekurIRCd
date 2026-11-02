@@ -295,7 +295,7 @@ static int apply_action(server_t *srv, client_t *cl, spam_action_t act, long dur
         case SPAM_KILL:
         case SPAM_ZLINE: {
             snprintf(cl->quit_reason, sizeof cl->quit_reason, "Spam: %s", reason);
-            cl->quitting = 1;
+            client_mark_quit(cl);
             if (act == SPAM_ZLINE && cl->ip[0]) {
                 long dur = duration > 0 ? duration : srv->cfg.spam.zline_duration;
                 char zr[200];
@@ -305,7 +305,7 @@ static int apply_action(server_t *srv, client_t *cl, spam_action_t act, long dur
                     if (c == cl || c->fd < 0 || c->quitting || (c->umodes & UMODE_O)) continue;
                     if (strcmp(c->ip, cl->ip) != 0) continue;
                     snprintf(c->quit_reason, sizeof c->quit_reason, "%s", cl->quit_reason);
-                    c->quitting = 1;
+                    client_mark_quit(c);
                 }
             }
             return 1;

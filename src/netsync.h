@@ -117,6 +117,8 @@ void netsync_chan_rename(struct server *srv, struct channel *chan, struct client
 void netsync_invite(struct server *srv, struct client *from, struct client *target, struct channel *chan);
 /* PRIVMSG/NOTICE/TAGMSG: `target` is as typed (#chan, @#chan, or a nick -> sent as the target's UID if remote). `tags` is
  * a ready "@k=v;k2=v2" string or "" . A target that is a local user needs no relay (returns without sending). */
+/* REDACT: to every server for a channel, or to the recipient's server for a private message. */
+void netsync_redact(struct server *srv, struct client *from, const char *chan, struct client *dst, const char *msgid, const char *reason);
 void netsync_message(struct server *srv, struct client *from, const char *verb, const char *target,
                      struct client *remote_target, const char *text, const irc_tag_t *tags, int ntags);
 void netsync_kill(struct server *srv, struct client *oper, struct client *target, const char *reason);

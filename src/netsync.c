@@ -458,7 +458,7 @@ static void evict_local_for_collision(server_t *srv, client_t *old) {
     if (found == old) HASH_DEL(srv->users, old);
     old->casefold_nick[0] = '\0';
     snprintf(old->quit_reason, sizeof old->quit_reason, "Nick collision");
-    old->quitting = 1;
+    client_mark_quit(old);
 }
 
 /* Settles a nick that is already in use when `ts`/`from` wants it. Returns 1 if the newcomer may proceed. */
@@ -681,7 +681,7 @@ static void handle_kill(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
         irc_build(kl, sizeof kl, NULL, 0, prefix, "KILL", (const char *[]){target->nick}, 1, reason); /* as for a local KILL */
         client_send(target, kl);
         snprintf(target->quit_reason, sizeof target->quit_reason, "Killed (%s (%s))", by, reason);
-        target->quitting = 1;
+        client_mark_quit(target);
         snprintf(snote, sizeof snote, "Received KILL message for %s. From %s: %s", target->nick, by, reason);
         server_notify_opers(srv, snote);
         return;
@@ -1114,6 +1114,25 @@ static void handle_message(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     fwd_message(srv, lc, msg, NULL);
 }
 
+/* :<uid> REDACT <#chan|uid> <msgid> [:reason] -- authorised by the sender's server; we forget it and tell our users. */
+static void handle_redact(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
+    client_t *from = src_user(srv, lc, msg->prefix);
+    if (!from || msg->nparams < 2) return;
+    const char *target = msg->params[0], *msgid = msg->params[1];
+    const char *reason = msg->nparams > 2 ? msg->params[msg->nparams - 1] : NULL;
+    char fl[700];
+    irc_build(fl, sizeof fl, NULL, 0, msg->prefix, "REDACT", (const char *[]){target, msgid}, 2, reason);
+    client_t *tu = target[0] != '#' && strlen(target) == UID_LEN ? netsync_find_uid(srv, target) : NULL;
+    if (tu) {
+        if (!tu->remote) cmd_apply_redact(srv, from, NULL, tu, msgid, reason);
+        else if (tu->nserver) route_to(srv, tu->nserver, fl);
+        return;
+    }
+    channel_t *chan = server_find_channel(srv, target);
+    if (chan) cmd_apply_redact(srv, from, chan, NULL, msgid, reason);
+    flood(srv, lc, fl);
+}
+
 static void handle_invite(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     client_t *from = src_user(srv, lc, msg->prefix);
     if (!from || msg->nparams < 2) return;
@@ -1387,6 +1406,7 @@ void netsync_handle(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     else if (!strcmp(c, "UNGLINE") || !strcmp(c, "UNSHUN")) handle_ungline(srv, lc, msg);
     else if (!strcmp(c, "RQUERY")) handle_rquery(srv, lc, msg);
     else if (!strcmp(c, "RENAME")) handle_rename(srv, lc, msg);
+    else if (!strcmp(c, "REDACT")) handle_redact(srv, lc, msg);
     else if (!strcmp(c, "RSQUIT")) handle_rsquit(srv, lc, msg);
     else if (!strcmp(c, "SVCRELAY")) handle_svcrelay(srv, lc, msg);
     else if (!strcmp(c, "CERTFP")) handle_certfp(srv, lc, msg);
@@ -1548,6 +1568,14 @@ void netsync_message(server_t *srv, client_t *from, const char *verb, const char
     const char *wire = remote_target ? remote_target->uid : target;
     irc_build(line, sizeof line, tags, ntags, from->uid, verb, (const char *[]){wire}, 1, text);
     if (remote_target) route_to(srv, remote_target->nserver, line); else flood(srv, NULL, line);
+}
+
+void netsync_redact(server_t *srv, client_t *from, const char *chan, client_t *dst, const char *msgid, const char *reason) {
+    if (!from->uid[0] || !netsync_has_links(srv)) return;
+    if (!chan && (!dst || !dst->remote || !dst->nserver)) return; /* a local recipient: nothing to tell anyone */
+    char line[700];
+    irc_build(line, sizeof line, NULL, 0, from->uid, "REDACT", (const char *[]){chan ? chan : dst->uid, msgid}, 2, reason);
+    if (chan) flood(srv, NULL, line); else route_to(srv, dst->nserver, line);
 }
 
 void netsync_kill(server_t *srv, client_t *oper, client_t *target, const char *reason) {

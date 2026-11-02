@@ -4,7 +4,7 @@ from harness import Server
 ALL_CAPS = ("away-notify multi-prefix userhost-in-names setname chghost account-notify extended-join echo-message "
             "message-tags server-time account-tag invite-notify standard-replies cap-notify batch labeled-response "
             "draft/no-implicit-names draft/pre-away extended-monitor draft/channel-rename draft/multiline "
-            "draft/read-marker draft/chathistory").split()
+            "draft/read-marker draft/chathistory draft/message-redaction").split()
 
 
 def test_os_style_username_is_sanitised_not_refused():
@@ -124,3 +124,17 @@ def test_cap_notify_values_only_for_302():
         s._start_services()  # ...and comes back with them, values only for 302
         assert new.saw(r"CAP cn302 NEW :sasl=PLAIN,SCRAM-SHA-256 ", 3)
         assert old.saw(r"CAP cn301 NEW :sasl draft/account-registration$", 1)
+
+
+def test_privmsg_to_several_targets():
+    with Server() as s:
+        a, b, c = s.client("mta"), s.client("mtb"), s.client("mtc")
+        c.say("JOIN #mt")
+        a.say("JOIN #mt")
+        r = a.say("PRIVMSG mtb,#mt,MTB,nobody :hi all", 0.5)
+        assert b.saw(r"PRIVMSG mtb :hi all") and c.saw(r"PRIVMSG #mt :hi all")
+        assert not b.saw(r"hi all", 0.3)                       # the repeat (MTB) was dropped
+        assert any(" 401 mta nobody " in l for l in r), r      # each target answers for itself
+        r = a.say("PRIVMSG t1,t2,t3,t4,t5 :x")
+        assert any(" 407 mta t5 " in l for l in r), r          # TARGMAX=PRIVMSG:4
+        assert "TARGMAX=PRIVMSG:4,NOTICE:4" in " ".join(a.say("VERSION"))  # VERSION repeats the 005 lines

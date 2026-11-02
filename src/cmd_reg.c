@@ -182,7 +182,7 @@ int client_apply_real_address(server_t *srv, client_t *cl, const char *given, co
     if (irc_ip_normalize(given, ip, sizeof ip) != 0) {
         log_warn("net", "trusted intermediary sent an invalid IP '%s'", given);
         snprintf(cl->quit_reason, sizeof cl->quit_reason, "Invalid forwarded address");
-        cl->quitting = 1;
+        client_mark_quit(cl);
         return -1;
     }
     snprintf(cl->ip, sizeof cl->ip, "%s", ip);
@@ -191,7 +191,7 @@ int client_apply_real_address(server_t *srv, client_t *cl, const char *given, co
     net_reset_host(srv, cl);
     if (net_assign_class(srv, cl) != 0) { /* the real address belongs to a full class */
         snprintf(cl->quit_reason, sizeof cl->quit_reason, "Too many connections in your class");
-        cl->quitting = 1;
+        client_mark_quit(cl);
         return -1;
     }
     cl->webirc = 1; /* "address supplied by a trusted intermediary": also makes net.c ignore the DNSBL result for the old address */
@@ -199,7 +199,7 @@ int client_apply_real_address(server_t *srv, client_t *cl, const char *given, co
     const char *kl = server_kline_match(srv, cl->ip, NULL, cl->realhost, 0);
     if (kl) {
         snprintf(cl->quit_reason, sizeof cl->quit_reason, "%s", kl);
-        cl->quitting = 1;
+        client_mark_quit(cl);
         return -1;
     }
     return 0;
@@ -220,7 +220,7 @@ void cmd_webirc(server_t *srv, client_t *cl, irc_message_t *msg) {
     if (!match) {
         log_warn("webirc", "rejected WEBIRC from %s (no matching [[webirc]] host+password)", cl->ip);
         snprintf(cl->quit_reason, sizeof cl->quit_reason, "WEBIRC: not authorized");
-        cl->quitting = 1;
+        client_mark_quit(cl);
         return;
     }
     if (client_apply_real_address(srv, cl, msg->params[3], msg->params[2]) == 0)
@@ -253,6 +253,7 @@ static const struct { const char *name; unsigned int bit; } CAP_ATTRS[] = {
     {"draft/multiline", CAP_MULTILINE},
     {"draft/read-marker", CAP_READ_MARKER},
     {"draft/chathistory", CAP_CHATHISTORY},
+    {"draft/message-redaction", CAP_MESSAGE_REDACTION},
 };
 #define N_CAP_ATTRS (int)(sizeof CAP_ATTRS / sizeof CAP_ATTRS[0])
 
@@ -398,7 +399,7 @@ void cmd_quit(server_t *srv, client_t *cl, irc_message_t *msg) {
     if (cl->quitting) return; /* a spam rule already disconnected them with its own reason */
     if (spammy) reason = "Client Quit";
     snprintf(cl->quit_reason, sizeof cl->quit_reason, "Quit: %s", reason);
-    cl->quitting = 1;
+    client_mark_quit(cl);
 }
 
 /* Hex-encodes the SHA-256 fingerprint of `cl`'s TLS client certificate into `out` (>= 65 bytes). -1 if this isn't a TLS
@@ -715,7 +716,7 @@ void svc_command(server_t *srv, client_t *svc, irc_message_t *msg) {
     } else if (!strcmp(c, "KILL")) {
         snprintf(cl->quit_reason, sizeof cl->quit_reason, "Killed (%s (%s))", svc ? svc->nick : "NickServ",
                  msg->nparams > 1 ? msg->params[msg->nparams - 1] : "");
-        cl->quitting = 1;
+        client_mark_quit(cl);
     } else if (!strcmp(c, "SVCSASL") && msg->nparams >= 3) {
         if (!cl->sasl_mech[0]) return; /* aborted or timed out meanwhile */
         if (!strcmp(msg->params[1], "C")) {

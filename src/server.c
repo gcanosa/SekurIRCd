@@ -63,9 +63,10 @@ long long server_marker_set(server_t *srv, const char *account, const char *targ
         /* MARKREAD takes any valid nick as a target, so one account could otherwise grow this forever.
          * ponytail: global cap, a per-account cap if one account crowding out the rest ever matters */
         if (HASH_COUNT(srv->markers) >= 100000) return 0;
-        m = calloc(1, sizeof *m);
+        size_t kl = strlen(key);
+        m = calloc(1, sizeof *m + kl + 1);
         if (!m) return 0;
-        snprintf(m->key, sizeof m->key, "%s", key);
+        memcpy(m->key, key, kl + 1);
         HASH_ADD_STR(srv->markers, key, m);
     }
     if (ms > m->ms) m->ms = ms; /* a marker only ever moves forward */
@@ -78,20 +79,25 @@ void server_marker_rename(server_t *srv, const char *oldname, const char *newnam
     irc_casefold(ocf, sizeof ocf, oldname);
     irc_casefold(ncf, sizeof ncf, newname);
     if (strcmp(ocf, ncf) == 0) return;
-    marker_t *m, *tmp, *moved = NULL;
+    struct moved { char acct[72]; long long ms; struct moved *next; } *moved = NULL;
+    marker_t *m, *tmp;
     HASH_ITER(hh, srv->markers, m, tmp) {
-        char *sep = strchr(m->key, '\x01');
+        const char *sep = strchr(m->key, '\x01');
         if (!sep || strcmp(sep + 1, ocf) != 0) continue;
+        struct moved *mv = malloc(sizeof *mv);
+        if (mv) {
+            snprintf(mv->acct, sizeof mv->acct, "%.*s", (int)(sep - m->key), m->key);
+            mv->ms = m->ms;
+            mv->next = moved;
+            moved = mv;
+        }
         HASH_DEL(srv->markers, m);
-        snprintf(sep + 1, sizeof m->key - (size_t)(sep + 1 - m->key), "%s", ncf);
-        m->hh.next = moved; /* re-added after the walk, so the iteration never meets it again */
-        moved = m;
+        free(m);
     }
-    while (moved) {
-        marker_t *next = moved->hh.next, *clash;
-        HASH_FIND_STR(srv->markers, moved->key, clash);
-        if (clash) { if (moved->ms > clash->ms) clash->ms = moved->ms; free(moved); }
-        else HASH_ADD_STR(srv->markers, key, moved);
+    while (moved) { /* re-added after the walk, so the iteration never met them */
+        struct moved *next = moved->next;
+        server_marker_set(srv, moved->acct, newname, moved->ms); /* keeps the newer one if the account had both */
+        free(moved);
         moved = next;
     }
     srv->history_dirty = 1;
@@ -294,6 +300,7 @@ void server_add_connection(server_t *srv, client_t *cl) {
     server_ip_key(srv, cl->ip, cl->count_key, sizeof cl->count_key);
     ip_count_inc(srv, cl->count_key);
     HASH_ADD(hh_conn, srv->by_conn_id, conn_id, sizeof cl->conn_id, cl);
+    client_mark_dirty(cl); /* the event loop registers its fd on the next pass */
 }
 
 client_t *server_find_by_conn_id(server_t *srv, uint64_t conn_id) {
@@ -585,7 +592,7 @@ void server_send_isupport(server_t *srv, client_t *cl) {
         "STATUSMSG=~&@%+", "AWAYLEN=390", "KICKLEN=300",
         "MAXLIST=b:100,e:100,I:100", "EXCEPTS=e", "INVEX=I", "MONITOR=100", "WATCH=128", "SILENCE=15",
         "EXTBAN=~,amrzj", "ELIST=MNU", "WHOX", "CHANLIMIT=#:200", "BOT=B", "CALLERID=g", "LINELEN=512",
-        "TARGMAX=PRIVMSG:1,NOTICE:1,KICK:1,JOIN:1,PART:1,WHOIS:1", srv->cfg.messages.history_size > 0 ? histtok : NULL, srv->cfg.messages.history_size > 0 ? "MSGREFTYPES=msgid,timestamp" : NULL,
+        "TARGMAX=PRIVMSG:4,NOTICE:4,KICK:1,JOIN:1,PART:1,WHOIS:1", srv->cfg.messages.history_size > 0 ? histtok : NULL, srv->cfg.messages.history_size > 0 ? "MSGREFTYPES=msgid,timestamp" : NULL,
     };
     int total = 0;
     for (size_t i = 0; i < sizeof tokens / sizeof tokens[0]; i++) if (tokens[i]) tokens[total++] = tokens[i]; /* drop the NULLs of disabled features */
@@ -883,7 +890,7 @@ int server_kline_enforce(server_t *srv, const char *mask, const char *line_type,
         if (!server_line_mask_hits(mask, line_type, c->ip, c->user, c->realhost, c->ident_confirmed)) continue;
         if (line_type[0] != 'Z' && server_client_eline_exempt(srv, c)) continue; /* ELINE protects an already-connected user too */
         snprintf(c->quit_reason, sizeof c->quit_reason, "%s", quit_reason);
-        c->quitting = 1;
+        client_mark_quit(c);
         matched++;
     }
     return matched;

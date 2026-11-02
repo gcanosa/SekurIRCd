@@ -38,4 +38,6 @@ void net_reset_host(struct server *srv, struct client *cl);
 void net_apply_listeners(struct server *srv);
 int net_run(struct server *srv);
 
+int net_flood_charge(struct server *srv, struct client *cl);
+
 #endif /* SEKURIRCD_NET_H */

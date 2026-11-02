@@ -2,11 +2,13 @@
 #include "cmd.h"
 #include "log.h"
 #include "server.h"
+#include "ev.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -28,6 +30,7 @@ struct protection_scan {
     time_t deadline;
     unsigned char buf[SCAN_BUF];
     size_t len, nread;
+    unsigned char ev_mask; /* registered readiness interest (ev.h) */
 };
 
 /* --- pure helpers ---------------------------------------------------------- */
@@ -141,7 +144,7 @@ static void scan_unlink(struct server *srv, protection_scan_t *s) {
     protection_scan_t **pp = &srv->prot.scans;
     while (*pp && *pp != s) pp = &(*pp)->next;
     if (*pp) { *pp = s->next; srv->prot.n_scans--; }
-    if (s->fd >= 0) close(s->fd);
+    if (s->fd >= 0) { ev_forget(s->fd, &s->ev_mask); close(s->fd); }
     free(s);
 }
 
@@ -304,14 +307,9 @@ int protection_scan_start(struct server *srv, const char *ip) {
 
 /* --- poll integration ------------------------------------------------------- */
 
-void protection_poll_fill(struct server *srv, struct pollfd *fds, protection_scan_t **fd_scan, int *n) {
-    for (protection_scan_t *s = srv->prot.scans; s; s = s->next) {
-        fds[*n].fd = s->fd;
-        fds[*n].events = s->state == ST_CONNECTING ? POLLOUT : POLLIN;
-        fds[*n].revents = 0;
-        fd_scan[*n] = s;
-        (*n)++;
-    }
+void protection_ev_sync(struct server *srv) {
+    for (protection_scan_t *s = srv->prot.scans; s; s = s->next) /* tagged 2 = net.c's EVK_SCAN */
+        ev_set(s->fd, (void *)((uintptr_t)s | 2u), s->state != ST_CONNECTING, s->state == ST_CONNECTING, &s->ev_mask);
 }
 
 int protection_scan_live(struct server *srv, const protection_scan_t *scan) {

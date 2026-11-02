@@ -38,6 +38,7 @@
 <tr><td><code>invite-notify</code> <code>standard-replies</code></td><td>Invite visibility for ops; machine-readable <code>FAIL</code>/<code>WARN</code>/<code>NOTE</code> replies.</td></tr>
 <tr><td><code>batch</code> <code>labeled-response</code></td><td>Related lines grouped in a <code>BATCH</code>; replies tagged with the <code>label</code> of the command that caused them.</td></tr>
 <tr><td><code>draft/chathistory</code></td><td>Message history with <code>CHATHISTORY</code>. See <a href="#history">history</a>. Not advertised when <code>history_size = 0</code>.</td></tr>
+<tr><td><code>draft/message-redaction</code></td><td><code>REDACT</code>: take back a message. See <a href="#history">history</a>.</td></tr>
 <tr><td><code>draft/read-marker</code></td><td><code>MARKREAD</code>: where you stopped reading, shared by every session of your account. See <a href="#history">history</a>.</td></tr>
 <tr><td><code>draft/multiline</code></td><td>One message over several lines, up to 24 lines and 4096 bytes (<code>draft/multiline=max-bytes=4096,max-lines=24</code>).</td></tr>
 <tr><td><code>cap-notify</code></td><td>Live <code>CAP NEW</code>/<code>CAP DEL</code> when capabilities change, for example history being turned on or off by a rehash.</td></tr>
@@ -66,6 +67,11 @@ history_size = 50                # messages kept per conversation; 0 turns histo
 <p>With <code>draft/read-marker</code>, a logged-in client sends <code>MARKREAD &lt;target&gt; timestamp=&lt;time&gt;</code> as you read.
   The server keeps the latest position per account and target, sends it on JOIN, and forwards every change to your other sessions,
   so a conversation you read on one device shows as read on the others. <code>MARKREAD &lt;target&gt;</code> without a timestamp asks for the stored one.</p>
+<p><code>REDACT &lt;target&gt; &lt;msgid&gt; [:reason]</code> takes a message back. You may redact your own messages (same account, or the
+  same <code>nick!user@host</code> when not logged in); in a channel, chanops and IRC operators may redact anyone's. Only messages still in
+  history can be redacted, since that is where the server checks who sent them. The message is removed from history on every server, and clients that
+  negotiated <code>draft/message-redaction</code> get the <code>REDACT</code> and hide it; other clients can't take back what they already showed.
+  Errors are <code>FAIL REDACT INVALID_TARGET</code>, <code>UNKNOWN_MSGID</code> or <code>REDACT_FORBIDDEN</code>.</p>
 
 <h2 id="accounts">accounts</h2>
 <p>Accounts are provided by NickServ in the services daemon (<code>bin/services</code>, see <a href="chanserv.html">services</a>). Every server relays

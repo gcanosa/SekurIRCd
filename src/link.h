@@ -38,6 +38,7 @@ typedef struct link_conn {
     char pending_pass[256]; /* PASS seen, waiting for the following SERVER line */
     int authenticated;
     int closing;            /* link_close() called -- freed by link_reap() at end of loop tick */
+    unsigned char ev_mask;  /* net.c's registered readiness interest (ev.h) */
     SSL *ssl;                /* non-NULL iff [links] tls=true for this connection */
     int tls_handshaking;    /* hub side only: SSL_accept() hasn't completed yet (leaf side
                               * blocks through its handshake in link_connect_leaf, see there) */

@@ -1,6 +1,7 @@
 /* Messaging and lookups: PRIVMSG, NOTICE, WHOIS, WHO, WHOWAS, AWAY, SETNAME,
  * USERHOST, ISON, MONITOR, SILENCE, GLOB. Ported from commands.py. */
 #include "cmd.h"
+#include "net.h"
 #include "history.h"
 
 #include <ctype.h>
@@ -523,8 +524,35 @@ cancel:
     return 1;
 }
 
-void cmd_privmsg(server_t *srv, client_t *cl, irc_message_t *msg) { if (!ml_collect(srv, cl, msg, "PRIVMSG")) send_msg(srv, cl, msg, "PRIVMSG", 0); }
-void cmd_notice(server_t *srv, client_t *cl, irc_message_t *msg) { if (!ml_collect(srv, cl, msg, "NOTICE")) send_msg(srv, cl, msg, "NOTICE", 1); }
+/* PRIVMSG/NOTICE a,b,#c :text -- each target is its own send (own msgid, spam/flood checks per recipient).
+ * Repeats are dropped; past MSG_MAX_TARGETS the rest get 407. Keep in step with TARGMAX in server.c. */
+#define MSG_MAX_TARGETS 4
+static void send_msg_targets(server_t *srv, client_t *cl, irc_message_t *msg, const char *verb, int is_notice) {
+    if (!strchr(msg->params[0], ',')) { send_msg(srv, cl, msg, verb, is_notice); return; }
+    char list[512], seen[MSG_MAX_TARGETS][CHAN_NAMELEN];
+    snprintf(list, sizeof list, "%s", msg->params[0]);
+    int n = 0;
+    char *save = NULL;
+    for (char *tok = strtok_r(list, ",", &save); tok && !cl->quitting; tok = strtok_r(NULL, ",", &save)) {
+        char cf[CHAN_NAMELEN];
+        irc_casefold(cf, sizeof cf, tok);
+        int dup = 0;
+        for (int i = 0; i < n && !dup; i++) dup = strcmp(seen[i], cf) == 0;
+        if (dup) continue;
+        if (n == MSG_MAX_TARGETS) {
+            if (!is_notice) { const char *p[] = {tok}; client_reply(cl, N_TOOMANYTARGETS, p, 1, "Too many recipients"); }
+            break;
+        }
+        if (n > 0 && !net_flood_charge(srv, cl)) break; /* a,b,c,d costs what four lines would */
+        memcpy(seen[n++], cf, sizeof cf);
+        irc_message_t one = *msg;
+        one.params[0] = tok;
+        send_msg(srv, cl, &one, verb, is_notice);
+    }
+}
+
+void cmd_privmsg(server_t *srv, client_t *cl, irc_message_t *msg) { if (!ml_collect(srv, cl, msg, "PRIVMSG")) send_msg_targets(srv, cl, msg, "PRIVMSG", 0); }
+void cmd_notice(server_t *srv, client_t *cl, irc_message_t *msg) { if (!ml_collect(srv, cl, msg, "NOTICE")) send_msg_targets(srv, cl, msg, "NOTICE", 1); }
 
 /* BATCH +ref draft/multiline <target>  ...  BATCH -ref */
 void cmd_batch(server_t *srv, client_t *cl, irc_message_t *msg) {
@@ -1514,6 +1542,70 @@ void cmd_markread(server_t *srv, client_t *cl, irc_message_t *msg) {
     for (client_t *c = srv->all_clients; c; c = c->all_next)
         if (c->fd >= 0 && !c->quitting && (c->caps & CAP_READ_MARKER) && c->account[0] && strcasecmp(c->account, cl->account) == 0)
             send_marker(c, is_chan ? chan->name : target, stored);
+}
+
+/* --- REDACT (draft/message-redaction) ----------------------------------------------------------------------------- */
+
+static void redact_fail(server_t *srv, client_t *cl, const char *code, const char *target, const char *msgid, const char *desc) {
+    char line[600];
+    const char *p[] = {"REDACT", code, target, msgid};
+    irc_build(line, sizeof line, NULL, 0, srv->cfg.server.name, "FAIL", p, msgid ? 4 : 3, desc);
+    client_send(cl, line);
+}
+
+void cmd_apply_redact(server_t *srv, client_t *from, channel_t *chan, client_t *dst, const char *msgid, const char *reason) {
+    char key[160], prefix[320], line[700];
+    if (chan) history_key_channel(key, sizeof key, chan->name);
+    else if (from->account[0] && dst->account[0]) history_key_dm(key, sizeof key, from->account, dst->account);
+    else key[0] = '\0';
+    if (key[0]) history_remove_msgid(srv, key, msgid);
+    client_prefix(from, prefix, sizeof prefix);
+    const char *p[] = {chan ? chan->name : dst->nick, msgid};
+    irc_build(line, sizeof line, NULL, 0, prefix, "REDACT", p, 2, reason);
+    if (chan) {
+        member_t *m, *tmp;
+        HASH_ITER(hh, chan->members, m, tmp)
+            if (!m->client->remote && (m->client->caps & CAP_MESSAGE_REDACTION)) client_send(m->client, line);
+        if (!from->remote && (from->caps & CAP_MESSAGE_REDACTION) && !channel_find_member(chan, from)) client_send(from, line);
+        return;
+    }
+    if (!dst->remote && (dst->caps & CAP_MESSAGE_REDACTION)) client_send(dst, line);
+    if (!from->remote && from != dst && (from->caps & CAP_MESSAGE_REDACTION)) client_send(from, line);
+}
+
+/* REDACT <target> <msgid> [:reason]: take back a message still in CHATHISTORY. Your own (same account, or same
+ * nick!user@host when not logged in); in a channel, chanops (and opers) may redact anyone's. Clients with the cap drop
+ * it from view; history forgets it for everyone. Messages outside history can't be checked, so they can't be redacted. */
+void cmd_redact(server_t *srv, client_t *cl, irc_message_t *msg) {
+    const char *target = msg->params[0], *msgid = msg->params[1];
+    const char *reason = msg->nparams > 2 ? msg->params[msg->nparams - 1] : NULL;
+    char key[160];
+    channel_t *chan = NULL;
+    client_t *dst = NULL;
+    if (target[0] == '#') {
+        chan = server_find_channel(srv, target);
+        if (!chan) { redact_fail(srv, cl, "INVALID_TARGET", target, NULL, "No such channel"); return; }
+        history_key_channel(key, sizeof key, chan->name);
+    } else {
+        dst = server_find_user(srv, target);
+        if (!dst || !dst->registered) { redact_fail(srv, cl, "INVALID_TARGET", target, NULL, "No such nick"); return; }
+        if (!cl->account[0] || !dst->account[0]) { redact_fail(srv, cl, "UNKNOWN_MSGID", target, msgid, "Private messages are only kept between logged-in accounts"); return; }
+        history_key_dm(key, sizeof key, cl->account, dst->account);
+    }
+    const hist_entry_t *e = srv->cfg.messages.history_size > 0 ? history_find_msgid(srv, key, msgid) : NULL;
+    if (!e) { redact_fail(srv, cl, "UNKNOWN_MSGID", target, msgid, "No such message (or it is too old)"); return; }
+    char prefix[320];
+    client_prefix(cl, prefix, sizeof prefix);
+    int own = (e->account[0] && cl->account[0] && strcasecmp(e->account, cl->account) == 0) || strcmp(e->sender, prefix) == 0;
+    if (!own) {
+        member_t *m = chan ? channel_find_member(chan, cl) : NULL;
+        int may = chan && ((cl->umodes & UMODE_O) || (m && channel_rank_level(m->rank) >= 3));
+        if (!may) { redact_fail(srv, cl, "REDACT_FORBIDDEN", target, msgid, "You may only redact your own messages"); return; }
+    }
+    char id[80];
+    snprintf(id, sizeof id, "%s", msgid); /* e points into the entry about to be freed */
+    cmd_apply_redact(srv, cl, chan, dst, id, reason);
+    netsync_redact(srv, cl, chan ? chan->name : NULL, dst, id, reason);
 }
 
 /* A message from a user on another server, for our local users: PM to a local user (UID target) or a channel (maybe

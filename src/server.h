@@ -88,6 +88,8 @@ typedef struct server {
     channel_t *channels;    /* uthash, keyed by casefold_name */
     int services_online;    /* a NickServ service user is on the network (cmd_services_tick; drives the sasl cap) */
     client_t *all_clients;  /* doubly-linked list, EVERY live connection (net.c's poll set) */
+    client_t *dirty_head;   /* connections with output to flush or interest to update (client_mark_dirty) */
+    client_t *dead_head;    /* connections to tear down at the end of this loop pass (client_mark_quit) */
     client_t *by_conn_id;   /* uthash (hh_conn), keyed by conn_id -- real (fd >= 0) connections
                               * only, see server_add_connection; O(1) worker-result lookup */
     int n_clients;          /* includes not-yet-registered connections */
@@ -140,7 +142,7 @@ typedef struct server {
  * strlen("SekurIRCd-") + sizeof(cfg.server.version). */
 extern const char sekurircd_build[]; /* build.c */
 /* Fills `out` with a fresh, unique message id (IRCv3 msgid tag). */
-struct marker { char key[200]; long long ms; UT_hash_handle hh; };
+struct marker { long long ms; UT_hash_handle hh; char key[]; }; /* key allocated to fit (was a fixed 200 bytes) */
 /* draft/read-marker store. Keys are casefolded "account\x01target". set only moves forward. Returns the stored value (0 = none). */
 long long server_marker_get(server_t *srv, const char *account, const char *target);
 long long server_marker_set(server_t *srv, const char *account, const char *target, long long ms);

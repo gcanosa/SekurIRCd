@@ -72,7 +72,7 @@ CPPFLAGS := -I$(SRC_DIR) -I$(VEND_DIR) -D_POSIX_C_SOURCE=200809L $(OPENSSL_CFLAG
 LDFLAGS  ?= $(HARDEN_LDFLAGS)
 LDLIBS   := $(OPENSSL_LIBS) -lpthread
 
-CORE_SRCS := $(SRC_DIR)/proto.c $(SRC_DIR)/crypto.c $(SRC_DIR)/log.c $(SRC_DIR)/config.c \
+CORE_SRCS := $(SRC_DIR)/ev.c $(SRC_DIR)/proto.c $(SRC_DIR)/crypto.c $(SRC_DIR)/log.c $(SRC_DIR)/config.c \
              $(SRC_DIR)/channel.c $(SRC_DIR)/client.c $(SRC_DIR)/server.c $(SRC_DIR)/net.c \
              $(SRC_DIR)/link.c $(SRC_DIR)/accounts.c $(SRC_DIR)/worker.c \
              $(SRC_DIR)/cmd.c $(SRC_DIR)/cmd_reg.c $(SRC_DIR)/cmd_chan.c $(SRC_DIR)/cmd_user.c \

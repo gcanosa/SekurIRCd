@@ -133,6 +133,38 @@ void history_rename_channel(server_t *srv, const char *oldname, const char *newn
     srv->history_dirty = 1;
 }
 
+static int find_index(const hist_buf_t *b, const char *msgid) {
+    for (int i = b->n - 1; i >= 0; i--) /* newest first: redactions are nearly always of something recent */
+        if (strcmp(b->e[(b->head + i) % b->cap].msgid, msgid) == 0) return i;
+    return -1;
+}
+
+const hist_entry_t *history_find_msgid(server_t *srv, const char *key, const char *msgid) {
+    hist_buf_t *b = history_get(srv, key);
+    int i = b ? find_index(b, msgid) : -1;
+    return i < 0 ? NULL : hist_buf_at(b, i);
+}
+
+int history_remove_msgid(server_t *srv, const char *key, const char *msgid) {
+    hist_buf_t *b = history_get(srv, key);
+    int i = b ? find_index(b, msgid) : -1;
+    if (i < 0) return 0;
+    /* Lay the ring out flat again (head 0) without the entry: hist_buf_add's growth assumes head == 0 while not full. */
+    hist_entry_t *flat = malloc((size_t)b->n * sizeof *flat);
+    if (!flat) return 0;
+    int n = 0;
+    for (int k = 0; k < b->n; k++) {
+        hist_entry_t *e = &b->e[(b->head + k) % b->cap];
+        if (k == i) entry_release(e); else flat[n++] = *e;
+    }
+    memcpy(b->e, flat, (size_t)n * sizeof *flat);
+    free(flat);
+    b->head = 0;
+    b->n = n;
+    srv->history_dirty = 1;
+    return 1;
+}
+
 void history_free(server_t *srv) {
     hist_buf_t *b, *tmp;
     HASH_ITER(hh, srv->history, b, tmp) { HASH_DEL(srv->history, b); hist_buf_clear(b); free(b); }

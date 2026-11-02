@@ -51,6 +51,9 @@ void history_add(struct server *srv, const char *key, int cap, const hist_entry_
 /* A channel RENAME: its conversation moves to the new name (replacing any stale history kept under that name). */
 void history_rename_channel(struct server *srv, const char *oldname, const char *newname);
 void history_free(struct server *srv);
+/* REDACT: the stored message with `msgid` in conversation `key` (NULL if gone), and its removal (1 if one was dropped). */
+const hist_entry_t *history_find_msgid(struct server *srv, const char *key, const char *msgid);
+int history_remove_msgid(struct server *srv, const char *key, const char *msgid);
 
 /* Persistence ([messages] history_file). load: at startup; maybe_save: from the 1-second tick (debounced) or force=1. */
 void history_load(struct server *srv);

@@ -63,7 +63,8 @@ int protection_scan_start(struct server *srv, const char *ip);
 
 /* Poll-loop hooks (net.c). fill appends this module's fds at fds[*n..] and
  * their scan pointers at fd_scan[*n..]. */
-void protection_poll_fill(struct server *srv, struct pollfd *fds, protection_scan_t **fd_scan, int *n);
+/* Registers each probe socket's readiness interest with net.c's event loop (ev.h), every loop pass. */
+void protection_ev_sync(struct server *srv);
 /* False once a scan has been freed (a hit frees all probes for its address, so
  * a poll-result slot for a sibling probe can outlive it within one iteration). */
 int protection_scan_live(struct server *srv, const protection_scan_t *scan);
