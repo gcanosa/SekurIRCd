@@ -197,12 +197,34 @@ static void flood_kick(server_t *srv, channel_t *chan, client_t *victim) {
     server_maybe_drop_channel(srv, chan); /* chan may be freed -- don't touch it after this */
 }
 
-/* The sender's client-only tags (+key[=value]) that are safe to relay: bounded count/size. */
-static void collect_client_tags(const irc_message_t *msg, msg_extra_t *x) {
+/* CLIENTTAGDENY ([messages] client_tag_deny): "a,b" blocks those tags, "*,-a,-b" blocks all but those. Names without '+'. */
+static int client_tag_denied(const char *deny, const char *name) {
+    if (!deny[0]) return 0;
+    int all = 0;
+    char list[CFG_STR];
+    snprintf(list, sizeof list, "%s", deny);
+    char *save = NULL;
+    for (char *t = strtok_r(list, ",", &save); t; t = strtok_r(NULL, ",", &save)) {
+        if (strcmp(t, "*") == 0) all = 1;
+        else if (t[0] == '-' && strcmp(t + 1, name) == 0) return 0;
+        else if (strcmp(t, name) == 0) return 1;
+    }
+    return all;
+}
+
+/* The sender's client-only tags (+key[=value]) that are safe to relay: bounded count/size, minus CLIENTTAGDENY, and a
+ * +draft/channel-context only when it names a channel the sender is really on (it would otherwise let anyone make a
+ * private message look like it came from inside a channel). */
+static void collect_client_tags(const client_t *from, const irc_message_t *msg, msg_extra_t *x) {
     size_t total = 0;
     for (int i = 0; i < msg->ntags && x->nct < MAX_CLIENT_TAGS; i++) {
         const char *k = msg->tags[i].key, *v = msg->tags[i].val ? msg->tags[i].val : "";
         if (k[0] != '+' || !k[1] || strlen(k) > 64 || strlen(v) > 128) continue;
+        if (client_tag_denied(from->srv->cfg.messages.client_tag_deny, k + 1)) continue;
+        if (strcmp(k, "+draft/channel-context") == 0) {
+            channel_t *ctx = server_find_channel(from->srv, v);
+            if (!ctx || !channel_find_member(ctx, (client_t *)from)) continue;
+        }
         int ok = 1;
         for (const char *c = k + 1; *c; c++)
             if (!(isalnum((unsigned char)*c) || *c == '-' || *c == '/' || *c == '.')) { ok = 0; break; }
@@ -307,12 +329,29 @@ static void record_history(server_t *srv, const char *key, const char *msgid, co
     history_add(srv, key, srv->cfg.messages.history_size, &h);
 }
 
+/* What history stores as the body: the text of a PRIVMSG/NOTICE, or for a TAGMSG (draft/event-playback) its client tags
+ * as they go on the wire. NULL = don't store: a TAGMSG with nothing but +typing (that is gone the moment it is sent) or
+ * with event history off. The returned buffer is static (single-threaded loop). */
+static const char *hist_body(const server_t *srv, const msg_extra_t *x, const char *text) {
+    if (!x->tagmsg) return text;
+    if (!srv->cfg.messages.history_events) return NULL;
+    irc_tag_t t[MAX_CLIENT_TAGS];
+    int n = 0;
+    for (int i = 0; i < x->nct; i++) if (strcmp(x->ct[i].key, "+typing") != 0) t[n++] = x->ct[i];
+    if (!n) return NULL;
+    static char buf[600];
+    irc_build(buf, sizeof buf, t, n, NULL, "X", NULL, 0, NULL); /* "@k=v;k2 X" */
+    char *sp = strrchr(buf, ' ');
+    if (sp) *sp = '\0';
+    return buf + 1;
+}
+
 static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char *verb, int is_notice) {
     const char *target = msg->params[0];
     int is_tagmsg = strcmp(verb, "TAGMSG") == 0;
     msg_extra_t x = {.tagmsg = is_tagmsg};
     server_next_msgid(srv, x.msgid, sizeof x.msgid);
-    collect_client_tags(msg, &x);
+    collect_client_tags(cl, msg, &x);
     if (is_tagmsg) {
         /* IRCv3 message-tags: TAGMSG is only meaningful from a client that negotiated it, and without any
          * relayable (+) tag there is nothing to send. */
@@ -441,10 +480,11 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
             deliver(mm->client, cl, lines, &x);
         }
         { irc_tag_t wt[1 + MAX_CLIENT_TAGS]; int nwt = wire_tags(&x, wt); netsync_message(srv, cl, verb, target, NULL, is_tagmsg ? NULL : outtext, wt, nwt); }
-        if (!is_tagmsg && srv->cfg.messages.history_size > 0) {
+        const char *hb = srv->cfg.messages.history_size > 0 ? hist_body(srv, &x, outtext) : NULL;
+        if (hb) {
             char hkey[160];
             history_key_channel(hkey, sizeof hkey, chan->name);
-            record_history(srv, hkey, x.msgid, prefix, cl->account, verb, chan->name, outtext);
+            record_history(srv, hkey, x.msgid, prefix, cl->account, verb, chan->name, hb);
         }
         delivered = 1;
     } else {
@@ -471,11 +511,11 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
         }
         delivered = 1;
         /* Private-message history, only between two logged-in accounts (so each side can ask for it by account). */
-        if (!is_tagmsg && srv->cfg.messages.history_size > 0 && srv->cfg.messages.history_dm &&
-            cl->account[0] && dst->account[0] && cl != dst) {
+        const char *hb = srv->cfg.messages.history_size > 0 ? hist_body(srv, &x, textbuf) : NULL;
+        if (hb && srv->cfg.messages.history_dm && cl->account[0] && dst->account[0] && cl != dst) {
             char hkey[160];
             history_key_dm(hkey, sizeof hkey, cl->account, dst->account);
-            record_history(srv, hkey, x.msgid, prefix, cl->account, verb, dst->nick, textbuf);
+            record_history(srv, hkey, x.msgid, prefix, cl->account, verb, dst->nick, hb);
         }
     }
     /* IRCv3 echo-message: the sender gets its own message back too, once
@@ -1250,13 +1290,13 @@ static void chathistory_fail(server_t *srv, client_t *cl, const char *code, cons
     client_send(cl, line);
 }
 
-/* Positions of a reference in a conversation: `before` = index of the first entry not strictly older than it,
- * `after` = index of the first entry strictly newer. "msgid=X" pins both to that entry; "timestamp=T" counts by
- * time. Returns 0 on a malformed/unknown reference. */
-static int history_ref(const hist_buf_t *b, const char *ref, int *before, int *after) {
+/* Positions of a reference in a conversation (the entries this client may see, oldest first): `before` = index of the
+ * first entry not strictly older than it, `after` = index of the first entry strictly newer. "msgid=X" pins both to
+ * that entry; "timestamp=T" counts by time. Returns 0 on a malformed/unknown reference. */
+static int history_ref(const hist_entry_t *const *v, int n, const char *ref, int *before, int *after) {
     if (strncmp(ref, "msgid=", 6) == 0) {
-        for (int i = 0; i < b->n; i++) {
-            if (strcmp(hist_buf_at(b, i)->msgid, ref + 6) == 0) { *before = i; *after = i + 1; return 1; }
+        for (int i = 0; i < n; i++) {
+            if (strcmp(v[i]->msgid, ref + 6) == 0) { *before = i; *after = i + 1; return 1; }
         }
         return 0;
     }
@@ -1264,8 +1304,8 @@ static int history_ref(const hist_buf_t *b, const char *ref, int *before, int *a
         long long ms = irc_parse_iso8601_ms(ref + 10);
         if (ms < 0) return 0;
         int bi = 0, ai = 0;
-        for (int i = 0; i < b->n; i++) {
-            long long e = hist_buf_at(b, i)->ms;
+        for (int i = 0; i < n; i++) {
+            long long e = v[i]->ms;
             if (e < ms) bi++;
             if (e <= ms) ai++;
         }
@@ -1274,6 +1314,8 @@ static int history_ref(const hist_buf_t *b, const char *ref, int *before, int *a
     }
     return 0;
 }
+
+static int hist_is_message(const hist_entry_t *e) { return !strcmp(e->verb, "PRIVMSG") || !strcmp(e->verb, "NOTICE"); }
 
 #define CHATHISTORY_MAX 100
 
@@ -1383,27 +1425,34 @@ void cmd_chathistory(server_t *srv, client_t *cl, irc_message_t *msg) {
     int limit = atoi(msg->params[nneed - 1]);
     if (limit < 1) { chathistory_fail(srv, cl, "INVALID_PARAMS", sub, "Invalid limit"); return; }
     if (limit > CHATHISTORY_MAX) limit = CHATHISTORY_MAX;
-    int n = b->n, lo = 0, hi = n;
+    /* draft/event-playback: without it, only PRIVMSG/NOTICE exist as far as this client is concerned (paging included) */
+    const hist_entry_t *view[HIST_MAX_SIZE];
+    int n = 0, playback = (cl->caps & CAP_EVENT_PLAYBACK) != 0;
+    for (int i = 0; i < b->n && n < HIST_MAX_SIZE; i++) {
+        const hist_entry_t *e = hist_buf_at(b, i);
+        if (playback || hist_is_message(e)) view[n++] = e;
+    }
+    int lo = 0, hi = n;
     int b1 = 0, a1 = 0, b2 = 0, a2 = 0;
     const char *ref = msg->params[2];
     int is_star = strcmp(ref, "*") == 0;
     if (strcasecmp(sub, "LATEST") == 0) {
-        if (!is_star && !history_ref(b, ref, &b1, &a1)) { chathistory_fail(srv, cl, "INVALID_PARAMS", ref, "Invalid reference"); return; }
+        if (!is_star && !history_ref(view, n, ref, &b1, &a1)) { chathistory_fail(srv, cl, "INVALID_PARAMS", ref, "Invalid reference"); return; }
         lo = is_star ? 0 : a1;
         if (n - lo > limit) lo = n - limit;
     } else if (strcasecmp(sub, "BEFORE") == 0) {
-        if (!history_ref(b, ref, &b1, &a1)) { chathistory_fail(srv, cl, "INVALID_PARAMS", ref, "Invalid reference"); return; }
+        if (!history_ref(view, n, ref, &b1, &a1)) { chathistory_fail(srv, cl, "INVALID_PARAMS", ref, "Invalid reference"); return; }
         hi = b1; lo = hi - limit < 0 ? 0 : hi - limit;
     } else if (strcasecmp(sub, "AFTER") == 0) {
-        if (!history_ref(b, ref, &b1, &a1)) { chathistory_fail(srv, cl, "INVALID_PARAMS", ref, "Invalid reference"); return; }
+        if (!history_ref(view, n, ref, &b1, &a1)) { chathistory_fail(srv, cl, "INVALID_PARAMS", ref, "Invalid reference"); return; }
         lo = a1; hi = lo + limit > n ? n : lo + limit;
     } else if (strcasecmp(sub, "AROUND") == 0) {
-        if (!history_ref(b, ref, &b1, &a1)) { chathistory_fail(srv, cl, "INVALID_PARAMS", ref, "Invalid reference"); return; }
+        if (!history_ref(view, n, ref, &b1, &a1)) { chathistory_fail(srv, cl, "INVALID_PARAMS", ref, "Invalid reference"); return; }
         int half = limit / 2;
         lo = b1 - half < 0 ? 0 : b1 - half;
         hi = b1 + (limit - half) > n ? n : b1 + (limit - half);
     } else if (strcasecmp(sub, "BETWEEN") == 0) {
-        if (!history_ref(b, ref, &b1, &a1) || !history_ref(b, msg->params[3], &b2, &a2)) {
+        if (!history_ref(view, n, ref, &b1, &a1) || !history_ref(view, n, msg->params[3], &b2, &a2)) {
             chathistory_fail(srv, cl, "INVALID_PARAMS", sub, "Invalid reference"); return;
         }
         if (b1 > b2) { int t = a1; a1 = a2; a2 = t; t = b1; b1 = b2; b2 = t; } /* either order */
@@ -1418,7 +1467,7 @@ void cmd_chathistory(server_t *srv, client_t *cl, irc_message_t *msg) {
     const char *bid = batch_open(srv, cl, "chathistory", shown);
     char line[1100];
     for (int i = lo; i < hi; i++) {
-        const hist_entry_t *e = hist_buf_at(b, i);
+        const hist_entry_t *e = view[i];
         char ts[40];
         irc_iso8601_from_ms(ts, sizeof ts, e->ms);
         irc_tag_t tags[4];
@@ -1428,7 +1477,20 @@ void cmd_chathistory(server_t *srv, client_t *cl, irc_message_t *msg) {
         tags[nt++] = (irc_tag_t){"msgid", e->msgid};
         if (e->account[0] && (cl->caps & CAP_ACCOUNT_TAG)) tags[nt++] = (irc_tag_t){"account", e->account};
         const char *mp[] = {target[0] == '#' ? shown : e->target};
-        irc_build(line, sizeof line, tags, nt, e->sender, e->verb, mp, 1, e->text);
+        if (hist_is_message(e)) {
+            irc_build(line, sizeof line, tags, nt, e->sender, e->verb, mp, 1, e->text);
+        } else if (!strcmp(e->verb, "TAGMSG")) { /* text holds its client tags, already escaped: spliced into the tag section */
+            if (!(cl->caps & CAP_MESSAGE_TAGS)) continue;
+            char base[700];
+            irc_build(base, sizeof base, tags, nt, e->sender, "TAGMSG", mp, 1, NULL);
+            char *sp = strchr(base, ' ');
+            if (!sp) continue;
+            snprintf(line, sizeof line, "%.*s;%s%s", (int)(sp - base), base, e->text, sp);
+        } else { /* JOIN/PART/QUIT/KICK/MODE/TOPIC/NICK: text holds the event's parameters as they were sent */
+            char base[700];
+            irc_build(base, sizeof base, tags, nt, e->sender, e->verb, NULL, 0, NULL);
+            snprintf(line, sizeof line, "%s%s%s", base, e->text[0] ? " " : "", e->text);
+        }
         client_send(cl, line);
     }
     batch_close(srv, cl, bid);
@@ -1619,7 +1681,7 @@ void cmd_deliver_remote_message(server_t *srv, client_t *from, const char *verb,
     server_next_msgid(srv, x.msgid, sizeof x.msgid);
     for (int i = 0; tagsrc && i < tagsrc->ntags; i++)
         if (strcmp(tagsrc->tags[i].key, "msgid") == 0) snprintf(x.msgid, sizeof x.msgid, "%s", tagsrc->tags[i].val);
-    if (tagsrc) collect_client_tags(tagsrc, &x);
+    if (tagsrc) collect_client_tags(from, tagsrc, &x);
     char prefix[320];
     client_prefix(from, prefix, sizeof prefix);
     char lines[4][LINE_SZ];
@@ -1631,10 +1693,11 @@ void cmd_deliver_remote_message(server_t *srv, client_t *from, const char *verb,
         const char *p[] = {dst->nick};
         build_lines(lines, from, prefix, verb, p, is_tagmsg ? NULL : text, &x);
         deliver(dst, from, lines, &x);
-        if (!is_tagmsg && srv->cfg.messages.history_size > 0 && srv->cfg.messages.history_dm && from->account[0] && dst->account[0]) {
+        const char *hb = srv->cfg.messages.history_size > 0 ? hist_body(srv, &x, text) : NULL;
+        if (hb && srv->cfg.messages.history_dm && from->account[0] && dst->account[0]) {
             char hkey[160];
             history_key_dm(hkey, sizeof hkey, from->account, dst->account);
-            record_history(srv, hkey, x.msgid, prefix, from->account, verb, dst->nick, text);
+            record_history(srv, hkey, x.msgid, prefix, from->account, verb, dst->nick, hb);
         }
         return;
     }
@@ -1659,9 +1722,10 @@ void cmd_deliver_remote_message(server_t *srv, client_t *from, const char *verb,
         if (min_level && channel_rank_level(mm->rank) < min_level) continue;
         deliver(mm->client, from, lines, &x);
     }
-    if (!is_tagmsg && !status_prefix && srv->cfg.messages.history_size > 0) {
+    const char *hb = !status_prefix && srv->cfg.messages.history_size > 0 ? hist_body(srv, &x, text) : NULL;
+    if (hb) {
         char hkey[160];
         history_key_channel(hkey, sizeof hkey, chan->name);
-        record_history(srv, hkey, x.msgid, prefix, from->account, verb, chan->name, text);
+        record_history(srv, hkey, x.msgid, prefix, from->account, verb, chan->name, hb);
     }
 }

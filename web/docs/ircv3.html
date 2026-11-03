@@ -45,14 +45,24 @@
 <tr><td><code>extended-monitor</code></td><td><code>MONITOR</code> targets also get away, account and host updates.</td></tr>
 <tr><td><code>draft/no-implicit-names</code> <code>draft/pre-away</code></td><td>No automatic <code>NAMES</code> after JOIN; <code>AWAY</code> can be set before registration finishes.</td></tr>
 <tr><td><code>draft/channel-rename</code></td><td><code>RENAME &lt;old&gt; &lt;new&gt; [:reason]</code>: a chanop renames a live channel, keeping members, modes and history.</td></tr>
+<tr><td><code>draft/event-playback</code></td><td><code>CHATHISTORY</code> also replays joins, parts, quits, kicks, mode and topic changes, nick changes and <code>TAGMSG</code> reactions. See <a href="#history">history</a>.</td></tr>
+<tr><td><code>draft/extended-isupport</code></td><td>The <code>ISUPPORT</code> command sends the <code>005</code> list on demand, also before registration; with <code>batch</code>, every <code>005</code> list comes in a <code>draft/isupport</code> batch.</td></tr>
 </table></div>
+<p>With <code>batch</code>, the quits of a netsplit come in one <code>netsplit</code> batch and the joins of a server relinking in one <code>netjoin</code> batch,
+  both named after the two servers, so clients can fold them into a single line.</p>
+<p><code>UTF8ONLY</code> is advertised and enforced: a line that isn't valid UTF-8 is refused with <code>FAIL &lt;command&gt; INVALID_UTF8</code>
+  and never relayed (<code>[messages] utf8_only = false</code> turns this off for networks with legacy-charset users).
+  <code>[server] icon = "https://..."</code> advertises the network's icon as <code>draft/ICON</code>. <code>[messages] client_tag_deny</code>
+  sets <code>CLIENTTAGDENY</code>: client-only tags that are not relayed (<code>"typing"</code>, or <code>"*,-draft/react,-draft/reply"</code> for all but those).
+  A <code>+draft/channel-context</code> tag is relayed only when it names a channel the sender is on.</p>
 <p>Also advertised in <code>005</code>: <code>MONITOR=100</code>, <code>ELIST=MNU</code>, <code>EXTBAN=,a</code>, <code>STATUSMSG=@%+</code>, <code>EXCEPTS</code>, <code>INVEX</code>, and <code>CHATHISTORY=&lt;n&gt;</code> (the most a single request returns, at most 100).</p>
 
 <h2 id="history">history</h2>
 <pre>[messages]
 history_size = 50                # messages kept per conversation; 0 turns history off, max 500
 #history_file = "history.json"   # survive restarts (history and read markers)
-#history_dm = true               # also keep private messages between two logged-in accounts</pre>
+#history_dm = true               # also keep private messages between two logged-in accounts
+#history_events = true           # also keep joins, parts, modes, topics, nicks and reactions (for draft/event-playback)</pre>
 <p>Clients with <code>draft/chathistory</code> and <code>batch</code> ask for what they missed. Replies come in a <code>BATCH</code> of type
   <code>chathistory</code>, each message with its original <code>time</code> and <code>msgid</code> tags.</p>
 <div class="tablewrap"><table>
@@ -62,6 +72,9 @@ history_size = 50                # messages kept per conversation; 0 turns histo
 <tr><td><code>CHATHISTORY BETWEEN &lt;target&gt; &lt;ref&gt; &lt;ref&gt; &lt;limit&gt;</code></td><td>Messages between two references, in either order.</td></tr>
 <tr><td><code>CHATHISTORY TARGETS &lt;ts&gt; &lt;ts&gt; &lt;limit&gt;</code></td><td>Your channels and private chats with activity in that window, newest first.</td></tr>
 </table></div>
+<p>With <code>draft/event-playback</code> the batch also holds the channel's events (JOIN, PART, QUIT, KICK, MODE, TOPIC, NICK) and
+  <code>TAGMSG</code>s such as <code>+draft/react</code>, each with its own <code>msgid</code>; <code>+typing</code> is never kept. Clients without the cap see only
+  <code>PRIVMSG</code> and <code>NOTICE</code>, and limits and references count only those. Events are not kept in <code>+D</code> or <code>+u</code> channels.</p>
 <p>A channel's history is readable by its members (and IRC operators) and is kept even when the channel empties.
   Private history needs both sides to be logged in to an account. Requests are capped at 100 messages.</p>
 <p>With <code>draft/read-marker</code>, a logged-in client sends <code>MARKREAD &lt;target&gt; timestamp=&lt;time&gt;</code> as you read.
@@ -91,6 +104,7 @@ history_size = 50                # messages kept per conversation; 0 turns histo
   Forgot your password? <code>/msg NickServ RESETPASS &lt;account&gt;</code> mails a code to your verified address. Accounts back <code>330 RPL_WHOISACCOUNT</code>
   and the extban <code>a:&lt;account&gt;</code> for <code>+b</code>, <code>+e</code> and <code>+I</code>, matching by account instead of hostmask.
   Clients without SASL can log in with <code>PASS account:password</code> at connect.</p>
+<p>A logged-in client may run SASL again to switch accounts (re-authentication); if it fails, the current login stays.</p>
 
 <h2>SASL PLAIN</h2>
 <p>Configure your client for SASL PLAIN with your account name and password. It sends <code>AUTHENTICATE PLAIN</code> during connection setup.

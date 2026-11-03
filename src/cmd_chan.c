@@ -79,11 +79,12 @@ void cmd_announce_join(channel_t *chan, client_t *cl) {
     const char *p3[] = {cl->account};
     irc_build(account_line, sizeof account_line, NULL, 0, prefix, "ACCOUNT", p3, 1, NULL);
 
+    server_history_event(cl->srv, chan, plain_join);
     member_t *m, *tmp;
     member_t *subject = channel_find_member(chan, cl);
     HASH_ITER(hh, chan->members, m, tmp) {
         if (subject && !channel_member_visible(chan, subject, m)) continue; /* +D hidden / +u audience: this member isn't told */
-        client_send(m->client, (m->client->caps & CAP_EXTENDED_JOIN) ? ext_join : plain_join);
+        server_fbatch_send(cl->srv, m->client, (m->client->caps & CAP_EXTENDED_JOIN) ? ext_join : plain_join); /* netjoin batch during a burst */
         /* account-notify's own ACCOUNT line would just duplicate what
          * extended-join already embedded in JOIN -- skip it for those. */
         if (cl->account[0] && (m->client->caps & CAP_ACCOUNT_NOTIFY) && !(m->client->caps & CAP_EXTENDED_JOIN))
@@ -333,6 +334,7 @@ void cmd_part(server_t *srv, client_t *cl, irc_message_t *msg) {
             const char *p[] = {chan->name};
             irc_build(line, sizeof line, NULL, 0, prefix, "PART", p, 1, reason);
             netsync_chan_part(srv, chan, cl, reason);
+            server_history_event(srv, chan, line);
             { /* only members who could see them in the channel see them leave (+D hidden, +u audience) */
                 member_t *pm, *ptmp;
                 HASH_ITER(hh, chan->members, pm, ptmp)

@@ -335,6 +335,10 @@ int netsync_link_up(server_t *srv, link_conn_t *lc, const char *name, const char
     lc->is_server = 1;
     lc->nserver = s;
     log_info("netsync", "linked with server %s (%s)", name, sid);
+    /* IRCv3 netjoin: the JOINs of its burst go into one batch, closed by its EOB. ponytail: one netjoin at a time -- a
+     * second link bursting meanwhile takes this slot over (the first one's batch just closes early). */
+    server_fbatch_begin(srv, FB_NETJOIN, "netjoin", srv->self_srv->name, name);
+    srv->netjoin_lc = lc;
     send_burst(srv, lc);
     /* tell the rest of the tree about the new server (its own users arrive when it bursts to us) */
     char line[300], hop[8];
@@ -372,10 +376,16 @@ static void kill_back(server_t *srv, link_conn_t *lc, const char *uid, const cha
 /* Removes `root` and every server behind it, with all their users (QUIT "uplink root" to our local users). */
 static void remove_server_tree(server_t *srv, netserver_t *root) {
     char reason[300];
-    snprintf(reason, sizeof reason, "%s %s", root->uplink ? root->uplink->name : srv->self_srv->name, root->name);
+    const char *up = root->uplink ? root->uplink->name : srv->self_srv->name;
+    snprintf(reason, sizeof reason, "%s %s", up, root->name);
+    server_fbatch_begin(srv, FB_NETSPLIT, "netsplit", up, root->name); /* IRCv3: all its QUITs in one netsplit batch */
+    int prev = srv->fb_cur;
+    srv->fb_cur = FB_NETSPLIT;
     client_t *u, *utmp;
     HASH_ITER(hh, srv->users, u, utmp)
         if (u->remote && u->nserver && netsync_is_behind(u->nserver, root)) server_remove_client(srv, u, reason);
+    srv->fb_cur = prev;
+    server_fbatch_end(srv, FB_NETSPLIT);
     /* Unlink first, free after: netsync_is_behind walks ->uplink, which may point at a server already removed in this
      * pass (hash order is arbitrary), so nothing can be freed until every server has been tested. */
     netserver_t *s, *tmp, *dead = NULL;
@@ -387,6 +397,7 @@ static void remove_server_tree(server_t *srv, netserver_t *root) {
 void netsync_link_down(server_t *srv, link_conn_t *lc, const char *reason) {
     netserver_t *root = lc->nserver;
     if (!root) return;
+    if (srv->netjoin_lc == lc) { server_fbatch_end(srv, FB_NETJOIN); srv->netjoin_lc = NULL; } /* died mid-burst */
     lc->nserver = NULL;
     char name[128], sid[SID_LEN + 1];
     snprintf(name, sizeof name, "%s", root->name);
@@ -934,6 +945,7 @@ static void handle_part(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
             client_prefix(u, prefix, sizeof prefix);
             const char *p[] = {chan->name};
             irc_build(line, sizeof line, NULL, 0, prefix, "PART", p, 1, reason);
+            server_history_event(srv, chan, line);
             member_t *pm, *ptmp;
             HASH_ITER(hh, chan->members, pm, ptmp)
                 if (channel_member_visible(chan, m, pm)) client_send(pm->client, line);
@@ -1390,10 +1402,14 @@ void netsync_handle(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     else if (!strcmp(c, "ACCOUNT")) handle_account(srv, lc, msg);
     else if (!strcmp(c, "KILL")) handle_kill(srv, lc, msg);
     else if (!strcmp(c, "SQUIT")) handle_squit(srv, lc, msg);
-    else if (!strcmp(c, "SJOIN")) handle_sjoin(srv, lc, msg);
+    else if (!strcmp(c, "SJOIN") || !strcmp(c, "JOIN")) {
+        int prev = srv->fb_cur;
+        if (srv->netjoin_lc == lc) srv->fb_cur = FB_NETJOIN;
+        if (c[0] == 'S') handle_sjoin(srv, lc, msg); else handle_join(srv, lc, msg);
+        srv->fb_cur = prev;
+    }
     else if (!strcmp(c, "BMASK")) handle_bmask(srv, lc, msg);
     else if (!strcmp(c, "TB")) handle_tb(srv, lc, msg);
-    else if (!strcmp(c, "JOIN")) handle_join(srv, lc, msg);
     else if (!strcmp(c, "PART")) handle_part(srv, lc, msg);
     else if (!strcmp(c, "KICK")) handle_kick(srv, lc, msg);
     else if (!strcmp(c, "TOPIC")) handle_topic(srv, lc, msg);
@@ -1411,7 +1427,10 @@ void netsync_handle(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     else if (!strcmp(c, "SVCRELAY")) handle_svcrelay(srv, lc, msg);
     else if (!strcmp(c, "CERTFP")) handle_certfp(srv, lc, msg);
     else if (!strcmp(c, "ENCAP")) handle_encap(srv, lc, msg);
-    else if (!strcmp(c, "EOB")) log_info("netsync", "end of burst from %s", lc->peer_name);
+    else if (!strcmp(c, "EOB")) {
+        log_info("netsync", "end of burst from %s", lc->peer_name);
+        if (srv->netjoin_lc == lc) { server_fbatch_end(srv, FB_NETJOIN); srv->netjoin_lc = NULL; }
+    }
     /* PING/PONG are answered in link.c; anything unknown is ignored (forward compatibility). */
 }
 

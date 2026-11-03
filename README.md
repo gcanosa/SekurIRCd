@@ -116,7 +116,11 @@ Website & docs: <https://gcanosa.github.io/SekurIRCd/> (source in [`web/`](web/)
   channel-mates who negotiated the cap), `chghost`, `extended-join`,
   `echo-message`, `message-tags`/`server-time`/`account-tag`,
   `account-notify`, `invite-notify`, `standard-replies`, and `sasl` (see
-  Accounts below)
+  Accounts below, re-authentication included); `draft/event-playback`
+  (joins, parts, modes, topics and reactions in `CHATHISTORY`),
+  `draft/extended-isupport` (`ISUPPORT` command, `draft/isupport` batch),
+  `netsplit`/`netjoin` batches, and the `UTF8ONLY`, `draft/ICON` and
+  `CLIENTTAGDENY` 005 tokens
 - Accounts through NickServ in the services daemon (`bin/services`, see
   "Services" below): SASL PLAIN, SCRAM-SHA-256 and EXTERNAL (`AUTHENTICATE`),
   `/REGISTER <account> <password>`, IRCv3 `draft/account-registration`

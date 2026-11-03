@@ -1,5 +1,6 @@
 #include "config.h"
 #include "crypto.h"
+#include "history.h"
 
 #include <arpa/inet.h>
 #include "client.h" /* SPAM_TRACK */
@@ -365,6 +366,8 @@ void config_defaults(config_t *out) {
     out->messages.max_message_length = 400;
     out->messages.history_size = 50;
     out->messages.history_dm = 1;
+    out->messages.history_events = 1;
+    out->messages.utf8_only = 1;
 
     out->logging.enabled = 1;
     snprintf(out->logging.directory, CFG_PATH, "logs");
@@ -474,6 +477,8 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
 
     if (cfg_get_str(srv, "name", "sekuri", out->server.name, CFG_STR, errbuf, errbufsz, "server.name")) return -1;
     if (cfg_get_str(srv, "network", "SekuriIRC Network", out->server.network, CFG_STR, errbuf, errbufsz, "server.network")) return -1;
+    if (cfg_get_str(srv, "icon", "", out->server.icon, CFG_STR, errbuf, errbufsz, "server.icon")) return -1;
+    if (strpbrk(out->server.icon, " \t")) { snprintf(errbuf, errbufsz, "server.icon must be a URL without spaces"); return -1; }
     if (cfg_get_str(srv, "version", sekurircd_version, out->server.version, CFG_STR, errbuf, errbufsz, "server.version")) return -1;
     if (cfg_get_str(srv, "sid", "", out->server.sid, sizeof out->server.sid, errbuf, errbufsz, "server.sid")) return -1;
     if (out->server.sid[0]) {
@@ -636,8 +641,11 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
     if (cfg_get_int(msg, "history_size", 50, &out->messages.history_size, errbuf, errbufsz, "messages.history_size")) return -1;
     if (cfg_get_str(msg, "history_file", "", out->messages.history_file, CFG_PATH, errbuf, errbufsz, "messages.history_file")) return -1;
     if (cfg_get_bool(msg, "history_dm", 1, &out->messages.history_dm, errbuf, errbufsz, "messages.history_dm")) return -1;
-    if (out->messages.history_size < 0 || out->messages.history_size > 500) {
-        snprintf(errbuf, errbufsz, "messages.history_size must be in 0-500");
+    if (cfg_get_bool(msg, "history_events", 1, &out->messages.history_events, errbuf, errbufsz, "messages.history_events")) return -1;
+    if (cfg_get_bool(msg, "utf8_only", 1, &out->messages.utf8_only, errbuf, errbufsz, "messages.utf8_only")) return -1;
+    if (cfg_get_str(msg, "client_tag_deny", "", out->messages.client_tag_deny, CFG_STR, errbuf, errbufsz, "messages.client_tag_deny")) return -1;
+    if (out->messages.history_size < 0 || out->messages.history_size > HIST_MAX_SIZE) {
+        snprintf(errbuf, errbufsz, "messages.history_size must be in 0-%d", HIST_MAX_SIZE);
         return -1;
     }
     /* Upper bound is the send_msg/cmd_squery text buffer (420) less its NUL.

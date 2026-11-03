@@ -156,6 +156,7 @@ typedef struct client {
     time_t register_last;
 
     uint64_t fanout_mark;   /* server_send_common_channels dedupe stamp */
+    uint64_t fb_mark[3];    /* server_fbatch_*: the netsplit/netjoin batch generation this client has open */
 
     int is_away;
     char away[400];

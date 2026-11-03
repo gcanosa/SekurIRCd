@@ -254,6 +254,8 @@ static const struct { const char *name; unsigned int bit; } CAP_ATTRS[] = {
     {"draft/read-marker", CAP_READ_MARKER},
     {"draft/chathistory", CAP_CHATHISTORY},
     {"draft/message-redaction", CAP_MESSAGE_REDACTION},
+    {"draft/extended-isupport", CAP_EXTENDED_ISUPPORT},
+    {"draft/event-playback", CAP_EVENT_PLAYBACK},
 };
 #define N_CAP_ATTRS (int)(sizeof CAP_ATTRS / sizeof CAP_ATTRS[0])
 
@@ -376,6 +378,14 @@ void cmd_cap(server_t *srv, client_t *cl, irc_message_t *msg) {
         cmd_send_welcome_if_ready(srv, cl);
     }
     /* CAP NEW/DEL/ACK from a client are meaningless server-side; ignored. */
+}
+
+/* draft/extended-isupport: the full 005 list on demand, before registration too (only for clients that asked for the cap
+ * then -- anyone else unregistered gets nothing, as for any unknown pre-registration command). */
+void cmd_isupport(server_t *srv, client_t *cl, irc_message_t *msg) {
+    (void)msg;
+    if (!cl->registered && !(cl->caps & CAP_EXTENDED_ISUPPORT)) return;
+    server_send_isupport(srv, cl);
 }
 
 void cmd_ping(server_t *srv, client_t *cl, irc_message_t *msg) {
@@ -505,7 +515,8 @@ static void sasl_data(server_t *srv, client_t *cl, const char *kind, const char 
 void cmd_authenticate(server_t *srv, client_t *cl, irc_message_t *msg) {
     const char *token = msg->params[0];
     if (!cl->sasl_mech[0]) {
-        if (cl->account[0]) { client_reply(cl, N_SASLALREADY, NULL, 0, "You have already authenticated using SASL"); return; }
+        /* Already logged in: a new exchange is a re-authentication (IRCv3 sasl-3.2 allows it); success switches the account
+         * through the usual SVSLOGIN path, failure leaves the current login alone. */
         int known = strcasecmp(token, "PLAIN") == 0 || strcasecmp(token, "SCRAM-SHA-256") == 0 || strcasecmp(token, "EXTERNAL") == 0;
         if (!services_agent(srv) || auth_fail_throttled(cl->ip)) { client_reply(cl, N_SASLFAIL, NULL, 0, "SASL authentication failed"); return; }
         if (!known) {

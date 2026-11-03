@@ -7,6 +7,11 @@ def test_cap_302_multiline_and_values():
         c = s.client("c302", register=False)
         c.send("CAP LS 302")
         ls = c.expect(r"CAP \* LS")
+        last = ls
+        while " LS * :" in last:  # multi-line LS: the last line has no "*"
+            last = c.expect(r"CAP \* LS")
+            ls += " " + last
+        assert "draft/event-playback" in ls, ls
         assert "sasl=PLAIN,SCRAM-SHA-256" in ls and "draft/chathistory" in ls and "labeled-response" in ls, ls
         d = s.client("c301", register=False)
         d.send("CAP LS")

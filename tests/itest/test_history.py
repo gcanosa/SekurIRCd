@@ -90,7 +90,7 @@ def test_read_marker_persists_with_history_file():
 
 def test_history_ring_grows_overflows_and_survives_odd_text():
     odd = 'quotes " back\\slash tab\t unicode \u00e9\u4e2d\U0001F600 {"json": [1,2]}'
-    with Server(cfg={"messages": {"history_file": "history.json", "history_size": 8}}) as s:
+    with Server(cfg={"messages": {"history_file": "history.json", "history_size": 8, "history_events": False}}) as s:
         a = s.client("hz")
         a.say("JOIN #ring")
         for i in range(12):  # past the 4-slot start, 8-slot cap: grows, then overwrites the oldest

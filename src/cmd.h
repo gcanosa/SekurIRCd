@@ -85,6 +85,7 @@ void cmd_cap_notify_changes(server_t *srv, int old_accounts, int old_history);
 int client_apply_real_address(server_t *srv, client_t *cl, const char *ip, const char *hostname);
 void cmd_webirc(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_cap(server_t *srv, client_t *cl, irc_message_t *msg);
+void cmd_isupport(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_ping(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_pong(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_quit(server_t *srv, client_t *cl, irc_message_t *msg);

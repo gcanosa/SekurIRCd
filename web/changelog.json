@@ -1,8 +1,14 @@
 [
   {
-    "tag": "Unreleased",
-    "date": "",
+    "tag": "v1.3.1",
+    "date": "2026-11-04",
     "changes": [
+      "IRCv3: draft/event-playback. CHATHISTORY replays joins, parts, quits, kicks, mode and topic changes, nick changes and TAGMSG reactions (+draft/react, +draft/reply; never +typing) to clients that ask for it; other clients still get only messages, and their limits and references count only messages. [messages] history_events = false keeps messages only",
+      "IRCv3: draft/extended-isupport. The ISUPPORT command sends the 005 list on demand, also before registration, and with batch every 005 list comes in a draft/isupport batch",
+      "IRCv3: netsplit and netjoin batches. The quits of a split and the joins of a relink each come in one batch, so clients can fold them",
+      "IRCv3 UTF8ONLY: lines that aren't valid UTF-8 are refused with FAIL <command> INVALID_UTF8 and never relayed. On by default; [messages] utf8_only = false turns it off for networks with legacy-charset users",
+      "IRCv3: draft/ICON ([server] icon) and CLIENTTAGDENY ([messages] client_tag_deny) in 005; a +draft/channel-context tag is only relayed when it names a channel the sender is on",
+      "SASL re-authentication: a logged-in client may run SASL again to switch accounts (it got 907 before); a failed attempt keeps the current login",
       "Event loop: kqueue (macOS/BSD) or epoll (Linux) instead of poll(), with a poll() fallback elsewhere. Each connection's interest is registered once and changed only when it changes, so a wakeup costs the number of busy connections instead of the number of connections; idle clients no longer slow everyone else down",
       "REDACT (draft/message-redaction): take back a message still in history. Your own, or anyone's in a channel you operate (IRC operators too). It is removed from CHATHISTORY on every server, and clients with the cap hide it",
       "PRIVMSG and NOTICE take up to 4 comma-separated targets (TARGMAX=PRIVMSG:4,NOTICE:4); each target counts against the flood limit and the spam limits like a separate message",

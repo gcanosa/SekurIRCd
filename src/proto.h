@@ -169,6 +169,8 @@ size_t irc_time_tag_insert(const char *line, char *tag, size_t tagsz, size_t *at
 #define CAP_READ_MARKER       0x400000u
 #define CAP_MESSAGE_REDACTION 0x800000u
 #define CAP_CHATHISTORY       0x8000u
+#define CAP_EXTENDED_ISUPPORT 0x1000000u
+#define CAP_EVENT_PLAYBACK    0x2000000u
 
 /* --- numeric reply codes (protocol.N) ------------------------------------ */
 #define N_WELCOME          "001"
@@ -355,5 +357,7 @@ size_t irc_time_tag_insert(const char *line, char *tag, size_t tagsz, size_t *at
 #define N_SASLABORTED      "906"
 #define N_SASLALREADY      "907"
 #define N_SASLMECHS        "908"
+
+int irc_utf8_valid(const char *s);
 
 #endif /* SEKURIRCD_PROTO_H */

@@ -33,6 +33,7 @@ typedef struct hist_buf {
     UT_hash_handle hh;
 } hist_buf_t;
 
+#define HIST_MAX_SIZE 500     /* most entries a conversation may keep ([messages] history_size upper bound) */
 #define HIST_MAX_BUFFERS 1000 /* conversations kept; the one idle longest is dropped beyond this */
 
 /* Conversation keys (stable, casefolded). A DM key is the two accounts in sorted order. */

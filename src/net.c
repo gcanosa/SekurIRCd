@@ -932,9 +932,17 @@ static int read_client_once(server_t *srv, client_t *cl) {
             continue;
         }
         if (!net_flood_charge(srv, cl)) continue;
+        int bad_utf8 = srv->cfg.messages.utf8_only && !irc_utf8_valid(line); /* checked before the parse cuts the line up */
         irc_message_t msg;
         if (irc_parse_line(line, &msg) != 0) continue;
         if (msg.nparams > srv->cfg.security.max_params) msg.nparams = srv->cfg.security.max_params;
+        if (bad_utf8) { /* UTF8ONLY: never relayed; told once per line, like the spec's example */
+            char fl[300];
+            const char *fp[] = {msg.command, "INVALID_UTF8"};
+            irc_build(fl, sizeof fl, NULL, 0, srv->cfg.server.name, "FAIL", fp, 2, "Message rejected, your IRC software MUST use UTF-8 encoding on this network");
+            client_send(cl, fl);
+            continue;
+        }
         cmd_dispatch(srv, cl, &msg);
     }
     if (start > 0) {

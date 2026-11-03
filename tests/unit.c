@@ -135,6 +135,11 @@ static void test_build_truncation_detected(void) {
 
 static void test_validators(void) {
     assert(irc_valid_nick("ethernet_", 30));
+    assert(irc_utf8_valid("plain \xc3\xa9 \xe2\x82\xac \xf0\x9f\x98\x80"));
+    assert(!irc_utf8_valid("latin1 caf\xe9"));      /* bare 0xE9 */
+    assert(!irc_utf8_valid("\xc0\xaf"));            /* overlong */
+    assert(!irc_utf8_valid("\xed\xa0\x80"));        /* surrogate */
+    assert(!irc_utf8_valid("\xe2\x82"));            /* truncated */
     assert(irc_valid_nick("[bracket]", 30));
     assert(irc_valid_nick("_leading", 30));
     assert(!irc_valid_nick("1startswithdigit", 30));

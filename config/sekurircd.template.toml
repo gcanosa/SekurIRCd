@@ -47,6 +47,10 @@ name = "irc.example.org"
 # Human-friendly network name shown in the welcome message.
 network = "SekuriIRC Network"
 
+# URL of the network's icon, advertised to clients as IRCv3 draft/ICON in 005.
+# "" (default) advertises nothing.
+#icon = "https://example.org/icon.png"
+
 # Version string reported via 004 MYINFO / VERSION. Omit to use the running
 # package's version (sekurircd.__version__) -- the recommended default.
 #version = "0.8.4"
@@ -406,6 +410,22 @@ history_size = 50
 # Also remember private messages between two logged-in accounts, so each side
 # can CHATHISTORY the conversation. Only used when history_size > 0.
 #history_dm = true
+
+# Also remember channel events (JOIN, PART, QUIT, KICK, MODE, TOPIC, NICK) and
+# TAGMSG reactions, replayed by CHATHISTORY to clients with the IRCv3
+# draft/event-playback cap; others still get only messages. Events share the
+# history_size slots with messages. Not kept for +D / +u channels.
+#history_events = true
+
+# IRCv3 UTF8ONLY: refuse (FAIL <cmd> INVALID_UTF8) and never relay any client
+# line that isn't valid UTF-8. Turn off only if you have users on legacy
+# charsets (latin1 etc.).
+#utf8_only = true
+
+# IRCv3 CLIENTTAGDENY: client-only tags NOT relayed, names without the '+'.
+# "typing" blocks typing notifications; "*,-draft/react,-draft/reply" blocks
+# everything except reactions and replies. "" (default) relays them all.
+#client_tag_deny = ""
 
 # Channel mode +G ("censor"): these words (case-insensitive, matched anywhere in
 # the text) are replaced with asterisks in messages to that channel.

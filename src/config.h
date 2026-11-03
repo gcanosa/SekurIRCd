@@ -44,6 +44,7 @@
 typedef struct {
     char name[CFG_STR];
     char network[CFG_STR];
+    char icon[CFG_STR];   /* draft/ICON: URL of the network's icon, "" = not advertised */
     char version[CFG_STR];
     char sid[4];          /* 3-character server id for linked networks (digit + 2 of [0-9A-Z]); "" = derived from the name */
     char bind[CFG_STR];
@@ -128,6 +129,9 @@ typedef struct {
     int history_size; /* PRIVMSG/NOTICE lines kept per conversation for CHATHISTORY; 0 = off */
     char history_file[CFG_PATH]; /* "" = memory only; else saved here and reloaded at startup */
     int history_dm;   /* also keep private messages between logged-in accounts */
+    int history_events; /* also keep JOIN/PART/QUIT/KICK/MODE/TOPIC/NICK/TAGMSG for draft/event-playback clients */
+    int utf8_only;    /* UTF8ONLY: refuse client lines that aren't valid UTF-8 */
+    char client_tag_deny[CFG_STR]; /* CLIENTTAGDENY value: client-only tags not relayed ("" = all relayed) */
     char censor_words[32][CFG_STR]; /* words channel mode +G stars out */
     int n_censor_words;
 } cfg_messages_t;

@@ -361,8 +361,73 @@ void server_maybe_drop_channel(server_t *srv, channel_t *chan) {
     channel_free(chan);
 }
 
+/* draft/event-playback: a channel event line (":prefix VERB params", no tags) goes into the channel's history as-is, so
+ * CHATHISTORY can replay it. Not in +D/+u channels, where who may see a JOIN/PART depends on the viewer. */
+void server_history_event(server_t *srv, channel_t *chan, const char *line) {
+    if (!srv || srv->cfg.messages.history_size <= 0 || !srv->cfg.messages.history_events) return;
+    if (chan->modes & (CMODE_DELAYJOIN | CMODE_AUDITORIUM) || line[0] != ':') return;
+    char sender[200], verb[16];
+    const char *sp = strchr(line, ' ');
+    if (!sp || (size_t)(sp - line - 1) >= sizeof sender) return;
+    snprintf(sender, sizeof sender, "%.*s", (int)(sp - line - 1), line + 1);
+    const char *vp = sp + 1, *rest = strchr(vp, ' ');
+    size_t vl = rest ? (size_t)(rest - vp) : strlen(vp);
+    if (vl >= sizeof verb) return;
+    snprintf(verb, sizeof verb, "%.*s", (int)vl, vp);
+    static const char *EVENTS[] = {"JOIN", "PART", "QUIT", "KICK", "MODE", "TOPIC", "NICK"};
+    int known = 0;
+    for (size_t i = 0; i < sizeof EVENTS / sizeof EVENTS[0]; i++) if (strcmp(verb, EVENTS[i]) == 0) known = 1;
+    if (!known) return;
+    char msgid[48], key[160];
+    server_next_msgid(srv, msgid, sizeof msgid);
+    history_key_channel(key, sizeof key, chan->name);
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    hist_entry_t h = {.ms = (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000, .msgid = msgid, .sender = sender,
+                      .account = "", .verb = verb, .target = chan->name, .text = rest ? rest + 1 : ""};
+    history_add(srv, key, srv->cfg.messages.history_size, &h);
+}
+
+void server_fbatch_begin(server_t *srv, int slot, const char *type, const char *a, const char *b) {
+    if (srv->fb[slot].active) server_fbatch_end(srv, slot);
+    srv->fb[slot].active = 1;
+    srv->fb[slot].gen = ++srv->fb_seq;
+    snprintf(srv->fb[slot].id, sizeof srv->fb[slot].id, "%s%llu", slot == FB_NETSPLIT ? "ns" : "nj", (unsigned long long)srv->fb_seq);
+    snprintf(srv->fb[slot].type, sizeof srv->fb[slot].type, "%s", type);
+    snprintf(srv->fb[slot].a, sizeof srv->fb[slot].a, "%s", a);
+    snprintf(srv->fb[slot].b, sizeof srv->fb[slot].b, "%s", b);
+}
+
+void server_fbatch_end(server_t *srv, int slot) {
+    if (!srv->fb[slot].active) return;
+    srv->fb[slot].active = 0;
+    char minus[32], line[100];
+    snprintf(minus, sizeof minus, "-%s", srv->fb[slot].id);
+    irc_build(line, sizeof line, NULL, 0, srv->cfg.server.name, "BATCH", (const char *[]){minus}, 1, NULL);
+    for (client_t *c = srv->all_clients; c; c = c->all_next) /* ponytail: walks every connection once per split/join */
+        if (c->fb_mark[slot] == srv->fb[slot].gen && c->fd >= 0) client_send(c, line);
+}
+
+void server_fbatch_send(server_t *srv, client_t *c, const char *line) {
+    int slot = srv ? srv->fb_cur : 0;
+    if (!slot || !srv->fb[slot].active || c->fd < 0 || !(c->caps & CAP_BATCH)) { client_send(c, line); return; }
+    if (c->fb_mark[slot] != srv->fb[slot].gen) {
+        c->fb_mark[slot] = srv->fb[slot].gen;
+        char plus[32], open[400];
+        snprintf(plus, sizeof plus, "+%s", srv->fb[slot].id);
+        irc_build(open, sizeof open, NULL, 0, srv->cfg.server.name, "BATCH",
+                  (const char *[]){plus, srv->fb[slot].type, srv->fb[slot].a, srv->fb[slot].b}, 4, NULL);
+        client_send(c, open);
+    }
+    char out[1100];
+    if (line[0] == '@') snprintf(out, sizeof out, "@batch=%s;%s", srv->fb[slot].id, line + 1);
+    else snprintf(out, sizeof out, "@batch=%s %s", srv->fb[slot].id, line);
+    client_send(c, out);
+}
+
 void server_broadcast_channel(channel_t *chan, const char *line, client_t *except) {
     member_t *m, *tmp;
+    if (chan->members) server_history_event(chan->members->client->srv, chan, line);
     HASH_ITER(hh, chan->members, m, tmp) {
         if (m->client == except) continue;
         client_send(m->client, line);
@@ -370,6 +435,8 @@ void server_broadcast_channel(channel_t *chan, const char *line, client_t *excep
 }
 
 void server_send_common_channels(server_t *srv, client_t *cl, const char *line, unsigned int cap) {
+    if (!cap) /* NICK and QUIT are the uncapped ones: each channel's history gets them (others are ignored there) */
+        for (chan_node_t *n = cl->channels; n; n = n->next) server_history_event(srv, n->chan, line);
     uint64_t gen = ++srv->fanout_gen;
     cl->fanout_mark = gen; /* never send to cl itself */
     for (chan_node_t *n = cl->channels; n; n = n->next) {
@@ -379,7 +446,7 @@ void server_send_common_channels(server_t *srv, client_t *cl, const char *line, 
             if (c->fanout_mark == gen) continue;
             c->fanout_mark = gen;
             if (cap && !(c->caps & cap)) continue;
-            client_send(c, line);
+            server_fbatch_send(srv, c, line); /* a netsplit's QUITs go into its batch */
         }
     }
 }
@@ -584,6 +651,9 @@ void server_send_isupport(server_t *srv, client_t *cl) {
     snprintf(chanlen, sizeof chanlen, "CHANNELLEN=%d", 50);
     snprintf(topiclen, sizeof topiclen, "TOPICLEN=%d", TOPIC_MAX_LEN);
 
+    char icontok[CFG_STR + 16], denytok[CFG_STR + 16];
+    snprintf(icontok, sizeof icontok, "draft/ICON=%s", srv->cfg.server.icon);
+    snprintf(denytok, sizeof denytok, "CLIENTTAGDENY=%s", srv->cfg.messages.client_tag_deny);
     char histtok[32];
     snprintf(histtok, sizeof histtok, "CHATHISTORY=%d", srv->cfg.messages.history_size > 100 ? 100 : srv->cfg.messages.history_size);
     const char *tokens[] = {
@@ -593,12 +663,37 @@ void server_send_isupport(server_t *srv, client_t *cl) {
         "MAXLIST=b:100,e:100,I:100", "EXCEPTS=e", "INVEX=I", "MONITOR=100", "WATCH=128", "SILENCE=15",
         "EXTBAN=~,amrzj", "ELIST=MNU", "WHOX", "CHANLIMIT=#:200", "BOT=B", "CALLERID=g", "LINELEN=512",
         "TARGMAX=PRIVMSG:4,NOTICE:4,KICK:1,JOIN:1,PART:1,WHOIS:1", srv->cfg.messages.history_size > 0 ? histtok : NULL, srv->cfg.messages.history_size > 0 ? "MSGREFTYPES=msgid,timestamp" : NULL,
+        srv->cfg.messages.utf8_only ? "UTF8ONLY" : NULL, srv->cfg.server.icon[0] ? icontok : NULL, srv->cfg.messages.client_tag_deny[0] ? denytok : NULL,
     };
     int total = 0;
     for (size_t i = 0; i < sizeof tokens / sizeof tokens[0]; i++) if (tokens[i]) tokens[total++] = tokens[i]; /* drop the NULLs of disabled features */
+    /* draft/extended-isupport: with batch too, the 005 lines travel in one draft/isupport batch (and nothing else does) */
+    int batched = (cl->caps & CAP_EXTENDED_ISUPPORT) && (cl->caps & CAP_BATCH);
+    static unsigned long seq;
+    char bid[24], bl[200];
+    snprintf(bid, sizeof bid, "is%lu", ++seq);
+    if (batched) {
+        char plus[32];
+        snprintf(plus, sizeof plus, "+%s", bid);
+        irc_build(bl, sizeof bl, NULL, 0, srv->cfg.server.name, "BATCH", (const char *[]){plus, "draft/isupport"}, 2, NULL);
+        client_send(cl, bl);
+    }
     for (int i = 0; i < total; i += 12) {
         int chunk = total - i < 12 ? total - i : 12;
-        client_reply(cl, N_ISUPPORT, tokens + i, chunk, "are supported by this server");
+        if (!batched) { client_reply(cl, N_ISUPPORT, tokens + i, chunk, "are supported by this server"); continue; }
+        const char *all[16];
+        all[0] = cl->nick[0] ? cl->nick : "*";
+        for (int k = 0; k < chunk; k++) all[k + 1] = tokens[i + k];
+        irc_tag_t bt = {"batch", bid};
+        char line[1024];
+        irc_build(line, sizeof line, &bt, 1, srv->cfg.server.name, N_ISUPPORT, all, chunk + 1, "are supported by this server");
+        client_send(cl, line);
+    }
+    if (batched) {
+        char minus[32];
+        snprintf(minus, sizeof minus, "-%s", bid);
+        irc_build(bl, sizeof bl, NULL, 0, srv->cfg.server.name, "BATCH", (const char *[]){minus}, 1, NULL);
+        client_send(cl, bl);
     }
 }
 

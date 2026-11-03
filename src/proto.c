@@ -601,3 +601,24 @@ int irc_proxy_v2_parse(const unsigned char *buf, size_t len, char *ip, size_t ip
     }
     return -1;
 }
+
+/* Strict UTF-8 (RFC 3629): no overlongs, no surrogates, nothing past U+10FFFF. */
+int irc_utf8_valid(const char *s) {
+    const unsigned char *p = (const unsigned char *)s;
+    while (*p) {
+        unsigned c = *p++;
+        int n;
+        unsigned min, cp;
+        if (c < 0x80) continue;
+        else if ((c & 0xE0) == 0xC0) { n = 1; min = 0x80; cp = c & 0x1F; }
+        else if ((c & 0xF0) == 0xE0) { n = 2; min = 0x800; cp = c & 0x0F; }
+        else if ((c & 0xF8) == 0xF0) { n = 3; min = 0x10000; cp = c & 0x07; }
+        else return 0;
+        for (int i = 0; i < n; i++, p++) {
+            if ((*p & 0xC0) != 0x80) return 0;
+            cp = (cp << 6) | (*p & 0x3F);
+        }
+        if (cp < min || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) return 0;
+    }
+    return 1;
+}

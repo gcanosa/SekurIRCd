@@ -125,6 +125,13 @@ typedef struct server {
 
     uint64_t fanout_gen;   /* see server_send_common_channels */
 
+    /* IRCv3 netsplit/netjoin batches (server_fbatch_*): slot FB_NETSPLIT / FB_NETJOIN; fb_cur = the slot lines sent
+     * through server_fbatch_send go into right now (0 = none). A client's batch opens on its first line. */
+    struct { int active; char id[24], type[12], a[128], b[128]; uint64_t gen; } fb[3];
+    int fb_cur;
+    uint64_t fb_seq;
+    void *netjoin_lc;      /* the link whose burst is the open netjoin (ends at its EOB) */
+
     /* server_notify_opers()'s own flood guard -- see that function's doc
      * comment. Fixed-size ring, unlike Python's unbounded deque, but the
      * ring is sized to the same threshold so the suppression decision
@@ -199,6 +206,11 @@ void server_send_lusers(server_t *srv, client_t *cl);
 /* Broadcast `line` (already built, no CRLF) to every member of `chan` except
  * `except` (may be NULL). */
 void server_broadcast_channel(channel_t *chan, const char *line, client_t *except);
+void server_history_event(server_t *srv, channel_t *chan, const char *line);
+enum { FB_NETSPLIT = 1, FB_NETJOIN = 2 };
+void server_fbatch_begin(server_t *srv, int slot, const char *type, const char *a, const char *b);
+void server_fbatch_end(server_t *srv, int slot);
+void server_fbatch_send(server_t *srv, client_t *c, const char *line);
 /* Send `line` once to every client sharing a channel with `cl` (not `cl`
  * itself), de-duplicated across all of cl's channels via a per-client
  * generation stamp -- O(total memberships), no seen-list cap. If `cap` is
