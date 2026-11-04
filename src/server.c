@@ -122,6 +122,7 @@ static void warn_plain_passwords(const config_t *cfg) {
 int server_init(server_t *srv, const config_t *cfg) {
     memset(srv, 0, sizeof *srv);
     srv->cfg = *cfg;
+    srv->svc_gone_at = time(NULL);
     server_apply_cloak_secret(srv);
     netsync_init(srv);
     crypto_random_hex(srv->msgid_prefix, sizeof srv->msgid_prefix, 8);

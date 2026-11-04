@@ -116,6 +116,8 @@ void link_forward_line(link_conn_t *lc, const char *line);
  * after a JOIN is announced locally. */
 void link_notify_channel_join(struct channel *chan, struct client *joiner);
 void link_notify_channel_new(struct server *srv, struct channel *chan, struct client *creator);
+/* Ranks a netsplit merge (same channel TS) brought back: ChanServ vets them under SECUREOPS. */
+void link_notify_merge_ranks(struct server *srv, struct channel *chan, struct client *u, int rank);
 
 /* The services user feed (links with watch_users): SVCUSER <uid> <nick> <user> <realhost> <ip> <account|*> <certfp|*>
  * <server> on connect/update, SVCNICK <uid> <nick>, SVCQUIT <uid>, SVCACCOUNT <uid> <account|*>. Service bots are skipped. */

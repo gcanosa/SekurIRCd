@@ -723,6 +723,30 @@ same goes for `SET RESTRICTED ON` (current ops are left in), `SET SECUREOPS
 ON` and `SET FOUNDER`, while `SET MLOCK` turns on `GUARD` so later mode
 changes get reverted. Both take the same `<mask>` forms:
 
+**Takeover protection** works the way other services packages do it, on every
+registered channel and whatever `SECUREOPS` says:
+
+- ChanServ remembers the timestamp (TS) of each registered channel. A
+  channel with a newer TS was recreated since ChanServ last saw it: the first
+  `JOIN` after it emptied, on any server, or while services were down. That
+  counts as a takeover, the way Anope does it. The channel goes back to the
+  server's default modes, and `+k`, `+i`, `+l`, redirects and every
+  ban/exception/invite entry are cleared. Then `+r`, `MLOCK` and a locked
+  topic are put back, and every `+q/+a/+o/+h` is vetted. Anyone who isn't the
+  founder, `IDENTIFY`'d or on the access list at a level that covers the rank
+  loses it.
+- A channel with the TS ChanServ already knows is left as it is, for example
+  one a relinking server brings back after a split.
+- When ChanServ relinks (a services or ircd restart), it sweeps each
+  registered channel: takeovers as above, and everywhere `ACCESS` members get
+  their modes and `AKICK`/`RESTRICTED` members are kicked.
+- Ranks a same-age netsplit merge brings back are checked under `SECUREOPS`.
+- `ACCESS` auto-modes and `AKICK` apply on `JOIN` to every registered channel,
+  not just the ones ChanServ sits in.
+- ChanServ can't be kicked or deopped (numeric 484). `SECUREOPS` checks every
+  `+o` against the real identity of whoever got it, and against the level of
+  their access entry: a `v` entry doesn't cover `@`.
+
 - a bare host (`trusted.example`, `1.2.3.4`), `ident@host`
   (`*@trusted.example`, `~user@1.2.3.4`), or a full `nick!ident@host` mask
   (`Helper!*@trusted.example`) -- shorthand forms are wildcard-expanded to a

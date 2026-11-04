@@ -565,7 +565,7 @@ static void guest_nick(char *out, size_t outsz) {
 
 static void enforce_check(nsuser_t *u) {
     u->enforce_at = 0;
-    if (!C.enforce_nicks) return;
+    if (!C.enabled || !C.enforce_nicks) return;
     const char *owner = accounts_owner_of_nick(&g_acc, u->nick);
     if (!owner || (u->account[0] && strcasecmp(u->account, owner) == 0)) return;
     snprintf(u->enforce_owner, sizeof u->enforce_owner, "%s", owner);
@@ -589,6 +589,7 @@ static void ev_user(irc_message_t *m) {
         HASH_ADD(hh, g_by_uid, uid, strlen(u->uid), u);
     }
     int renamed = fresh || strcasecmp(u->nick, m->params[1]) != 0;
+    if (renamed && !fresh) cs_user_nick(u->nick, m->params[1]);
     if (renamed) user_set_nick(u, m->params[1]);
     snprintf(u->user, sizeof u->user, "%s", m->params[2]);
     snprintf(u->host, sizeof u->host, "%s", m->params[3]);
@@ -600,17 +601,16 @@ static void ev_user(irc_message_t *m) {
 }
 
 int ns_event(irc_message_t *m) {
-    if (!C.enabled) return 0;
     const char *c = m->command;
     if (!strcmp(c, "SVCUSER")) { ev_user(m); return 1; }
     if (!strcmp(c, "SVCNICK")) {
         nsuser_t *u = m->nparams >= 2 ? user_by_uid(m->params[0]) : NULL;
-        if (u) { user_set_nick(u, m->params[1]); enforce_check(u); }
+        if (u) { cs_user_nick(u->nick, m->params[1]); user_set_nick(u, m->params[1]); enforce_check(u); }
         return 1;
     }
     if (!strcmp(c, "SVCQUIT")) {
         nsuser_t *u = m->nparams >= 1 ? user_by_uid(m->params[0]) : NULL;
-        if (u) user_free(u);
+        if (u) { cs_user_quit(u->nick); user_free(u); }
         return 1;
     }
     if (!strcmp(c, "SVCACCOUNT")) {
@@ -625,14 +625,15 @@ int ns_event(irc_message_t *m) {
         if (m->nparams >= 2 && !C.network_set) snprintf(C.network, sizeof C.network, "%s", m->params[1]);
         return 1;
     }
+    if (!C.enabled) return 0;
     if (!strcmp(c, "SVCSASL")) { ev_sasl(m); return 1; }
     if (!strcmp(c, "SVCREGISTER")) { ev_register(m); return 1; }
     return 0;
 }
 
 void ns_session_start(void) {
-    if (!C.enabled) return;
     users_clear(); /* the hub resends everyone after SVCWATCH */
+    if (!C.enabled) { svc_queue_line("SVCWATCH USERS"); return; } /* ChanServ still wants the QUIT/NICK feed */
     memset(g_sasl, 0, sizeof g_sasl);
     char line[600];
     irc_build(line, sizeof line, NULL, 0, NULL, "NICK", (const char *[]){C.nick, C.user, C.host}, 3, C.realname);

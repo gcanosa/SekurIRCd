@@ -793,6 +793,11 @@ void cmd_kick(server_t *srv, client_t *cl, irc_message_t *msg) {
         return;
     }
     if ((target->umodes & UMODE_Q) && !(cl->umodes & UMODE_O)) { err_not_channel_op(cl, chan->name); return; }
+    if (target->is_service && !cl->is_service) { /* kicking ChanServ out would switch off everything GUARD enforces */
+        const char *p[] = {target->nick, chan->name};
+        client_reply(cl, N_ISCHANSERVICE, p, 2, "Cannot kick or deop a network service");
+        return;
+    }
     /* a halfop (not full op/oper) may only kick "downward" */
     if ((me->rank & RANK_HALFOP) && !(me->rank & RANK_OP) && !(cl->umodes & UMODE_O) && (tm->rank & (RANK_OP | RANK_HALFOP))) {
         err_not_channel_op(cl, chan->name);
@@ -1071,6 +1076,11 @@ void cmd_apply_channel_mode(server_t *srv, client_t *cl, channel_t *chan,
             /* Who may touch whom: owners/admins are protected -- the setter must be at least as senior as the
              * target (opers and services always are), and only an owner may grant +q, only owner/admin +a.
              * A user may always drop their own prefix. */
+            if (target->is_service && sign == '-' && !cl->is_service) {
+                const char *pe[] = {target->nick, chan->name};
+                client_reply(cl, N_ISCHANSERVICE, pe, 2, "Cannot kick or deop a network service");
+                argi++; continue;
+            }
             member_t *setter = channel_find_member(chan, cl);
             int setter_lvl = ((cl->umodes & UMODE_O) || cl->is_service) ? 99 : setter ? channel_rank_level(setter->rank) : 0;
             int need = (c == 'q') ? 5 : (c == 'a') ? 4 : 0;
@@ -1082,6 +1092,7 @@ void cmd_apply_channel_mode(server_t *srv, client_t *cl, channel_t *chan,
                 argi++; continue;
             }
             int rank = (c == 'o') ? RANK_OP : (c == 'h') ? RANK_HALFOP : (c == 'v') ? RANK_VOICE : (c == 'q') ? RANK_OWNER : RANK_ADMIN;
+            if ((sign == '+') == ((tm->rank & rank) != 0)) { argi++; continue; } /* already so: nothing to announce */
             if (sign == '+') {
                 tm->rank |= rank;
                 if (c == 'q' || c == 'a') tm->rank |= RANK_OP; /* owner/admin are ops too -- every op check keeps working */

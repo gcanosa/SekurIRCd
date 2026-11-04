@@ -801,20 +801,26 @@ static void handle_sjoin(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     if (!irc_valid_channel(name, 50)) return;
 
     channel_t *chan = server_find_channel(srv, name);
+    /* A TS of 0 or less would beat every real channel and hand the sender all of its modes and ranks: ignore it
+     * (treat it as the same age as ours, or now for a channel we don't have). */
+    if (ts <= 0) ts = chan ? (long)chan->created : (long)time(NULL);
     int keep_ranks = 1;
+    int vet = 0; /* 1: ChanServ vets every rank once the members are in (a channel new to us); 2: just the merged ones */
     if (!chan) {
         chan = server_get_or_create_channel(srv, name);
         if (!chan) return;
         chan->modes = 0; /* a remote channel: its modes, not our defaults */
         chan->created = ts;
         set_state_modes(chan, modes, margs, nm, 1);
-        link_notify_channel_new(srv, chan, NULL);
+        vet = 1;
     } else if (ts < chan->created) { /* theirs is older: it wins everything */
         reset_channel_for_ts(srv, chan);
         chan->created = ts;
-        set_state_modes(chan, modes, margs, nm, 1);
+        set_state_modes(chan, modes, margs, nm, 1); /* may have lost +r/MLOCK: SVCNEW puts them back */
+        vet = 1;
     } else if (ts == chan->created) { /* same age: merge */
         set_state_modes(chan, modes, margs, nm, 0);
+        vet = 2;
     } else { /* ours is older: their modes are ignored and their members arrive without ranks */
         keep_ranks = 0;
     }
@@ -849,6 +855,11 @@ static void handle_sjoin(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
             if ((joined[i].rank & bits[pass]) && !(pass == 2 && (joined[i].rank & (RANK_OWNER | RANK_ADMIN)))) { letters[n] = ltr[pass]; args[n] = joined[i].c->nick; n++; }
         if (n) broadcast_rank_modes(chan, from->name, '+', letters, args, n);
     }
+    /* Only now that the members (and their ranks) are in: notifying before the loop sent ChanServ an empty channel, so
+     * whoever created a registered channel on another server -- or recreated it there during a split -- kept ops. */
+    if (vet == 1) link_notify_channel_new(srv, chan, NULL);
+    else if (vet == 2)
+        for (int i = 0; i < nj; i++) if (joined[i].rank) link_notify_merge_ranks(srv, chan, joined[i].c, joined[i].rank);
     /* forward the original, unchanged -- every server applies the TS rules itself */
     char fl[1200];
     const char *p2[14] = {msg->params[0], name, modes};
@@ -912,12 +923,12 @@ static void handle_join(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     long ts = atol(msg->params[0]);
     const char *name = msg->params[1];
     channel_t *chan = server_find_channel(srv, name);
+    int is_new = !chan;
     if (!chan) {
         chan = server_get_or_create_channel(srv, name);
         if (!chan) return;
         chan->modes = 0;
-        chan->created = ts;
-        link_notify_channel_new(srv, chan, NULL);
+        chan->created = ts > 0 ? ts : time(NULL);
     }
     if (!channel_find_member(chan, u)) {
         member_t *m = channel_add_member(chan, u);
@@ -927,6 +938,7 @@ static void handle_join(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
             cmd_announce_join(chan, u);
         }
     }
+    if (is_new) link_notify_channel_new(srv, chan, NULL);
     char fl[300];
     const char *p[] = {msg->params[0], name};
     irc_build(fl, sizeof fl, NULL, 0, u->uid, "JOIN", p, 2, NULL);

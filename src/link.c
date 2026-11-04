@@ -32,8 +32,7 @@
  * Leaf side dials out as a TLS client, honoring tls_insecure_skip_verify;
  * its SSL_CTX is created once, lazily, and freed at shutdown. */
 
-static void sync_ranks_to(server_t *srv, link_conn_t *lc);
-static void send_member_line(link_conn_t *lc, const char *cmd, channel_t *chan, client_t *u, int rank);
+static void send_member_line(link_conn_t *lc, const char *cmd, channel_t *chan, client_t *u, int rank, const char *flag);
 static ssize_t link_io_read(link_conn_t *lc, void *buf, size_t len) {
     if (!lc->ssl) return read(lc->fd, buf, len);
     ERR_clear_error();
@@ -590,6 +589,7 @@ void link_reap(server_t *srv) {
         if (!lc->closing) { pp = &lc->next; continue; }
         *pp = lc->next;
         if (lc->is_server) netsync_link_down(srv, lc, "Link closed");
+        if (lc->service) { srv->svc_gone_at = time(NULL); srv->svc_back_at = 0; } /* channels made from now on go unwatched */
         for (int b = 0; b < lc->n_bots; b++) {
             log_info("link", "link '%s' lost -- removing service nick '%s'", lc->peer_name, lc->bots[b]->nick);
             server_remove_client(srv, lc->bots[b], "Service disconnected");
@@ -775,7 +775,8 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
         snprintf(svc->realname, sizeof svc->realname, "%s", realname);
         server_add_user(srv, svc);
         lc->bots[lc->n_bots++] = svc;
-        if (!lc->service) { lc->service = svc; sync_ranks_to(srv, lc); } /* the channel service vets the ranks */
+        /* The channel service: it asks for each registered channel's members itself (SVCMEMBERS ... SYNC). */
+        if (!lc->service) { lc->service = svc; srv->svc_back_at = time(NULL); }
         netsync_introduce_user(srv, svc); /* a service nick is a user to the rest of the network too */
         log_info("link", "link '%s' introduced service nick '%s'", lc->peer_name, nick);
         return 0;
@@ -875,6 +876,44 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
         int nargs = 0;
         for (int i = 2; i < msg.nparams && nargs < 16; i++) args[nargs++] = msg.params[i];
         cmd_apply_channel_mode(srv, svc, chan, msg.params[1], args, nargs, 1);
+        return 0;
+    }
+    if (strcasecmp(msg.command, "SVCRESET") == 0) {
+        /* Anope's TS bounce: a registered channel ChanServ judged taken over (recreated while nobody vetted it) goes
+         * back to the server's default modes with empty ban/exception/invite lists, so whatever the grabber set (+k,
+         * +i, +b *!*@*, a redirect) is gone. Ranks are ChanServ's business (SVCSYNC); it puts +r and MLOCK back next. */
+        if (msg.nparams < 1) return 0;
+        channel_t *chan = server_find_channel(srv, msg.params[0]);
+        if (!chan) return 0;
+        char ms[48] = "-";
+        const char *ka[] = {"*"};
+        int nk = 0;
+        for (const char *c = "imnpstzCTSVQNRMcDuG"; *c; c++) /* never r (ChanServ's), P or O (oper-set) */
+            if ((chan->modes & channel_flag_bit(*c)) && !strchr(srv->cfg.channels.default_modes, *c)) strncat(ms, (char[]){*c, 0}, sizeof ms - strlen(ms) - 1);
+        if (chan->modes & CMODE_K) { strncat(ms, "k", sizeof ms - strlen(ms) - 1); nk = 1; }
+        if (chan->modes & CMODE_L) strncat(ms, "l", sizeof ms - strlen(ms) - 1);
+        if (chan->modes & CMODE_FLOOD) strncat(ms, "f", sizeof ms - strlen(ms) - 1);
+        if (chan->modes & CMODE_JTHROT) strncat(ms, "j", sizeof ms - strlen(ms) - 1);
+        if (chan->modes & CMODE_REDIRECT) strncat(ms, "L", sizeof ms - strlen(ms) - 1);
+        if (ms[1]) cmd_apply_channel_mode(srv, svc, chan, ms, ka, nk, 1);
+        masklist_t *lists[] = {&chan->bans, &chan->exceptions, &chan->invex};
+        for (int li = 0; li < 3; li++) {
+            int total = lists[li]->n;
+            if (!total) continue;
+            /* snapshot first: each MODE below edits the list being walked */
+            char (*masks)[256] = calloc((size_t)total, sizeof *masks);
+            if (!masks) continue;
+            for (int i = 0; i < total; i++) snprintf(masks[i], sizeof masks[i], "%s", lists[li]->masks[i]);
+            for (int i = 0; i < total; i += 12) {
+                int k = total - i < 12 ? total - i : 12;
+                char lm[16] = "-";
+                const char *la[12];
+                for (int j = 0; j < k; j++) { lm[1 + j] = "beI"[li]; la[j] = masks[i + j]; }
+                lm[1 + k] = '\0';
+                cmd_apply_channel_mode(srv, svc, chan, lm, la, k, 1);
+            }
+            free(masks);
+        }
         return 0;
     }
     if (strcasecmp(msg.command, "TOPIC") == 0) {
@@ -995,24 +1034,40 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
         member_t *m = target ? channel_find_member(chan, target) : NULL;
         const char *rank = "none";
         if (m) rank = (m->rank & RANK_OP) ? "o" : (m->rank & RANK_HALFOP) ? "h" : (m->rank & RANK_VOICE) ? "v" : "none";
-        char reply[300];
-        const char *rp[] = {msg.params[0], msg.params[1], rank};
-        irc_build(reply, sizeof reply, NULL, 0, NULL, "WHOISCHANREPLY", rp, 3, NULL);
+        char reply[300], ts[24];
+        snprintf(ts, sizeof ts, "%ld", chan ? (long)chan->created : 0L); /* REGISTER records the channel's TS */
+        const char *rp[] = {msg.params[0], msg.params[1], rank, ts};
+        irc_build(reply, sizeof reply, NULL, 0, NULL, "WHOISCHANREPLY", rp, 4, NULL);
         link_forward_line(lc, reply);
         return 0;
     }
     if (strcasecmp(msg.command, "SVCMEMBERS") == 0) {
-        /* The live topic, then every current member's real identity + ranks, so a ChanServ setting change (ACCESS,
-         * AKICK, RESTRICTED, SECUREOPS, FOUNDER, TOPICLOCK) takes effect without anyone rejoining. */
+        /* SVCMEMBERS <chan> [<nick>|* [SYNC]]: the live topic, then every current member's real identity + ranks, so
+         * a ChanServ setting change (ACCESS, AKICK, RESTRICTED, SECUREOPS, FOUNDER, TOPICLOCK) takes effect without
+         * anyone rejoining. A nick asks about that one member only (no topic): SECUREOPS checking a +o. SYNC is
+         * ChanServ (re)linking: each line says whether the channel was created while it was away (a takeover to undo). */
         if (msg.nparams < 1) return 0;
         channel_t *chan = server_find_channel(srv, msg.params[0]);
         if (!chan) return 0;
-        char tline[600];
+        const char *who = msg.nparams >= 2 && strcmp(msg.params[1], "*") != 0 ? msg.params[1] : NULL;
+        if (who) {
+            client_t *u = server_find_user(srv, who);
+            member_t *m = u && !u->is_service ? channel_find_member(chan, u) : NULL;
+            if (m) send_member_line(lc, "SVCMEMBER", chan, u, m->rank, "0");
+            return 0;
+        }
+        int sync = msg.nparams >= 3 && strcasecmp(msg.params[2], "SYNC") == 0;
+        int fresh = sync && chan->created >= srv->svc_gone_at && (!srv->svc_back_at || chan->created <= srv->svc_back_at);
+        char tline[600], flag[32];
+        /* SYNC: "<0|1>:<channel TS>" -- ChanServ compares the TS with the one it last vetted; the 0/1 hint is for a
+         * channel it has no TS for yet. */
+        if (sync) snprintf(flag, sizeof flag, "%d:%ld", fresh, (long)chan->created);
+        else snprintf(flag, sizeof flag, "0");
         irc_build(tline, sizeof tline, NULL, 0, NULL, "SVCTOPIC", (const char *[]){chan->name}, 1, chan->topic);
         link_forward_line(lc, tline);
         member_t *m, *mtmp;
         HASH_ITER(hh, chan->members, m, mtmp)
-            if (!m->client->is_service) send_member_line(lc, "SVCMEMBER", chan, m->client, m->rank);
+            if (!m->client->is_service) send_member_line(lc, "SVCMEMBER", chan, m->client, m->rank, flag);
         return 0;
     }
     /* SQUIT or anything else unrecognized: ignored, same "log, never spam
@@ -1020,9 +1075,10 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
     return 0;
 }
 
-/* <cmd> <chan> <nick> <user> <realhost> <account|*> <ident 0|1> <ranks qaohv, or "-" for none>. SVCSYNC (ranked
- * members only, for ChanServ to vet) and SVCMEMBER (every member, answering SVCMEMBERS) share this shape. */
-static void send_member_line(link_conn_t *lc, const char *cmd, channel_t *chan, client_t *u, int rank) {
+/* <cmd> <chan> <nick> <user> <realhost> <account|*> <ident 0|1> <ranks qaohv, or "-" for none> [<flag>]. SVCSYNC (ranked
+ * members only, for ChanServ to vet; flag "merge" = a same-TS netsplit merge) and SVCMEMBER (answering SVCMEMBERS;
+ * flag "1" = the channel was created while ChanServ was away) share this shape. */
+static void send_member_line(link_conn_t *lc, const char *cmd, channel_t *chan, client_t *u, int rank, const char *flag) {
     char ranks[8] = "";
     if (rank & RANK_OWNER) strcat(ranks, "q");
     if (rank & RANK_ADMIN) strcat(ranks, "a");
@@ -1031,51 +1087,53 @@ static void send_member_line(link_conn_t *lc, const char *cmd, channel_t *chan, 
     if (rank & RANK_VOICE) strcat(ranks, "v");
     if (!ranks[0]) strcpy(ranks, "-");
     char line[500];
-    const char *p[] = {chan->name, u->nick, u->user, u->realhost, u->account[0] ? u->account : "*", u->ident_confirmed ? "1" : "0", ranks};
-    irc_build(line, sizeof line, NULL, 0, NULL, cmd, p, 7, NULL);
+    const char *p[] = {chan->name, u->nick, u->user, u->realhost, u->account[0] ? u->account : "*", u->ident_confirmed ? "1" : "0", ranks, flag};
+    irc_build(line, sizeof line, NULL, 0, NULL, cmd, p, flag ? 8 : 7, NULL);
     link_forward_line(lc, line);
 }
 
-static void send_svcsync(link_conn_t *lc, channel_t *chan, client_t *u, int rank) {
-    if (rank & (RANK_OWNER | RANK_ADMIN | RANK_OP | RANK_HALFOP | RANK_VOICE)) send_member_line(lc, "SVCSYNC", chan, u, rank);
+static void send_svcsync(link_conn_t *lc, channel_t *chan, client_t *u, int rank, const char *flag) {
+    if (rank & (RANK_OWNER | RANK_ADMIN | RANK_OP | RANK_HALFOP | RANK_VOICE)) send_member_line(lc, "SVCSYNC", chan, u, rank, flag);
 }
 
-/* A new service link: let it vet every rank already handed out while it was away. */
-static void sync_ranks_to(server_t *srv, link_conn_t *lc) {
-    channel_t *chan, *ctmp;
-    HASH_ITER(hh, srv->channels, chan, ctmp) {
-        member_t *m, *mtmp;
-        HASH_ITER(hh, chan->members, m, mtmp)
-            if (!m->client->is_service) send_svcsync(lc, chan, m->client, m->rank);
-    }
+void link_notify_merge_ranks(server_t *srv, channel_t *chan, client_t *u, int rank) {
+    for (link_conn_t *lc = srv->links; lc; lc = lc->next)
+        if (lc->service && !lc->closing && lc->authenticated) send_svcsync(lc, chan, u, rank, "merge");
 }
 
 /* A channel just appeared (created by a local JOIN, or by a remote SJOIN/JOIN, or renamed onto a new name): services
  * restore +r/MLOCK/GUARD on it. With no `creator`, every member already in it is vetted (RENAME brings its members). */
 void link_notify_channel_new(server_t *srv, channel_t *chan, client_t *creator) {
-    char line[300];
-    const char *p[] = {chan->name};
-    irc_build(line, sizeof line, NULL, 0, NULL, "SVCNEW", p, 1, NULL);
+    /* SVCNEW <chan> <TS> <hint>: ChanServ treats it as a takeover (resets it, takes back unvetted ops) when the TS is
+     * newer than the incarnation it last vetted. Without a stored TS it goes by the hint: 1 = created since ChanServ
+     * was last lost (or this ircd started) -- 0 for an old channel a relinking server brings back. */
+    char line[300], ts[24];
+    snprintf(ts, sizeof ts, "%ld", (long)chan->created);
+    const char *p[] = {chan->name, ts, (creator || chan->created >= srv->svc_gone_at) ? "1" : "0"};
+    irc_build(line, sizeof line, NULL, 0, NULL, "SVCNEW", p, 3, NULL);
     for (link_conn_t *lc = srv->links; lc; lc = lc->next) {
         if (!lc->service || lc->closing || !lc->authenticated) continue;
         link_forward_line(lc, line);
         if (creator) {
             member_t *m = channel_find_member(chan, creator);
-            if (m) send_svcsync(lc, chan, creator, m->rank);
+            if (m) send_svcsync(lc, chan, creator, m->rank, NULL);
             continue;
         }
         member_t *m, *mtmp;
         HASH_ITER(hh, chan->members, m, mtmp)
-            if (!m->client->is_service) send_svcsync(lc, chan, m->client, m->rank);
+            if (!m->client->is_service) send_svcsync(lc, chan, m->client, m->rank, NULL);
     }
 }
 
 void link_notify_channel_join(channel_t *chan, client_t *joiner) {
-    if (channel_member_count(chan) == 1 && joiner->srv && !joiner->remote) link_notify_channel_new(joiner->srv, chan, joiner);
-    member_t *m, *tmp;
-    HASH_ITER(hh, chan->members, m, tmp) {
-        client_t *svc = m->client;
-        if (svc == joiner || !svc->is_service || !svc->link_conn) continue;
+    if (!joiner->srv || joiner->is_service) return;
+    if (channel_member_count(chan) == 1 && !joiner->remote) link_notify_channel_new(joiner->srv, chan, joiner);
+    /* Every registered (+r) channel, not just the ones ChanServ sits in: ACCESS auto-modes and AKICK work everywhere,
+     * as on any services package -- a takeover can't start by the AKICKed joining a channel ChanServ isn't guarding. */
+    int registered = (chan->modes & CMODE_R) != 0;
+    for (link_conn_t *lc = joiner->srv->links; lc; lc = lc->next) {
+        if (!lc->service || lc->closing || !lc->authenticated) continue;
+        if (!registered && !channel_find_member(chan, lc->service)) continue;
         char line[500];
         /* realhost, not the cloak: the services link is trusted, and a
          * random per-connection cloak could never match an ACCESS/AKICK mask. */
@@ -1086,7 +1144,7 @@ void link_notify_channel_join(channel_t *chan, client_t *joiner) {
                             joiner->account[0] ? joiner->account : "*",
                             joiner->ident_confirmed ? "1" : "0"};
         irc_build(line, sizeof line, NULL, 0, NULL, "SVCJOIN", p, 6, NULL);
-        link_forward_line(svc->link_conn, line);
+        link_forward_line(lc, line);
     }
 }
 

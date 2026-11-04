@@ -384,6 +384,14 @@ static void rec_set_str(cJSON *rec, const char *key, const char *val) {
     cJSON_DeleteItemFromObjectCaseSensitive(rec, key);
     cJSON_AddStringToObject(rec, key, val);
 }
+static double rec_num(cJSON *rec, const char *key) {
+    cJSON *v = cJSON_GetObjectItemCaseSensitive(rec, key);
+    return cJSON_IsNumber(v) ? v->valuedouble : 0;
+}
+static void rec_set_num(cJSON *rec, const char *key, double val) {
+    cJSON_DeleteItemFromObjectCaseSensitive(rec, key);
+    cJSON_AddNumberToObject(rec, key, val);
+}
 
 /* Expand an ACCESS/AKICK mask into a full nick!user@host glob, same three
  * shorthands as upstream's _normalize_access_mask: a bare host, user@host,
@@ -578,6 +586,18 @@ static void wire_svcmembers(const char *chan) {
     char line[300];
     const char *p[] = {chan};
     irc_build(line, sizeof line, NULL, 0, NULL, "SVCMEMBERS", p, 1, NULL);
+    queue_line(line);
+}
+/* SVCMEMBERS <chan> <nick>: one member's identity and ranks (SECUREOPS vetting a +o). */
+static void wire_svcmember_one(const char *chan, const char *nick) {
+    char line[300];
+    irc_build(line, sizeof line, NULL, 0, NULL, "SVCMEMBERS", (const char *[]){chan, nick}, 2, NULL);
+    queue_line(line);
+}
+/* SVCMEMBERS <chan> * SYNC: ChanServ just (re)linked -- the full sweep, flagged if the channel is a takeover. */
+static void wire_svcmembers_sync(const char *chan) {
+    char line[300];
+    irc_build(line, sizeof line, NULL, 0, NULL, "SVCMEMBERS", (const char *[]){chan, "*", "SYNC"}, 3, NULL);
     queue_line(line);
 }
 static void wire_invite(const char *chan, const char *nick) {
@@ -860,6 +880,7 @@ static struct {
     char password[128];
     char account[64]; /* the registrant's account at REGISTER time (becomes the founder account) */
     time_t sent_at;
+    long ts;          /* the channel's TS, from WHOISCHANREPLY: the incarnation ChanServ starts out knowing */
 } g_pending_register;
 
 /* A SUCCESSOR CLAIM awaiting the hub's WHOISUSERREPLY (the claimant's real
@@ -903,6 +924,7 @@ static void finish_register(void) {
     cJSON_AddStringToObject(rec, "pw_hash", hash);
     if (g_pending_register.account[0]) cJSON_AddStringToObject(rec, "founder", g_pending_register.account); /* registered while logged in: that account is the founder */
     cJSON_AddNumberToObject(rec, "registered_at", (double)time(NULL));
+    if (g_pending_register.ts > 0) cJSON_AddNumberToObject(rec, "ts", (double)g_pending_register.ts);
     cJSON_AddBoolToObject(rec, "secureops", 1); /* new registrations are protected against takeover while services were away */
     char cf[128];
     irc_casefold(cf, sizeof cf, chan);
@@ -1593,7 +1615,7 @@ static void cmd_help(const char *from_nick, char *args) {
     reply(from_nick, "                                -- the founder ACCOUNT is recognised on join and may use * as the password");
     reply(from_nick, "  SET #channel PRIVATE|RESTRICTED|SECUREOPS ON|OFF <password>");
     reply(from_nick, "                                -- PRIVATE hides it from LIST; RESTRICTED kicks anyone not on the access list;");
-    reply(from_nick, "                                   SECUREOPS takes ops away from anyone ChanServ did not grant them to");
+    reply(from_nick, "                                   SECUREOPS takes ops away from anyone the access list doesn't back");
     reply(from_nick, "  LIST [pattern]                -- registered channels (not PRIVATE ones)");
     reply(from_nick, "  SET #channel DESC|URL|ENTRYMSG <text> <password>");
     reply(from_nick, "                                -- free-text metadata (DESC/URL shown by INFO,");
@@ -1727,45 +1749,70 @@ static void handle_svcjoin(irc_message_t *msg) {
 
 /* SVCNEW: a channel was just created on the ircd. If it's registered, restore what the ircd forgets when a channel
  * dies (+r, MLOCK, GUARD) -- guard_join_all only covers channels that already exist when the link comes up. */
+/* Is this incarnation of a registered channel a takeover? Anope's rule: a channel whose TS is newer than the one
+ * ChanServ last vetted was recreated since -- by whoever got there first, possibly while services were down or on the
+ * far side of a split. The same (or an older) TS is the channel ChanServ already knows: a relinking server bringing
+ * it back, not a new one. With no TS stored yet (a record from before this, or a fresh REGISTER) the hub's hint
+ * decides. Decided once per incarnation (`g_inc`): the SVCSYNC / SVCMEMBER lines that follow reuse the verdict, and a
+ * takeover gets its modes and lists reset (SVCRESET) and +r / MLOCK / the locked topic put back. */
+static struct { char chan[128]; long ts; int takeover; } g_inc;
+
+/* `restore`: also put back MLOCK and the locked topic after the reset (the relink sweep; SVCNEW does that itself). */
+static int judge_incarnation(cJSON *rec, const char *chan, long ts, int hint, int restore) {
+    char cf[128];
+    irc_casefold(cf, sizeof cf, chan);
+    if (ts > 0 && g_inc.ts == ts && strcmp(g_inc.chan, cf) == 0) return g_inc.takeover;
+    long known = (long)rec_num(rec, "ts");
+    int takeover = known > 0 ? ts > known : hint;
+    if (ts > 0 && ts != known) { rec_set_num(rec, "ts", (double)ts); store_save(); }
+    snprintf(g_inc.chan, sizeof g_inc.chan, "%s", cf);
+    g_inc.ts = ts;
+    g_inc.takeover = takeover;
+    if (takeover) {
+        char line[300];
+        irc_build(line, sizeof line, NULL, 0, NULL, "SVCRESET", (const char *[]){chan}, 1, NULL);
+        queue_line(line);
+        if (restore) apply_mlock(rec, chan); /* SVCRESET never touches +r */
+        const char *locked = rec_str(rec, "topic");
+        if (rec_bool(rec, "topiclock") && locked[0]) wire_topic(chan, locked);
+        log_info("chanserv", "%s was recreated without services watching -- resetting it", chan);
+    }
+    return takeover;
+}
+
+/* Was the last SVCNEW / sync verdict for `chan` a takeover? (SVCSYNC lines come right after their SVCNEW.) */
+static int is_takeover(const char *chan) {
+    char cf[128];
+    irc_casefold(cf, sizeof cf, chan);
+    return g_inc.takeover && strcmp(g_inc.chan, cf) == 0;
+}
+
 static void handle_svcnew(irc_message_t *msg) {
     if (msg->nparams < 1) return;
     const char *chan = msg->params[0];
     cJSON *rec = store_get(chan);
     if (!rec) return;
+    /* SVCNEW <chan> [<TS> <hint>] -- an older hub sends the name alone: treat it as new, as it always was */
+    judge_incarnation(rec, chan, msg->nparams >= 3 ? atol(msg->params[1]) : 0, msg->nparams >= 3 ? msg->params[2][0] == '1' : 1, 0);
     if (rec_bool(rec, "guard")) wire_join(chan);
     wire_mode(chan, "+r", NULL);
     apply_mlock(rec, chan);
+    /* A channel that arrived from another server can bring unranked members along with it (no SVCJOIN for them if it
+     * came without +r): AKICK / RESTRICTED / auto-modes for everyone. The ranked ones also get an SVCSYNC. */
+    wire_svcmembers(chan);
 }
 
-/* SVCSYNC: a member holds ranks on a channel (just created, or already there when we linked). Anyone with no claim to
- * them -- not the founder, not on the access list, not identified, not granted by us -- loses them (SECUREOPS). */
-static void handle_svcsync(irc_message_t *msg) {
-    if (msg->nparams < 7) return;
-    const char *chan = msg->params[0], *nick = msg->params[1], *user = msg->params[2], *host = msg->params[3];
-    const char *account = msg->params[4], *ranks = msg->params[6];
-    int ident_confirmed = msg->params[5][0] == '1';
-    cJSON *rec = store_get(chan);
-    if (!rec || !rec_bool(rec, "secureops") || strcasecmp(nick, g_cfg.nick) == 0) return;
-    const char *fa = rec_str(rec, "founder");
-    if (fa[0] && account[0] && account[0] != '*' && strcasecmp(fa, account) == 0) return;
-    if (access_level_for(rec, nick, user, host, account, ident_confirmed)[0]) return;
-    if (is_identified(chan, nick) || granted_has(chan, nick)) return;
-    char ms[16] = "-", args[512] = "";
-    size_t n = 1;
-    for (const char *c = ranks; *c && n < sizeof ms - 1; c++) {
-        ms[n++] = *c;
-        strncat(args, args[0] ? " " : "", sizeof args - strlen(args) - 1);
-        strncat(args, nick, sizeof args - strlen(args) - 1);
-    }
-    ms[n] = '\0';
-    if (n > 1) wire_mode_args(chan, ms, args);
-}
-
-/* SVCMEMBER (the hub answering SVCMEMBERS after a setting change): give a member who is already in the channel what
- * they'd get on JOIN now -- AKICK, RESTRICTED, ACCESS levels, the founder's mode, SECUREOPS -- not on their next JOIN.
- * Ranks ChanServ handed out that the list no longer backs are taken back; ranks from anyone else (an op, IDENTIFY)
- * are left to SECUREOPS. RESTRICTED leaves current ops in place (whoever just turned it on is usually one of them). */
-static void handle_svcmember(irc_message_t *msg) {
+/* What a member may hold, applied -- Anope's SetCorrectModes. Shared by SVCSYNC (ranked members of a channel that was
+ * just created or merged in a netsplit) and SVCMEMBER (answering SVCMEMBERS: a setting change, ChanServ relinking, or
+ * SECUREOPS checking a +o). Params: <chan> <nick> <user> <realhost> <account|*> <ident 0|1> <ranks|-> [<flag>].
+ *
+ * `takeover`: the ranks were handed out while ChanServ couldn't watch (the channel was created, recreated on another
+ * server, or recreated while services were down), so q/a/o/h that the access list doesn't back are taken back whatever
+ * SECUREOPS says -- that is how a registered channel is protected against being grabbed after a restart or a split.
+ * Otherwise only SECUREOPS takes them, plus anything ChanServ itself handed out that the list no longer backs.
+ * Voice is never taken from someone ChanServ didn't voice. Each rank is checked against the access level, so a
+ * VOICE entry no longer covers someone who got @ from a friend. */
+static void enforce_member(irc_message_t *msg, int takeover) {
     if (msg->nparams < 7) return;
     const char *chan = msg->params[0], *nick = msg->params[1], *user = msg->params[2], *host = msg->params[3];
     const char *account = msg->params[4], *ranks = msg->params[6];
@@ -1785,10 +1832,14 @@ static void handle_svcmember(irc_message_t *msg) {
         granted_mark(chan, nick);
         return;
     }
-    if (is_identified(chan, nick)) return;
+    if (is_identified(chan, nick)) return; /* IDENTIFY'd with the channel password: founder-equivalent */
     const char *level = access_level_for(rec, nick, user, host, account, ident_confirmed);
+    int allowed = level[0] ? access_level_rank(level) : -1;
     int was_granted = granted_has(chan, nick);
-    if (rec_bool(rec, "restricted") && !level[0] && !strpbrk(ranks, "qao")) {
+    int secure = takeover || rec_bool(rec, "secureops");
+    if (rec_bool(rec, "restricted") && !level[0] && (takeover || !strpbrk(ranks, "qao"))) {
+        /* RESTRICTED leaves ops someone legitimately gave in place (whoever just turned it on is usually one of
+         * them), but not ones nobody vetted. Ban the host too, so it can't rejoin in a loop. */
         char rban[300];
         snprintf(rban, sizeof rban, "*!*@%s", host);
         wire_mode(chan, "+b", rban);
@@ -1798,14 +1849,15 @@ static void handle_svcmember(irc_message_t *msg) {
     char ms[24] = "", args[512] = "";
     size_t n = 0;
     char cur = 0;
-    if (was_granted)
-        for (const char *c = ranks; *c && n < sizeof ms - 3; c++) {
-            if (*c == '-' || *c == level[0]) continue;
-            if (cur != '-') ms[n++] = cur = '-';
-            ms[n++] = *c;
-            strncat(args, args[0] ? " " : "", sizeof args - strlen(args) - 1);
-            strncat(args, nick, sizeof args - strlen(args) - 1);
-        }
+    for (const char *c = ranks; *c && n < sizeof ms - 4; c++) {
+        int r = access_level_rank((char[]){*c, 0});
+        if (r < 0 || r <= allowed) continue;              /* "-" / within what the list grants */
+        if (!(*c == 'v' ? was_granted : (secure || was_granted))) continue;
+        if (cur != '-') ms[n++] = cur = '-';
+        ms[n++] = *c;
+        strncat(args, args[0] ? " " : "", sizeof args - strlen(args) - 1);
+        strncat(args, nick, sizeof args - strlen(args) - 1);
+    }
     if (level[0] && !strchr(ranks, level[0])) {
         ms[n++] = '+';
         ms[n++] = level[0];
@@ -1815,7 +1867,24 @@ static void handle_svcmember(irc_message_t *msg) {
     ms[n] = '\0';
     if (n) wire_mode_args(chan, ms, args);
     if (level[0]) granted_mark(chan, nick); else granted_unmark(chan, nick);
-    if (!level[0] && !was_granted && ranks[0] != '-') handle_svcsync(msg); /* SECUREOPS for ranks someone else gave */
+}
+
+/* SVCSYNC: ranked members of a channel that just appeared (takeover check), or that a same-TS netsplit merge brought
+ * back ("merge": only SECUREOPS applies -- the channel itself never went away). */
+static void handle_svcsync(irc_message_t *msg) {
+    int merge = msg->nparams >= 8 && strcasecmp(msg->params[7], "merge") == 0;
+    enforce_member(msg, !merge && msg->nparams >= 1 && is_takeover(msg->params[0]));
+}
+
+/* SVCMEMBER: flag "<hint>:<TS>" = ChanServ just relinked (SVCMEMBERS ... SYNC); judge the channel's incarnation. */
+static void handle_svcmember(irc_message_t *msg) {
+    int takeover = 0;
+    if (msg->nparams >= 8) {
+        const char *colon = strchr(msg->params[7], ':');
+        cJSON *rec = colon ? store_get(msg->params[0]) : NULL;
+        if (rec) takeover = judge_incarnation(rec, msg->params[0], atol(colon + 1), msg->params[7][0] == '1', 1);
+    }
+    enforce_member(msg, takeover);
 }
 
 /* --- link handshake + main loop --------------------------------------------- */
@@ -1916,7 +1985,16 @@ static void guard_join_all(void) {
         }
         wire_mode(chan, "+r", NULL);
         apply_mlock(entry, chan);
+        /* Everything that happened while we were away: ops grabbed in a channel recreated meanwhile, ACCESS members
+         * without their modes, AKICK/RESTRICTED members who walked in. A channel that doesn't exist is a no-op. */
+        wire_svcmembers_sync(chan);
     }
+}
+
+void cs_user_quit(const char *nick) { clear_identified_nick(nick); granted_clear_nick(nick); }
+void cs_user_nick(const char *old_nick, const char *new_nick) {
+    rename_identified_nick(old_nick, new_nick);
+    granted_rename(old_nick, new_nick);
 }
 
 /* "nick!user@host" -> "nick" (or the whole thing if there's no '!'). */
@@ -1953,6 +2031,15 @@ static void process_line(char *line) {
         nick_from_prefix(msg.prefix, old_nick, sizeof old_nick);
         rename_identified_nick(old_nick, msg.params[0]);
         granted_rename(old_nick, msg.params[0]);
+        return;
+    }
+
+    /* KICK of ChanServ itself (the ircd refuses it from users; another service or a desync could still do it): come
+     * straight back, or every GUARD protection silently stops for that channel. */
+    if (strcasecmp(msg.command, "KICK") == 0) {
+        if (msg.nparams < 2 || strcasecmp(msg.params[1], g_cfg.nick) != 0) return;
+        cJSON *rec = store_get(msg.params[0]);
+        if (rec && rec_bool(rec, "guard")) wire_join(msg.params[0]);
         return;
     }
 
@@ -1995,11 +2082,12 @@ static void process_line(char *line) {
             int takes = strchr("kbeIohvqa", *c) != NULL || (sign == '+' && strchr("lfjL", *c) != NULL);
             if (takes && argi < msg.nparams) arg = msg.params[argi++];
             if (strchr("ohvqabeI", *c)) {
-                if (sign == '+' && secureops && arg && strchr("oaq", *c) && strcasecmp(arg, g_cfg.nick) != 0 &&
-                    !is_identified(msg.params[0], arg) && !granted_has(msg.params[0], arg)) {
-                    char dm[3] = {'-', *c, '\0'};
-                    wire_mode(msg.params[0], dm, arg); /* SECUREOPS: ops only for the access list / identified founder */
-                }
+                /* SECUREOPS: ops only for the access list (at a level covering the rank) and the founder. The MODE
+                 * only names a nick, so ask the hub who that really is; handle_svcmember decides. A server's MODE is
+                 * a netsplit merge, which the hub already sent as SVCSYNC. */
+                if (sign == '+' && secureops && arg && strchr("qaoh", *c) && strcasecmp(arg, g_cfg.nick) != 0 &&
+                    msg.prefix && strchr(msg.prefix, '!'))
+                    wire_svcmember_one(msg.params[0], arg);
                 continue;
             }
             int pi = -1;
@@ -2064,6 +2152,7 @@ static void process_line(char *line) {
         irc_casefold(cf2, sizeof cf2, g_pending_register.chan);
         if (strcmp(cf1, cf2) != 0 || strcasecmp(msg.params[1], g_pending_register.nick) != 0) return;
         g_pending_register.active = 0;
+        g_pending_register.ts = msg.nparams >= 4 ? atol(msg.params[3]) : 0;
         if (strcmp(msg.params[2], "o") == 0) finish_register();
         else reply(g_pending_register.nick, "You must be a channel operator there to register it.");
         return;
@@ -2097,6 +2186,7 @@ static int run_session(void) {
      * could wrongly satisfy) a SUCCESSOR CLAIM after reconnecting. */
     g_n_identified = 0;
     g_n_granted = 0;
+    memset(&g_inc, 0, sizeof g_inc);
     g_last_activity = time(NULL);
     log_info("services", "session established as '%s'%s", g_cfg.nick, ns_enabled() ? " + NickServ" : "");
     ns_session_start();

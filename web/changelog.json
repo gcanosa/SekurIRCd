@@ -1,5 +1,12 @@
 [
   {
+    "tag": "Unreleased",
+    "date": "",
+    "changes": [
+      "ChanServ takeover protection, as on Anope. ChanServ remembers each registered channel's TS. A channel recreated since it last saw it (on another server, during a netsplit, or while services were down) is reset: default modes, no +k/+i/+l/redirect, empty ban/exception/invite lists, then +r, MLOCK and a locked topic back. Anyone holding ops who isn't the founder, identified or on the access list at a level covering the rank loses them (SECUREOPS no longer needed for this). A channel with the TS it already knows, such as one a relinking server brings back, is left alone. On relink, ChanServ sweeps every registered channel, giving ACCESS modes and kicking AKICK/RESTRICTED members who joined meanwhile. ACCESS and AKICK work on JOIN in every registered channel, not only GUARDed ones. ChanServ can't be kicked or deopped (484). SECUREOPS checks each +o against the access level (a v entry no longer covers @). SJOIN with a TS of 0 or less no longer wins every channel. Mode changes that change nothing are no longer echoed"
+    ]
+  },
+  {
     "tag": "v1.3.1",
     "date": "2026-11-04",
     "changes": [

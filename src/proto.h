@@ -333,6 +333,7 @@ size_t irc_time_tag_insert(const char *line, char *tag, size_t tagsz, size_t *at
 #define N_NOCHANNELKEY     "475"
 #define N_NOPRIVILEGES     "481"
 #define N_CANTKILLSERVER   "483"
+#define N_ISCHANSERVICE    "484" /* KICK/deop of a network service */
 #define N_NOTCHANNELOP     "482"
 #define N_SECUREONLYCHAN   "489"
 #define N_NEEDREGGEDNICK   "477" /* +R (registered-only) / +O (oper-only) JOIN refusal */

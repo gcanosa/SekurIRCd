@@ -55,6 +55,9 @@ typedef struct server {
     int history_dirty;
     time_t history_last_save;
     struct marker *markers;           /* draft/read-marker: account+target -> last-read time (ms) */
+    /* When the channel service's link was last lost (boot time until it first links) and when it last came back:
+     * a channel created between the two was created with nobody watching, so ChanServ vets it as a takeover. */
+    time_t svc_gone_at, svc_back_at;
     struct netserver *servers;        /* netsync: every server on the network by SID (incl. ourselves) */
     struct netserver *self_srv;
     struct client *by_uid;            /* netsync: every user (local and remote) by UID */
