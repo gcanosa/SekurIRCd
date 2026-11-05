@@ -35,6 +35,10 @@ def test_mode_parameters_validated():
         a.say("MODE #m +k secret")
         modes = a.say("MODE #m")
         assert any(" 324 alice #m +ntk secret" in l for l in modes), modes  # flag letters and args are separate parameters
+        a.say("MODE #m +l 5")
+        b = s.client("bob")
+        r = b.say("MODE #m")
+        assert any(" 324 bob #m +ntkl * 5" in l for l in r), r  # key redacted for non-members, limit kept
 
 
 def test_ban_list_full_and_cap():

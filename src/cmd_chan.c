@@ -1171,16 +1171,15 @@ static void cmd_mode_channel(server_t *srv, client_t *cl, irc_message_t *msg, co
     if (msg->nparams < 2) {
         char modestr[360];
         channel_modes_string(chan, modestr, sizeof modestr);
-        if ((chan->modes & CMODE_K) && !(channel_find_member(chan, cl) || (cl->umodes & UMODE_O))) {
-            /* redact the key from a non-member query */
-            char *space = strchr(modestr, ' ');
-            if (space) { *(space + 1) = '*'; *(space + 2) = '\0'; }
-        }
         /* "+kl key 5": the flag letters and each argument are separate parameters on the wire */
         const char *p[2 + 8] = {chan->name};
         int np = 1;
         char *save = NULL;
         for (char *t = strtok_r(modestr, " ", &save); t && np < 10; t = strtok_r(NULL, " ", &save)) p[np++] = t;
+        /* redact the key from a non-member query; it is always the first
+         * argument, and the ones after it (+l limit, +L target...) stay */
+        if (np > 2 && strchr(p[1], 'k') && !(channel_find_member(chan, cl) || (cl->umodes & UMODE_O)))
+            p[2] = "*";
         client_reply(cl, N_CHANNELMODEIS, p, np, NULL);
         char tbuf[32];
         snprintf(tbuf, sizeof tbuf, "%ld", (long)chan->created);

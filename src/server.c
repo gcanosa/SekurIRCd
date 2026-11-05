@@ -893,7 +893,7 @@ void server_send_welcome(server_t *srv, client_t *cl) {
     server_send_lusers(srv, cl);
     server_send_motd(srv, cl);
 
-    char modestr[16];
+    char modestr[24];
     client_mode_string(cl, modestr, sizeof modestr);
     client_reply(cl, N_UMODEIS, NULL, 0, modestr);
 }
