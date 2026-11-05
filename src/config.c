@@ -851,7 +851,7 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
         if (e) return -1;
         if (cfg_get_bool(chan, "restrict_creation", 0, &out->channels.restrict_creation, errbuf, errbufsz, "channels.restrict_creation")) return -1;
         if (cfg_get_str_array(chan, "allowed_channels", out->channels.allowed_channels, CFG_MAX_ALLOWED_CHANNELS, &out->channels.n_allowed_channels, errbuf, errbufsz, "channels.allowed_channels")) return -1;
-        if (cfg_get_str(chan, "default_modes", "", out->channels.default_modes, sizeof out->channels.default_modes, errbuf, errbufsz, "channels.default_modes")) return -1;
+        if (cfg_get_str(chan, "default_modes", "nt", out->channels.default_modes, sizeof out->channels.default_modes, errbuf, errbufsz, "channels.default_modes")) return -1;
         for (const char *c = out->channels.default_modes; *c; c++) {
             if (!strchr(CHAN_FLAG_MODES, *c)) {
                 snprintf(errbuf, errbufsz, "channels.default_modes: '%c' is not a valid argument-free channel mode (allowed: imnpstz)", *c);

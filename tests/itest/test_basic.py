@@ -34,7 +34,7 @@ def test_mode_parameters_validated():
         assert any(" 401 " in l for l in r), r
         a.say("MODE #m +k secret")
         modes = a.say("MODE #m")
-        assert any(" 324 alice #m +k secret" in l for l in modes), modes  # flag letters and args are separate parameters
+        assert any(" 324 alice #m +ntk secret" in l for l in modes), modes  # flag letters and args are separate parameters
 
 
 def test_ban_list_full_and_cap():

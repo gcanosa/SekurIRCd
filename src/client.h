@@ -96,6 +96,8 @@ typedef struct client {
     char *label_buf;      /* captured lines, '\n'-separated */
     size_t label_len, label_cap;
     int label_lines;
+    int label_defer;      /* the reply comes later (REGISTER via services): no ACK now, label_pending labels it */
+    char label_pending[72];
     struct ml_state *ml;  /* draft/multiline batch being collected (cmd_user.c) */
     /* netsync (multi-server): */
     int remote;           /* lives on another server; fd == -1, nothing is ever written to it here */
@@ -220,6 +222,9 @@ void *client_list_idle(void *list, int n);
 
 /* Compute the display prefix "nick!~user@host" (or "nick@host" pre-USER). */
 void client_prefix(const client_t *cl, char *out, size_t outsz);
+/* The user@ part as client_prefix shows it ("~" unless identd confirmed it), for numerics that list it
+ * separately (001, 311, 352/354, 353, 314, 302, 604...). Four rotating buffers: several per line are fine. */
+const char *client_ident(const client_t *cl);
 /* IRCv3 labeled-response: between begin and end, every line sent to `cl` is held;
  * end releases them tagged with the label (one line), inside a labeled-response
  * batch (several), or as a bare ACK (none). */

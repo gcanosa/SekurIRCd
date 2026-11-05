@@ -41,7 +41,7 @@ static void send_names(client_t *cl, channel_t *chan) {
         char nickbuf[NICKLEN + HOSTLEN + 8];
         char rankch[8];
         channel_rank_prefix(m->rank, multi, rankch);
-        if (userhost) snprintf(nickbuf, sizeof nickbuf, "%s%s!%s@%s", rankch, m->client->nick, m->client->user, m->client->host);
+        if (userhost) snprintf(nickbuf, sizeof nickbuf, "%s%s!%s@%s", rankch, m->client->nick, client_ident(m->client), m->client->host);
         else snprintf(nickbuf, sizeof nickbuf, "%s%s", rankch, m->client->nick);
         size_t nl = strlen(nickbuf);
         if (pos && pos + nl + 1 > budget) {
@@ -91,7 +91,7 @@ void cmd_announce_join(channel_t *chan, client_t *cl) {
             client_send(m->client, account_line);
     }
     link_notify_channel_join(chan, cl);
-    send_join_burst(cl, chan);
+    if (!cl->remote) send_join_burst(cl, chan); /* a remote user's topic/NAMES come from its own server */
 }
 
 /* Topic + (unless draft/no-implicit-names) the member list: what a client gets right after joining. */
@@ -565,7 +565,7 @@ void cmd_names(server_t *srv, client_t *cl, irc_message_t *msg) {
 }
 
 void cmd_list(server_t *srv, client_t *cl, irc_message_t *msg) {
-    client_reply(cl, N_LISTSTART, NULL, 0, "Channel :Users  Name");
+    client_reply(cl, N_LISTSTART, (const char *[]){"Channel"}, 1, "Users  Name");
 
     int have_wanted = 0;
     char wanted[32][CHAN_NAMELEN];

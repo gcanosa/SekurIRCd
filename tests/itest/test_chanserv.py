@@ -1,3 +1,4 @@
+import re
 import time
 
 from harness import Server, ChanServ
@@ -68,7 +69,7 @@ def test_recreated_registered_channel_gets_r_back():
             f.say("PART #rn", 0.5)  # channel dies, +r is gone
             f.say("JOIN #rn", 1.2)  # recreated: ChanServ must reassert +r
             r = " ".join(f.say("MODE #rn"))
-            assert "324 fnd #rn +r" in r, r
+            assert re.search(r"324 fnd #rn \+\w*r", r), r
 
 
 def test_recreated_channel_creator_loses_op_unless_authorized():
@@ -100,7 +101,7 @@ def test_services_reconnect_strips_unearned_ops():
         assert "@intruder" in " ".join(x.say("NAMES #sr"))
         cs.start()
         assert "@intruder" not in " ".join(x.say("NAMES #sr", 1.5))
-        assert "324 intruder #sr +r" in " ".join(x.say("MODE #sr"))
+        assert re.search(r"324 intruder #sr \+\w*r", " ".join(x.say("MODE #sr")))
         cs.stop()
 
 
@@ -215,6 +216,6 @@ def test_rename_onto_registered_channel_goes_through_chanserv():
             x = s.client("intruder", caps=["draft/channel-rename"])
             x.say("JOIN #tmp")
             x.say("RENAME #tmp #rr :mine now", 1.5)  # used to skip ChanServ entirely: no +r, op kept
-            assert "324 intruder #rr +r" in " ".join(x.say("MODE #rr")), "renamed-onto registered name lost +r"
+            assert re.search(r"324 intruder #rr \+\w*r", " ".join(x.say("MODE #rr"))), "renamed-onto registered name lost +r"
             names = " ".join(x.say("NAMES #rr"))
             assert "@intruder" not in names and "intruder" in names, names

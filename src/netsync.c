@@ -635,12 +635,13 @@ static void handle_chghost(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     client_prefix(u, oldprefix, sizeof oldprefix);
     snprintf(u->user, sizeof u->user, "%s", msg->params[1]);
     snprintf(u->host, sizeof u->host, "%s", msg->params[2]);
-    irc_build(line, sizeof line, NULL, 0, oldprefix, "CHGHOST", (const char *[]){u->user, u->host}, 2, NULL);
+    if (msg->nparams >= 4) u->ident_confirmed = msg->params[3][0] == '1'; /* older peers send 3 params */
+    irc_build(line, sizeof line, NULL, 0, oldprefix, "CHGHOST", (const char *[]){client_ident(u), u->host}, 2, NULL);
     server_send_common_channels(srv, u, line, CAP_CHGHOST);
     server_monitor_extend(srv, u, line, CAP_CHGHOST);
     char fl[400];
-    const char *p[] = {u->uid, u->user, u->host};
-    irc_build(fl, sizeof fl, NULL, 0, s->sid, "CHGHOST", p, 3, NULL);
+    const char *p[] = {u->uid, u->user, u->host, u->ident_confirmed ? "1" : "0"};
+    irc_build(fl, sizeof fl, NULL, 0, s->sid, "CHGHOST", p, 4, NULL);
     flood(srv, lc, fl);
 }
 
@@ -1492,8 +1493,8 @@ void netsync_user_away(server_t *srv, client_t *cl) {
 void netsync_user_chghost(server_t *srv, client_t *cl) {
     if (!cl->uid[0] || !netsync_has_links(srv)) return;
     char line[400];
-    const char *p[] = {cl->uid, cl->user, cl->host};
-    irc_build(line, sizeof line, NULL, 0, self_sid(srv), "CHGHOST", p, 3, NULL);
+    const char *p[] = {cl->uid, cl->user, cl->host, cl->ident_confirmed ? "1" : "0"}; /* 4th: CHGIDENT confirms the ident */
+    irc_build(line, sizeof line, NULL, 0, self_sid(srv), "CHGHOST", p, 4, NULL);
     flood(srv, NULL, line);
 }
 

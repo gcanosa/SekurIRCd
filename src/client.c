@@ -149,6 +149,14 @@ void client_prefix(const client_t *cl, char *out, size_t outsz) {
     }
 }
 
+const char *client_ident(const client_t *cl) {
+    static char buf[4][USERLEN + 2];
+    static unsigned k;
+    char *b = buf[k++ & 3];
+    irc_ident_for(b, sizeof buf[0], cl->user, cl->ident_confirmed);
+    return b;
+}
+
 void client_send(client_t *cl, const char *line) {
     if (cl->quitting) return;
     if (cl->fd < 0) {
@@ -273,6 +281,10 @@ static int has_batch_tag(const char *line) {
 void client_label_end(client_t *cl) {
     if (!cl->label_capture) return; /* overflowed and already released (and shrunk) */
     cl->label_capture = 0;
+    if (cl->label_defer) { /* answered later, under label_pending */
+        cl->label_defer = 0;
+        if (cl->label_lines == 0) return;
+    }
     const char *srvname = (cl->srv && cl->srv->cfg.server.name[0]) ? cl->srv->cfg.server.name : "server";
     /* Render "label=<escaped>" once, using irc_build's tag escaping. */
     irc_tag_t lt = {"label", cl->label};

@@ -430,7 +430,7 @@ static int may_use_vhost(client_t *cl, cfg_vhost_t *v) {
  * negotiated the cap. */
 static void broadcast_chghost(server_t *srv, client_t *cl, const char *old_prefix) {
     char line[400];
-    const char *p[] = {cl->user, cl->host};
+    const char *p[] = {client_ident(cl), cl->host};
     irc_build(line, sizeof line, NULL, 0, old_prefix, "CHGHOST", p, 2, NULL);
     if (cl->caps & CAP_CHGHOST) client_send(cl, line);
     server_send_common_channels(srv, cl, line, CAP_CHGHOST);

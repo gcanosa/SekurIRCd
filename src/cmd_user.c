@@ -332,8 +332,28 @@ static void record_history(server_t *srv, const char *key, const char *msgid, co
 /* What history stores as the body: the text of a PRIVMSG/NOTICE, or for a TAGMSG (draft/event-playback) its client tags
  * as they go on the wire. NULL = don't store: a TAGMSG with nothing but +typing (that is gone the moment it is sent) or
  * with event history off. The returned buffer is static (single-threaded loop). */
+/* A finished multiline batch as history keeps it (one entry, one msgid): its lines joined by '\n', a concat fragment
+ * by '\r' -- neither can occur in IRC text. +S/+G applied as deliver_ml does. chathistory_send splits it again. */
+static const char *ml_hist_text(const server_t *srv) {
+    static char buf[ML_MAX_BYTES + ML_MAX_LINES + 1];
+    const ml_state_t *ml = g_ml;
+    channel_t *chan = ml->target[0] == '#' ? server_find_channel((server_t *)srv, ml->target) : NULL;
+    int strip = chan && (chan->modes & CMODE_STRIPCOLOR), censor = chan && (chan->modes & CMODE_CENSOR);
+    size_t len = 0;
+    buf[0] = '\0';
+    for (int i = 0; i < ml->n; i++) {
+        char txt[420], tmp[420];
+        snprintf(txt, sizeof txt, "%s", ml->text[i]);
+        if (strip) { strip_formatting(tmp, sizeof tmp, txt); snprintf(txt, sizeof txt, "%s", tmp); }
+        if (censor) censor_text(srv, txt);
+        len += (size_t)snprintf(buf + len, sizeof buf - len, "%s%s", i ? (ml->concat[i] ? "\r" : "\n") : "", txt);
+        if (len >= sizeof buf) break;
+    }
+    return buf;
+}
+
 static const char *hist_body(const server_t *srv, const msg_extra_t *x, const char *text) {
-    if (!x->tagmsg) return text;
+    if (!x->tagmsg) return g_ml ? ml_hist_text(srv) : text;
     if (!srv->cfg.messages.history_events) return NULL;
     irc_tag_t t[MAX_CLIENT_TAGS];
     int n = 0;
@@ -616,11 +636,14 @@ void cmd_batch(server_t *srv, client_t *cl, irc_message_t *msg) {
     if (ml->n == 0 || all_concat) { batch_fail(srv, cl, "MULTILINE_INVALID", ml->ref, "Empty batch"); free(ml); return; }
     /* One synthetic message for the ordinary send path: all the usual checks (+n/+m/bans/flood/spam/...) run once on the
      * joined text, then deliver() fans the batch out through g_ml. */
-    char joined[420] = "";
+    char full[ML_MAX_BYTES + ML_MAX_LINES + 1] = "", joined[420];
     for (int i = 0; i < ml->n; i++) {
-        if (i && !ml->concat[i]) strncat(joined, " ", sizeof joined - strlen(joined) - 1);
-        strncat(joined, ml->text[i], sizeof joined - strlen(joined) - 1);
+        if (i && !ml->concat[i]) strncat(full, " ", sizeof full - strlen(full) - 1);
+        strncat(full, ml->text[i], sizeof full - strlen(full) - 1);
     }
+    snprintf(joined, sizeof joined, "%s", full);
+    /* past what the synthetic line holds: the spam filters still see all of it (send_msg checks only `joined`) */
+    if (strlen(full) >= sizeof joined && spam_check_message(srv, cl, ml->target, full, strcmp(ml->verb, "NOTICE") == 0)) { free(ml); return; }
     irc_message_t synth;
     memset(&synth, 0, sizeof synth);
     synth.command = (char *)ml->verb;
@@ -657,7 +680,7 @@ static void whois_one(server_t *srv, client_t *cl, const char *nick) {
         client_reply(cl, N_ENDOFWHOIS, pe, 1, "End of /WHOIS list.");
         return;
     }
-    const char *p1[] = {target->nick, target->user, target->host, "*"};
+    const char *p1[] = {target->nick, client_ident(target), target->host, "*"};
     client_reply(cl, N_WHOISUSER, p1, 4, target->realname);
 
     const char *p2[] = {target->nick, netsync_server_name_of(srv, target)};
@@ -755,7 +778,7 @@ static const char *whox_value(char letter, client_t *u, channel_t *chan, client_
     switch (letter) {
     case 't': return token;
     case 'c': return chan ? chan->name : "*";
-    case 'u': return u->user;
+    case 'u': return client_ident(u);
     case 'i': return ((cl->umodes & UMODE_O) || u == cl) ? u->ip : "255.255.255.255";
     case 'h': return u->host;
     case 's': return netsync_server_name_of(cl->srv, u);
@@ -804,7 +827,7 @@ static void send_who_classic(client_t *cl, client_t *u, channel_t *chan, int mul
     who_rank_flags(m ? m->rank : 0, multi, rankch);
     char flags[10];
     snprintf(flags, sizeof flags, "%s%s%s%s", u->is_away ? "G" : "H", visible_oper(u, cl) ? "*" : "", (u->umodes & UMODE_B) ? "B" : "", rankch);
-    const char *p[] = {chan ? chan->name : "*", u->user, u->host, netsync_server_name_of(cl->srv, u), u->nick, flags};
+    const char *p[] = {chan ? chan->name : "*", client_ident(u), u->host, netsync_server_name_of(cl->srv, u), u->nick, flags};
     char trailing[600];
     snprintf(trailing, sizeof trailing, "0 %s", u->realname);
     client_reply(cl, N_WHOREPLY, p, 6, trailing);
@@ -1018,7 +1041,7 @@ static void userhost_one(const char *nick, void *ctx) {
     if (!u) return;
     char entry[300];
     snprintf(entry, sizeof entry, "%s%s%s=%c%s@%s", sc->out[0] ? " " : "", u->nick,
-             visible_oper(u, sc->cl) ? "*" : "", u->is_away ? '-' : '+', u->user, u->host);
+             visible_oper(u, sc->cl) ? "*" : "", u->is_away ? '-' : '+', client_ident(u), u->host);
     strncat(sc->out, entry, sizeof sc->out - strlen(sc->out) - 1);
 }
 
@@ -1035,7 +1058,7 @@ static void userip_one(const char *nick, void *ctx) {
     if (!u) return;
     char entry[300];
     snprintf(entry, sizeof entry, "%s%s%s=%c%s@%s", sc->out[0] ? " " : "", u->nick,
-             (u->umodes & UMODE_O) ? "*" : "", u->is_away ? '-' : '+', u->user, u->ip);
+             (u->umodes & UMODE_O) ? "*" : "", u->is_away ? '-' : '+', client_ident(u), u->ip);
     strncat(sc->out, entry, sizeof sc->out - strlen(sc->out) - 1);
 }
 
@@ -1186,7 +1209,7 @@ static void watch_impl(server_t *srv, client_t *cl, irc_message_t *msg) {
             char timebuf[32];
             if (u) {
                 snprintf(timebuf, sizeof timebuf, "%ld", (long)u->signon_time);
-                const char *p[] = {u->nick, u->user, u->host, timebuf};
+                const char *p[] = {u->nick, client_ident(u), u->host, timebuf};
                 client_reply(cl, N_NOWON, p, 4, "is online");
             } else {
                 snprintf(timebuf, sizeof timebuf, "%ld", 0L);
@@ -1202,7 +1225,7 @@ static void watch_impl(server_t *srv, client_t *cl, irc_message_t *msg) {
                 char timebuf[32];
                 if (u) {
                     snprintf(timebuf, sizeof timebuf, "%ld", (long)u->signon_time);
-                    const char *p[] = {u->nick, u->user, u->host, timebuf};
+                    const char *p[] = {u->nick, client_ident(u), u->host, timebuf};
                     client_reply(cl, N_NOWON, p, 4, "is online");
                 } else {
                     const char *p[] = {cl->watch[i], "*", "*", "0"};
@@ -1218,7 +1241,7 @@ static void watch_impl(server_t *srv, client_t *cl, irc_message_t *msg) {
                 client_t *u = server_find_user(srv, cl->watch[i]);
                 if (!u) continue;
                 char timebuf[32]; snprintf(timebuf, sizeof timebuf, "%ld", (long)u->signon_time);
-                const char *p[] = {u->nick, u->user, u->host, timebuf};
+                const char *p[] = {u->nick, client_ident(u), u->host, timebuf};
                 client_reply(cl, N_NOWON, p, 4, "is online");
             }
             client_reply(cl, N_ENDOFWATCHLIST, NULL, 0, "End of WATCH S");
@@ -1272,7 +1295,7 @@ void cmd_glob(server_t *srv, client_t *cl, irc_message_t *msg) {
         if (invisible_to(u, cl)) continue;
         char flags[8];
         snprintf(flags, sizeof flags, "%s%s%s", u->is_away ? "G" : "H", visible_oper(u, cl) ? "*" : "", (u->umodes & UMODE_B) ? "B" : "");
-        const char *p[] = {"*", u->user, u->host, netsync_server_name_of(srv, u), u->nick, flags};
+        const char *p[] = {"*", client_ident(u), u->host, netsync_server_name_of(srv, u), u->nick, flags};
         char trailing[600];
         snprintf(trailing, sizeof trailing, "0 %s", u->realname);
         client_reply(cl, N_WHOREPLY, p, 6, trailing);
@@ -1340,6 +1363,54 @@ static void batch_close(server_t *srv, client_t *cl, const char *bid) {
     client_send(cl, line);
 }
 
+/* One stored multiline message (lines split by '\n', concat fragments by '\r'), inside the chathistory batch: a nested
+ * draft/multiline batch for clients that have it, else each line as its own message (concat fragments glued, as
+ * deliver_ml does live); only the first carries the msgid. `tags` are the entry's batch/time/msgid/account tags. */
+static void replay_multiline(server_t *srv, client_t *cl, const hist_entry_t *e, const irc_tag_t *tags, int nt, const char *target) {
+    const char *tp[] = {target};
+    char line[1100], frag[420];
+    if ((cl->caps & CAP_MULTILINE) && (cl->caps & CAP_BATCH)) {
+        static unsigned long seq = 0;
+        char bid[24], plus[28], minus[28];
+        snprintf(bid, sizeof bid, "hml%lu", ++seq);
+        snprintf(plus, sizeof plus, "+%s", bid);
+        snprintf(minus, sizeof minus, "-%s", bid);
+        const char *bp[] = {plus, "draft/multiline", target};
+        irc_build(line, sizeof line, tags, nt, e->sender, "BATCH", bp, 3, NULL);
+        client_send(cl, line);
+        for (const char *p = e->text, *sep = "\n"; ; ) {
+            size_t l = strcspn(p, "\n\r");
+            snprintf(frag, sizeof frag, "%.*s", (int)l, p);
+            irc_tag_t lt[3] = {{"batch", bid}, {"draft/multiline-concat", ""}};
+            irc_build(line, sizeof line, lt, *sep == '\r' ? 2 : 1, e->sender, e->verb, tp, 1, frag);
+            client_send(cl, line);
+            if (!p[l]) break;
+            sep = p + l, p += l + 1;
+        }
+        const char *ep[] = {minus};
+        irc_build(line, sizeof line, NULL, 0, e->sender, "BATCH", ep, 1, NULL);
+        client_send(cl, line);
+        return;
+    }
+    irc_tag_t rest[4];
+    int nr = 0;
+    for (int i = 0; i < nt; i++) if (strcmp(tags[i].key, "msgid")) rest[nr++] = tags[i];
+    int first = 1;
+    for (const char *p = e->text; ; ) {
+        size_t l = strcspn(p, "\n"); /* one logical line: up to the next new line, concat fragments glued */
+        char txt[420]; /* like deliver_ml: a glued line is cut where a live one is */
+        size_t n = 0;
+        for (size_t i = 0; i < l && n < sizeof txt - 1; i++) if (p[i] != '\r') txt[n++] = p[i];
+        txt[n] = '\0';
+        irc_build(line, sizeof line, first ? tags : rest, first ? nt : nr, e->sender, e->verb, tp, 1, txt);
+        client_send(cl, line);
+        first = 0;
+        if (!p[l]) break;
+        p += l + 1;
+    }
+    (void)srv;
+}
+
 /* CHATHISTORY TARGETS <ts> <ts> <limit>: conversations (channels you are in, DM partners) with their newest message
  * time inside the window, newest first. */
 static void chathistory_targets(server_t *srv, client_t *cl, irc_message_t *msg) {
@@ -1392,7 +1463,8 @@ static void chathistory_targets(server_t *srv, client_t *cl, irc_message_t *msg)
 }
 
 void cmd_chathistory(server_t *srv, client_t *cl, irc_message_t *msg) {
-    if (!(cl->caps & CAP_CHATHISTORY) || !(cl->caps & CAP_BATCH) || srv->cfg.messages.history_size <= 0) return;
+    if (srv->cfg.messages.history_size <= 0) { chathistory_fail(srv, cl, "INVALID", "*", "Chat history is off on this server"); return; }
+    if (!(cl->caps & CAP_CHATHISTORY) || !(cl->caps & CAP_BATCH)) { chathistory_fail(srv, cl, "INVALID", "*", "Negotiate batch and draft/chathistory first"); return; }
     const char *sub = msg->params[0];
     if (strcasecmp(sub, "TARGETS") == 0) { chathistory_targets(srv, cl, msg); return; }
     int nneed = strcasecmp(sub, "BETWEEN") == 0 ? 5 : 4; /* sub target ref [ref2] limit */
@@ -1477,7 +1549,10 @@ void cmd_chathistory(server_t *srv, client_t *cl, irc_message_t *msg) {
         tags[nt++] = (irc_tag_t){"msgid", e->msgid};
         if (e->account[0] && (cl->caps & CAP_ACCOUNT_TAG)) tags[nt++] = (irc_tag_t){"account", e->account};
         const char *mp[] = {target[0] == '#' ? shown : e->target};
-        if (hist_is_message(e)) {
+        if (hist_is_message(e) && strpbrk(e->text, "\n\r")) { /* a multiline batch: see ml_hist_text */
+            replay_multiline(srv, cl, e, tags, nt, mp[0]);
+            continue;
+        } else if (hist_is_message(e)) {
             irc_build(line, sizeof line, tags, nt, e->sender, e->verb, mp, 1, e->text);
         } else if (!strcmp(e->verb, "TAGMSG")) { /* text holds its client tags, already escaped: spliced into the tag section */
             if (!(cl->caps & CAP_MESSAGE_TAGS)) continue;
@@ -1577,7 +1652,12 @@ static void send_marker(client_t *to, const char *target, long long ms) {
 void cmd_markread(server_t *srv, client_t *cl, irc_message_t *msg) {
     char line[300];
     const char *target = msg->params[0];
-    if (!(cl->caps & CAP_READ_MARKER)) return;
+    if (!(cl->caps & CAP_READ_MARKER)) {
+        const char *p[] = {"MARKREAD", "INVALID", target};
+        irc_build(line, sizeof line, NULL, 0, srv->cfg.server.name, "FAIL", p, 3, "Negotiate draft/read-marker first");
+        client_send(cl, line);
+        return;
+    }
     if (!cl->account[0]) {
         const char *p[] = {"MARKREAD", "ACCOUNT_REQUIRED", target};
         irc_build(line, sizeof line, NULL, 0, srv->cfg.server.name, "FAIL", p, 3, "You must be logged in to use read markers");

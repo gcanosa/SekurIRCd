@@ -613,7 +613,7 @@ void server_remove_client(server_t *srv, client_t *cl, const char *quit_reason) 
     net_release_class(srv, cl);
 
     if (cl->registered && !cl->is_service) {
-        server_whowas_record(srv, cl->nick, cl->user, cl->host, cl->realname);
+        server_whowas_record(srv, cl->nick, client_ident(cl), cl->host, cl->realname);
         server_monitor_notify(srv, cl, 0);
         server_watch_notify(srv, cl, 0);
 
@@ -802,7 +802,7 @@ void server_send_rules(server_t *srv, client_t *cl) {
 void server_send_welcome(server_t *srv, client_t *cl) {
     char msg[768]; /* worst case: CFG_STR network/name/version + NICKLEN + USERLEN + HOSTLEN */
     snprintf(msg, sizeof msg, "Welcome to the %s IRC Network %s!%s@%s",
-             srv->cfg.server.network, cl->nick, cl->user, cl->host);
+             srv->cfg.server.network, cl->nick, client_ident(cl), cl->host);
     client_reply(cl, N_WELCOME, NULL, 0, msg);
 
     snprintf(msg, sizeof msg, "Your host is %s, running version %s",
@@ -1205,7 +1205,7 @@ void server_watch_notify(server_t *srv, client_t *cl, int online) {
     if (!e) return;
     char timebuf[32];
     snprintf(timebuf, sizeof timebuf, "%ld", (long)(online ? cl->signon_time : time(NULL)));
-    const char *p[] = {cl->nick, cl->user, cl->host, timebuf};
+    const char *p[] = {cl->nick, client_ident(cl), cl->host, timebuf};
     for (int i = 0; i < e->n; i++)
         if (e->w[i] != cl) client_reply(e->w[i], online ? N_LOGON : N_LOGOFF, p, 4, online ? "logged online" : "logged offline");
 }

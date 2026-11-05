@@ -799,7 +799,8 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
         const char *from_nick = svc ? svc->nick : lc->peer_name;
         const char *from_user = svc ? svc->user : lc->peer_name;
         const char *from_host = svc ? svc->host : lc->peer_name;
-        irc_prefix_for(prefix, sizeof prefix, from_nick, from_user, from_host);
+        if (svc) client_prefix(svc, prefix, sizeof prefix); /* as its MODE/JOIN lines show it: a service's user has no "~" */
+        else irc_prefix_for(prefix, sizeof prefix, from_nick, from_user, from_host);
 
         char out[700];
         const char *p[] = {target};

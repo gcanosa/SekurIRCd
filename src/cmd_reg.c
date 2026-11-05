@@ -635,6 +635,10 @@ void cmd_register(server_t *srv, client_t *cl, irc_message_t *msg) {
     client_id(srv, cl, cid, sizeof cid);
     irc_build(line, sizeof line, NULL, 0, NULL, "SVCREGISTER", (const char *[]){cid, cl->ip, account, email}, 4, password);
     to_services(srv, line);
+    if (cl->label_capture) { /* labeled-response: services answer later; that answer carries the label, not an ACK now */
+        snprintf(cl->label_pending, sizeof cl->label_pending, "%s", cl->label);
+        cl->label_defer = 1;
+    }
 }
 
 /* CERT ADD|DEL|INFO -- kept as shorthand for /msg NickServ CERT ..., which owns certificate fingerprints now. */
@@ -739,12 +743,16 @@ void svc_command(server_t *srv, client_t *svc, irc_message_t *msg) {
         int style = cl->auth_style;
         cl->auth_style = AUTH_STYLE_LEGACY;
         const char *text = msg->params[msg->nparams - 1];
-        if (strcmp(msg->params[1], "SUCCESS") != 0) { send_fail(srv, cl, "REGISTER", msg->params[2], text); return; }
-        if (style == AUTH_STYLE_DRAFT) {
-            char line[500];
-            irc_build(line, sizeof line, NULL, 0, srv->cfg.server.name, "REGISTER", (const char *[]){"SUCCESS", msg->params[3]}, 2, text);
-            client_send(cl, line);
-        } else notice_self(srv, cl, text);
-        log_info("main", "%s registered account %s", cl->nick, msg->params[3]);
+        if (cl->label_pending[0]) client_label_begin(cl, cl->label_pending), cl->label_pending[0] = '\0';
+        if (strcmp(msg->params[1], "SUCCESS") != 0) send_fail(srv, cl, "REGISTER", msg->params[2], text);
+        else {
+            if (style == AUTH_STYLE_DRAFT) {
+                char line[500];
+                irc_build(line, sizeof line, NULL, 0, srv->cfg.server.name, "REGISTER", (const char *[]){"SUCCESS", msg->params[3]}, 2, text);
+                client_send(cl, line);
+            } else notice_self(srv, cl, text);
+            log_info("main", "%s registered account %s", cl->nick, msg->params[3]);
+        }
+        client_label_end(cl);
     }
 }

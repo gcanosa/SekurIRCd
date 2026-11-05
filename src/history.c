@@ -27,8 +27,9 @@ void history_key_dm(char *out, size_t outsz, const char *account_a, const char *
 
 int history_key_is_dm(const char *key) { return key[0] == '\x01'; }
 
-/* Longest each string may be (the old fixed field sizes, less the NUL). */
-static const size_t HIST_FIELD_MAX[6] = {47, 159, 31, 7, 71, 419};
+/* Longest each string may be (the old fixed field sizes, less the NUL); text also holds a whole multiline batch
+ * (4096 bytes in up to 24 lines plus their separators, see ml_hist_text). */
+static const size_t HIST_FIELD_MAX[6] = {47, 159, 31, 7, 71, 4200};
 
 /* Copies `src`'s six strings into one malloc'd block and points `dst` at it. */
 static int entry_dup(hist_entry_t *dst, const hist_entry_t *src) {

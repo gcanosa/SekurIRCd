@@ -1,9 +1,17 @@
 [
   {
-    "tag": "Unreleased",
-    "date": "",
+    "tag": "v1.3.2",
+    "date": "2026-11-05",
     "changes": [
-      "ChanServ takeover protection, as on Anope. ChanServ remembers each registered channel's TS. A channel recreated since it last saw it (on another server, during a netsplit, or while services were down) is reset: default modes, no +k/+i/+l/redirect, empty ban/exception/invite lists, then +r, MLOCK and a locked topic back. Anyone holding ops who isn't the founder, identified or on the access list at a level covering the rank loses them (SECUREOPS no longer needed for this). A channel with the TS it already knows, such as one a relinking server brings back, is left alone. On relink, ChanServ sweeps every registered channel, giving ACCESS modes and kicking AKICK/RESTRICTED members who joined meanwhile. ACCESS and AKICK work on JOIN in every registered channel, not only GUARDed ones. ChanServ can't be kicked or deopped (484). SECUREOPS checks each +o against the access level (a v entry no longer covers @). SJOIN with a TS of 0 or less no longer wins every channel. Mode changes that change nothing are no longer echoed"
+      "ChanServ takeover protection, as on Anope. ChanServ remembers each registered channel's TS. A channel recreated since it last saw it (on another server, during a netsplit, or while services were down) is reset: default modes, no +k/+i/+l/redirect, empty ban/exception/invite lists, then +r, MLOCK and a locked topic back. Anyone holding ops who isn't the founder, identified or on the access list at a level covering the rank loses them (SECUREOPS no longer needed for this). A channel with the TS it already knows, such as one a relinking server brings back, is left alone. On relink, ChanServ sweeps every registered channel, giving ACCESS modes and kicking AKICK/RESTRICTED members who joined meanwhile. ACCESS and AKICK work on JOIN in every registered channel, not only GUARDed ones. ChanServ can't be kicked or deopped (484). SECUREOPS checks each +o against the access level (a v entry no longer covers @). SJOIN with a TS of 0 or less no longer wins every channel. Mode changes that change nothing are no longer echoed",
+      "Fix (linked servers): a user joining a channel with members on another server also got that server's own topic and NAMES replies (331/332/353/366), once per remote server, and again when a server relinked. Only the user's own server answers a JOIN now",
+      "Fix: draft/multiline messages lost their line breaks and everything past 419 bytes in CHATHISTORY (they were stored as one flattened line, although up to 4096 bytes are accepted). History keeps the whole batch: clients with draft/multiline get it back as a multiline batch inside the chathistory batch, others as one message per line, as live",
+      "Fix: spam filters only checked the first 419 bytes of a multiline batch; the whole text is checked now",
+      "Fix: the user part was shown two ways. JOIN/PRIVMSG prefixes said ~user (ident not confirmed) while 001, WHOIS (311), WHO (352/354 u), NAMES with userhost-in-names (353), WHOWAS (314), USERHOST/USERIP (302), WATCH (604/600) and CHGHOST said user, so a ban copied from WHOIS (*!user@host) didn't match. All of them show the ~ now. ChanServ's NOTICEs no longer carry a ~ its MODE lines don't have. A CHGIDENT on a user on another server now reaches every server as a confirmed ident",
+      "labeled-response: REGISTER (draft/account-registration) answered ACK at once and sent REGISTER SUCCESS/FAIL unlabeled when services replied; the reply now carries the label and no ACK is sent",
+      "CHATHISTORY and MARKREAD without their capability (or with history off) answer FAIL ... INVALID instead of nothing",
+      "LIST: 321 is \"321 nick Channel :Users  Name\" (it was one trailing parameter)",
+      "[channels] default_modes defaults to \"nt\" when the key is missing, as the template says (it was empty, so channels took external messages)"
     ]
   },
   {
