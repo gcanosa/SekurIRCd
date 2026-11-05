@@ -63,3 +63,20 @@ def test_rehash_bad_port_keeps_old_listener():
         s.reload()
         assert can_connect(old), "failed rebind must leave the old listener alone"
         blocker.close()
+
+
+def test_rehash_reports_files_and_changed_sections():
+    s = Server(cfg={"operators": [{"name": "op", "password": "oppw", "hosts": ["*@*"]}]})
+    with s:
+        c = s.client("rh")
+        c.say("OPER op oppw", 0.5)
+        out = c.say("REHASH", 1.0)
+        assert any(" 382 rh " in l and ".toml :Rehashing" in l for l in out), out
+        assert any("*** Rehash: config: " in l for l in out), out
+        assert any("*** Rehash: no setting changed" in l for l in out), out
+        assert any("*** Rehash: MOTD: " in l for l in out), out
+        s.cfg["server"]["network"] = "ChangedNet"
+        s.write_config()
+        out = c.say("REHASH", 1.0)
+        assert any("*** Rehash: changed: [server]" in l for l in out), out
+        assert not any("[security]" in l for l in out), out

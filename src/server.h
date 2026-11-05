@@ -104,6 +104,7 @@ typedef struct server {
     protection_state_t prot; /* active proxy scanner + its caches (protection.c) */
 
     textfile_t motd, oper_motd, rules;
+    char rehash_report[2048]; /* what the last server_rehash re-read/changed, '\n'-separated (server_rehash_note) */
 
     whowas_entry_t whowas[WHOWAS_MAX]; /* ring buffer */
     int whowas_head;                   /* next slot to write */
@@ -165,6 +166,8 @@ void server_send_isupport(server_t *srv, client_t *cl);
 int server_init(server_t *srv, const config_t *cfg);
 void server_load_motd(server_t *srv);
 int server_rehash(server_t *srv, char *errbuf, size_t errbufsz);
+/* Appends one line to srv->rehash_report (no logging -- callers log their own); used by server_rehash and the listener/TLS reload. */
+void server_rehash_note(server_t *srv, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 
 client_t *server_find_user(server_t *srv, const char *nick);
 /* O(1) lookup by client_t.conn_id (server_add_connection's hh_conn hash),

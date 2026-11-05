@@ -26,8 +26,9 @@ unsigned spam_parse_targets(const char *s);
 
 /* (Re)load [spam] filters_file into srv->spam_filters. Called at startup and
  * from server_rehash. Does nothing to the in-memory list when filters_file is
- * "" (rules added with SPAMFILTER ADD then live in memory only). */
-void spam_reload(server_t *srv);
+ * "" (rules added with SPAMFILTER ADD then live in memory only). Returns the
+ * number of rules loaded from the file, -1 when no file was read. */
+int spam_reload(server_t *srv);
 void spam_free(server_t *srv);
 
 /* PRIVMSG/NOTICE gate. Returns 1 if the message must be dropped (the sender

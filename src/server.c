@@ -9,6 +9,7 @@
 #include "history.h"
 #include "vendor/cJSON.h"
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -183,15 +184,58 @@ void server_load_motd(server_t *srv) {
     load_textfile(&srv->rules, path);
 }
 
+void server_rehash_note(server_t *srv, const char *fmt, ...) {
+    size_t used = strlen(srv->rehash_report);
+    if (used + 2 >= sizeof srv->rehash_report) return;
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(srv->rehash_report + used, sizeof srv->rehash_report - used - 1, fmt, ap);
+    va_end(ap);
+    strcat(srv->rehash_report, "\n");
+}
+
+#define NOTE(...) do { log_info("rehash", __VA_ARGS__); server_rehash_note(srv, __VA_ARGS__); } while (0)
+
+/* Which config sections differ. Byte compares are exact: config_defaults memsets the whole struct and cfg_grow zeroes
+ * each array entry, so equal settings are equal bytes. */
+static void note_changed_sections(server_t *srv, const config_t *a, const config_t *b) {
+    char out[400] = "";
+#define DIFF(name, cond) do { if (cond) { size_t l_ = strlen(out); snprintf(out + l_, sizeof out - l_, "%s[%s]", l_ ? " " : "", name); } } while (0)
+#define SEC(name, f) DIFF(name, memcmp(&a->f, &b->f, sizeof a->f))
+#define ARR(name, p, n) DIFF(name, a->n != b->n || (a->n && memcmp(a->p, b->p, sizeof *a->p * (size_t)a->n)))
+    SEC("server", server); SEC("security", security); SEC("messages", messages); SEC("logging", logging);
+    ARR("operators", operators, n_operators); SEC("admin", admin); ARR("vhosts", vhosts, n_vhosts);
+    ARR("webirc", webirc, n_webirc); ARR("classes", classes, n_classes); SEC("channels", channels);
+    SEC("dnsbl", dnsbl); SEC("spam", spam); SEC("tls", tls); SEC("websocket", websocket);
+    cfg_links_t la = a->links, lb = b->links;
+    la.peers = lb.peers = NULL;
+    DIFF("links", memcmp(&la, &lb, sizeof la) || (a->links.n_peers && memcmp(a->links.peers, b->links.peers, sizeof *a->links.peers * (size_t)a->links.n_peers)));
+    SEC("accounts", accounts); SEC("debug_channel", debug_channel); SEC("protection", protection);
+#undef ARR
+#undef SEC
+#undef DIFF
+    if (out[0]) NOTE("changed: %s", out);
+    else NOTE("no setting changed");
+}
+
+static void note_textfile(server_t *srv, const char *what, const textfile_t *tf, const char *path) {
+    if (tf->n) NOTE("%s: %s (%d line%s)", what, path, tf->n, tf->n == 1 ? "" : "s");
+    else NOTE("%s: %s (missing or empty)", what, path);
+}
+
 int server_rehash(server_t *srv, char *errbuf, size_t errbufsz) {
+    srv->rehash_report[0] = '\0';
     if (srv->cfg.path[0] == '\0') {
         snprintf(errbuf, errbufsz, "running on built-in defaults, nothing to reload");
         return -1;
     }
     config_t tmp;
     if (config_load(srv->cfg.path, &tmp, errbuf, errbufsz) != 0) return -1;
-    /* bind/port/TLS listeners are not re-bound on rehash (same as Python) --
-     * only the config values themselves swap in. */
+    char path[CFG_PATH];
+    NOTE("config: %s", tmp.path);
+    if (config_protection_path(&tmp, path, sizeof path))
+        NOTE("protection: %s%s", path, tmp.protection.loaded ? "" : " (not found, using sekurircd.toml values)");
+    note_changed_sections(srv, &srv->cfg, &tmp);
     int old_history = srv->cfg.messages.history_size > 0;
     config_free(&srv->cfg); /* the new config owns its own arrays; nothing keeps a pointer into the old ones across commands */
     srv->cfg = tmp;
@@ -203,10 +247,22 @@ int server_rehash(server_t *srv, char *errbuf, size_t errbufsz) {
     net_reclass_all(srv);
     net_apply_listeners(srv);
     server_load_motd(srv);
-    spam_reload(srv);
+    config_motd_path(&srv->cfg, path, sizeof path);
+    note_textfile(srv, "MOTD", &srv->motd, path);
+    config_oper_motd_path(&srv->cfg, path, sizeof path);
+    note_textfile(srv, "oper MOTD", &srv->oper_motd, path);
+    config_rules_path(&srv->cfg, path, sizeof path);
+    note_textfile(srv, "rules", &srv->rules, path);
+    int n_spam = spam_reload(srv);
+    if (!srv->cfg.spam.filters_enabled) NOTE("spam filters: off");
+    else if (config_spamfilters_path(&srv->cfg, path, sizeof path)) {
+        if (n_spam < 0) NOTE("spam filters: %s (could not open)", path);
+        else NOTE("spam filters: %s (%d rule%s)", path, n_spam, n_spam == 1 ? "" : "s");
+    }
     protection_reload(srv);
     return 0;
 }
+#undef NOTE
 
 client_t *server_find_user(server_t *srv, const char *nick) {
     char cf[NICKLEN];

@@ -1182,13 +1182,14 @@ static void tick(server_t *srv) {
 }
 
 /* One listener: bring `*fd` in line with (want, bind, port). Returns 1 if it changed, 0 if not, -1 on a failed bind (old kept). */
-static int rebind_one(const char *what, int *fd, char *cur_bind, size_t cur_bind_sz, int *cur_port, int want, const char *bind, int port) {
+static int rebind_one(server_t *srv, const char *what, int *fd, char *cur_bind, size_t cur_bind_sz, int *cur_port, int want, const char *bind, int port) {
     if (!want) {
         if (*fd < 0) return 0;
         close(*fd);
         *fd = -1;
         *cur_port = 0;
         log_info("net", "%s listener closed (disabled by rehash)", what);
+        server_rehash_note(srv, "%s listener closed", what);
         return 1;
     }
     if (*fd >= 0 && *cur_port == port && strcmp(cur_bind, bind) == 0) return 0;
@@ -1196,6 +1197,8 @@ static int rebind_one(const char *what, int *fd, char *cur_bind, size_t cur_bind
     if (nfd < 0) {
         log_error("net", "rehash: could not bind %s listener to %s:%d -- keeping %s", what, bind, port,
                   *fd >= 0 ? "the old one" : "it disabled");
+        server_rehash_note(srv, "%s listener: could not bind %s:%d -- keeping %s", what, bind, port,
+                           *fd >= 0 ? "the old one" : "it disabled");
         return -1;
     }
     if (*fd >= 0) close(*fd);
@@ -1203,6 +1206,7 @@ static int rebind_one(const char *what, int *fd, char *cur_bind, size_t cur_bind
     snprintf(cur_bind, cur_bind_sz, "%s", bind);
     *cur_port = port;
     log_info("net", "%s listener now on %s:%d", what, bind, port);
+    server_rehash_note(srv, "%s listener now on %s:%d", what, bind, port);
     return 1;
 }
 
@@ -1213,29 +1217,29 @@ static void apply_v6_listeners(server_t *srv) {
     int want[] = {srv->listen_fd >= 0, srv->tls_listen_fd >= 0, srv->ws_listen_fd >= 0, srv->link_listen_fd >= 0};
     int port[] = {c->server.port, c->tls.port, c->websocket.port, c->links.port};
     for (int i = 0; i < 4; i++)
-        rebind_one(what[i], &srv->l6[i].fd, srv->l6[i].bind, sizeof srv->l6[i].bind, &srv->l6[i].port,
+        rebind_one(srv, what[i], &srv->l6[i].fd, srv->l6[i].bind, sizeof srv->l6[i].bind, &srv->l6[i].port,
                    c->server.ipv6 && want[i], i == L6_LINK ? c->links.bind6 : c->server.bind6, port[i]);
 }
 
 void net_apply_listeners(server_t *srv) {
     const config_t *c = &srv->cfg;
-    rebind_one("client", &srv->listen_fd, srv->bound_main.bind, sizeof srv->bound_main.bind, &srv->bound_main.port,
+    rebind_one(srv, "client", &srv->listen_fd, srv->bound_main.bind, sizeof srv->bound_main.bind, &srv->bound_main.port,
                1, c->server.bind, c->server.port);
 
     /* TLS: reload the certificate on every rehash (renewals), keeping the old context if the new one won't load. */
     if (c->tls.enabled) {
         SSL_CTX *nc = tls_setup(srv);
-        if (nc) { if (srv->tls_ctx) SSL_CTX_free(srv->tls_ctx); srv->tls_ctx = nc; log_info("tls", "certificate reloaded"); }
-        else log_error("tls", "rehash: new certificate/key did not load -- keeping the old one");
+        if (nc) { if (srv->tls_ctx) SSL_CTX_free(srv->tls_ctx); srv->tls_ctx = nc; log_info("tls", "certificate reloaded"); server_rehash_note(srv, "TLS certificate: reloaded"); }
+        else { log_error("tls", "rehash: new certificate/key did not load -- keeping the old one"); server_rehash_note(srv, "TLS certificate: new one did not load -- keeping the old one"); }
     } else if (srv->tls_ctx) {
         SSL_CTX_free(srv->tls_ctx); /* live TLS connections hold their own reference */
         srv->tls_ctx = NULL;
     }
-    rebind_one("TLS", &srv->tls_listen_fd, srv->bound_tls.bind, sizeof srv->bound_tls.bind, &srv->bound_tls.port,
+    rebind_one(srv, "TLS", &srv->tls_listen_fd, srv->bound_tls.bind, sizeof srv->bound_tls.bind, &srv->bound_tls.port,
                c->tls.enabled && srv->tls_ctx != NULL, c->server.bind, c->tls.port);
-    rebind_one("WebSocket", &srv->ws_listen_fd, srv->bound_ws.bind, sizeof srv->bound_ws.bind, &srv->bound_ws.port,
+    rebind_one(srv, "WebSocket", &srv->ws_listen_fd, srv->bound_ws.bind, sizeof srv->bound_ws.bind, &srv->bound_ws.port,
                c->websocket.enabled && (!c->websocket.tls || srv->tls_ctx), c->server.bind, c->websocket.port);
-    rebind_one("link", &srv->link_listen_fd, srv->bound_link.bind, sizeof srv->bound_link.bind, &srv->bound_link.port,
+    rebind_one(srv, "link", &srv->link_listen_fd, srv->bound_link.bind, sizeof srv->bound_link.bind, &srv->bound_link.port,
                c->links.enabled && strcmp(c->links.mode, "leaf") != 0, c->links.bind, c->links.port);
     apply_v6_listeners(srv);
 }

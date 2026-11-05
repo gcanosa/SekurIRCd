@@ -327,8 +327,18 @@ void cmd_rehash(server_t *srv, client_t *cl, irc_message_t *msg) {
     (void)msg;
     char err[256];
     if (server_rehash(srv, err, sizeof err) == 0) {
-        client_reply(cl, N_REHASHING, NULL, 0, "Rehashing");
+        const char *p[] = {srv->cfg.path};
+        client_reply(cl, N_REHASHING, p, 1, "Rehashing");
         log_info("oper", "%s rehashed config from %s", cl->nick, srv->cfg.path);
+        char m[400];
+        snprintf(m, sizeof m, "%s is rehashing server config file", cl->nick);
+        server_notify_opers(srv, m);
+        /* What was re-read and what changed, one NOTICE per line (as Unreal/InspIRCd report their rehash). */
+        for (char *line = srv->rehash_report, *nl; *line; line = nl + 1) {
+            if (!(nl = strchr(line, '\n'))) break;
+            snprintf(m, sizeof m, "*** Rehash: %.*s", (int)(nl - line), line);
+            notice_self(srv, cl, m);
+        }
     } else {
         char m[400];
         snprintf(m, sizeof m, "Rehash failed: %s", err);

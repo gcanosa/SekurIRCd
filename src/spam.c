@@ -176,15 +176,15 @@ static void list_append(server_t *srv, spam_filter_t *f) {
     *pp = f;
 }
 
-void spam_reload(server_t *srv) {
+int spam_reload(server_t *srv) {
     char path[CFG_PATH];
-    if (!srv->cfg.spam.filters_enabled) { spam_free(srv); return; }
-    if (!config_spamfilters_path(&srv->cfg, path, sizeof path)) return; /* memory-only rules stay */
+    if (!srv->cfg.spam.filters_enabled) { spam_free(srv); return -1; }
+    if (!config_spamfilters_path(&srv->cfg, path, sizeof path)) return -1; /* memory-only rules stay */
     spam_free(srv);
     FILE *fp = fopen(path, "r");
     if (!fp) {
         if (srv->cfg.spam.enabled) log_warn("spam", "cannot open filters_file %s -- no content filters loaded", path);
-        return;
+        return -1;
     }
     char line[700], err[160];
     int lineno = 0, loaded = 0;
@@ -205,6 +205,7 @@ void spam_reload(server_t *srv) {
     }
     fclose(fp);
     log_info("spam", "loaded %d spam filter(s) from %s", loaded, path);
+    return loaded;
 }
 
 /* --- per-client tracking ----------------------------------------------------- */
