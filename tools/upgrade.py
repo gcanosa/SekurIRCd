@@ -175,6 +175,34 @@ def describe(ref) -> Any:
 def is_ancestor(a, b): return run(["git", "merge-base", "--is-ancestor", a, b], check=False).returncode == 0
 
 
+def rewritten_base(cur_sha, target_sha):
+    """When `cur` and `target` share no history but cur's code is exactly an upstream commit's (upstream rewrote and
+    force-pushed its history: new hashes, same files), that upstream commit; else None. Nothing local is lost moving on."""
+    tree = git("rev-parse", f"{cur_sha}^{{tree}}", check=False)
+    for ln in git("log", "--format=%H %T", "-n", "2000", target_sha, check=False).splitlines():
+        h, t = ln.split()
+        if t == tree: return h
+    return None
+
+
+def build_state(cur):
+    """What actually runs vs the source: (binary_version, needs_rebuild, needs_restart, why).
+    bin/sekurircd --version is compared with what this checkout builds; a daemon started before bin/sekurircd was
+    last written still runs the older binary (make doesn't restart anything)."""
+    v = run(["bin/sekurircd", "--version"], check=False).stdout.split() if os.path.exists("bin/sekurircd") else []
+    binv = v[1].rstrip(",") if len(v) > 1 else None
+    rebuild = binv != cur["full"]
+    restart = False
+    m = re.search(r"sekurircd:\s+running \(pid (\d+)\)", run(["./sekurircd", "status"], check=False).stdout)
+    if m and binv:
+        started = run(["env", "LC_ALL=C", "ps", "-o", "lstart=", "-p", m[1]], check=False).stdout.strip()
+        try: restart = time.mktime(time.strptime(started, "%a %b %d %H:%M:%S %Y")) < os.path.getmtime("bin/sekurircd") - 1
+        except ValueError: pass
+    why = (f"bin/sekurircd is {binv or 'missing'}, this source builds {cur['full']}" if rebuild else
+           "the running ircd was started before bin/sekurircd was rebuilt" if restart else "")
+    return binv, rebuild, restart, why
+
+
 def latest_release() -> Any:
     """(tag, title, source): gh CLI, then GitHub API, then newest local tag."""
     if shutil.which("gh"):
@@ -563,6 +591,9 @@ def preflight():
     info(f"Installed  {bold('v' + cur['full'])}  {dim(cur['short'] + ' · ' + cur['date'])}  "
          f"on {cur['branch'] or 'detached HEAD'}")
     info("Running    " + ", ".join(f"{k}: {green('up') if v else dim('down')}" for k, v in st.items()))
+    cur["binv"], cur["rebuild"], cur["restart"], why = build_state(cur)
+    if cur["rebuild"] or (cur["restart"] and any(st.values())):
+        warn(yellow("Not what you run yet: ") + why + (" -- rebuild and restart" if cur["rebuild"] else " -- restart"))
     if dirty:
         warn(f"{len(dirty)} locally modified tracked file(s) -- they will be preserved:")
         for l in dirty[:8]: info(dim("  " + l))
@@ -584,11 +615,25 @@ def choose_target(cur):
     if m:
         m.update(kind="main", branch=branch); opts.append(m)
 
+    stale = cur.get("rebuild") or cur.get("restart")
+
+    def rel_of(d):  # "here" | "ahead" | "behind" | "rewritten" | "diverged"
+        if d["sha"] == cur["sha"]: return "here"
+        if is_ancestor(cur["sha"], d["sha"]): return "ahead"
+        if is_ancestor(d["sha"], cur["sha"]): return "behind"
+        if not d.get("rewritten_base"): d["rewritten_base"] = rewritten_base(cur["sha"], d["sha"])
+        if not d["rewritten_base"]: return "diverged"
+        return "rewritten" if git("rev-list", "--count", d["rewritten_base"] + ".." + d["sha"]) != "0" else "same-code"
+
     def note(d):
-        if d["sha"] == cur["sha"]: return green("← you are here")
-        if is_ancestor(cur["sha"], d["sha"]):
-            return yellow(f"{git('rev-list', '--count', cur['sha'] + '..' + d['sha'])} commit(s) ahead of you")
-        if is_ancestor(d["sha"], cur["sha"]): return dim("already contained in your checkout")
+        r = rel_of(d)
+        if r == "here": return green("← you are here") + (yellow(" (not built/running yet)") if stale else "")
+        if r == "ahead": return yellow(f"{git('rev-list', '--count', cur['sha'] + '..' + d['sha'])} commit(s) ahead of you")
+        if r == "behind": return dim("already contained in your checkout (older)")
+        if r in ("rewritten", "same-code"):
+            b = d["rewritten_base"]
+            n = int(git("rev-list", "--count", b + ".." + d["sha"]))
+            return yellow(f"same code as {b[:7]} (upstream history was rewritten)" + (f", {n} commit(s) ahead" if n else ""))
         return red("diverged from your checkout")
 
     want = ARGS.channel
@@ -596,11 +641,18 @@ def choose_target(cur):
         pick = next((o for o in opts if o["kind"] == want), None) or (describe(want) if want not in ("release", "main") else None)
         if not pick: die(f"can't resolve --channel {want}")
         pick.setdefault("kind", "ref")
+        rel_of(pick)  # sets rewritten_base when upstream rewrote its history
         return pick
     out()
-    if opts and all(o["sha"] == cur["sha"] for o in opts):
+    if opts and all(o["sha"] == cur["sha"] for o in opts) and not stale:
         ok("You're already on the latest release and latest commit -- nothing to upgrade to.")
         opts = []
+    # the default: an option with new commits (ahead of you, or past your code under rewritten history), then the same
+    # code under upstream's hashes, else rebuilding what you're on;
+    # never one that is older than your checkout
+    rels = [rel_of(o) for o in opts]
+    default = next((str(i) for want in ("ahead", "rewritten", "same-code") for i, r in enumerate(rels, 1) if r == want), None)
+    if not default and stale: default = next((str(i) for i, r in enumerate(rels, 1) if r == "here"), None)
     for i, o in enumerate(opts, 1):
         if o["kind"] == "release":
             info(f"{bold(f'[{i}]')} Latest {bold('release')}  {bold(o['ref'])} {o['title'] and '— ' + o['title'].split('—')[-1].strip()}"
@@ -609,10 +661,11 @@ def choose_target(cur):
             info(f"{bold(f'[{i}]')} Latest {bold('commits')}   origin/{o['branch']} @ {o['short']}"
                  f" {dim('(version ' + str(o['full']) + ', ' + o['date'] + ')')}  {note(o)}")
             info(dim(f"      newest commit: {o['subject']}"))
+        if rels[i - 1] == "here" and stale: info(dim("      choose it to rebuild and restart this checkout"))
     info(f"{bold(f'[{len(opts) + 1}]')} A specific tag or commit")
     info(f"{bold('[q]')} Quit")
     while True:
-        r = prompt("Choice", "1")
+        r = prompt("Choice", default or "q")
         if r.lower() == "q": sys.exit(0)
         if r.isdigit() and 1 <= int(r) <= len(opts): return opts[int(r) - 1]
         if r.isdigit() and int(r) == len(opts) + 1:
@@ -631,10 +684,17 @@ def review(cur, tgt):
     elif tgt["sha"] != cur["sha"] and is_ancestor(tgt["sha"], cur["sha"]):
         warn("Target is already contained in your checkout (you're ahead of it).")
     if tgt["sha"] == cur["sha"]:
-        ok("Already on this exact commit -- nothing to do."); sys.exit(0)
-    stat = git("diff", "--shortstat", cur["sha"], tgt["sha"])
+        if not (cur.get("rebuild") or cur.get("restart")):
+            ok("Already on this exact commit -- nothing to do."); sys.exit(0)
+        ok("Source already at this commit: rebuilding it and restarting, so what runs matches it.")
+        return
+    base = tgt.get("rewritten_base") or cur["sha"]  # rewritten upstream history: diff against the same code upstream
+    if tgt.get("rewritten_base"):
+        warn(f"Upstream rewrote its history: your {cur['short']} is the same code as its {base[:7]}; "
+             f"your branch will be reset onto upstream's (nothing of yours is lost).")
+    stat = git("diff", "--shortstat", base, tgt["sha"])
     info(dim(stat))
-    LOG.w(git("diff", "--stat", cur["sha"], tgt["sha"]))
+    LOG.w(git("diff", "--stat", base, tgt["sha"]))
 
     out(); out(bold("  Changelog"))
     entries = []
@@ -645,15 +705,15 @@ def review(cur, tgt):
         info(bold(green(f"{e['tag']}  ({e['date']})")))
         for ch in e["changes"]: out(wrap("• " + ch))
     if not new: info(dim("(no changelog entries newer than your version)"))
-    commits = git("log", "--oneline", "--no-decorate", f"{cur['sha']}..{tgt['sha']}").splitlines()
+    commits = git("log", "--oneline", "--no-decorate", f"{base}..{tgt['sha']}").splitlines()
     if commits and (tgt["kind"] != "release" or not new):
         out(); out(bold(f"  {len(commits)} commit(s) between you and target"))
         for l in commits[:15]: info(dim(l))
         if len(commits) > 15: info(dim(f"... and {len(commits) - 15} more"))
 
     out(); out(bold("  Config templates: what's new"))
-    show_config_news(config_news(cur["sha"], tgt["sha"]))
-    if tgt["kind"] == "main" and cur["branch"] == tgt["branch"] and not is_ancestor("HEAD", tgt["ref"]):
+    show_config_news(config_news(base, tgt["sha"]))
+    if tgt["kind"] == "main" and cur["branch"] == tgt["branch"] and not is_ancestor("HEAD", tgt["ref"]) and not tgt.get("rewritten_base"):
         die(f"Your local {cur['branch']} has commits that aren't on origin -- refusing to fast-forward over them.")
 
 
@@ -682,10 +742,12 @@ def upgrade(cur, st, tgt):
     if do_full: backups.append(full_backup(dest, cur))
 
     step("Updating source")
-    steps = ([["checkout", tgt["branch"]], ["merge", "--ff-only", f"origin/{tgt['branch']}"]]
-             if tgt["kind"] == "main" else [["checkout", "--detach", tgt["sha"]]])
+    # rewritten upstream history: the local branch is the same code under old hashes, so it is reset, not merged
+    ff = ["reset", "--hard", f"origin/{tgt['branch']}"] if tgt.get("rewritten_base") else ["merge", "--ff-only", f"origin/{tgt['branch']}"]
+    steps = ([["checkout", tgt["branch"]], ff] if tgt["kind"] == "main" else [["checkout", "--detach", tgt["sha"]]])
     if tgt["kind"] == "main" and run(["git", "rev-parse", "--verify", "--quiet", tgt["branch"]], check=False).returncode:
         steps[0] = ["checkout", "-b", tgt["branch"], "--track", f"origin/{tgt['branch']}"]
+    if tgt["sha"] == cur["sha"]: steps = []  # rebuild in place
     kept = switch(steps, tgt["sha"])
     ok(f"source is now at {tgt['short']}")
     for f in kept: warn(f"kept your local edits to {f}; upstream's new copy saved as {f}.upstream-{tgt['version']}")
@@ -845,9 +907,18 @@ def check():
             h, dt, s = l.split("|", 2)
             info(f"  {cyan(h)} {dim(dt)} {s}")
         if len(log) > 10: info(dim(f"  ... and {len(log) - 10} more"))
+    elif (b := rewritten_base(cur["sha"], m["sha"])):
+        news += 1
+        warn(yellow(f"Upstream rewrote its history: your checkout is the same code as {b[:7]} on origin/{branch}") +
+             f" -- {bold('tools/upgrade.py')} moves you onto it")
     else:
         warn(red("Your checkout has diverged from ") + f"origin/{branch}" + " — upgrade would need a manual look")
         news += 1
+
+    binv, rebuild, restart, why = build_state(cur)
+    if rebuild or restart:
+        news += 1
+        warn(yellow("Not what you run yet: ") + why + f" -- run {bold('tools/upgrade.py')} and pick the checkout you're on")
 
     out()
     if news: out(bold(yellow("  ▲ Updates available")) + f"  — run {bold('tools/upgrade.py')} to upgrade")

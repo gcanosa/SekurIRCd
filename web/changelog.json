@@ -1,12 +1,5 @@
 [
   {
-    "tag": "Unreleased",
-    "date": "",
-    "changes": [
-      "draft/multiline across linked servers: a batch sent on one server reached users on the others as one flattened line cut at 419 bytes, and was stored that way in their CHATHISTORY. Its lines now travel with it (a new MLINE link line just before the message), so users on every server get the same multiline batch, or one message per line without the cap, and every server's history keeps it whole. Servers older than 1.3.3 ignore MLINE and still deliver the flattened message, so mixed networks keep working (a pre-1.3.3 server in the middle of a path flattens what passes through it)"
-    ]
-  },
-  {
     "tag": "v1.3.2",
     "date": "2026-11-05",
     "changes": [
@@ -18,7 +11,9 @@
       "labeled-response: REGISTER (draft/account-registration) answered ACK at once and sent REGISTER SUCCESS/FAIL unlabeled when services replied; the reply now carries the label and no ACK is sent",
       "CHATHISTORY and MARKREAD without their capability (or with history off) answer FAIL ... INVALID instead of nothing",
       "LIST: 321 is \"321 nick Channel :Users  Name\" (it was one trailing parameter)",
-      "[channels] default_modes defaults to \"nt\" when the key is missing, as the template says (it was empty, so channels took external messages)"
+      "[channels] default_modes defaults to \"nt\" when the key is missing, as the template says (it was empty, so channels took external messages)",
+      "draft/multiline across linked servers: a batch sent on one server reached users on the others as one flattened line cut at 419 bytes, and was stored that way in their CHATHISTORY. Its lines now travel with it (a new MLINE link line just before the message), so users on every server get the same multiline batch, or one message per line without the cap, and every server's history keeps it whole. Servers older than 1.3.2 ignore MLINE and still deliver the flattened message, so mixed networks keep working (a pre-1.3.2 server in the middle of a path flattens what passes through it)",
+      "tools/upgrade.py: when upstream rewrote its history (same code, new commit hashes) it said \"diverged\" and could not upgrade; it now says \"same code as <commit> (upstream history was rewritten)\" and moves the checkout onto upstream's history, keeping local edits. It also tells you when what runs isn't the checkout yet (bin/sekurircd older than the source, or a daemon started before the last build) and offers to rebuild and restart it. The menu's default is never an option older than your checkout (it was always [1], the latest release, even when that was a downgrade)"
     ]
   },
   {
