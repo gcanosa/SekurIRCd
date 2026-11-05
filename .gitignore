@@ -8,7 +8,8 @@
 /config/protection.toml
 /config/accounts.json
 /config/klines.json
-/config/tls/*.pem
+/config/tls/
+/config/*.json.bak*
 # live MOTD/rules/spam filters: the admin's (and the server's), created from config/*.template.* when missing
 /config/ircd.motd
 /config/oper.motd
