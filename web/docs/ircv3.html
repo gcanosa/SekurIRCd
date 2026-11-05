@@ -40,7 +40,7 @@
 <tr><td><code>draft/chathistory</code></td><td>Message history with <code>CHATHISTORY</code>. See <a href="#history">history</a>. Not advertised when <code>history_size = 0</code>.</td></tr>
 <tr><td><code>draft/message-redaction</code></td><td><code>REDACT</code>: take back a message. See <a href="#history">history</a>.</td></tr>
 <tr><td><code>draft/read-marker</code></td><td><code>MARKREAD</code>: where you stopped reading, shared by every session of your account. See <a href="#history">history</a>.</td></tr>
-<tr><td><code>draft/multiline</code></td><td>One message over several lines, up to 24 lines and 4096 bytes (<code>draft/multiline=max-bytes=4096,max-lines=24</code>).</td></tr>
+<tr><td><code>draft/multiline</code></td><td>One message over several lines, up to 24 lines and 4096 bytes (<code>draft/multiline=max-bytes=4096,max-lines=24</code>). The batch stays whole across linked servers and in history; clients without the cap get one message per line. Spam filters check the whole text.</td></tr>
 <tr><td><code>cap-notify</code></td><td>Live <code>CAP NEW</code>/<code>CAP DEL</code> when capabilities change, for example history being turned on or off by a rehash.</td></tr>
 <tr><td><code>extended-monitor</code></td><td><code>MONITOR</code> targets also get away, account and host updates.</td></tr>
 <tr><td><code>draft/no-implicit-names</code> <code>draft/pre-away</code></td><td>No automatic <code>NAMES</code> after JOIN; <code>AWAY</code> can be set before registration finishes.</td></tr>
@@ -76,7 +76,8 @@ history_size = 50                # messages kept per conversation; 0 turns histo
   <code>TAGMSG</code>s such as <code>+draft/react</code>, each with its own <code>msgid</code>; <code>+typing</code> is never kept. Clients without the cap see only
   <code>PRIVMSG</code> and <code>NOTICE</code>, and limits and references count only those. Events are not kept in <code>+D</code> or <code>+u</code> channels.</p>
 <p>A channel's history is readable by its members (and IRC operators) and is kept even when the channel empties.
-  Private history needs both sides to be logged in to an account. Requests are capped at 100 messages.</p>
+  Private history needs both sides to be logged in to an account. Requests are capped at 100 messages.
+  <code>CHATHISTORY</code> or <code>MARKREAD</code> sent without the capability (or with history off) gets <code>FAIL ... INVALID</code>.</p>
 <p>With <code>draft/read-marker</code>, a logged-in client sends <code>MARKREAD &lt;target&gt; timestamp=&lt;time&gt;</code> as you read.
   The server keeps the latest position per account and target, sends it on JOIN, and forwards every change to your other sessions,
   so a conversation you read on one device shows as read on the others. <code>MARKREAD &lt;target&gt;</code> without a timestamp asks for the stored one.</p>

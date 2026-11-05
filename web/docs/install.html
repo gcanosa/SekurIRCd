@@ -72,6 +72,18 @@ QUIT</pre>
   standalone ChanServ from an older release (<code>services/chanserv.pid</code>) is stopped first, so there are never two. If <code>status</code> finds a
   matching process but no valid pidfile, it says so instead of reporting "stopped". <code>./bin/sekurircd --rehash</code> reloads the config without restarting.</p>
 
+<h2 id="upgrade">upgrade</h2>
+<p>For a git-clone install, <code>tools/upgrade.py</code> picks the latest release or the latest <code>main</code>, shows what changes (versions, changelog,
+  new config options), backs everything up, builds, installs and optionally restarts, and can roll back.</p>
+<pre>tools/upgrade.py              # interactive
+tools/upgrade.py --check      # only report new releases/commits (exit 10 = updates available)
+tools/upgrade.py --dry-run    # show everything, change nothing
+tools/upgrade.py --rollback   # undo the last upgrade</pre>
+<p>Your live config is only changed with your OK: before restarting it offers <code>tools/confcheck.py --fix</code>, which moves settings to where they
+  live now. Locally edited files are kept. If upstream rewrote its history with the same code, it moves the checkout onto it. It also warns
+  when what's running is older than the checkout (a stale build, or a daemon started before the last build) and offers to rebuild and restart.
+  Each run writes <code>logs/SekurIRCd-upgrade-&lt;date&gt;.log</code>.</p>
+
 <h2>daemon mode</h2>
 <pre>./bin/sekurircd --config config/sekurircd.toml --daemon --pidfile /var/run/sekurircd.pid
 ./bin/sekurircd --stop   --pidfile /var/run/sekurircd.pid   # graceful stop, removes the pidfile

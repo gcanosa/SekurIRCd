@@ -95,13 +95,27 @@ password_hash = "scrypt$16384$8$1$&lt;salt-hex&gt;$&lt;digest-hex&gt;"   # from 
 /msg ChanServ SUCCESSOR #chan SET &lt;mask&gt; &lt;password&gt;
 /msg ChanServ SUCCESSOR #chan CLAIM &lt;new-password&gt;
 /msg ChanServ SET #chan MLOCK|DESC|URL|ENTRYMSG ...
+/msg ChanServ SET #chan FOUNDER &lt;account|-&gt; &lt;password&gt;
+/msg ChanServ SET #chan PRIVATE|RESTRICTED|SECUREOPS ON|OFF &lt;password&gt;
 /msg ChanServ HELP</pre>
 <p>The password belongs to the channel record; anyone who knows it can IDENTIFY as founder. <code>IDENTIFY</code> lasts for the connection
   only and must be repeated after reconnecting. <code>/HELP</code> in ChanServ prints exact syntax for each command.</p>
+<p><code>FOUNDER</code> ties the channel to an account, recognised on join, which may use <code>*</code> as the password. <code>PRIVATE</code> hides the
+  channel from ChanServ <code>LIST</code>, <code>RESTRICTED</code> kicks anyone not on the access list, and <code>SECUREOPS</code> (on for new registrations)
+  checks every <code>+o</code> against the access level, so a <code>v</code> entry never covers <code>@</code>.</p>
+
+<h2 id="takeover">takeover protection</h2>
+<p>ChanServ remembers each registered channel's creation timestamp (TS), as Anope does. If the channel was recreated since ChanServ last saw it
+  (on another server, during a netsplit, or while services were down), ChanServ resets it: default modes, no <code>+k</code>/<code>+i</code>/<code>+l</code>/redirect,
+  empty ban, exception and invite lists, then <code>+r</code>, MLOCK and a locked topic back. Anyone holding ops who isn't the founder, identified, or on the
+  access list at a level that covers the rank loses them. A channel that keeps the TS ChanServ knows, such as one a relinking server brings back, is left alone.</p>
+<p>When services relink, ChanServ sweeps every registered channel, giving ACCESS modes and kicking AKICK (and, with <code>RESTRICTED</code>, unlisted)
+  members who joined in the meantime. ACCESS and AKICK apply on JOIN in every registered channel, not only GUARDed ones.
+  ChanServ itself can't be kicked or deopped (<code>484</code>).</p>
 
 <h2>guard and topiclock</h2>
 <p><code>JOIN</code> makes ChanServ a permanent member, so the channel can never go empty or be squatted. The setting persists across
-  restarts and ChanServ rejoins immediately if kicked. Each time it (re)joins it deops anyone not identified this session, closing the
+  restarts. Each time it (re)joins it deops anyone not identified this session, closing the
   gap where a full ircd restart lets a stranger win the race to an empty channel. <code>TOPICLOCK</code> records the topic and restores
   it when GUARD rejoins, since topics live only in ircd memory.</p>
 
