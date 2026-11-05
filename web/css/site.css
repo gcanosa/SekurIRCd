@@ -100,6 +100,10 @@ table { border-collapse: collapse; width: 100%; margin: 16px 0; font-size: .92re
 th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
 th { color: var(--ink); }
 .tablewrap { overflow-x: auto; }
+.cmp td, .cmp thead th { white-space: nowrap; }
+.cmp td.y { color: var(--ok); }
+.cmp td.n { color: var(--muted); }
+.cmp th:nth-child(2), .cmp td:nth-child(2) { background: var(--panel); color: var(--ink); }
 
 /* docs layout */
 .docs-layout { display: grid; grid-template-columns: 210px minmax(0, 1fr); gap: 40px; padding: 32px 0 64px; }

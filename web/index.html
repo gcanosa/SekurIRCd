@@ -72,6 +72,32 @@
   </div>
 </section>
 
+<section id="compare">
+  <h2>sekurircd --compare</h2>
+  <p>How SekurIRCd stacks up against the most widely deployed IRC daemons, out of the box with no third-party modules.</p>
+  <div class="tablewrap">
+  <table class="cmp">
+    <thead><tr><th></th><th>SekurIRCd</th><th>UnrealIRCd 6</th><th>InspIRCd 4</th><th>Solanum</th><th>ngIRCd</th><th>Ergo</th></tr></thead>
+    <tbody>
+      <tr><th>Language</th><td>C11</td><td>C</td><td>C++</td><td>C</td><td>C</td><td>Go</td></tr>
+      <tr><th>License</th><td class="y">MIT</td><td>GPLv2</td><td>GPLv2</td><td>GPLv2</td><td>GPLv2</td><td class="y">MIT</td></tr>
+      <tr><th>Server linking</th><td class="y">yes</td><td class="y">yes</td><td class="y">yes</td><td class="y">yes</td><td class="y">yes</td><td class="n">no</td></tr>
+      <tr><th>NickServ + ChanServ included</th><td class="y">yes</td><td class="n">no (Anope/Atheme)</td><td class="n">no (Anope/Atheme)</td><td class="n">no (Atheme)</td><td class="n">no</td><td class="y">yes</td></tr>
+      <tr><th>Active open-proxy scanner</th><td class="y">built in</td><td class="n">no</td><td class="n">no</td><td class="n">external (HOPM)</td><td class="n">no</td><td class="n">no</td></tr>
+      <tr><th>DNSBL checks</th><td class="y">built in</td><td class="y">built in</td><td class="y">module</td><td class="y">built in</td><td class="n">no</td><td class="n">via script</td></tr>
+      <tr><th>Native WebSocket</th><td class="y">yes</td><td class="y">yes</td><td class="y">module</td><td class="n">no (removed)</td><td class="n">no</td><td class="y">yes</td></tr>
+      <tr><th>Web chat client shipped</th><td class="y">yes</td><td class="n">no</td><td class="n">no</td><td class="n">no</td><td class="n">no</td><td class="n">no</td></tr>
+      <tr><th>IRCv3 chathistory + multiline</th><td class="y">yes</td><td class="y">yes</td><td class="n">no</td><td class="n">no</td><td class="n">no</td><td class="y">yes</td></tr>
+      <tr><th>Interactive link wizard</th><td class="y">yes</td><td class="n">no</td><td class="n">no</td><td class="n">no</td><td class="n">no</td><td class="n">n/a</td></tr>
+      <tr><th>Runtime dependencies</th><td class="y">OpenSSL only</td><td>several</td><td>per module</td><td>several</td><td class="y">minimal</td><td class="y">none (static)</td></tr>
+      <tr><th>Config format</th><td>TOML</td><td>custom blocks</td><td>XML-like</td><td>custom blocks</td><td>INI</td><td>YAML</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note">Based on each project's public documentation as of November 2026. Spotted something out of date?
+    <a href="https://github.com/gcanosa/SekurIRCd/issues">Open an issue</a> and we'll fix it.</p>
+</section>
+
 <section>
   <h2>isekur --download</h2>
   <p>Our recommended client: <a href="https://github.com/gcanosa/iSekur">iSekur</a>, a small, very colorful terminal IRC client
