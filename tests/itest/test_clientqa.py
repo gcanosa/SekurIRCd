@@ -116,3 +116,19 @@ def test_multiline_crosses_linked_servers():
         snd.send("BATCH -p")
         pm = far.drain(1.0)
         assert any(re.search(r"BATCH \+ml\d+ draft/multiline mlfar", l) for l in pm) and any(l.endswith("PRIVMSG mlfar :pm two") for l in pm), pm
+
+
+def test_live_motd_is_made_from_its_template_and_never_overwritten():
+    import os
+    s = Server(cfg={"messages": {"motd": "m.motd"}, "operators": [{"name": "op", "password": "oppw", "hosts": ["*@*"]}]})
+    open(os.path.join(s.dir, "m.template.motd"), "w").write("from the template\n")
+    with s:
+        live = os.path.join(s.dir, "m.motd")
+        assert open(live).read() == "from the template\n", "a missing live MOTD is created from its template"
+        c = s.client("mo")
+        assert any("from the template" in l for l in c.say("MOTD", 0.4))
+        open(live, "w").write("edited by the admin\n")
+        c.say("OPER op oppw", 0.5)
+        c.say("REHASH", 1.0)
+        assert open(live).read() == "edited by the admin\n", "an existing live file is never replaced"
+        assert any("edited by the admin" in l for l in c.say("MOTD", 0.4))

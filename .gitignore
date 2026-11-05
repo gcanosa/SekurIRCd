@@ -9,6 +9,11 @@
 /config/accounts.json
 /config/klines.json
 /config/tls/*.pem
+# live MOTD/rules/spam filters: the admin's (and the server's), created from config/*.template.* when missing
+/config/ircd.motd
+/config/oper.motd
+/config/ircd.rules
+/config/spamfilters.conf
 /services/services.toml
 /services/*.json
 /services/*.json.bak*

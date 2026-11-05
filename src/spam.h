@@ -1,4 +1,4 @@
-/* Spam protection: content filters (regex rules, see config/spamfilters.conf),
+/* Spam protection: content filters (regex rules, see config/spamfilters.template.conf),
  * a new-connection PM restriction, and per-client recipient/repeat limits.
  * Master switch: [spam] enabled. Everything here is a no-op when it's off.
  * Rules and limits apply to local clients only; each server in a link

@@ -1,6 +1,6 @@
 # Shared helpers for tools/*.sh. Source it, then call `banner` first thing:
 #   source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"; banner
-# The version in the banner is read from src/version.h (falls back to the "powered by" line of config/ircd.motd).
+# The version in the banner is read from src/version.h (falls back to the "powered by" line of config/ircd.template.motd).
 # Clear the screen and show the SekurIRCd banner, centered to the terminal width (colour only on a tty).
 banner() {
   local art=(
@@ -14,7 +14,7 @@ banner() {
   local root; root="$(dirname "${BASH_SOURCE[0]}")/.."
   # src/version.h is the source of truth; the MOTD line is only a fallback (it is hand-edited, so it can drift).
   ver=$(sed -n 's/.*SEKURIRCD_VERSION[[:space:]]*"\([^"]*\)".*/SekurIRCd v\1/p' "$root/src/version.h" 2>/dev/null | head -1)
-  [ -n "$ver" ] || ver=$(sed -n 's/.*powered by \(SekurIRCd v[0-9.]*\).*/\1/p' "$root/config/ircd.motd" 2>/dev/null | head -1)
+  [ -n "$ver" ] || ver=$(sed -n 's/.*powered by \(SekurIRCd v[0-9.]*\).*/\1/p' "$root/config/ircd.template.motd" 2>/dev/null | head -1)
   sub=("small tools  -  secure by default  -  no nonsense" "${ver:-SekurIRCd}" "$url")
   local w=${COLUMNS:-$(tput cols 2>/dev/null || echo 80)} tty=0 i pad line
   [ -t 1 ] && { tty=1; printf '\e[H\e[2J\e[3J'; }

@@ -421,7 +421,7 @@ def dirty_files():
 
 
 def switch(steps, target_sha, park=True):
-    """Run git steps. Tracked files the admin edited locally (e.g. ircd.motd) that
+    """Run git steps. Tracked files the admin edited locally (ircd.motd before 1.3.3 untracked it) that
     the target also changes would make git refuse; keep their edits, park the
     upstream copy next to them as <file>.upstream-<ver>."""
     cur = git("rev-parse", "HEAD")

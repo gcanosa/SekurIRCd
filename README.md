@@ -166,7 +166,7 @@ Website & docs: <https://gcanosa.github.io/SekurIRCd/> (source in [`web/`](web/)
   - **Connection limits** (`[connection]`): total and per-IP caps and the
     connect-flood throttle. Connections a scan probe relays back are exempt.
   - **Flood guard** (`[flood]`) and **spam protection** (`[spam]`, off by
-    default): regex content filters (`config/spamfilters.conf`, managed live
+    default): regex content filters (`config/spamfilters.conf`, made from its template, managed live
     with the oper-only `SPAMFILTER LIST|ADD|DEL`) for
     PRIVMSG/NOTICE/AWAY/QUIT/PART/TOPIC with `block`/`warn`/`kill`/`zline`
     actions, a new-connection PM restriction, and per-client recipient/repeat
@@ -215,7 +215,7 @@ Website & docs: <https://gcanosa.github.io/SekurIRCd/> (source in [`web/`](web/)
 - `PING`/`PONG`, `QUIT`, `WHOIS`, `WHO`, `VERSION`, `TIME`, `AWAY`, `INFO` --
   plus a server-initiated keepalive `PING` that drops unresponsive clients
   after `security.ping_timeout`
-- Message of the Day from `config/ircd.motd`, operator MOTD (`oper.motd`, shown on /OPER and /OPERMOTD) and `/RULES` from `ircd.rules`
+- Message of the Day from `config/ircd.motd` (created from `ircd.template.motd` when missing; yours to edit, git never touches it), operator MOTD (`oper.motd`, shown on /OPER and /OPERMOTD) and `/RULES` from `ircd.rules`
 - File logging (rotating) + console logging, both configurable in TOML, with a
   `debug` switch for protocol-level trace output; console output is
   color-coded by level when attached to a terminal (auto-disabled when piped,
@@ -250,7 +250,7 @@ Website & docs: <https://gcanosa.github.io/SekurIRCd/> (source in [`web/`](web/)
 
 ```
 sekurircd/
-├── config/            # versioned config TEMPLATE (sekurircd.toml + ircd.motd)
+├── config/            # versioned config TEMPLATES (*.template.*); live copies are untracked
 ├── src/               # source (ircd core)
 ├── services/          # the SEPARATE services process (NickServ + ChanServ)
 ├── tests/             # assert-based self-check (tests/unit.c)
@@ -281,7 +281,7 @@ make            # -> bin/sekurircd, bin/services
 
 # 2. configure
 cp config/sekurircd.template.toml config/sekurircd.toml
-cp config/ircd.motd config/ircd.motd   # already present; edit to taste
+# config/ircd.motd, oper.motd, ircd.rules are created from their templates at first start: edit those
 # edit config/sekurircd.toml (port, operators, [links] for services, ...)
 # and services/services.toml for NickServ + ChanServ (see "Services" below)
 
@@ -326,8 +326,8 @@ wraps `--rehash`.
 make
 make install
 #   -> binaries in ~/.local/bin
-#   -> config/sekurircd.template.toml, services.template.toml, ircd.motd in ~/.config/sekurircd
-#      (never overwrites a live sekurircd.toml/services.toml already there)
+#   -> the templates (sekurircd/services/protection .toml, MOTD, rules, spam filters) in ~/.config/sekurircd
+#      (never overwrites a live file there; the ircd makes ircd.motd etc. from the templates when missing)
 #   -> state (pidfiles, logs/) in ~/.local/state/sekurircd/{ircd,services}
 #   -> units in ~/.config/systemd/user
 #      ($XDG_CONFIG_HOME/$XDG_STATE_HOME honored instead of ~/.config, ~/.local/state if set)

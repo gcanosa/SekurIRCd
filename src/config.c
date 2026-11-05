@@ -4,6 +4,7 @@
 
 #include <arpa/inet.h>
 #include "client.h" /* SPAM_TRACK */
+#include "log.h"
 #include "proto.h"
 #include "version.h"
 #include "vendor/toml.h"
@@ -185,16 +186,41 @@ static void resolve_against_config_dir(const config_t *cfg, const char *rel, cha
     snprintf(out, outsz, "%s/%s", dir, rel);
 }
 
+/* The live MOTD/rules/spam-filter files are the admin's, never git's: the repo ships "ircd.template.motd" etc. and a
+ * missing live file is created from the template next to it ("x.ext" <- "x.template.ext") the first time it is
+ * looked up -- at startup and on every REHASH. An existing file is never touched. */
+static void seed_from_template(const char *path) {
+    if (!path[0] || access(path, F_OK) == 0) return;
+    char tpl[CFG_PATH + 16];
+    const char *base = strrchr(path, '/'), *dot = strrchr(base ? base + 1 : path, '.');
+    if (dot) snprintf(tpl, sizeof tpl, "%.*s.template%s", (int)(dot - path), path, dot);
+    else snprintf(tpl, sizeof tpl, "%s.template", path);
+    FILE *in = fopen(tpl, "rb");
+    if (!in) return;
+    FILE *outf = fopen(path, "wb");
+    if (outf) {
+        char buf[4096];
+        size_t n;
+        while ((n = fread(buf, 1, sizeof buf, in)) > 0) fwrite(buf, 1, n, outf);
+        fclose(outf);
+        log_info("config", "%s was missing: created it from %s", path, tpl);
+    }
+    fclose(in);
+}
+
 void config_motd_path(const config_t *cfg, char *out, size_t outsz) {
     resolve_against_config_dir(cfg, cfg->messages.motd, out, outsz);
+    seed_from_template(out);
 }
 
 void config_oper_motd_path(const config_t *cfg, char *out, size_t outsz) {
     resolve_against_config_dir(cfg, cfg->messages.oper_motd, out, outsz);
+    seed_from_template(out);
 }
 
 void config_rules_path(const config_t *cfg, char *out, size_t outsz) {
     resolve_against_config_dir(cfg, cfg->messages.rules, out, outsz);
+    seed_from_template(out);
 }
 
 int config_klines_path(const config_t *cfg, char *out, size_t outsz) {
@@ -206,6 +232,7 @@ int config_klines_path(const config_t *cfg, char *out, size_t outsz) {
 int config_spamfilters_path(const config_t *cfg, char *out, size_t outsz) {
     if (cfg->spam.filters_file[0] == '\0') return 0;
     resolve_against_config_dir(cfg, cfg->spam.filters_file, out, outsz);
+    seed_from_template(out);
     return 1;
 }
 

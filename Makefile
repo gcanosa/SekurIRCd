@@ -176,9 +176,10 @@ clean:
 #                                             (default state dir ~/.local/state/sekurircd)
 #   $(UNITDIR)/{sekurircd,services}.service (default ~/.config/systemd/user)
 #
-# Only ships config/*.template.toml + ircd.motd -- never writes a live
-# sekurircd.toml/services.toml itself (those need operator-chosen operators/
-# secrets), matching the existing "cp *.template.toml" quick-start flow.
+# Only ships templates (config/*.template.*), never a live file: sekurircd.toml/services.toml
+# need operator-chosen operators/secrets (the "cp *.template.toml" quick-start flow), and the ircd
+# creates a missing ircd.motd/oper.motd/ircd.rules/spamfilters.conf from its template at start,
+# so a reinstall never overwrites the ones you (or SPAMFILTER ADD) edited.
 PREFIX     ?= $(HOME)/.local
 SYSCONFDIR ?= $(shell echo "$${XDG_CONFIG_HOME:-$$HOME/.config}/sekurircd")
 STATEDIR   ?= $(shell echo "$${XDG_STATE_HOME:-$$HOME/.local/state}/sekurircd")
@@ -196,9 +197,9 @@ install: all
 	sed -e 's|^chanserv_pidfile = ""|chanserv_pidfile = "$(STATEDIR)/services/services.pid"|' \
 	    config/sekurircd.template.toml > $(SYSCONFDIR)/sekurircd.template.toml
 	chmod 644 $(SYSCONFDIR)/sekurircd.template.toml
-	install -m644 config/protection.template.toml config/spamfilters.conf $(SYSCONFDIR)/
+	install -m644 config/protection.template.toml config/spamfilters.template.conf $(SYSCONFDIR)/
 	install -m644 services/services.template.toml $(SYSCONFDIR)/
-	test -f $(SYSCONFDIR)/ircd.motd || install -m644 config/ircd.motd $(SYSCONFDIR)/
+	install -m644 config/ircd.template.motd config/oper.template.motd config/ircd.template.rules $(SYSCONFDIR)/
 	sed -e 's|/usr/local/bin|$(PREFIX)/bin|g' -e 's|/etc/sekurircd|$(SYSCONFDIR)|g' -e 's|/var/lib/sekurircd|$(STATEDIR)|g' \
 	    systemd/sekurircd.service > $(UNITDIR)/sekurircd.service
 	sed -e 's|/usr/local/bin|$(PREFIX)/bin|g' -e 's|/etc/sekurircd|$(SYSCONFDIR)|g' -e 's|/var/lib/sekurircd|$(STATEDIR)|g' \

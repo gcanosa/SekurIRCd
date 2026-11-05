@@ -4,17 +4,22 @@
 #
 # This is a documented starting point, not a live config. To run a server:
 #
-#   1. Copy it (and ircd.motd) next to where you keep live config:
+#   1. Copy it next to where you keep live config:
 #
 #          cp config/sekurircd.template.toml /etc/sekurircd/sekurircd.toml
-#          cp config/ircd.motd               /etc/sekurircd/ircd.motd
-#          cp config/oper.motd config/ircd.rules /etc/sekurircd/
+#
+#      The MOTD, oper MOTD and rules (ircd.motd, oper.motd, ircd.rules) are
+#      created there from config/*.template.* the first time the server
+#      starts, if missing; edit those copies (git never touches them). Copy
+#      the templates there too when the config lives outside the checkout:
+#
+#          cp config/ircd.template.motd config/oper.template.motd config/ircd.template.rules /etc/sekurircd/
 #
 #      Optional, recommended -- the Protection bundle (DNSBL, proxy scanner,
 #      connection limits, flood and spam protection in one file):
 #
 #          cp config/protection.template.toml /etc/sekurircd/protection.toml
-#          cp config/spamfilters.conf         /etc/sekurircd/
+#          cp config/spamfilters.template.conf /etc/sekurircd/   (spamfilters.conf is made from it)
 #
 #   2. Edit the copy to taste (port, network name, logging, security limits,
 #      operators, admin contact, vhosts, channel-creation policy, ...).

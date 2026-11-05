@@ -97,7 +97,7 @@ window = 1.0
 #   1. New-connection restriction: a fresh connection can't PM users for
 #      `new_user_period` (channels stay open, and it can always message
 #      services and opers, so nobody is locked out of asking for help).
-#   2. Regex content filters from `filters_file` (see config/spamfilters.conf
+#   2. Regex content filters from `filters_file` (see config/spamfilters.template.conf
 #      for the format and examples), plus /SPAMFILTER for live management.
 #   3. Recipient/repeat limits: messaging more than `max_targets` different
 #      people/channels, or sending the same text to `max_repeat` of them,

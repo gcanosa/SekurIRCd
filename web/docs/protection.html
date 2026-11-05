@@ -188,7 +188,7 @@ window = 1.0       # ...within this many seconds is disconnected</pre>
 <ol>
 <li><strong>New-connection restriction.</strong> A fresh connection cannot PM users for <code>new_user_period</code> (default 30s). Channels stay open, and anyone can
   always message services and opers, so nobody is locked out of asking for help.</li>
-<li><strong>Content filters.</strong> Regex rules from <code>filters_file</code> (an annotated example ships as <code>config/spamfilters.conf</code>) are matched
+<li><strong>Content filters.</strong> Regex rules from <code>filters_file</code> (an annotated example ships as <code>config/spamfilters.template.conf</code>; the live <code>spamfilters.conf</code> is created from it) are matched
   against <code>PRIVMSG</code>/<code>NOTICE</code> to users and channels, and against <code>AWAY</code>, <code>QUIT</code>, <code>PART</code> and <code>TOPIC</code> text.
   Matching is case-insensitive POSIX ERE, run after mIRC colour and bold codes are stripped.</li>
 <li><strong>Recipient and repeat limits.</strong> Messaging more than <code>max_targets</code> different people or channels, or sending the same text (8+ characters)

@@ -1,5 +1,12 @@
 [
   {
+    "tag": "Unreleased",
+    "date": "",
+    "changes": [
+      "The MOTD, oper MOTD, rules and spam filters are yours, not git's: the repo now ships config/ircd.template.motd, oper.template.motd, ircd.template.rules and spamfilters.template.conf, and the live ircd.motd/oper.motd/ircd.rules/spamfilters.conf are untracked (.gitignore). The ircd creates a missing one from its template at start and on REHASH and never touches an existing one. Upgrading keeps your edited files as they are; a file you never edited is recreated from the new template. make install no longer overwrites an installed spamfilters.conf (it lost SPAMFILTER ADD rules on every reinstall)"
+    ]
+  },
+  {
     "tag": "v1.3.2",
     "date": "2026-11-05",
     "changes": [
