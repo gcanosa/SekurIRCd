@@ -81,3 +81,38 @@ def test_liststart_and_default_modes():
         c.say("JOIN #new")
         assert any(" 324 lst #new +nt" in l for l in c.say("MODE #new", 0.4)), "default_modes defaults to nt"
         assert any(l.endswith(" 321 lst Channel :Users  Name") for l in c.say("LIST", 0.4))
+
+
+def test_multiline_crosses_linked_servers():
+    n = Network()
+    n.add("a")
+    n.add("b", parent="a")
+    n.add("c", parent="b")
+    with n:
+        caps = ["draft/multiline", "batch", "message-tags", "draft/chathistory", "server-time"]
+        snd = n.client("a", "mlsnd", caps=caps)
+        far = n.client("c", "mlfar", caps=caps)          # two hops away: relayed through b
+        old = n.client("c", "mlold")                      # no multiline cap
+        for c in (snd, far, old):
+            c.say("JOIN #ml2", 0.5)
+        far.drain(0.5), old.drain(0.2)
+        a, b = "x" * 300, "y" * 300
+        snd.send("BATCH +r draft/multiline #ml2")
+        snd.send(f"@batch=r PRIVMSG #ml2 :{a}")
+        snd.send(f"@batch=r;draft/multiline-concat PRIVMSG #ml2 :{b}")
+        snd.send("@batch=r PRIVMSG #ml2 :last line")
+        snd.send("BATCH -r")
+        got = far.drain(1.0)
+        assert any(re.search(r"BATCH \+ml\d+ draft/multiline #ml2", l) for l in got), got
+        assert any(l.endswith(f"PRIVMSG #ml2 :{a}") for l in got) and any("multiline-concat" in l and l.endswith(f":{b}") for l in got), got
+        assert any(l.endswith("PRIVMSG #ml2 :last line") for l in got), got
+        plain = [l for l in old.drain(0.5) if " PRIVMSG " in l]
+        assert len(plain) == 2 and plain[0].endswith(":" + (a + b)[:419]) and plain[1].endswith(":last line"), plain
+        h = far.say("CHATHISTORY LATEST #ml2 * 5", 0.6)
+        assert any("BATCH +hml" in l for l in h) and any(l.endswith(":last line") for l in h), "history on c keeps the batch: " + str(h)
+        snd.send("BATCH +p draft/multiline mlfar")
+        snd.send("@batch=p PRIVMSG mlfar :pm one")
+        snd.send("@batch=p PRIVMSG mlfar :pm two")
+        snd.send("BATCH -p")
+        pm = far.drain(1.0)
+        assert any(re.search(r"BATCH \+ml\d+ draft/multiline mlfar", l) for l in pm) and any(l.endswith("PRIVMSG mlfar :pm two") for l in pm), pm

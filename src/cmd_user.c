@@ -75,6 +75,52 @@ typedef struct ml_state {
 } ml_state_t;
 
 static const ml_state_t *g_ml; /* set around send_msg for a finished batch: deliver() then fans it out multiline-aware */
+
+/* A batch from another server: its MLINE lines wait here (keyed by msgid: lines relayed from different links may
+ * interleave) until its flattened PRIVMSG/NOTICE arrives and cmd_deliver_remote_message takes them. Bounded: the
+ * oldest slot is reused, and lines whose message never came are dropped after ML_PENDING_TTL. */
+#define ML_PENDING_MAX 32
+#define ML_PENDING_TTL 30
+static struct { ml_state_t ml; char msgid[48]; const client_t *from; time_t at; } g_mlp[ML_PENDING_MAX];
+
+void cmd_ml_part(server_t *srv, client_t *from, const char *msgid, int concat, const char *text) {
+    time_t now = time(NULL);
+    int slot = -1, oldest = 0;
+    for (int i = 0; i < ML_PENDING_MAX; i++) {
+        if (g_mlp[i].msgid[0] && now - g_mlp[i].at > ML_PENDING_TTL) g_mlp[i].msgid[0] = '\0';
+        if (g_mlp[i].msgid[0] && g_mlp[i].from == from && strcmp(g_mlp[i].msgid, msgid) == 0) { slot = i; break; }
+        if (!g_mlp[oldest].msgid[0]) continue;
+        if (!g_mlp[i].msgid[0] || g_mlp[i].at < g_mlp[oldest].at) oldest = i;
+    }
+    if (slot < 0) {
+        slot = oldest;
+        memset(&g_mlp[slot].ml, 0, sizeof g_mlp[slot].ml);
+        snprintf(g_mlp[slot].msgid, sizeof g_mlp[slot].msgid, "%s", msgid);
+        g_mlp[slot].from = from;
+    }
+    ml_state_t *ml = &g_mlp[slot].ml;
+    g_mlp[slot].at = now;
+    if (ml->n >= ML_MAX_LINES || (ml->n == 0 && concat)) return;
+    snprintf(ml->text[ml->n], sizeof ml->text[0], "%.*s", srv->cfg.messages.max_message_length, text);
+    if (ml->bytes + (int)strlen(ml->text[ml->n]) > ML_MAX_BYTES) return;
+    ml->bytes += (int)strlen(ml->text[ml->n]);
+    ml->concat[ml->n++] = concat;
+}
+
+/* The waiting batch for this message, removed from the store (its storage stays valid until the next cmd_ml_part). */
+static ml_state_t *ml_take(const client_t *from, const char *msgid) {
+    for (int i = 0; i < ML_PENDING_MAX; i++)
+        if (g_mlp[i].msgid[0] && g_mlp[i].from == from && strcmp(g_mlp[i].msgid, msgid) == 0) {
+            g_mlp[i].msgid[0] = '\0';
+            return g_mlp[i].ml.n ? &g_mlp[i].ml : NULL;
+        }
+    return NULL;
+}
+
+/* Our own finished batch: its lines go to the other servers ahead of the flattened message (see netsync_mline). */
+static void ml_to_links(server_t *srv, client_t *cl, const char *target, client_t *remote_target, const char *msgid) {
+    for (int i = 0; g_ml && i < g_ml->n; i++) netsync_mline(srv, cl, target, remote_target, msgid, g_ml->concat[i], g_ml->text[i]);
+}
 static void censor_text(const server_t *srv, char *text);
 static void strip_formatting(char *dst, size_t dstsz, const char *src);
 
@@ -488,6 +534,7 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
                 if ((chan->modes & CMODE_AUDITORIUM) && m && !channel_member_visible(chan, m, mm)) continue;
                 if (channel_rank_level(mm->rank) >= min_level) deliver(mm->client, cl, lines, &x);
             }
+            ml_to_links(srv, cl, target, NULL, x.msgid);
             { irc_tag_t wt[1 + MAX_CLIENT_TAGS]; int nwt = wire_tags(&x, wt); netsync_message(srv, cl, verb, target, NULL, is_tagmsg ? NULL : outtext, wt, nwt); }
             if (cl->caps & CAP_ECHO_MESSAGE) deliver(cl, cl, lines, &x); /* echo-message clients (The Lounge, gamja, Kiwi) only show what comes back */
             return;
@@ -499,6 +546,7 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
             if ((chan->modes & CMODE_AUDITORIUM) && m && !channel_member_visible(chan, m, mm)) continue;
             deliver(mm->client, cl, lines, &x);
         }
+        ml_to_links(srv, cl, target, NULL, x.msgid);
         { irc_tag_t wt[1 + MAX_CLIENT_TAGS]; int nwt = wire_tags(&x, wt); netsync_message(srv, cl, verb, target, NULL, is_tagmsg ? NULL : outtext, wt, nwt); }
         const char *hb = srv->cfg.messages.history_size > 0 ? hist_body(srv, &x, outtext) : NULL;
         if (hb) {
@@ -525,6 +573,7 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
         if (dst->remote) { /* on another server: it runs the recipient-side checks and delivers */
             irc_tag_t wt[1 + MAX_CLIENT_TAGS];
             int nwt = wire_tags(&x, wt);
+            ml_to_links(srv, cl, target, dst, x.msgid);
             netsync_message(srv, cl, verb, target, dst, is_tagmsg ? NULL : textbuf, wt, nwt);
         } else {
             deliver(dst, cl, lines, &x);
@@ -1753,14 +1802,31 @@ void cmd_redact(server_t *srv, client_t *cl, irc_message_t *msg) {
 /* A message from a user on another server, for our local users: PM to a local user (UID target) or a channel (maybe
  * @#chan). The origin server already ran the sender-side checks and any +S/+G text rewriting; we run the recipient-side
  * ones (PM) and fan it out to OUR members only. */
+static void deliver_remote(server_t *srv, client_t *from, const char *verb, const char *target, const char *text,
+                           const irc_message_t *tagsrc, msg_extra_t x);
+
 void cmd_deliver_remote_message(server_t *srv, client_t *from, const char *verb, const char *target, const char *text,
                                 const irc_message_t *tagsrc) {
-    int is_tagmsg = strcmp(verb, "TAGMSG") == 0;
-    int is_notice = is_tagmsg || strcmp(verb, "NOTICE") == 0;
-    msg_extra_t x = {.tagmsg = is_tagmsg};
+    msg_extra_t x = {.tagmsg = strcmp(verb, "TAGMSG") == 0};
     server_next_msgid(srv, x.msgid, sizeof x.msgid);
     for (int i = 0; tagsrc && i < tagsrc->ntags; i++)
         if (strcmp(tagsrc->tags[i].key, "msgid") == 0) snprintf(x.msgid, sizeof x.msgid, "%s", tagsrc->tags[i].val);
+    /* its MLINE lines came first: deliver and keep it as the multiline batch it was (deliver_ml, ml_hist_text) */
+    ml_state_t *ml = x.tagmsg ? NULL : ml_take(from, x.msgid);
+    if (ml) {
+        client_t *dst = strlen(target) == UID_LEN && !strchr(target, '#') ? netsync_find_uid(srv, target) : NULL;
+        snprintf(ml->target, sizeof ml->target, "%s", dst ? dst->nick : target);
+        snprintf(ml->verb, sizeof ml->verb, "%s", verb);
+        g_ml = ml;
+    }
+    deliver_remote(srv, from, verb, target, text, tagsrc, x);
+    g_ml = NULL;
+}
+
+static void deliver_remote(server_t *srv, client_t *from, const char *verb, const char *target, const char *text,
+                           const irc_message_t *tagsrc, msg_extra_t x) {
+    int is_tagmsg = x.tagmsg;
+    int is_notice = is_tagmsg || strcmp(verb, "NOTICE") == 0;
     if (tagsrc) collect_client_tags(from, tagsrc, &x);
     char prefix[320];
     client_prefix(from, prefix, sizeof prefix);

@@ -1139,6 +1139,20 @@ static void handle_message(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     fwd_message(srv, lc, msg, NULL);
 }
 
+/* :<uid> MLINE <#chan|uid> <msgid> <c|-> :<text> -- one line of a multiline batch; its PRIVMSG/NOTICE follows. Passed on
+ * the way the message itself will be, and kept for it when it is for us (a channel, or one of our users). */
+static void handle_mline(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
+    client_t *from = src_user(srv, lc, msg->prefix);
+    if (!from || msg->nparams < 4) return;
+    const char *target = msg->params[0];
+    char fl[700];
+    irc_build(fl, sizeof fl, NULL, 0, msg->prefix, "MLINE", (const char *[]){target, msg->params[1], msg->params[2]}, 3, msg->params[3]);
+    client_t *tu = strlen(target) == UID_LEN ? netsync_find_uid(srv, target) : NULL;
+    if (tu && tu->remote) { route_to(srv, tu->nserver, fl); return; }
+    if (!tu) flood(srv, lc, fl);
+    cmd_ml_part(srv, from, msg->params[1], msg->params[2][0] == 'c', msg->params[3]);
+}
+
 /* :<uid> REDACT <#chan|uid> <msgid> [:reason] -- authorised by the sender's server; we forget it and tell our users. */
 static void handle_redact(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     client_t *from = src_user(srv, lc, msg->prefix);
@@ -1436,6 +1450,7 @@ void netsync_handle(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     else if (!strcmp(c, "RQUERY")) handle_rquery(srv, lc, msg);
     else if (!strcmp(c, "RENAME")) handle_rename(srv, lc, msg);
     else if (!strcmp(c, "REDACT")) handle_redact(srv, lc, msg);
+    else if (!strcmp(c, "MLINE")) handle_mline(srv, lc, msg);
     else if (!strcmp(c, "RSQUIT")) handle_rsquit(srv, lc, msg);
     else if (!strcmp(c, "SVCRELAY")) handle_svcrelay(srv, lc, msg);
     else if (!strcmp(c, "CERTFP")) handle_certfp(srv, lc, msg);
@@ -1599,6 +1614,15 @@ void netsync_message(server_t *srv, client_t *from, const char *verb, const char
     char line[1500];
     const char *wire = remote_target ? remote_target->uid : target;
     irc_build(line, sizeof line, tags, ntags, from->uid, verb, (const char *[]){wire}, 1, text);
+    if (remote_target) route_to(srv, remote_target->nserver, line); else flood(srv, NULL, line);
+}
+
+void netsync_mline(server_t *srv, client_t *from, const char *target, client_t *remote_target, const char *msgid, int concat,
+                   const char *text) {
+    if (!from->uid[0] || !netsync_has_links(srv)) return;
+    char line[700];
+    const char *wire = remote_target ? remote_target->uid : target;
+    irc_build(line, sizeof line, NULL, 0, from->uid, "MLINE", (const char *[]){wire, msgid, concat ? "c" : "-"}, 3, text);
     if (remote_target) route_to(srv, remote_target->nserver, line); else flood(srv, NULL, line);
 }
 

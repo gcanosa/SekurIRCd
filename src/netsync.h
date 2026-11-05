@@ -21,6 +21,7 @@
  *               :<uid> PART <#chan> :<reason>    :<uid> KICK <#chan> <uid> :<reason>
  *               :<uid> TOPIC <#chan> :<text>     :<uid> MODE <#chan> <modes> [args]   :<uid> UMODE <+modes>
  *               [@tags] :<uid> PRIVMSG|NOTICE|TAGMSG <target> [:text]     (target: uid, #chan, or @#chan etc.)
+ *               :<uid> MLINE <target> <msgid> <c|-> :text  one line of a multiline batch, ahead of its flattened PRIVMSG/NOTICE
  *               :<uid> INVITE <uid> <#chan>      :<uid> AWAY [:msg]           :<uid> SETNAME :<realname>
  *               :<sid> CHGHOST <uid> <user> <host>   :<sid> ACCOUNT <uid> <account|*>
  *               :<uid> KILL <uid> :<reason>      :<sid> SQUIT <sid> :<reason>
@@ -119,6 +120,12 @@ void netsync_invite(struct server *srv, struct client *from, struct client *targ
  * a ready "@k=v;k2=v2" string or "" . A target that is a local user needs no relay (returns without sending). */
 /* REDACT: to every server for a channel, or to the recipient's server for a private message. */
 void netsync_redact(struct server *srv, struct client *from, const char *chan, struct client *dst, const char *msgid, const char *reason);
+/* One line of a draft/multiline batch, sent just before the batch's flattened PRIVMSG/NOTICE (same msgid):
+ * ":<uid> MLINE <target> <msgid> <c|-> :<text>" (c: draft/multiline-concat). Servers older than 1.3.2 ignore the
+ * verb and deliver the flattened message; newer ones rebuild the batch (cmd_ml_part / cmd_deliver_remote_message). */
+void netsync_mline(struct server *srv, struct client *from, const char *target, struct client *remote_target,
+                   const char *msgid, int concat, const char *text);
+void cmd_ml_part(struct server *srv, struct client *from, const char *msgid, int concat, const char *text);
 void netsync_message(struct server *srv, struct client *from, const char *verb, const char *target,
                      struct client *remote_target, const char *text, const irc_tag_t *tags, int ntags);
 void netsync_kill(struct server *srv, struct client *oper, struct client *target, const char *reason);

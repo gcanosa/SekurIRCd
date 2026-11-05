@@ -1,5 +1,12 @@
 [
   {
+    "tag": "Unreleased",
+    "date": "",
+    "changes": [
+      "draft/multiline across linked servers: a batch sent on one server reached users on the others as one flattened line cut at 419 bytes, and was stored that way in their CHATHISTORY. Its lines now travel with it (a new MLINE link line just before the message), so users on every server get the same multiline batch, or one message per line without the cap, and every server's history keeps it whole. Servers older than 1.3.3 ignore MLINE and still deliver the flattened message, so mixed networks keep working (a pre-1.3.3 server in the middle of a path flattens what passes through it)"
+    ]
+  },
+  {
     "tag": "v1.3.2",
     "date": "2026-11-05",
     "changes": [
