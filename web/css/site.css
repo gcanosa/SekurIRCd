@@ -90,6 +90,7 @@ pre {
 
 /* grid cards */
 .grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); }
+.grid.g4 { grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
 .card { border: 1px solid var(--border); border-radius: 8px; padding: 16px 18px; background: var(--panel); }
 .card h3 { margin: 0 0 6px; font-size: 1rem; }
 .card h3::before { content: "// "; color: var(--link); }
@@ -141,3 +142,10 @@ a.card { color: inherit; text-decoration: none; display: block; }
 a.card:hover { border-color: var(--link); color: inherit; }
 a.card:hover h3 { color: var(--link); }
 
+/* download card OS icons (Simple Icons, CC0), tinted via mask so they follow the theme */
+.os { float: right; width: 28px; height: 28px; margin-left: 10px; background: var(--muted); -webkit-mask: var(--i) center / contain no-repeat; mask: var(--i) center / contain no-repeat; }
+a.card:hover .os { background: var(--link); }
+.os-apple { --i: url(../img/os/apple.svg); }
+.os-linux { --i: url(../img/os/linux.svg); }
+.os-raspberrypi { --i: url(../img/os/raspberrypi.svg); }
+.os-source { --i: url(../img/os/source.svg); }
