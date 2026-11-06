@@ -144,3 +144,23 @@ def test_link_allowed_ips_rejects_other_sources():
         except ConnectionResetError:
             data = b""  # closed with our unread bytes still queued -> RST: also a rejection
         assert data in (b"", b"timeout") and b"SERVER" not in data, data
+
+
+def test_webirc_secure_and_forwarded_https_grant_z():
+    cfg = {"webirc": [{"name": "gw", "password": "gwpass", "hosts": ["127.0.0.1"]}],
+           "websocket": {"enabled": True, "port": 0, "trusted_proxies": ["127.0.0.1"]}}
+    s = Server(cfg=cfg)
+    s.cfg["websocket"]["port"] = s.ws_port
+    with s:
+        c = s.client("ws1", register=False, extra=["WEBIRC gwpass kiwi h.example.org 198.51.100.9 :secure"])
+        c.send("NICK ws1")
+        c.send("USER ws1 0 * :x")
+        c.expect(r" 001 ")
+        assert "z" in c.say("MODE ws1")[-1].split()[-1]
+        p = s.client("plain")
+        assert "z" not in p.say("MODE plain")[-1].split()[-1]
+        sock = ws_connect(s.ws_port, "X-Forwarded-Proto: https\r\n")
+        frames = ws_session(sock, "wsz")
+        sock.sendall(ws_frame("MODE wsz"))
+        out, _ = ws_parse(ws_read(sock, 0.8))
+        assert any(" 221 wsz " in t and "z" in t.split()[-1] for o, t in frames + out), (frames + out)[-3:]

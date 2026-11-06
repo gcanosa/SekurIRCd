@@ -68,3 +68,17 @@ def test_oper_demotion_drops_oper_only_modes():
         r = boss.say("MODE boss -o")
         assert any("MODE boss :-o" in l or "-o" in l for l in r), r
         assert "q" not in " ".join(boss.say("MODE boss")).split(" 221 boss ")[-1]
+
+
+def test_oper_modes_default_and_per_login():
+    cfg = {"security": {"oper_modes": "+oswI"}, "operators": [
+        {"name": "boss", "password": "bosspw", "hosts": ["*@*"], "modes": "+osW"},
+        {"name": "junior", "password": "juniorpw", "hosts": ["*@*"]},
+    ]}
+    with Server(cfg=cfg) as s:
+        boss = oper(s, "boss")
+        umodes = boss.say("MODE boss")[-1].split()[-1]
+        assert "W" in umodes and "I" not in umodes, umodes  # the login's own modes replace the default
+        jr = oper(s, "jr", "junior", "juniorpw")
+        umodes = jr.say("MODE jr")[-1].split()[-1]
+        assert "I" in umodes and "o" in umodes and "W" not in umodes, umodes

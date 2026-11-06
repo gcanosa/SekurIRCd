@@ -114,6 +114,17 @@ void *client_list_idle(void *list, int n) {
     return NULL;
 }
 
+unsigned client_umode_bit(char c) {
+    switch (c) {
+        case 'i': return UMODE_I;        case 'w': return UMODE_W;          case 'd': return UMODE_DEAF;
+        case 'T': return UMODE_D;        case 's': return UMODE_S;          case 'Z': return UMODE_SECUREONLY;
+        case 'p': return UMODE_P;        case 'I': return UMODE_HIDEIDLE;   case 'R': return UMODE_REGONLY;
+        case 'D': return UMODE_NOPM;     case 'B': return UMODE_B;          case 'g': return UMODE_G;
+        case 'H': return UMODE_H;        case 'q': return UMODE_Q;          case 'W': return UMODE_WHOISNOTE;
+        default:  return 0;
+    }
+}
+
 void client_mode_string(const client_t *cl, char *out, size_t outsz) {
     char modestr[32] = "+";
     size_t p = 1;

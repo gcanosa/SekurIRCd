@@ -17,6 +17,7 @@ typedef struct {
     char key[64];       /* Sec-WebSocket-Key */
     char origin[256];   /* "" if absent */
     int text_proto;     /* client offered the text.ircv3.net subprotocol */
+    int https;          /* X-Forwarded-Proto is https at every hop -- only believed from a trusted proxy */
     char forwarded[256]; /* raw X-Forwarded-For (else X-Real-IP) value, "" if absent -- see ws_forwarded_client */
 } ws_request_t;
 

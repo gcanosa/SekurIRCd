@@ -242,6 +242,9 @@ const char *client_invite_key(client_t *cl);
  * (server_send_welcome) both report. */
 void client_mode_string(const client_t *cl, char *out, size_t outsz);
 
+/* User-facing umode letter -> UMODE_* bit, for the flag modes config can grant (0 = not one of them). */
+unsigned client_umode_bit(char c);
+
 /* Queue a raw line (no CRLF) for sending; appends CRLF, grows sbuf, and marks
  * `cl` quitting with "SendQ exceeded" if it would exceed SENDQ_MAX. */
 void client_send(client_t *cl, const char *line);

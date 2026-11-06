@@ -32,6 +32,23 @@ static int is_valid_level(const char *s) {
 
 /* self-togglable user modes (client.USER_MODE_SELF) */
 #define USER_MODE_SELF "iwdTsBgZ"
+/* what /OPER may add: the self modes plus p I R D and the oper-only H q W (never x, r, z, S) */
+#define OPER_MODE_OK USER_MODE_SELF "pIRDHqW"
+
+/* "+swW" -> "swW" in place: drops '+' and 'o' (always given); 0, or -1 with errbuf set on a letter /OPER can't grant. */
+static int norm_oper_modes(char *m, const char *field, char *errbuf, size_t errbufsz) {
+    char *w = m;
+    for (const char *c = m; *c; c++) {
+        if (*c == '+' || *c == 'o') continue;
+        if (!strchr(OPER_MODE_OK, *c) || strchr(m, *c) < c) {
+            snprintf(errbuf, errbufsz, "%s: '%c' is not a mode /OPER can set (allowed: %s)", field, *c, OPER_MODE_OK);
+            return -1;
+        }
+        *w++ = *c;
+    }
+    *w = '\0';
+    return 0;
+}
 /* argument-free channel modes a deployment may set as a default
  * (channel.CHAN_MODES - MODE_ARG - {"r"}) */
 #define CHAN_FLAG_MODES "niptsmz"
@@ -363,6 +380,7 @@ void config_defaults(config_t *out) {
     out->security.host_masking_token_bytes = 4;
     out->security.oper_host_masking = 0;
     snprintf(out->security.oper_host_format, CFG_STR, "netadmin.{network}");
+    snprintf(out->security.oper_modes, sizeof out->security.oper_modes, "sw");
     for (int i = 0; i < N_DEFAULT_RESERVED_NICKS; i++)
         snprintf(out->security.reserved_nicks[i], CFG_STR, "%s", DEFAULT_RESERVED_NICKS[i]);
     out->security.n_reserved_nicks = N_DEFAULT_RESERVED_NICKS;
@@ -569,6 +587,8 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
     if (cfg_get_str(sec, "klines_file", "", out->security.klines_file, CFG_PATH, errbuf, errbufsz, "security.klines_file")) return -1;
     if (cfg_get_str(sec, "protection_file", "protection.toml", out->security.protection_file, CFG_PATH, errbuf, errbufsz, "security.protection_file")) return -1;
     if (cfg_get_str(sec, "default_user_modes", "", out->security.default_user_modes, sizeof out->security.default_user_modes, errbuf, errbufsz, "security.default_user_modes")) return -1;
+    if (cfg_get_str(sec, "oper_modes", "+osw", out->security.oper_modes, sizeof out->security.oper_modes, errbuf, errbufsz, "security.oper_modes")) return -1;
+    if (norm_oper_modes(out->security.oper_modes, "security.oper_modes", errbuf, errbufsz)) return -1;
     if (cfg_get_str(sec, "oper_auto_join", "", out->security.oper_auto_join, CFG_STR, errbuf, errbufsz, "security.oper_auto_join")) return -1;
     if (cfg_get_str(sec, "die_password", "", out->security.die_password, CFG_STR, errbuf, errbufsz, "security.die_password")) return -1;
     if (cfg_get_str(sec, "die_password_hash", "", out->security.die_password_hash, CFG_STR, errbuf, errbufsz, "security.die_password_hash")) return -1;
@@ -753,6 +773,10 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
                 /* privileges = [] is an explicit "none of the restricted commands" -- distinct from the key being absent (everything). */
                 if (toml_key_exists(o, "privileges") && npv == 0) op->privs = 0x100u; /* only the unrestricted commands */
             }
+            snprintf(fn, sizeof fn, "operators[%d].modes", i);
+            if (cfg_get_str(o, "modes", "", op->modes, sizeof op->modes, errbuf, errbufsz, fn)) return -1;
+            if (norm_oper_modes(op->modes, fn, errbuf, errbufsz)) return -1;
+            if (toml_key_exists(o, "modes") && !op->modes[0]) snprintf(op->modes, sizeof op->modes, "+"); /* modes = "+o": just o, not the default */
             for (int j = 0; j < op->n_hosts; j++) {
                 if (!op->hosts[j][0] || strpbrk(op->hosts[j], " \t\r\n")) {
                     snprintf(errbuf, errbufsz, "operators[%d].hosts[%d] must be a non-empty mask with no whitespace", i, j);

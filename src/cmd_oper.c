@@ -44,11 +44,26 @@ static void finish_oper(server_t *srv, client_t *cl, const char *op_name, int pw
     }
 
     cl->oper_fails = 0;
-    cl->umodes |= UMODE_O | UMODE_S | UMODE_W;
     snprintf(cl->oper_name, sizeof cl->oper_name, "%s", op_name);
     cl->oper_privs = OPER_PRIV_ALL; /* a login without `privileges` keeps today's all-powerful behaviour */
-    for (int i = 0; i < srv->cfg.n_operators; i++)
-        if (strcmp(srv->cfg.operators[i].name, op_name) == 0 && srv->cfg.operators[i].privs) cl->oper_privs = srv->cfg.operators[i].privs;
+    const char *om = srv->cfg.security.oper_modes;
+    for (int i = 0; i < srv->cfg.n_operators; i++) {
+        const cfg_operator_t *op = &srv->cfg.operators[i];
+        if (strcmp(op->name, op_name) != 0) continue;
+        if (op->privs) cl->oper_privs = op->privs;
+        if (op->modes[0]) om = op->modes;
+    }
+    /* "+o" plus whichever configured modes weren't already on ("+" in om is a login's explicit "just o") */
+    char added[32] = "+o";
+    size_t na = 2;
+    if (!(cl->umodes & UMODE_O)) cl->umodes |= UMODE_O; else na = 1;
+    for (const char *p = om; *p && na + 1 < sizeof added; p++) {
+        unsigned bit = client_umode_bit(*p);
+        if (!bit || (cl->umodes & bit)) continue;
+        cl->umodes |= bit;
+        added[na++] = *p;
+    }
+    added[na] = '\0';
 
     char prefix[320];
     client_prefix(cl, prefix, sizeof prefix);
@@ -65,10 +80,12 @@ static void finish_oper(server_t *srv, client_t *cl, const char *op_name, int pw
         }
     }
 
-    char line[200];
-    const char *p2[] = {cl->nick, "+osw"};
-    irc_build(line, sizeof line, NULL, 0, prefix, "MODE", p2, 2, NULL);
-    client_send(cl, line);
+    if (na > 1) {
+        char line[200];
+        const char *p2[] = {cl->nick, added};
+        irc_build(line, sizeof line, NULL, 0, prefix, "MODE", p2, 2, NULL);
+        client_send(cl, line);
+    }
     client_reply(cl, N_YOUREOPER, NULL, 0, "You are now an IRC operator");
     netsync_user_modes(srv, cl);
 

@@ -59,6 +59,13 @@ int ws_parse_request(const char *req, ws_request_t *out) {
             if (strcasecmp(t, "text.ircv3.net") == 0) out->text_proto = 1;
     if (!header_value(req, "X-Forwarded-For", out->forwarded, sizeof out->forwarded))
         header_value(req, "X-Real-IP", out->forwarded, sizeof out->forwarded);
+    /* "https" at every hop: a client sending "https" through a proxy that appends gets "https, http" -- not TLS */
+    char proto[64] = "";
+    if (header_value(req, "X-Forwarded-Proto", proto, sizeof proto) && proto[0]) {
+        out->https = 1;
+        for (char *save, *t = strtok_r(proto, ", \t", &save); t; t = strtok_r(NULL, ", \t", &save))
+            if (strcasecmp(t, "https") != 0) out->https = 0;
+    }
     return 0;
 }
 

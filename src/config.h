@@ -75,6 +75,7 @@ typedef struct {
     char protection_file[CFG_PATH]; /* Protection bundle (config/protection.toml); "" = don't load one */
     char default_user_modes[16];
     char oper_auto_join[CFG_STR];
+    char oper_modes[24];  /* letters added on /OPER besides o, e.g. "swW" (no signs) */
     char die_password[CFG_STR];
     char die_password_hash[CFG_STR];
     char restart_password[CFG_STR];
@@ -142,6 +143,7 @@ typedef struct {
     char password_hash[CFG_STR];
     char hosts[CFG_MAX_HOSTS_PER_OPER][CFG_MASK];
     int n_hosts;
+    char modes[24];      /* per-login override of security.oper_modes; "" = use that */
     unsigned privs;      /* OPER_PRIV_* bits from `privileges`; 0 = key absent = everything (back-compat) */
 } cfg_operator_t;
 

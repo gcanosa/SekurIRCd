@@ -197,19 +197,7 @@ void cmd_send_welcome_if_ready(server_t *srv, client_t *cl) {
     /* Must land before server_send_welcome: its post-MOTD RPL_UMODEIS line
      * (and RFC 221 in general) is supposed to reflect the modes the client
      * actually ends up with, not a snapshot taken before these apply. */
-    for (const char *p = srv->cfg.security.default_user_modes; *p; p++) {
-        switch (*p) {
-            case 'i': cl->umodes |= UMODE_I; break;
-            case 'w': cl->umodes |= UMODE_W; break;
-            case 'd': cl->umodes |= UMODE_DEAF; break;
-            case 'T': cl->umodes |= UMODE_D; break;
-            case 'B': cl->umodes |= UMODE_B; break; /* allowed by the config check, never applied before */
-            case 'g': cl->umodes |= UMODE_G; break;
-            case 'Z': cl->umodes |= UMODE_SECUREONLY; break;
-            case 's': cl->umodes |= UMODE_S; break;
-            default: break;
-        }
-    }
+    for (const char *p = srv->cfg.security.default_user_modes; *p; p++) cl->umodes |= client_umode_bit(*p);
 
     char snote[300];
     snprintf(snote, sizeof snote, "Client connecting: %s (%s@%s) [%s] {users}", cl->nick, cl->user, cl->realhost[0] ? cl->realhost : cl->host, cl->ip);

@@ -241,6 +241,13 @@ void cmd_webirc(server_t *srv, client_t *cl, irc_message_t *msg) {
         client_mark_quit(cl);
         return;
     }
+    /* IRCv3 WEBIRC options: "secure" = the user reached the gateway over TLS -> +z */
+    if (msg->nparams > 4) {
+        char opts[256];
+        snprintf(opts, sizeof opts, "%s", msg->params[4]);
+        for (char *save, *t = strtok_r(opts, " ", &save); t; t = strtok_r(NULL, " ", &save))
+            if (strcmp(t, "secure") == 0 || strncmp(t, "secure=", 7) == 0) cl->umodes |= UMODE_Z;
+    }
     if (client_apply_real_address(srv, cl, msg->params[3], msg->params[2]) == 0)
         log_info("webirc", "gateway %s: client is %s (%s)", match->name[0] ? match->name : "?", cl->ip, cl->realhost);
 }

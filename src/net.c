@@ -403,15 +403,15 @@ static ssize_t ws_read(client_t *cl, void *buf, size_t len) {
         else {
             ws_out_append(cl, (const unsigned char *)resp, strlen(resp));
             cl->ws = 2;
-            /* Behind a trusted reverse proxy the socket peer is the proxy: believe its forwarded client address. */
-            if (wr.forwarded[0]) {
-                for (int i = 0; i < srv->cfg.websocket.n_trusted_proxies; i++) {
-                    if (irc_ip_mask_match(srv->cfg.websocket.trusted_proxies[i], cl->ip)) {
-                        char real[64];
-                        if (ws_forwarded_client(wr.forwarded, srv->cfg.websocket.trusted_proxies, srv->cfg.websocket.n_trusted_proxies, real, sizeof real) == 0)
-                            client_apply_real_address(srv, cl, real, NULL);
-                        break;
-                    }
+            /* Behind a trusted reverse proxy the socket peer is the proxy: believe its forwarded client address,
+             * and that the browser reached it over TLS (+z, so +z channels and +Z users accept it). */
+            for (int i = 0; i < srv->cfg.websocket.n_trusted_proxies; i++) {
+                if (irc_ip_mask_match(srv->cfg.websocket.trusted_proxies[i], cl->ip)) {
+                    if (wr.https) cl->umodes |= UMODE_Z;
+                    char real[64];
+                    if (wr.forwarded[0] && ws_forwarded_client(wr.forwarded, srv->cfg.websocket.trusted_proxies, srv->cfg.websocket.n_trusted_proxies, real, sizeof real) == 0)
+                        client_apply_real_address(srv, cl, real, NULL);
+                    break;
                 }
             }
         }

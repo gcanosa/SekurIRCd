@@ -198,6 +198,14 @@ klines_file = ""
 # hybrid-family ircds) set +i and +w on every connect by default.
 default_user_modes = "iw"
 
+# User modes every successful /OPER gets (UnrealIRCd's set::modes-on-oper,
+# Solanum's oper_umodes). o is always given; on top of it any of the
+# self modes above plus p (hide channels), I (hide idle), R (registered-only
+# PMs), D (no PMs), and the oper-only H (hide oper status), q (unkickable),
+# W (notice when someone /WHOISes you). A login's own `modes` (see
+# [[operators]]) replaces this for that login.
+oper_modes = "+osw"
+
 # Channel a client is auto-joined to right after a successful /OPER (created
 # on first use, same as any channel a client JOINs). Empty (the default)
 # means opers get no auto-join. The daemon does NOT enforce oper-only
@@ -477,6 +485,8 @@ backup_count = 5
 #   (NickServ SUSPEND/FDROP/SASET are for services admins: [nickserv] admins in services.toml)
 #   all      everything. `privileges = []` grants none of the above (a "helper" oper).
 #   e.g.  privileges = ["kill", "kline", "wallops"]
+# Optional per-login `modes` replaces security.oper_modes for that login,
+#   e.g.  modes = "+oswW"   (a netadmin who wants WHOIS notices too)
 # -----------------------------------------------------------------------------
 # None by default -- no one can /OPER until you add at least one table here.
 # Each requires exactly ONE of `password` or `password_hash`:
