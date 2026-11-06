@@ -714,11 +714,11 @@ void server_send_isupport(server_t *srv, client_t *cl) {
     char histtok[32];
     snprintf(histtok, sizeof histtok, "CHATHISTORY=%d", srv->cfg.messages.history_size > 100 ? 100 : srv->cfg.messages.history_size);
     const char *tokens[] = {
-        netbuf, "CHANTYPES=#", "CHANMODES=beI,k,lfjL,imnprstzCNPQSTVROMcDuG", "PREFIX=(qaohv)~&@%+",
+        netbuf, "CHANTYPES=#", "CHANMODES=beI,k,lfjL,imnprstzCNPQSTVROMcDuGK", "PREFIX=(qaohv)~&@%+",
         nicklen, chanlen, topiclen, "CASEMAPPING=ascii", "MODES=6",
         "STATUSMSG=~&@%+", "AWAYLEN=390", "KICKLEN=300",
         "MAXLIST=b:100,e:100,I:100", "EXCEPTS=e", "INVEX=I", "MONITOR=100", "WATCH=128", "SILENCE=15",
-        "EXTBAN=~,amrzj", "ELIST=MNU", "WHOX", "CHANLIMIT=#:200", "BOT=B", "CALLERID=g", "LINELEN=512",
+        "EXTBAN=~,amnrzjtSf", "ELIST=MNU", "WHOX", "CHANLIMIT=#:200", "BOT=B", "CALLERID=g", "LINELEN=512",
         "TARGMAX=PRIVMSG:4,NOTICE:4,KICK:1,JOIN:1,PART:1,WHOIS:1", srv->cfg.messages.history_size > 0 ? histtok : NULL, srv->cfg.messages.history_size > 0 ? "MSGREFTYPES=msgid,timestamp" : NULL,
         srv->cfg.messages.utf8_only ? "UTF8ONLY" : NULL, srv->cfg.server.icon[0] ? icontok : NULL, srv->cfg.messages.client_tag_deny[0] ? denytok : NULL,
     };
@@ -874,7 +874,7 @@ void server_send_welcome(server_t *srv, client_t *cl) {
 
     char swver[CFG_STR + 16];
     server_software_version(srv, swver, sizeof swver);
-    const char *myinfo[] = {srv->cfg.server.name, swver, "diwsoZrpIHqRDBg", "beIklfjLnimpstzrovhqaPCTSVQNROMcDuG"};
+    const char *myinfo[] = {srv->cfg.server.name, swver, "diwsozrpIHqRDBgTZxW", "beIklfjLnimpstzrovhqaPCTSVQNROMcDuGK"};
     client_reply(cl, N_MYINFO, myinfo, 4, NULL);
 
     if (cl->ssl) {
@@ -893,7 +893,7 @@ void server_send_welcome(server_t *srv, client_t *cl) {
     server_send_lusers(srv, cl);
     server_send_motd(srv, cl);
 
-    char modestr[24];
+    char modestr[32];
     client_mode_string(cl, modestr, sizeof modestr);
     client_reply(cl, N_UMODEIS, NULL, 0, modestr);
 }

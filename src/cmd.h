@@ -54,6 +54,11 @@ int force_nick_change(server_t *srv, client_t *target, const char *newnick);
 /* account services relay (cmd_reg.c) */
 client_t *services_agent(server_t *srv);           /* the NickServ service user, or NULL while services are down */
 void cmd_services_tick(server_t *srv, time_t now);
+void cmd_channels_tick(server_t *srv, time_t now);
+void broadcast_chghost(server_t *srv, client_t *cl, const char *old_prefix); /* IRCv3 CHGHOST to cap holders + the network */
+struct channel;
+int channel_flood_event(server_t *srv, struct channel *chan, char type);
+void server_chan_mode(server_t *srv, struct channel *chan, const char *modes, const char *arg);
 void svc_command(server_t *srv, client_t *svc, irc_message_t *msg); /* SVSLOGIN/SVSNICK/KILL/SVCSASL/SVCREGRESULT */
 int client_cert_fingerprint(client_t *cl, char *out, size_t outsz);
 void cmd_accept(server_t *srv, client_t *cl, irc_message_t *msg);

@@ -73,8 +73,8 @@ def test_modes_topic_kick_nick_across_servers():
         a.send("MODE #m +o carol")
         assert c.saw(r":alice!.* MODE #m \+o carol")
         assert "@carol" in " ".join(c.say("NAMES #m", 0.4)), "the remote op rank must show"
-        c.send("MODE #m +t")
-        assert a.saw(r":carol!.* MODE #m \+t"), "a remote op can change modes"
+        c.send("MODE #m +m")
+        assert a.saw(r":carol!.* MODE #m \+m"), "a remote op can change modes"
         c.send("TOPIC #m :set from afar")
         assert a.saw(r":carol!.* TOPIC #m :set from afar")
         c.send("NICK carol2")

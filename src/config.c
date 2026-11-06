@@ -31,7 +31,7 @@ static int is_valid_level(const char *s) {
 }
 
 /* self-togglable user modes (client.USER_MODE_SELF) */
-#define USER_MODE_SELF "iwdsBg"
+#define USER_MODE_SELF "iwdTsBgZ"
 /* argument-free channel modes a deployment may set as a default
  * (channel.CHAN_MODES - MODE_ARG - {"r"}) */
 #define CHAN_FLAG_MODES "niptsmz"
@@ -615,7 +615,7 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
     }
     for (const char *c = out->security.default_user_modes; *c; c++) {
         if (!strchr(USER_MODE_SELF, *c)) {
-            snprintf(errbuf, errbufsz, "security.default_user_modes: '%c' is not a valid default user mode (allowed: iwdsBg)", *c);
+            snprintf(errbuf, errbufsz, "security.default_user_modes: '%c' is not a valid default user mode (allowed: iwdTsBgZ)", *c);
             return -1;
         }
     }

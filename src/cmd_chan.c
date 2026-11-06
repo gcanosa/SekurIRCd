@@ -3,6 +3,7 @@
  * handlers. Not yet ported: STATUSMSG delivery lives in cmd_user.c
  * (PRIVMSG/NOTICE); EXTBAN a: lives in channel.c's mask matcher. */
 #include "cmd.h"
+#include "net.h"
 #include "history.h"
 #include "link.h"
 #include "log.h"
@@ -173,10 +174,12 @@ static void do_join_one(server_t *srv, client_t *cl, const char *chan_name, cons
 /* +L: a JOIN refused because the channel is full (+l) or invite-only (+i) is forwarded to the +L target instead.
  * One hop only -- the target's own +L isn't followed, so two channels can't bounce a user around forever. */
 static int g_redirect_depth;
-static int try_redirect(server_t *srv, client_t *cl, channel_t *chan) {
-    if (!(chan->modes & CMODE_REDIRECT) || !chan->redirect[0] || g_redirect_depth) return 0;
+/* +L (to == NULL) or a ~f: forward ban (to = its channel). One hop only. */
+static int try_redirect(server_t *srv, client_t *cl, channel_t *chan, const char *to) {
+    if (!to && (!(chan->modes & CMODE_REDIRECT) || !chan->redirect[0])) return 0;
+    if (g_redirect_depth || !irc_valid_channel(to ? to : chan->redirect, 50)) return 0;
     char target[CHAN_NAMELEN];
-    snprintf(target, sizeof target, "%s", chan->redirect);
+    snprintf(target, sizeof target, "%s", to ? to : chan->redirect);
     const char *p[] = {chan->name, target};
     client_reply(cl, N_LINKCHANNEL, p, 2, "Forwarding to another channel");
     g_redirect_depth = 1;
@@ -224,7 +227,7 @@ static void do_join_one(server_t *srv, client_t *cl, const char *chan_name, cons
         channel_set_ban_extra(&bx); /* for ~r/~z/~j in +b/+e/+I */
         if ((chan->modes & CMODE_I) && !channel_is_invited(chan, invite_key_of(cl), cl->nick, cl->user, cl->host, cl->account, cl->ident_confirmed)) {
             const char *p[] = {chan->name};
-            if (try_redirect(srv, cl, chan)) return;
+            if (try_redirect(srv, cl, chan, NULL)) return;
             client_reply(cl, N_INVITEONLYCHAN, p, 1, "Cannot join channel (+i)");
             return;
         }
@@ -235,12 +238,15 @@ static void do_join_one(server_t *srv, client_t *cl, const char *chan_name, cons
         }
         if ((chan->modes & CMODE_L) && chan->limit > 0 && channel_member_count(chan) >= chan->limit) {
             const char *p[] = {chan->name};
-            if (try_redirect(srv, cl, chan)) return;
+            if (try_redirect(srv, cl, chan, NULL)) return;
             client_reply(cl, N_CHANNELISFULL, p, 1, "Cannot join channel (+l)");
             return;
         }
         if (channel_is_banned(chan, cl->nick, cl->user, cl->host, cl->realhost, cl->ip, cl->account, cl->ident_confirmed)) {
             const char *p[] = {chan->name};
+            char fwd[CHAN_NAMELEN];
+            if (channel_ban_forward(chan, cl->nick, cl->user, cl->host, cl->realhost, cl->ip, cl->account, cl->ident_confirmed, fwd, sizeof fwd)
+                && try_redirect(srv, cl, chan, fwd)) return; /* ~f:#chan: banned here, sent there */
             client_reply(cl, N_BANNED, p, 1, "Cannot join channel (+b)");
             return;
         }
@@ -283,6 +289,7 @@ static void do_join_one(server_t *srv, client_t *cl, const char *chan_name, cons
     }
     cmd_announce_join(chan, cl);
     netsync_chan_join(srv, chan, cl, is_new);
+    if (!is_new && !(cl->umodes & UMODE_O)) channel_flood_event(srv, chan, 'j');
 }
 
 void cmd_join(server_t *srv, client_t *cl, irc_message_t *msg) {
@@ -743,6 +750,72 @@ void cmd_invite(server_t *srv, client_t *cl, irc_message_t *msg) {
     log_info("chan", "%s invited %s to %s", cl->nick, target->nick, chan_name);
 }
 
+/* A mode change made by this server (":server MODE #chan <modes> [arg]"), sent to the channel and the network. */
+void server_chan_mode(server_t *srv, channel_t *chan, const char *modes, const char *arg) {
+    char line[600];
+    const char *p[] = {chan->name, modes, arg};
+    if (irc_build(line, sizeof line, NULL, 0, srv->cfg.server.name, "MODE", p, arg ? 3 : 2, NULL) >= 0)
+        server_broadcast_channel(chan, line, NULL);
+    netsync_chan_mode(srv, chan, NULL, modes, arg ? &arg : NULL, arg ? 1 : 0);
+}
+
+/* +f [..]:secs, a channel-wide event of `type` (c j k m n). Counts it, and once over the limit sets the action mode (and
+ * schedules its removal). Returns 1 if the limit was just exceeded. ponytail: each server counts only its own users'
+ * events, so on a network the effective limit is per server; a network-wide count would need the counters synced. */
+int channel_flood_event(server_t *srv, channel_t *chan, char type) {
+    floodprot_t *f = chan->fp;
+    const char *t = f ? strchr(FP_TYPES, type) : NULL;
+    if (!t) return 0;
+    int i = (int)(t - FP_TYPES);
+    if (!f->limit[i]) return 0;
+    time_t now = time(NULL);
+    if (now - f->start[i] >= chan->flood_secs) { f->start[i] = now; f->count[i] = 0; }
+    if (++f->count[i] <= f->limit[i]) return 0;
+    unsigned bit = channel_flag_bit(f->action[i]);
+    if (bit && !(chan->modes & bit)) {
+        chan->modes |= bit;
+        char m[3] = {'+', f->action[i], 0};
+        server_chan_mode(srv, chan, m, NULL);
+        char note[200];
+        snprintf(note, sizeof note, "Channel %s: flood protection (+f %c) set +%c", chan->name, type, f->action[i]);
+        server_notify_opers(srv, note);
+        if (f->unset_mins[i]) f->unset_at[i] = now + (time_t)f->unset_mins[i] * 60;
+    }
+    f->count[i] = 0; /* one action per burst, not one per further event */
+    return 1;
+}
+
+/* Every few seconds: expired ~t: list entries go, and +f action modes past their unset time are removed. */
+void cmd_channels_tick(server_t *srv, time_t now) {
+    static time_t last;
+    if (now - last < 5) return;
+    last = now;
+    channel_t *chan, *ctmp;
+    HASH_ITER(hh, srv->channels, chan, ctmp) {
+        masklist_t *lists[] = {&chan->bans, &chan->exceptions, &chan->invex};
+        for (int li = 0; li < 3; li++) {
+            for (int i = lists[li]->n - 1; i >= 0; i--) {
+                if (!channel_mask_expired(lists[li], i, now)) continue;
+                char mask[256];
+                snprintf(mask, sizeof mask, "%s", lists[li]->masks[i]);
+                masklist_del(lists[li], mask);
+                char m[3] = {'-', "beI"[li], 0};
+                server_chan_mode(srv, chan, m, mask);
+            }
+        }
+        floodprot_t *f = chan->fp;
+        for (int i = 0; f && i < 7; i++) {
+            if (!f->unset_at[i] || now < f->unset_at[i]) continue;
+            f->unset_at[i] = 0;
+            unsigned bit = channel_flag_bit(f->action[i]);
+            if (!bit || !(chan->modes & bit)) continue;
+            chan->modes &= ~bit;
+            char m[3] = {'-', f->action[i], 0};
+            server_chan_mode(srv, chan, m, NULL);
+        }
+    }
+}
+
 void cmd_knock(server_t *srv, client_t *cl, irc_message_t *msg) {
     channel_t *chan = server_find_channel(srv, msg->params[0]);
     if (!chan) { err_no_such_channel(cl, msg->params[0]); return; }
@@ -751,11 +824,17 @@ void cmd_knock(server_t *srv, client_t *cl, irc_message_t *msg) {
         client_reply(cl, N_KNOCKONCHAN, p, 1, "You are already on that channel");
         return;
     }
+    if (chan->modes & CMODE_NOKNOCK) {
+        const char *p[] = {chan->name};
+        client_reply(cl, N_CANNOTKNOCK, p, 1, "No knocks are allowed! (+K)");
+        return;
+    }
     if (!(chan->modes & (CMODE_I | CMODE_K))) {
         const char *p[] = {chan->name};
         client_reply(cl, N_CHANOPEN, p, 1, "Channel is open");
         return;
     }
+    if (channel_flood_event(srv, chan, 'k')) return; /* +f k: too many knocks, +K is now set */
     char prefix[320];
     client_prefix(cl, prefix, sizeof prefix);
     member_t *m, *tmp;
@@ -838,12 +917,15 @@ static void cmd_mode_user(server_t *srv, client_t *cl, irc_message_t *msg, const
         return;
     }
     if (msg->nparams < 2) {
-        char modestr[24];
+        char modestr[32];
         client_mode_string(cl, modestr, sizeof modestr);
         client_reply(cl, N_UMODEIS, NULL, 0, modestr);
         return;
     }
 
+    char old_prefix[320];
+    client_prefix(cl, old_prefix, sizeof old_prefix);
+    unsigned had_x = cl->umodes & UMODE_X;
     char sign = '+';
     char applied[32] = "+";
     size_t ap = 1;
@@ -859,7 +941,11 @@ static void cmd_mode_user(server_t *srv, client_t *cl, irc_message_t *msg, const
             else continue;
         } else if (c == 'i') bit = UMODE_I;
         else if (c == 'w') bit = UMODE_W;
-        else if (c == 'd') bit = UMODE_D;
+        else if (c == 'd') bit = UMODE_DEAF;
+        else if (c == 'T') bit = UMODE_D;
+        else if (c == 'Z') bit = UMODE_SECUREONLY;
+        else if (c == 'x') bit = UMODE_X;
+        else if (c == 'W') { if (cl->umodes & UMODE_O) bit = UMODE_WHOISNOTE; else continue; } /* oper-only, like H */
         else if (c == 's') bit = UMODE_S;
         else if (c == 'p') bit = UMODE_P;
         else if (c == 'I') bit = UMODE_HIDEIDLE;
@@ -870,9 +956,10 @@ static void cmd_mode_user(server_t *srv, client_t *cl, irc_message_t *msg, const
         else if (c == 'g') bit = UMODE_G;
         else if (c == 'H') { if (cl->umodes & UMODE_O) bit = UMODE_H; else continue; }
         else continue;
+        if ((sign == '+') == ((cl->umodes & bit) != 0)) continue; /* already so: not echoed */
         if (sign == '+') cl->umodes |= bit; else cl->umodes &= ~bit;
         if (c == 'o' && sign == '-') { /* de-opered: drop the oper-only modes too */
-            cl->umodes &= ~(UMODE_Q | UMODE_H);
+            cl->umodes &= ~(UMODE_Q | UMODE_H | UMODE_WHOISNOTE);
             cl->oper_name[0] = '\0';
             cl->oper_privs = 0;
         }
@@ -889,6 +976,12 @@ static void cmd_mode_user(server_t *srv, client_t *cl, irc_message_t *msg, const
     irc_build(line, sizeof line, NULL, 0, prefix, "MODE", p2, 2, NULL);
     client_send(cl, line);
     netsync_user_modes(srv, cl);
+    if ((cl->umodes & UMODE_X) != had_x) { /* +x cloaks, -x shows the real host (bans match both anyway) */
+        net_reset_host(srv, cl);
+        broadcast_chghost(srv, cl, old_prefix);
+        const char *ph[] = {cl->host};
+        client_reply(cl, N_HOSTHIDDEN, ph, 1, "is now your displayed host");
+    }
 }
 
 /* Shared by /MODE (is_full_op reflects the caller's real rank) and /SAMODE
@@ -971,9 +1064,11 @@ void cmd_apply_channel_mode(server_t *srv, client_t *cl, channel_t *chan,
             case 'D': flagbit = CMODE_DELAYJOIN; break;
             case 'u': flagbit = CMODE_AUDITORIUM; break;
             case 'G': flagbit = CMODE_CENSOR; break;
+            case 'K': flagbit = CMODE_NOKNOCK; break;
             default: break;
         }
         if (flagbit) {
+            if ((sign == '+') == ((chan->modes & flagbit) != 0)) continue; /* already so: nothing to announce, like Unreal */
             if (sign == '+') chan->modes |= flagbit; else chan->modes &= ~flagbit;
             if (sign == '-' && flagbit == CMODE_DELAYJOIN) { /* -D: everyone still hidden becomes visible */
                 member_t *hm, *htmp;
@@ -1005,6 +1100,7 @@ void cmd_apply_channel_mode(server_t *srv, client_t *cl, channel_t *chan,
                 outflags[of++] = 'L';
                 snprintf(outparams[n_outparams++], sizeof outparams[0], "%s", target);
             } else {
+                if (!(chan->modes & CMODE_REDIRECT)) continue;
                 chan->modes &= ~CMODE_REDIRECT;
                 chan->redirect[0] = '\0';
                 if (cursign != sign) { outflags[of++] = sign; cursign = sign; }
@@ -1015,15 +1111,21 @@ void cmd_apply_channel_mode(server_t *srv, client_t *cl, channel_t *chan,
             if (sign == '+') {
                 if (argi >= nargs) continue;
                 int n, secs;
-                if (!parse_rate(args[argi], &n, &secs)) { argi++; continue; } /* malformed "lines:secs": consume, ignore */
-                if (is_f) { chan->modes |= CMODE_FLOOD; chan->flood_lines = n; chan->flood_secs = secs; }
-                else { chan->modes |= CMODE_JTHROT; chan->jt_joins = n; chan->jt_secs = secs; chan->jt_count = 0; chan->jt_start = 0; }
+                if (is_f) {
+                    if (channel_set_flood(chan, args[argi]) != 0) { argi++; continue; } /* malformed: consume, ignore */
+                    channel_flood_param(chan, outparams[n_outparams], sizeof outparams[0]);
+                } else {
+                    if (!parse_rate(args[argi], &n, &secs)) { argi++; continue; }
+                    chan->modes |= CMODE_JTHROT; chan->jt_joins = n; chan->jt_secs = secs; chan->jt_count = 0; chan->jt_start = 0;
+                    snprintf(outparams[n_outparams], sizeof outparams[0], "%d:%d", n, secs);
+                }
+                n_outparams++;
                 if (cursign != sign) { outflags[of++] = sign; cursign = sign; }
                 outflags[of++] = c;
-                snprintf(outparams[n_outparams++], sizeof outparams[0], "%d:%d", n, secs);
                 argi++;
             } else {
-                if (is_f) { chan->modes &= ~CMODE_FLOOD; chan->flood_lines = chan->flood_secs = 0; }
+                if (!(chan->modes & (is_f ? CMODE_FLOOD : CMODE_JTHROT))) continue;
+                if (is_f) channel_clear_flood(chan);
                 else { chan->modes &= ~CMODE_JTHROT; chan->jt_joins = chan->jt_secs = 0; }
                 if (cursign != sign) { outflags[of++] = sign; cursign = sign; }
                 outflags[of++] = c;
@@ -1040,6 +1142,7 @@ void cmd_apply_channel_mode(server_t *srv, client_t *cl, channel_t *chan,
                 argi++;
             } else {
                 if (argi < nargs) argi++; /* "-k <key>": the key arg is consumed, not shifted onto the next mode */
+                if (!(chan->modes & CMODE_K)) continue;
                 chan->modes &= ~CMODE_K;
                 chan->key[0] = '\0';
                 if (cursign != sign) { outflags[of++] = sign; cursign = sign; }
@@ -1058,6 +1161,7 @@ void cmd_apply_channel_mode(server_t *srv, client_t *cl, channel_t *chan,
                 snprintf(outparams[n_outparams++], sizeof outparams[0], "%ld", lim);
                 argi++;
             } else {
+                if (!(chan->modes & CMODE_L)) continue;
                 chan->modes &= ~CMODE_L;
                 chan->limit = 0;
                 if (cursign != sign) { outflags[of++] = sign; cursign = sign; }
@@ -1108,7 +1212,9 @@ void cmd_apply_channel_mode(server_t *srv, client_t *cl, channel_t *chan,
         } else if (c == 'b' || c == 'e' || c == 'I') {
             if (argi >= nargs) continue;
             if (strchr(args[argi], ' ')) { argi++; continue; } /* see the +k note above -- still consume the arg */
-            const char *mask = args[argi];
+            char normmask[256];
+            channel_normalize_mask(args[argi], normmask, sizeof normmask);
+            const char *mask = normmask;
             masklist_t *ml = (c == 'b') ? &chan->bans : (c == 'e') ? &chan->exceptions : &chan->invex;
             int changed;
             if (sign == '+') {
@@ -1118,6 +1224,7 @@ void cmd_apply_channel_mode(server_t *srv, client_t *cl, channel_t *chan,
                     argi++; continue;
                 }
                 changed = masklist_add(ml, mask) == 0;
+                if (changed) snprintf(ml->set_by[ml->n - 1], sizeof ml->set_by[0], "%s", cl->nick);
             } else changed = masklist_del(ml, mask) == 0;
             if (!changed) { argi++; continue; } /* duplicate add / absent remove: nothing to announce */
             if (cursign != sign) { outflags[of++] = sign; cursign = sign; }
@@ -1155,9 +1262,11 @@ static void reply_masklist(client_t *cl, channel_t *chan, char letter) {
     masklist_t *ml = (letter == 'b') ? &chan->bans : (letter == 'e') ? &chan->exceptions : &chan->invex;
     const char *list_n = (letter == 'b') ? N_BANLIST : (letter == 'e') ? N_EXCEPTLIST : N_INVEXLIST;
     const char *end_n = (letter == 'b') ? N_ENDOFBANLIST : (letter == 'e') ? N_ENDOFEXCEPTLIST : N_ENDOFINVEXLIST;
-    for (int i = 0; i < ml->n; i++) {
-        const char *p[] = {chan->name, ml->masks[i]};
-        client_reply(cl, list_n, p, 2, NULL);
+    for (int i = 0; i < ml->n; i++) { /* "<mask> <setter> <time>", as every other ircd sends and clients show */
+        char ts[24];
+        snprintf(ts, sizeof ts, "%ld", (long)ml->set_at[i]);
+        const char *p[] = {chan->name, ml->masks[i], ml->set_by[i][0] ? ml->set_by[i] : cl->srv->cfg.server.name, ts};
+        client_reply(cl, list_n, p, 4, NULL);
     }
     const char *pe[] = {chan->name};
     const char *desc = (letter == 'b') ? "End of channel ban list" : (letter == 'e') ? "End of channel exception list" : "End of channel invite exception list";

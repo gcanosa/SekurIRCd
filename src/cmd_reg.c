@@ -90,12 +90,30 @@ void cmd_nick(server_t *srv, client_t *cl, irc_message_t *msg) {
     if (!(cl->umodes & UMODE_O)) {
         for (chan_node_t *n = cl->channels; n; n = n->next) {
             channel_t *chan = n->chan;
-            if (!(chan->modes & CMODE_NONICK)) continue;
             member_t *me = channel_find_member(chan, cl);
-            if (me && (me->rank & (RANK_OP | RANK_HALFOP))) continue;
-            const char *p[] = {chan->name};
-            client_reply(cl, N_CANTCHANGENICK, p, 1, "Can not change nickname while on channel (+N)");
-            return;
+            if (chan->modes & CMODE_NONICK) {
+                if (!(me && (me->rank & (RANK_OP | RANK_HALFOP)))) {
+                    const char *p[] = {chan->name};
+                    client_reply(cl, N_CANTCHANGENICK, p, 1, "Can not change nickname while on channel (+N)");
+                    return;
+                }
+            }
+            if (!(me && me->rank) && channel_flood_event(srv, chan, 'n')) { /* +f [..n]: too many nick changes, +N is now set */
+                const char *p[] = {chan->name};
+                client_reply(cl, N_CANTCHANGENICK, p, 1, "Can not change nickname while on channel (+N)");
+                return;
+            }
+            if (chan->bans.n && !(me && me->rank)) { /* ~n: ban, voice and up are exempt (as in UnrealIRCd) */
+                ban_extra_t bx = {cl->realname, (cl->umodes & UMODE_Z) != 0, cl};
+                channel_set_ban_extra(&bx);
+                int hit = channel_is_nickbanned(chan, cl->nick, cl->user, cl->host, cl->realhost, cl->ip, cl->account, cl->ident_confirmed);
+                channel_set_ban_extra(NULL);
+                if (hit) {
+                    const char *p[] = {chan->name};
+                    client_reply(cl, N_CANTCHANGENICK, p, 1, "Can not change nickname while banned from changing it (~n)");
+                    return;
+                }
+            }
         }
     }
 

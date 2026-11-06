@@ -201,7 +201,11 @@ void cmd_send_welcome_if_ready(server_t *srv, client_t *cl) {
         switch (*p) {
             case 'i': cl->umodes |= UMODE_I; break;
             case 'w': cl->umodes |= UMODE_W; break;
-            case 'd': cl->umodes |= UMODE_D; break;
+            case 'd': cl->umodes |= UMODE_DEAF; break;
+            case 'T': cl->umodes |= UMODE_D; break;
+            case 'B': cl->umodes |= UMODE_B; break; /* allowed by the config check, never applied before */
+            case 'g': cl->umodes |= UMODE_G; break;
+            case 'Z': cl->umodes |= UMODE_SECUREONLY; break;
             case 's': cl->umodes |= UMODE_S; break;
             default: break;
         }

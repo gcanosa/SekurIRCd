@@ -321,7 +321,18 @@ static void sender_reply(client_t *from, const char *code, const char **params, 
  * it should be delivered. Used for local senders and for messages arriving from other servers alike. */
 static int pm_target_ok(client_t *cl, client_t *dst, const char *textbuf, int is_notice) {
     if (client_is_silencing(dst, cl)) return 0; /* dropped without telling the sender */
-    if ((dst->umodes & UMODE_D) && is_blocked_ctcp(textbuf)) return 0; /* +d: suppress CTCP */
+    if ((dst->umodes & UMODE_D) && is_blocked_ctcp(textbuf)) return 0; /* +T: suppress CTCP */
+    if (cl != dst && !cl->is_service && !dst->is_service) { /* +Z: private messages only between TLS users */
+        const char *pe[] = {dst->nick};
+        if ((dst->umodes & UMODE_SECUREONLY) && !(cl->umodes & UMODE_Z) && !(cl->umodes & UMODE_O)) {
+            if (!is_notice) sender_reply(cl, N_CANTSENDTOUSER, pe, 1, "You must be connected via SSL/TLS to message this user");
+            return 0;
+        }
+        if ((cl->umodes & UMODE_SECUREONLY) && !(dst->umodes & UMODE_Z)) {
+            if (!is_notice) sender_reply(cl, N_CANTSENDTOUSER, pe, 1, "Message not sent: recipient is not connected via SSL/TLS and you have +Z");
+            return 0;
+        }
+    }
     if ((dst->umodes & UMODE_NOPM) && !(cl->umodes & UMODE_O) && cl != dst) {
         const char *pe[] = {dst->nick};
         if (!is_notice) sender_reply(cl, N_NONONREG, pe, 1, "is not accepting private messages");
@@ -508,9 +519,37 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
             time_t now = time(NULL);
             if (now - m->fl_start >= chan->flood_secs) { m->fl_start = now; m->fl_count = 0; }
             if (++m->fl_count > chan->flood_lines) { /* +f: kick the flooder; ops/halfops/voice/opers are exempt */
+                if (chan->fp && chan->fp->action[5] == 'b') { /* +f [..t#b]: kick-ban */
+                    char mask[300];
+                    snprintf(mask, sizeof mask, "*!*@%s", cl->host);
+                    if (masklist_add(&chan->bans, mask) == 0) server_chan_mode(srv, chan, "+b", mask);
+                }
                 flood_kick(srv, chan, cl);
                 return;
             }
+        }
+        if (chan->fp && chan->fp->limit[6] && m && !privileged && !is_tagmsg) { /* +f [..r]: the same line over and over */
+            unsigned h = 2166136261u;
+            for (const unsigned char *q = (const unsigned char *)textbuf; *q; q++) h = (h ^ *q) * 16777619u;
+            time_t now = time(NULL);
+            if (h != m->rp_hash || now - m->rp_start >= chan->flood_secs) { m->rp_hash = h; m->rp_count = 0; m->rp_start = now; }
+            if (++m->rp_count > chan->fp->limit[6]) {
+                char act = chan->fp->action[6];
+                if (act == 'd') { /* drop it, quietly to the channel */
+                    if (!is_notice) { const char *pe[] = {target}; client_reply(cl, N_CANNOTSENDTOCHAN, pe, 1, "Cannot send to channel (+f, repeated message)"); }
+                    return;
+                }
+                if (act == 'b') {
+                    char mask[300];
+                    snprintf(mask, sizeof mask, "*!*@%s", cl->host);
+                    if (masklist_add(&chan->bans, mask) == 0) server_chan_mode(srv, chan, "+b", mask);
+                }
+                flood_kick(srv, chan, cl);
+                return;
+            }
+        }
+        if (chan->fp && !privileged && !is_tagmsg && !cl->remote) { /* +f [..]: channel-wide CTCP and message counts */
+            if (is_blocked_ctcp(textbuf) ? channel_flood_event(srv, chan, 'c') : channel_flood_event(srv, chan, 'm')) return;
         }
         char stripbuf[420];
         const char *outtext = textbuf;
@@ -530,7 +569,7 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
             /* "at least that rank": ~ owner(5) & admin(4) @ op(3) % halfop(2) + voice(1) -- channel_rank_level's scale */
             int min_level = (status_prefix == '~') ? 5 : (status_prefix == '&') ? 4 : (status_prefix == '@') ? 3 : (status_prefix == '%') ? 2 : 1;
             HASH_ITER(hh, chan->members, mm, tmp) {
-                if (mm->client == cl) continue;
+                if (mm->client == cl || (mm->client->umodes & UMODE_DEAF)) continue;
                 if ((chan->modes & CMODE_AUDITORIUM) && m && !channel_member_visible(chan, m, mm)) continue;
                 if (channel_rank_level(mm->rank) >= min_level) deliver(mm->client, cl, lines, &x);
             }
@@ -541,7 +580,7 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
         }
 
         HASH_ITER(hh, chan->members, mm, tmp) {
-            if (mm->client == cl) continue;
+            if (mm->client == cl || (mm->client->umodes & UMODE_DEAF)) continue; /* +d: deaf to channel messages */
             /* +u: an unranked member's words reach only members who can see them (ranked members) */
             if ((chan->modes & CMODE_AUDITORIUM) && m && !channel_member_visible(chan, m, mm)) continue;
             deliver(mm->client, cl, lines, &x);
@@ -731,6 +770,12 @@ static void whois_one(server_t *srv, client_t *cl, const char *nick) {
     }
     const char *p1[] = {target->nick, client_ident(target), target->host, "*"};
     client_reply(cl, N_WHOISUSER, p1, 4, target->realname);
+    if ((target->umodes & UMODE_WHOISNOTE) && target != cl) { /* +W: tell the oper (on whichever server) */
+        char note[400], line[520];
+        snprintf(note, sizeof note, "*** Notice -- %s (%s@%s) did a /WHOIS on you", cl->nick, client_ident(cl), cl->host);
+        irc_build(line, sizeof line, NULL, 0, srv->cfg.server.name, "NOTICE", (const char *[]){target->nick}, 1, note);
+        if (target->remote) netsync_push(srv, target, line); else client_send(target, line);
+    }
 
     const char *p2[] = {target->nick, netsync_server_name_of(srv, target)};
     client_reply(cl, N_WHOISSERVER, p2, 2, target->remote && target->nserver ? target->nserver->desc : srv->cfg.server.network);
@@ -1863,7 +1908,7 @@ static void deliver_remote(server_t *srv, client_t *from, const char *verb, cons
     int min_level = !status_prefix ? 0 : (status_prefix == '~') ? 5 : (status_prefix == '&') ? 4 : (status_prefix == '@') ? 3 : (status_prefix == '%') ? 2 : 1;
     member_t *mm, *tmp;
     HASH_ITER(hh, chan->members, mm, tmp) {
-        if (mm->client->remote || mm->client == from) continue;
+        if (mm->client->remote || mm->client == from || (mm->client->umodes & UMODE_DEAF)) continue;
         if ((chan->modes & CMODE_AUDITORIUM) && m && !channel_member_visible(chan, m, mm)) continue;
         if (min_level && channel_rank_level(mm->rank) < min_level) continue;
         deliver(mm->client, from, lines, &x);

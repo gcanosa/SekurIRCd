@@ -30,7 +30,7 @@ struct link_conn;
 /* self-togglable via MODE, same letters as security.default_user_modes */
 #define UMODE_I 0x01
 #define UMODE_W 0x02
-#define UMODE_D 0x04  /* d: suppress CTCP (except ACTION) in private messages */
+#define UMODE_D 0x04  /* T: suppress CTCP (except ACTION) in private messages -- UnrealIRCd's letter (was d before 1.3.3) */
 #define UMODE_S 0x08  /* receive server notices */
 #define UMODE_O 0x10  /* oper -- only /OPER may set this */
 #define UMODE_Z 0x20  /* Z: secure (TLS) connection -- server-set only */
@@ -43,6 +43,10 @@ struct link_conn;
 #define UMODE_NOPM     0x1000 /* D: accept PMs from nobody except IRCOps */
 #define UMODE_G        0x4000 /* g: caller-ID -- only accept PMs from users on your /ACCEPT list (and opers) */
 #define UMODE_B        0x2000 /* B: marks the user as a bot -- self-settable; WHOIS 335, WHO flag B, @bot tag */
+#define UMODE_SECUREONLY 0x10000 /* Z: PMs only to and from TLS users (UnrealIRCd +Z) */
+#define UMODE_DEAF     0x8000
+#define UMODE_X        0x20000 /* x: cloaked host shown (on by default under host_masking); -x shows the real host */
+#define UMODE_WHOISNOTE 0x40000 /* W: oper-only -- told when someone does a /WHOIS on you */ /* d: deaf -- channel PRIVMSG/NOTICE/TAGMSG are not delivered (UnrealIRCd/InspIRCd +d) */
 
 struct accept_entry { char nick[NICKLEN]; char account[64]; uint64_t conn_id; };
 #define MAX_ACCEPT 20

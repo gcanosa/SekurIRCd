@@ -227,6 +227,46 @@ static void test_channel_ban_matches_realhost_and_ip(void) {
 /* Regression: the "m:"/"~m:" quiet extban blocks speaking (channel_is_quieted)
  * but must NOT block JOIN (channel_is_banned skips it); "~a:" is an alias
  * for the bare "a:" account extban. */
+static void test_normalize_mask(void) {
+    static const char *cases[][2] = {
+        {"1.2.3.4", "*!*@1.2.3.4"}, {"2001:db8::/32", "*!*@2001:db8::/32"}, {"bob", "bob!*@*"},
+        {"bad@host", "*!bad@host"}, {"n!u", "n!u@*"}, {"*!*@x", "*!*@x"},
+        {"~account:joe", "~a:joe"}, {"~q:1.2.3.4", "~m:*!*@1.2.3.4"}, {"~quiet:*!*@h", "~m:*!*@h"},
+        {"m:bob", "m:bob!*@*"}, {"~time:5:1.2.3.4", "~t:5:*!*@1.2.3.4"}, {"~t:10:~q:bob", "~t:10:~m:bob!*@*"},
+        {"~certfp:AB:CD", "~S:AB:CD"}, {"~forward:#lobby:1.2.3.4", "~f:#lobby:*!*@1.2.3.4"}, {"~channel:#x", "~j:#x"}, {"~c:#x", "~j:#x"}, {"a:joe", "a:joe"}, {"~z", "~z"}, {"z", "z"},
+    };
+    char out[256];
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        channel_normalize_mask(cases[i][0], out, sizeof out);
+        if (strcmp(out, cases[i][1]) != 0) { fprintf(stderr, "normalize %s -> %s\n", cases[i][0], out); assert(0); }
+    }
+}
+
+static void test_timed_ban_and_unreal_flood(void) {
+    channel_t *chan = channel_new("#t", "#t");
+    assert(masklist_add(&chan->bans, "~t:2:*!*@timed.example") == 0);
+    assert(masklist_add(&chan->bans, "*!*@forever.example") == 0);
+    assert(channel_is_banned(chan, "x", "u", "timed.example", "timed.example", "1.1.1.1", "", 1));
+    time_t now = time(NULL);
+    assert(!channel_mask_expired(&chan->bans, 0, now + 119));
+    assert(channel_mask_expired(&chan->bans, 0, now + 121));
+    assert(!channel_mask_expired(&chan->bans, 1, now + 99999));
+    char out[100];
+    assert(channel_set_flood(chan, "[5c#C15,10j#R,3k,20m,4n,7t#b,9r#d,2q]:15") == 0);
+    channel_flood_param(chan, out, sizeof out);
+    assert(strcmp(out, "[5c#C15,10j#R,3k,20m,4n,7t#b,9r#d]:15") == 0); /* q is not a type: dropped */
+    assert(chan->flood_lines == 7 && chan->flood_secs == 15 && chan->fp->action[5] == 'b');
+    assert(channel_set_flood(chan, "[5j#x]:15") != 0);      /* not an action for j */
+    assert(channel_set_flood(chan, "[5j]") != 0);
+    assert(strcmp(chan->fp->spec, "[5c#C15,10j#R,3k,20m,4n,7t#b,9r#d]:15") == 0); /* a bad one changes nothing */
+    assert(masklist_add(&chan->bans, "~f:#lobby:*!*@fwd.example") == 0);
+    char fwd[64] = "";
+    assert(channel_is_banned(chan, "x", "u", "fwd.example", "fwd.example", "1.1.1.1", "", 1));
+    assert(channel_ban_forward(chan, "x", "u", "fwd.example", "fwd.example", "1.1.1.1", "", 1, fwd, sizeof fwd) && strcmp(fwd, "#lobby") == 0);
+    assert(channel_set_flood(chan, "3:5") == 0 && !chan->fp && chan->flood_lines == 3);
+    channel_free(chan);
+}
+
 static void test_quiet_extban_and_tilde_alias(void) {
     channel_t *chan = channel_new("#q", "#q");
     assert(masklist_add(&chan->bans, "m:*!*@quiet.example.com") == 0);
@@ -1130,6 +1170,8 @@ int main(void) {
     RUN(test_glob_and_masks);
     RUN(test_channel_ban_matches_realhost_and_ip);
     RUN(test_quiet_extban_and_tilde_alias);
+    RUN(test_normalize_mask);
+    RUN(test_timed_ban_and_unreal_flood);
     RUN(test_durations);
     RUN(test_prefix_for);
     RUN(test_add_time_tag);

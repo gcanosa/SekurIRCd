@@ -23,7 +23,6 @@
 
 #define MAX_OPER_FAILS 3
 
-static void broadcast_chghost(server_t *srv, client_t *cl, const char *old_prefix);
 
 /* Applies (or refuses) the OPER grant once the password is known good or
  * bad -- shared by the plaintext-password path (checked inline, cheap) and
@@ -438,7 +437,7 @@ static int may_use_vhost(client_t *cl, cfg_vhost_t *v) {
 
 /* IRCv3 chghost: only delivered to `cl` itself and channel-mates that
  * negotiated the cap. */
-static void broadcast_chghost(server_t *srv, client_t *cl, const char *old_prefix) {
+void broadcast_chghost(server_t *srv, client_t *cl, const char *old_prefix) {
     char line[400];
     const char *p[] = {client_ident(cl), cl->host};
     irc_build(line, sizeof line, NULL, 0, old_prefix, "CHGHOST", p, 2, NULL);

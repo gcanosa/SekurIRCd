@@ -677,7 +677,7 @@ static cJSON *check_password(const char *from_nick, const char *chan, const char
 /* MLOCK: (re)assert the locked flag modes on the ircd. */
 /* Extended MLOCK. A record keeps: "mlock" (flag letters forced ON), "mlock_off" (letters forced OFF, k l f j L allowed),
  * and the parameters for the ON parameter modes: mlock_key / mlock_limit / mlock_flood / mlock_jt / mlock_redirect. */
-#define MLOCK_FLAGS "nimpstzCNPQSTVROMcDuG"
+#define MLOCK_FLAGS "nimpstzCNPQSTVROMcDuGK"
 static const struct { char letter; const char *field; } MLOCK_PARAMS[] = {
     {'k', "mlock_key"}, {'l', "mlock_limit"}, {'f', "mlock_flood"}, {'j', "mlock_jt"}, {'L', "mlock_redirect"},
 };
@@ -1355,7 +1355,9 @@ static int mlock_parse(const char *value, char *on, size_t onsz, char *off, size
         switch (*c) {
             case 'k': ok = strlen(arg) < 60; break;
             case 'l': { char *e; long n = strtol(arg, &e, 10); ok = !*e && n >= 1 && n <= 1000000; break; }
-            case 'f': case 'j': { int a, b; char x; ok = sscanf(arg, "%d:%d%c", &a, &b, &x) == 2 && a >= 1 && a <= 100 && b >= 1 && b <= 600; break; }
+            case 'f': case 'j': { int a, b; char x; ok = sscanf(arg, "%d:%d%c", &a, &b, &x) == 2 && a >= 1 && a <= 100 && b >= 1 && b <= 600;
+                if (*c == 'f' && arg[0] == '[') ok = strlen(arg) < 96 && strstr(arg, "]:") != NULL; /* UnrealIRCd form: the ircd checks the rest */
+                break; }
             case 'L': ok = irc_valid_channel(arg, 50); break;
         }
         if (!ok) { snprintf(err, errsz, "Bad parameter for +%c", *c); return 0; }

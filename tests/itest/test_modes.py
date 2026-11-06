@@ -152,3 +152,95 @@ def test_spamfilter_shun_sticks():
         u.send("PRIVMSG #h :clean line")
         assert not rx.saw(r"clean line", 0.5)  # shunned: later messages vanish too
         assert u.say("PING :x") and not u.saw(r"ERROR", 0.2)  # still connected
+
+
+def test_unreal_style_modes_deaf_noctcp_noknock_nickban_hostban():
+    with Server() as s:
+        op, u, d = s.client("op"), s.client("u1"), s.client("deafy")
+        op.say("JOIN #u"); u.say("JOIN #u"); d.say("JOIN #u")
+        # +d: deaf to channel messages, private ones still arrive
+        d.send("MODE deafy +d")
+        assert d.saw(r"MODE deafy :?\+d")
+        u.send("PRIVMSG #u :hello room")
+        assert op.saw(r"PRIVMSG #u :hello room") and not d.saw(r"hello room", 0.5)
+        u.send("PRIVMSG deafy :hi you")
+        assert d.saw(r"PRIVMSG deafy :hi you")
+        # +T: CTCP to you is dropped (was +d)
+        d.say("MODE deafy -d+T")
+        u.send("PRIVMSG deafy :\x01VERSION\x01")
+        assert not d.saw(r"VERSION", 0.5)
+        # a no-op mode change is not echoed
+        op.drain(); op.send("MODE #u +t")
+        assert not op.saw(r"MODE #u \+t", 0.5)
+        # +K: no knocking
+        op.say("MODE #u +iK")
+        x = s.client("knocker")
+        x.send("KNOCK #u")
+        assert x.saw(r" 480 knocker #u ")
+        # ~n: no nick change (voice and up exempt); bare-host bans are stored canonically
+        op.say("MODE #u -i")
+        op.send("MODE #u +b ~nickchange:u1")
+        assert op.saw(r"MODE #u \+b ~n:u1!\*@\*")
+        u.send("NICK u2")
+        assert u.saw(r" 447 u1 #u ")
+        op.send("MODE #u +b 203.0.113.9")
+        assert op.saw(r"MODE #u \+b \*!\*@203\.0\.113\.9")
+        op.send("MODE #u -b 203.0.113.9")
+        assert op.saw(r"MODE #u -b \*!\*@203\.0\.113\.9")
+
+
+def test_banlist_setter_unreal_flood_and_secure_only_pm():
+    with Server() as s:
+        op, u = s.client("op"), s.client("u1")
+        op.say("JOIN #f"); u.say("JOIN #f")
+        # 367 carries the setter and the time, like other ircds
+        op.say("MODE #f +b *!*@ban.example")
+        op.send("MODE #f +b")
+        assert op.saw(r" 367 op #f \*!\*@ban\.example op \d+")
+        # UnrealIRCd +f: 3 messages in 30s, then the server sets +m
+        op.send("MODE #f +f [3m,9r]:30")
+        assert op.saw(r"MODE #f \+f \[3m,9r\]:30")
+        for i in range(4):
+            u.send(f"PRIVMSG #f :line {i}")
+        assert op.saw(r"MODE #f \+m")
+        # +Z: private messages only between TLS users (these test clients are plaintext)
+        u.send("MODE u1 +Z")
+        assert u.saw(r"MODE u1 :?\+Z")
+        op.send("PRIVMSG u1 :hi")
+        assert op.saw(r" 531 op u1 :You must be connected via SSL/TLS")
+        u.send("PRIVMSG op :hi")
+        assert u.saw(r" 531 u1 op :Message not sent")
+
+
+def test_cloak_toggle_whois_notify_forward_ban_and_repeat_flood():
+    cfg = dict(OPER)
+    cfg["security"] = {"rdns_enabled": False, "ident_enabled": False, "flood_max_msgs": 1000, "connect_flood_max": 100000,
+                       "host_masking": True}
+    with Server(cfg=cfg) as s:
+        boss, u = oper(s, "boss"), s.client("u1")
+        # +x is on by default under host_masking; -x shows the real host (396), +x cloaks again
+        assert "x" in " ".join(u.say("MODE u1", 0.4))
+        u.send("MODE u1 -x")
+        assert u.saw(r" 396 u1 127\.0\.0\.1 :is now your displayed host")
+        u.send("MODE u1 +x")
+        cl = u.expect(r" 396 u1 \S+ :is now your displayed host")
+        assert "127.0.0.1" not in cl, cl
+        # +W: an oper is told who WHOISed them; ordinary users can't set it
+        boss.say("MODE boss +W")
+        u.send("WHOIS boss")
+        assert boss.saw(r"NOTICE boss :\*\*\* Notice -- u1 \(.*\) did a /WHOIS on you")
+        u.send("MODE u1 +W")
+        assert not u.saw(r"MODE u1 :?\+W", 0.5)
+        # ~f: banned from #main, sent to #lobby instead
+        boss.say("JOIN #main")
+        boss.send("MODE #main +b ~forward:#lobby:u1")
+        assert boss.saw(r"MODE #main \+b ~f:#lobby:u1!\*@\*")
+        u.send("JOIN #main")
+        assert u.saw(r" 470 u1 #main #lobby ") and u.saw(r":u1!\S+ JOIN :?#lobby")
+        # +f r#d: the third identical line is dropped
+        v = s.client("v1")
+        v.say("JOIN #main")
+        boss.say("MODE #main +f [2r#d]:30")
+        for _ in range(3):
+            v.send("PRIVMSG #main :buy now")
+        assert v.saw(r" 404 v1 #main :Cannot send to channel \(\+f, repeated message\)")

@@ -75,13 +75,14 @@
 <tr><td><code>+p</code> <code>+s</code></td><td>Private / secret. Hides name, topic and membership from non-members.</td></tr>
 <tr><td><code>+k</code> <code>+l</code></td><td>Key, and user limit.</td></tr>
 <tr><td><code>+f &lt;lines&gt;:&lt;seconds&gt;</code></td><td>Flood protection: kicks anyone who sends more than that many lines in that time. Ops, halfops, voiced users and IRC operators are exempt. Tag-only messages (<code>TAGMSG</code>, such as typing indicators) are not counted.</td></tr>
+<tr><td><code>+f [&lt;n&gt;&lt;type&gt;[#&lt;action&gt;[&lt;mins&gt;]],...]:&lt;seconds&gt;</code></td><td>UnrealIRCd's form, e.g. <code>[10j#R5,30m,4n,7t#b]:15</code>. Types: <code>c</code> CTCPs (sets <code>+C</code>, or <code>#m</code>/<code>#M</code>), <code>j</code> joins (<code>+i</code>, or <code>#R</code>), <code>k</code> knocks (<code>+K</code>), <code>m</code> messages (<code>+m</code>, or <code>#M</code>), <code>n</code> nick changes (<code>+N</code>), all channel-wide; <code>t</code> lines per user (kick, or <code>#b</code> kick-ban), <code>r</code> the same line repeated per user (kick, <code>#b</code> kick-ban or <code>#d</code> drop). A number after the action removes that mode again after that many minutes. Counts are per server.</td></tr>
 <tr><td><code>+z</code></td><td>Only clients connected over TLS may join.</td></tr>
 <tr><td><code>+r</code></td><td>Registered with services. Set and cleared only by ChanServ.</td></tr>
 <tr><td><code>+P</code></td><td>Permanent: the channel survives going empty.</td></tr>
 <tr><td><code>+C</code> <code>+T</code> <code>+S</code></td><td>Block CTCP, block channel NOTICE, strip color codes.</td></tr>
-<tr><td><code>+N</code> <code>+Q</code> <code>+V</code></td><td>Block nick changes, block kicks, block invites.</td></tr>
+<tr><td><code>+N</code> <code>+Q</code> <code>+V</code> <code>+K</code></td><td>Block nick changes, block kicks, block invites, block <code>KNOCK</code>.</td></tr>
 <tr><td><code>+o</code> <code>+h</code> <code>+v</code></td><td>Prefix modes: <code>@</code> op, <code>%</code> halfop, <code>+</code> voice.</td></tr>
-<tr><td><code>+b</code> <code>+e</code> <code>+I</code></td><td>Ban, ban exception, invite exception. Up to 100 entries each. Extban <code>a:&lt;account&gt;</code> matches by SASL account.</td></tr>
+<tr><td><code>+b</code> <code>+e</code> <code>+I</code></td><td>Ban, ban exception, invite exception. Up to 100 entries each. Extbans: <code>~a:&lt;account&gt;</code>, <code>~m:&lt;mask&gt;</code> (quiet), <code>~n:&lt;mask&gt;</code> (no nick change, voice and up exempt), <code>~r:&lt;realname&gt;</code>, <code>~j:#chan</code>, <code>~z</code> (TLS), <code>~S:&lt;fingerprint&gt;</code> (TLS client certificate), <code>~t:&lt;minutes&gt;:&lt;mask&gt;</code> (removed by the server after that time; wraps any other mask), <code>~f:#chan:&lt;mask&gt;</code> (a matching user's JOIN is forwarded to <code>#chan</code>). UnrealIRCd names work too (<code>~account:</code>, <code>~quiet:</code>, <code>~nickchange:</code>, <code>~realname:</code>, <code>~channel:</code>, <code>~certfp:</code>, <code>~time:</code>, <code>~forward:</code>). A bare host or <code>user@host</code> is stored as <code>*!*@host</code> / <code>*!user@host</code>.</td></tr>
 </table></div>
 
 <h2>user modes</h2>
@@ -89,15 +90,19 @@
 <tr><th>Mode</th><th>Meaning</th></tr>
 <tr><td><code>+i</code></td><td>Invisible. Hidden from <code>GLOB</code> unless you share a channel or the searcher is an oper.</td></tr>
 <tr><td><code>+w</code></td><td>Receive <code>WALLOPS</code>.</td></tr>
-<tr><td><code>+d</code></td><td>Drop CTCP sent to you.</td></tr>
+<tr><td><code>+d</code></td><td>Deaf: channel messages are not delivered to you. Private messages still are.</td></tr>
+<tr><td><code>+T</code></td><td>Drop CTCP sent to you (was <code>+d</code> before 1.3.3).</td></tr>
 <tr><td><code>+B</code></td><td>Mark yourself as a bot. Shows <code>335</code> in WHOIS and <code>B</code> in WHO flags, and tags your messages with <code>bot</code> for clients with <code>message-tags</code>. Advertised as <code>BOT=B</code>.</td></tr>
+<tr><td><code>+x</code></td><td>Cloaked host. On by default when <code>host_masking</code> is enabled; <code>-x</code> shows your real host, <code>+x</code> cloaks it again (<code>396</code>). Bans match the real host and IP either way.</td></tr>
+<tr><td><code>+W</code></td><td>Opers only: a notice whenever someone does a <code>/WHOIS</code> on you.</td></tr>
 <tr><td><code>+s</code></td><td>Server notices (opers): bans, connects, kills, failed <code>OPER</code>, links.</td></tr>
 <tr><td><code>+o</code></td><td>Operator. Granted by <code>/OPER</code>.</td></tr>
-<tr><td><code>+Z</code></td><td>Connected over TLS. Set by the server.</td></tr>
+<tr><td><code>+z</code></td><td>Connected over TLS. Set by the server (was <code>+Z</code> before 1.3.3).</td></tr>
+<tr><td><code>+Z</code></td><td>Private messages only to and from TLS users (<code>531</code> otherwise). IRC operators and services can still reach you.</td></tr>
 <tr><td><code>+r</code></td><td>Identified to an account. Set by the server.</td></tr>
 </table></div>
 <p class="note"><code>[security] default_user_modes</code> (e.g. <code>"iw"</code>) applies self-togglable modes automatically after registration.
-  <code>+o</code>, <code>+Z</code> and <code>+r</code> can never be granted this way.</p>
+  <code>+o</code>, <code>+z</code> and <code>+r</code> can never be granted this way.</p>
 </main>
 </div>
 <footer id="site-footer"></footer>

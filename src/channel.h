@@ -55,6 +55,7 @@ struct client;
 #define CMODE_DELAYJOIN  0x1000000 /* D: a joiner stays invisible until they speak (or get a rank) */
 #define CMODE_AUDITORIUM 0x2000000 /* u: ordinary members are visible only to ranked members (and themselves) */
 #define CMODE_CENSOR     0x4000000 /* G: configured bad words in messages are starred out */
+#define CMODE_NOKNOCK    0x8000000 /* K: /KNOCK disabled */
 #define CMODE_NOCOLOR    0x100000 /* c: reject (not just strip) a message containing colour/formatting codes */
 
 typedef struct member {
@@ -65,6 +66,9 @@ typedef struct member {
     int hidden;                       /* +D: joined but not yet revealed -- see channel_member_visible */
     time_t fl_start;                  /* +f window start for this member */
     int fl_count;
+    unsigned rp_hash;                 /* +f r: hash of the member's last line, and how many times in a row */
+    int rp_count;
+    time_t rp_start;
     unsigned cache_lists_gen, cache_ident_hash;
     unsigned char cache_valid, cache_banned, cache_quieted;
     UT_hash_handle hh; /* keyed by the client pointer itself */
@@ -76,7 +80,22 @@ typedef struct {
     int n;
     unsigned gen;       /* bumped on every add/del; invalidates member_t's cached ban verdict */
     int dynamic;        /* holds a ~j: extban, whose verdict depends on other channels -> never cached */
+    time_t *set_at;     /* parallel to masks: when it was set (RPL_BANLIST, ~t: expiry) */
+    char (*set_by)[64]; /* parallel to masks: who set it, "" = unknown (a burst) */
 } masklist_t;
+
+/* +f in UnrealIRCd's form "[<n><type>[#<action>[<mins>]],...]:<secs>". Types: c CTCP, j joins, k knocks, m messages,
+ * n nick changes (all channel-wide), t text per user, r the same line repeated per user. The plain "<lines>:<secs>" form needs none of this (fp stays NULL). */
+#define FP_TYPES "cjkmntr"
+typedef struct floodprot {
+    char spec[96];      /* canonical parameter, as shown in MODE */
+    int limit[7];       /* per FP_TYPES; 0 = not watched */
+    char action[7];     /* mode letter set when exceeded; for t and r: 'k' kick, 'b' kickban, r also 'd' drop */
+    int unset_mins[7];  /* remove that mode again after this many minutes, 0 = leave it */
+    int count[7];
+    time_t start[7];
+    time_t unset_at[7];
+} floodprot_t;
 
 
 typedef struct channel {
@@ -92,6 +111,7 @@ typedef struct channel {
     char redirect[CHAN_NAMELEN];      /* +L target */
     int flood_lines, flood_secs;      /* +f */
     int jt_joins, jt_secs;            /* +j */
+    floodprot_t *fp;                  /* +f in UnrealIRCd's [..]:secs form, NULL otherwise */
     int jt_count;                     /* joins seen in the current +j window */
     time_t jt_start;
     masklist_t bans;                  /* +b */
@@ -124,6 +144,9 @@ int channel_mask_hit(const char *mask, const char *nick, const char *user,
 /* True if the m:/~m: quiet extban hits (see channel.c) -- blocks speaking,
  * not JOIN, unlike a structural +b. Not affected by +e (exceptions are for
  * structural bans; a chanop removes a specific quiet with -b instead). */
+int channel_is_nickbanned(channel_t *chan, const char *nick, const char *user, /* ~n: may not change nick */
+                          const char *host, const char *realhost, const char *ip,
+                          const char *account, int ident_confirmed);
 int channel_is_quieted(channel_t *chan, const char *nick, const char *user,
                         const char *host, const char *realhost, const char *ip,
                         const char *account, int ident_confirmed);
@@ -169,6 +192,13 @@ int channel_member_visible(const channel_t *chan, const member_t *subject, const
 
 void masklist_free(masklist_t *ml);
 int masklist_add(masklist_t *ml, const char *mask); /* 0 ok, -1 dup/full */
+int channel_set_flood(channel_t *chan, const char *param); /* +f: either form; -1 = invalid, nothing changed */
+void channel_clear_flood(channel_t *chan);
+void channel_flood_param(const channel_t *chan, char *out, size_t outsz);
+int channel_mask_expired(const masklist_t *ml, int i, time_t now);
+int channel_ban_forward(channel_t *chan, const char *nick, const char *user, const char *host, const char *realhost,
+                        const char *ip, const char *account, int ident_confirmed, char *out, size_t outsz); /* ~f:#chan: hit */ /* a ~t:<mins>: entry past its time */
+void channel_normalize_mask(const char *in, char *out, size_t outsz); /* "1.2.3.4" -> "*!*@1.2.3.4", Unreal named extbans -> letters */
 int masklist_del(masklist_t *ml, const char *mask); /* 0 removed, -1 not found */
 
 void channel_invite_add(channel_t *chan, const char *casefold_nick);

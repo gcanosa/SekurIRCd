@@ -889,7 +889,7 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
         char ms[48] = "-";
         const char *ka[] = {"*"};
         int nk = 0;
-        for (const char *c = "imnpstzCTSVQNRMcDuG"; *c; c++) /* never r (ChanServ's), P or O (oper-set) */
+        for (const char *c = "imnpstzCTSVQNRMcDuGK"; *c; c++) /* never r (ChanServ's), P or O (oper-set) */
             if ((chan->modes & channel_flag_bit(*c)) && !strchr(srv->cfg.channels.default_modes, *c)) strncat(ms, (char[]){*c, 0}, sizeof ms - strlen(ms) - 1);
         if (chan->modes & CMODE_K) { strncat(ms, "k", sizeof ms - strlen(ms) - 1); nk = 1; }
         if (chan->modes & CMODE_L) strncat(ms, "l", sizeof ms - strlen(ms) - 1);

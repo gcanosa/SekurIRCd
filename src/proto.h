@@ -272,6 +272,9 @@ size_t irc_time_tag_insert(const char *line, char *tag, size_t tagsz, size_t *at
 
 #define N_KNOCK            "710"
 #define N_KNOCKDLVR        "711"
+#define N_CANNOTKNOCK      "480"
+#define N_CANTSENDTOUSER   "531"
+#define N_HOSTHIDDEN       "396"
 #define N_CHANOPEN         "713"
 #define N_KNOCKONCHAN      "714"
 

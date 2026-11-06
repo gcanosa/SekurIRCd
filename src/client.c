@@ -115,14 +115,18 @@ void *client_list_idle(void *list, int n) {
 }
 
 void client_mode_string(const client_t *cl, char *out, size_t outsz) {
-    char modestr[24] = "+";
+    char modestr[32] = "+";
     size_t p = 1;
     if (cl->umodes & UMODE_I) modestr[p++] = 'i';
     if (cl->umodes & UMODE_W) modestr[p++] = 'w';
-    if (cl->umodes & UMODE_D) modestr[p++] = 'd';
+    if (cl->umodes & UMODE_DEAF) modestr[p++] = 'd';
+    if (cl->umodes & UMODE_D) modestr[p++] = 'T';
     if (cl->umodes & UMODE_S) modestr[p++] = 's';
     if (cl->umodes & UMODE_O) modestr[p++] = 'o';
-    if (cl->umodes & UMODE_Z) modestr[p++] = 'Z';
+    if (cl->umodes & UMODE_Z) modestr[p++] = 'z';
+    if (cl->umodes & UMODE_SECUREONLY) modestr[p++] = 'Z';
+    if (cl->umodes & UMODE_X) modestr[p++] = 'x';
+    if (cl->umodes & UMODE_WHOISNOTE) modestr[p++] = 'W';
     if (cl->umodes & UMODE_R) modestr[p++] = 'r';
     if (cl->umodes & UMODE_P) modestr[p++] = 'p';
     if (cl->umodes & UMODE_HIDEIDLE) modestr[p++] = 'I';

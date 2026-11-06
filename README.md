@@ -38,13 +38,13 @@ Website & docs: <https://gcanosa.github.io/SekurIRCd/> (source in [`web/`](web/)
   reliably shows whether a channel is actually registered
 - User modes via `MODE`: self-togglable `+i` (invisible -- hidden from
   `GLOB` unless you share a channel or the searcher's an oper), `+w`
-  (WALLOPS), `+d` (drop CTCP sent to you), `+B` (mark yourself as a bot:
+  (WALLOPS), `+d` (deaf: no channel messages), `+T` (drop CTCP sent to you), `+B` (mark yourself as a bot:
   `335` in WHOIS, `B` in the WHO flags, an IRCv3 `bot` tag on your messages
   for `message-tags` clients, `BOT=B` in `005`), plus `+o` (operator, granted by
-  `/OPER`, which also grants `+s` and `+w`), and `+Z` (connected over TLS --
+  `/OPER`, which also grants `+s` and `+w`), and `+z` (connected over TLS --
   set by the server, not self-togglable); `[security] default_user_modes` (e.g.
   `"iw"`) applies self-togglable modes automatically once a client
-  registers -- `+o`/`+Z` can never be granted this way
+  registers -- `+o`/`+z` can never be granted this way
 - TLS/SSL listener (`[tls]`): opt-in, runs alongside the plaintext listener
   on its own port (default `6697`, the conventional "ircs" port); a
   self-signed certificate is fine (still encrypted) -- clients just need
@@ -82,7 +82,8 @@ Website & docs: <https://gcanosa.github.io/SekurIRCd/> (source in [`web/`](web/)
   mask from K/G-lines), plus `UN`-forms. Each `[[operators]]` login may carry
   `privileges = ["kill", "kline", "sa", "host", "wallops", "rehash", "die",
   "link"]` to restrict which of those it can use (no key = everything).
-- Channel modes `+f <lines>:<secs>` (kicks a non-privileged flooder) and
+- Channel modes `+f <lines>:<secs>` (kicks a non-privileged flooder; UnrealIRCd's
+  `+f [10j#R5,30m,4n,7t#b]:15` form works too) and
   `+j <joins>:<secs>` (refuses joins once the rate is exceeded).
 - Connecting through something: `WEBIRC` (`[[webirc]]`), the PROXY protocol
   v1 (`[server] proxy_protocol_hosts`) and a WebSocket listener (`[websocket]`,

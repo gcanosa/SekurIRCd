@@ -588,7 +588,7 @@ void net_reclass_all(server_t *srv) {
 }
 
 void net_reset_host(server_t *srv, client_t *cl) {
-    if (!srv->cfg.security.host_masking) { snprintf(cl->host, sizeof cl->host, "%s", cl->realhost); return; }
+    if (!(cl->umodes & UMODE_X)) { /* -x (or host_masking off and never +x): the real host */ snprintf(cl->host, sizeof cl->host, "%s", cl->realhost); return; }
     int resolved = strcmp(cl->realhost, cl->ip) != 0;
     apply_masked_host(srv, cl, resolved ? cl->realhost : cl->ip, resolved ? cl->realhost : NULL);
 }
@@ -688,6 +688,7 @@ static client_t *accept_common(server_t *srv, int listen_fd) {
     }
 
     if (srv->cfg.security.host_masking) {
+        cl->umodes |= UMODE_X; /* cloaked: the user can drop it with -x, as on UnrealIRCd */
         apply_masked_host(srv, cl, ipbuf, NULL); /* rDNS hasn't run yet -- IP-keyed token, network-only suffix */
     } else {
         snprintf(cl->host, sizeof cl->host, "%s", ipbuf);
@@ -1057,7 +1058,7 @@ static void drain_worker_results(server_t *srv) {
                      * is off; under masking, recloak from the real hostname
                      * instead of the accept-time IP-keyed fallback. */
                     snprintf(cl->realhost, sizeof cl->realhost, "%s", r->text);
-                    if (srv->cfg.security.host_masking) apply_masked_host(srv, cl, r->text, r->text);
+                    if (cl->umodes & UMODE_X) apply_masked_host(srv, cl, r->text, r->text);
                     else snprintf(cl->host, sizeof cl->host, "%s", r->text);
                 }
                 cmd_send_welcome_if_ready(srv, cl);
@@ -1124,6 +1125,7 @@ static void drain_worker_results(server_t *srv) {
 static void tick(server_t *srv) {
     time_t now = time(NULL);
     cmd_services_tick(srv, now);
+    cmd_channels_tick(srv, now);
     for (client_t *cl = srv->all_clients; cl; cl = cl->all_next) {
         /* Safety net for the event loop's lists: a quit set without client_mark_quit, or output queued some way
          * that skipped client_send, is picked up here within a second instead of never. */

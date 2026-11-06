@@ -102,7 +102,7 @@ def test_websocket_over_tls_wss():
         assert any(" 001 " in t for o, t in frames), frames[:3]
         tls.sendall(ws_frame("MODE wssu"))
         out, _ = ws_parse(ws_read(tls, 0.8))
-        assert any(" 221 " in t and "Z" in t for o, t in out), out  # +Z = secure connection
+        assert any(" 221 " in t and "z" in t for o, t in out), out  # +z = secure connection
 
 
 def test_connection_class_limits_clients():

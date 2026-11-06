@@ -127,8 +127,8 @@ static int rank_from_prefix(const char **p) {
 }
 
 static const struct { char letter; unsigned bit; } UMODE_MAP[] = {
-    {'i', UMODE_I}, {'w', UMODE_W}, {'d', UMODE_D}, {'s', UMODE_S}, {'o', UMODE_O}, {'Z', UMODE_Z}, {'r', UMODE_R}, {'p', UMODE_P},
-    {'I', UMODE_HIDEIDLE}, {'H', UMODE_H}, {'q', UMODE_Q}, {'R', UMODE_REGONLY}, {'D', UMODE_NOPM}, {'B', UMODE_B}, {'g', UMODE_G},
+    {'i', UMODE_I}, {'w', UMODE_W}, {'d', UMODE_DEAF}, {'T', UMODE_D}, {'s', UMODE_S}, {'o', UMODE_O}, {'Z', UMODE_Z}, {'X', UMODE_SECUREONLY}, /* wire letters: older servers know Z as TLS (users see z) */ {'r', UMODE_R}, {'p', UMODE_P},
+    {'I', UMODE_HIDEIDLE}, {'H', UMODE_H}, {'q', UMODE_Q}, {'R', UMODE_REGONLY}, {'D', UMODE_NOPM}, {'B', UMODE_B}, {'g', UMODE_G}, {'x', UMODE_X}, {'W', UMODE_WHOISNOTE},
 };
 
 /* "+iw" (plus 'S' for a service pseudo-client) <-> bits. */
@@ -728,7 +728,8 @@ static void set_state_modes(channel_t *chan, const char *modes, const char **arg
     if (replace) {
         chan->modes = 0;
         chan->key[0] = '\0';
-        chan->limit = chan->flood_lines = chan->flood_secs = chan->jt_joins = chan->jt_secs = 0;
+        chan->limit = chan->jt_joins = chan->jt_secs = 0;
+        channel_clear_flood(chan);
         chan->redirect[0] = '\0';
     }
     int ai = 0;
@@ -741,7 +742,7 @@ static void set_state_modes(channel_t *chan, const char *modes, const char **arg
         switch (*c) {
             case 'k': snprintf(chan->key, sizeof chan->key, "%s", a); chan->modes |= CMODE_K; break;
             case 'l': chan->limit = atoi(a); if (chan->limit > 0) chan->modes |= CMODE_L; break;
-            case 'f': { int n, s; if (sscanf(a, "%d:%d", &n, &s) == 2) { chan->flood_lines = n; chan->flood_secs = s; chan->modes |= CMODE_FLOOD; } break; }
+            case 'f': channel_set_flood(chan, a); break;
             case 'j': { int n, s; if (sscanf(a, "%d:%d", &n, &s) == 2) { chan->jt_joins = n; chan->jt_secs = s; chan->modes |= CMODE_JTHROT; } break; }
             case 'L': snprintf(chan->redirect, sizeof chan->redirect, "%s", a); chan->modes |= CMODE_REDIRECT; break;
         }
@@ -765,7 +766,7 @@ static void reset_channel_for_ts(server_t *srv, channel_t *chan) {
     }
     HASH_ITER(hh, chan->members, m, tmp) m->rank = 0;
     char flagsoff[40] = "-";
-    for (const char *c = "nipstmzrPCTSVQNROMcDuG"; *c; c++)
+    for (const char *c = "nipstmzrPCTSVQNROMcDuGK"; *c; c++)
         if (chan->modes & channel_flag_bit(*c)) strncat(flagsoff, (char[]){*c, 0}, sizeof flagsoff - strlen(flagsoff) - 1);
     char ps[8] = "";
     const char *pargs[4];
@@ -1057,12 +1058,14 @@ static void handle_mode(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
                 if (sign == '+' && arg) { chan->limit = atoi(arg); chan->modes |= CMODE_L; outarg = arg; } else { chan->limit = 0; chan->modes &= ~CMODE_L; }
             } else if (*c == 'f' || *c == 'j') {
                 int n, secs;
-                if (sign == '+' && arg && sscanf(arg, "%d:%d", &n, &secs) == 2) {
-                    if (*c == 'f') { chan->flood_lines = n; chan->flood_secs = secs; chan->modes |= CMODE_FLOOD; }
-                    else { chan->jt_joins = n; chan->jt_secs = secs; chan->jt_count = 0; chan->jt_start = 0; chan->modes |= CMODE_JTHROT; }
+                if (sign == '+' && arg && *c == 'f') {
+                    emit = channel_set_flood(chan, arg) == 0;
+                    outarg = arg;
+                } else if (sign == '+' && arg && sscanf(arg, "%d:%d", &n, &secs) == 2) {
+                    { chan->jt_joins = n; chan->jt_secs = secs; chan->jt_count = 0; chan->jt_start = 0; chan->modes |= CMODE_JTHROT; }
                     outarg = arg;
                 } else if (sign == '-') {
-                    if (*c == 'f') { chan->modes &= ~CMODE_FLOOD; chan->flood_lines = chan->flood_secs = 0; }
+                    if (*c == 'f') channel_clear_flood(chan);
                     else { chan->modes &= ~CMODE_JTHROT; chan->jt_joins = chan->jt_secs = 0; }
                 } else emit = 0;
             } else if (*c == 'L') {
