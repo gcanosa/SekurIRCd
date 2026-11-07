@@ -18,6 +18,9 @@ For each live config (sekurircd.toml, protection.toml, services.toml):
                                      (the defaults). Backups <file>.pre-fix-<date>; the daemons validate the
                                      result and anything they reject is restored.
 
+--fix --write also tightens the permissions of secret files and config directories you own (the chmods the
+check suggests); ones that need sudo or a chown are left for you.
+
 --fix never changes what the server does: a moved setting keeps its value (one already set in its new
 home wins there today, so the old copy is just commented out), and everything else it adds or disables
 is a comment or was already ignored. A [server] name without a dot is left for you. Plain-text passwords
@@ -63,6 +66,7 @@ RETIRED_TO = {"accounts": (SV, "nickserv")}
 OPTIONAL = {"config/protection.toml"}  # sekurircd.toml settings apply when it's absent
 
 errors = warnings = 0
+perm_fixes = []  # (path, mode) chmods --fix --write applies: only ones this user can make without sudo or chown
 
 
 def ok(s): print(f"  {green('✔')} {s}")
@@ -393,10 +397,13 @@ def check_permissions(paths=None):
     """Warns about secret files other local users can read or change, each with the exact command that fixes it."""
     me, users = pwd.getpwuid(os.getuid()).pw_name, daemon_users()
     bad = 0
+    perm_fixes.clear()
     for d in ("config", "services", "config/tls"):
         if os.path.isdir(d) and os.stat(d).st_mode & (stat.S_IWGRP | stat.S_IWOTH):
             warn(f"{d}/ is writable by {'everyone' if os.stat(d).st_mode & stat.S_IWOTH else 'its group'}: anyone who can "
                  f"write there can swap in their own config -- fix: {sudo_for(d, me)}chmod go-w {d}"); bad += 1
+            if not sudo_for(d, me):
+                perm_fixes.append((d, stat.S_IMODE(os.stat(d).st_mode) & ~(stat.S_IWGRP | stat.S_IWOTH)))
     for f, what in paths or secret_files():
         st = os.stat(f)
         owner = pwd.getpwuid(st.st_uid).pw_name
@@ -409,13 +416,15 @@ def check_permissions(paths=None):
         if not mode & ~want & 0o077:
             continue
         who = ("everyone on this machine" if mode & 0o006 else f"group {group}")
-        how = "change" if mode & 0o022 else "read"
+        how = "changed" if mode & 0o022 else "read"
         if others and not via_group:  # chmod 600 alone would lock the daemon out
             u = sorted(others)[0]
             fix = f"sudo chown {u} {f} && sudo chmod 600 {f}  (the daemon runs as {u}; or add {u} to group {group} " \
                   f"and chmod 640 {f})"
         else:
             fix = f"{sudo_for(f, me)}chmod {want:o} {f}"
+            if not sudo_for(f, me):
+                perm_fixes.append((f, want))
         warn(f"{f} ({what}) can be {how} by {who} ({mode:o}) -- fix: {fix}"); bad += 1
     if not bad:
         ok("secret files are private to their owner")
@@ -707,6 +716,7 @@ def selftest():
             with contextlib.redirect_stdout(buf):
                 check_permissions([(f, "x")])
             assert expect in buf.getvalue(), buf.getvalue()
+            assert perm_fixes == ([(f, 0o600)] if mode == 0o644 else []), perm_fixes  # what --fix --write would chmod
     print("selftest ok")
 
 
@@ -760,8 +770,22 @@ def fix(write, quiet):
         print(buf.getvalue()); summary()
         print(f"  {red('--fix only tidies a config the server accepts: fix the error(s) first.')}")
         return 1
+    perms = list(perm_fixes)
+    if perms:
+        print(f"\n{bold('file permissions')}")
+        for path, mode in perms:
+            if write:
+                os.chmod(path, mode); ok(f"chmod {mode:o} {path}")
+            else:
+                note(f"would chmod {mode:o} {path}")
+        if write:  # the warnings above are now stale: re-run the check so what's left is current
+            with contextlib.redirect_stdout(io.StringIO()) as buf:
+                report(None, True)
     if not changes:
-        ok("nothing for --fix to change")
+        if perms and not write:
+            print(f"\n  Apply with {bold('tools/confcheck.py --fix --write')}")
+            return 2
+        ok("nothing else for --fix to change" if perms else "nothing for --fix to change")
         left = [l for l in buf.getvalue().splitlines() if l.lstrip().startswith(("!", "\033[33m!"))]
         if left:
             print(f"  {len(left)} warning(s) need you:")
