@@ -203,7 +203,8 @@ fingerprint = "sha256:&lt;the hub's certificate&gt;"</pre>
 <p><code>sekurircd.toml</code>, <code>services.toml</code>, the TLS key, <code>accounts.json</code> and the ChanServ store hold secrets.
   <code>tools/confcheck.py</code> warns about any of them other local users can read or change, and prints the exact fix for each: <code>chmod 600</code> for
   your own files, <code>sudo</code> when another user owns one, or <code>chown</code> to the daemon's user (or <code>640</code> through its group) when it runs as
-  someone else, so the daemon isn't locked out.</p>
+  someone else, so the daemon isn't locked out. <code>tools/confcheck.py --fix --write</code> applies the <code>chmod</code> fixes itself for files you own
+  (<code>--fix</code> alone previews them); the <code>sudo</code> and <code>chown</code> cases are left to you.</p>
 
 <h2>host cloaking</h2>
 <pre>[security]

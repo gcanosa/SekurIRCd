@@ -105,6 +105,15 @@ tools/upgrade.py --rollback   # undo the last upgrade</pre>
   when what's running is older than the checkout (a stale build, or a daemon started before the last build) and offers to rebuild and restart.
   Each run writes <code>logs/SekurIRCd-upgrade-&lt;date&gt;.log</code>.</p>
 
+<h2 id="backup">backup and restore</h2>
+<p><code>tools/backup-config.sh</code> packs everything you'd carry to a new machine or version into one private archive: the live configs,
+  accounts and their rotating backups, K-lines, MOTDs, TLS keys and ChanServ registrations.</p>
+<pre>tools/backup-config.sh [DIR]                    # back up (asks for DIR, default /tmp)
+tools/backup-config.sh --restore [ARCHIVE|DIR]  # restore one (lists the backups in DIR to pick from)</pre>
+<p>A restore shows which files are new, changed or the same, backs up the current files next to the archive first, then runs
+  <code>tools/confcheck.py</code> (and the daemons' own <code>--check</code>) on the result and rolls back if it fails. Archives with paths outside
+  <code>config/</code> and <code>services/</code> are refused. To restore a single file, <code>tar -xzf ARCHIVE config/sekurircd.toml</code> run from the repo directory is enough.</p>
+
 <h2>daemon mode</h2>
 <pre>./bin/sekurircd --config config/sekurircd.toml --daemon --pidfile /var/run/sekurircd.pid
 ./bin/sekurircd --stop   --pidfile /var/run/sekurircd.pid   # graceful stop, removes the pidfile
