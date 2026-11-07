@@ -1043,11 +1043,20 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
         return 0;
     }
     if (strcasecmp(msg.command, "SVCMEMBERS") == 0) {
-        /* SVCMEMBERS <chan> [<nick>|* [SYNC]]: the live topic, then every current member's real identity + ranks, so
+        /* SVCMEMBERS <chan> [<nick>|* [SYNC]] (or * <nick>, below): the live topic, then every current member's real identity + ranks, so
          * a ChanServ setting change (ACCESS, AKICK, RESTRICTED, SECUREOPS, FOUNDER, TOPICLOCK) takes effect without
          * anyone rejoining. A nick asks about that one member only (no topic): SECUREOPS checking a +o. SYNC is
          * ChanServ (re)linking: each line says whether the channel was created while it was away (a takeover to undo). */
         if (msg.nparams < 1) return 0;
+        if (strcmp(msg.params[0], "*") == 0) { /* SVCMEMBERS * <nick>: that user in every +r channel they are in (just logged in) */
+            client_t *u = msg.nparams >= 2 ? server_find_user(srv, msg.params[1]) : NULL;
+            if (!u || u->is_service) return 0;
+            for (chan_node_t *n = u->channels; n; n = n->next) {
+                member_t *m = (n->chan->modes & CMODE_R) ? channel_find_member(n->chan, u) : NULL;
+                if (m) send_member_line(lc, "SVCMEMBER", n->chan, u, m->rank, "0");
+            }
+            return 0;
+        }
         channel_t *chan = server_find_channel(srv, msg.params[0]);
         if (!chan) return 0;
         const char *who = msg.nparams >= 2 && strcmp(msg.params[1], "*") != 0 ? msg.params[1] : NULL;

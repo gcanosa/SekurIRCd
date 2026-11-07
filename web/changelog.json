@@ -3,6 +3,7 @@
     "tag": "Unreleased",
     "date": "",
     "changes": [
+      "ChanServ: an ACCESS entry by account (=account) now gives its mode when the user logs in to NickServ after joining the channel. Before, the mode only came on join, so identifying late meant a /cycle",
       "Oper modes are configurable, like UnrealIRCd's modes-on-oper and Solanum's oper_umodes: [security] oper_modes (default \"+osw\") sets what every /OPER gets, and a login's own modes = \"...\" in [[operators]] replaces it (e.g. \"+oswW\" for a netadmin who wants WHOIS notices). o is always given; allowed on top are iwdTsBgZpIRD and the oper-only H, q and W. An unknown letter fails the config load. The MODE line after /OPER now lists only the modes that were actually added",
       "Users who reach us over TLS through a web gateway or reverse proxy now get +z too, so they can join +z (TLS-only) channels: a WEBIRC with the IRCv3 \"secure\" option, and a WebSocket from a trusted_proxies address whose X-Forwarded-Proto is https at every hop. Direct TLS and wss connections already had it"
     ]

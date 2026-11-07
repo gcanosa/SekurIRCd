@@ -15,6 +15,8 @@ void svc_queue_line(const char *line);
  * channels ChanServ sits in) -- IDENTIFY / auto-mode state is per nick and must not pass to whoever takes it next. */
 void cs_user_quit(const char *nick);
 void cs_user_nick(const char *old_nick, const char *new_nick);
+/* A user just logged in: give them their ACCESS modes in the registered channels they are already in. */
+void cs_user_login(const char *nick);
 
 /* nickserv.c -------------------------------------------------------------------------------------------------- */
 /* [nickserv] from services.toml (`config_path` resolves relative paths). -1 + err on a bad value. */

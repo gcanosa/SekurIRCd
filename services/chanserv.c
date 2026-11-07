@@ -1999,6 +1999,10 @@ void cs_user_nick(const char *old_nick, const char *new_nick) {
     granted_rename(old_nick, new_nick);
 }
 
+/* Logged in after joining: SVCMEMBERS * <nick> has the hub answer with an SVCMEMBER for each registered (+r) channel
+ * the nick is in, and enforce_member grants what SVCJOIN would have. */
+void cs_user_login(const char *nick) { wire_svcmember_one("*", nick); }
+
 /* "nick!user@host" -> "nick" (or the whole thing if there's no '!'). */
 static void nick_from_prefix(const char *prefix, char *out, size_t outsz) {
     const char *bang = strchr(prefix, '!');

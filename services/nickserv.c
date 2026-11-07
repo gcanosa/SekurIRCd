@@ -618,6 +618,7 @@ int ns_event(irc_message_t *m) {
         if (u) {
             snprintf(u->account, sizeof u->account, "%s", strcmp(m->params[1], "*") ? m->params[1] : "");
             if (u->account[0] && strcasecmp(u->account, u->enforce_owner) == 0) u->enforce_at = 0;
+            if (u->account[0]) cs_user_login(u->nick);
         }
         return 1;
     }

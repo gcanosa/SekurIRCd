@@ -219,3 +219,20 @@ def test_rename_onto_registered_channel_goes_through_chanserv():
             assert re.search(r"324 intruder #rr \+\w*r", " ".join(x.say("MODE #rr"))), "renamed-onto registered name lost +r"
             names = " ".join(x.say("NAMES #rr"))
             assert "@intruder" not in names and "intruder" in names, names
+
+
+def test_access_granted_on_login_after_join():
+    """ACCESS by account: logging in after joining still gets the mode, no rejoin needed."""
+    from test_accounts import register
+    from test_accounts2 import ns
+    with Server(cfg={"accounts": {"enabled": True, "store_file": "acc.json"}}) as s:
+        register(s, "acctmaker", "hopacct", "hoppass123").send("QUIT")
+        f = s.client("fnd")
+        f.say("JOIN #late")
+        f.say("PRIVMSG ChanServ :REGISTER #late pw12345", 1.2)
+        f.say("PRIVMSG ChanServ :ACCESS #late ADD =hopacct h pw12345", 1.0)
+        h = s.client("hopper")
+        h.say("JOIN #late", 1.0)
+        assert "%hopper" not in " ".join(f.say("NAMES #late"))
+        assert any("identified" in l for l in ns(h, "IDENTIFY hopacct hoppass123", 2.0))
+        assert "%hopper" in " ".join(f.say("NAMES #late", 1.0))
