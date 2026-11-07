@@ -51,7 +51,8 @@
 
 <h2>turning it on</h2>
 <p>The bundle is one file, <code>protection.toml</code>, kept next to <code>sekurircd.toml</code>. A fully commented template ships as
-  <code>config/protection.template.toml</code>.</p>
+  <code>config/protection.template.toml</code>. <code>tools/makeconf.py</code> and the <a href="wizard.html">web wizard</a> can
+  write it for you from a few questions. To start from the template instead:</p>
 <pre>cp config/protection.template.toml /etc/sekurircd/protection.toml
 $EDITOR /etc/sekurircd/protection.toml
 /REHASH                              # no restart needed

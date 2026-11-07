@@ -1,753 +1,518 @@
 # =============================================================================
-#  sekurircd -- default configuration template
+#  SekurIRCd -- server configuration template
 # =============================================================================
 #
-# This is a documented starting point, not a live config. To run a server:
+#  Quick start:
+#    tools/makeconf.py          asks a few questions and writes this file for you
+#                               (also: bin/sekurircd --makeconf)
+#  By hand:
+#    1. cp config/sekurircd.template.toml config/sekurircd.toml
+#    2. edit it -- at least [server] name/network and one [[operators]] login
+#    3. bin/sekurircd --config config/sekurircd.toml --check
+#    4. ./sekurircd start
 #
-#   1. Copy it next to where you keep live config:
+#  Every key is optional: the value shown (commented out or not) is the
+#  built-in default unless noted. Changes apply live with /REHASH.
 #
-#          cp config/sekurircd.template.toml /etc/sekurircd/sekurircd.toml
+#  Relative paths: motd/rules/klines/history files and TLS cert/key resolve
+#  against this file's directory; [logging] directory against the working
+#  directory.
 #
-#      The MOTD, oper MOTD and rules (ircd.motd, oper.motd, ircd.rules) are
-#      created there from config/*.template.* the first time the server
-#      starts, if missing; edit those copies (git never touches them). Copy
-#      the templates there too when the config lives outside the checkout:
+#  Related files:
+#    ircd.motd, oper.motd, ircd.rules   MOTD, oper MOTD, /RULES text (made from
+#                                       their templates on first start)
+#    protection.toml                    the Protection bundle (optional; copy
+#                                       config/protection.template.toml)
+#    ../services/services.toml          NickServ + ChanServ
 #
-#          cp config/ircd.template.motd config/oper.template.motd config/ircd.template.rules /etc/sekurircd/
-#
-#      Optional, recommended -- the Protection bundle (DNSBL, proxy scanner,
-#      connection limits, flood and spam protection in one file):
-#
-#          cp config/protection.template.toml /etc/sekurircd/protection.toml
-#          cp config/spamfilters.template.conf /etc/sekurircd/   (spamfilters.conf is made from it)
-#
-#   2. Edit the copy to taste (port, network name, logging, security limits,
-#      operators, admin contact, vhosts, channel-creation policy, ...).
-#
-#   3. Start the daemon pointing at the copy:
-#
-#          sekurircd --config /etc/sekurircd/sekurircd.toml
-#
-# Relative paths resolve as follows:
-#
-#   - [messages] motd, [tls] cert_file/key_file  -> relative to THIS config
-#     file's directory
-#   - [logging] directory                        -> relative to the current
-#     working directory
-#
-# Every key is optional; the value shown (commented or not) is the built-in
-# default unless noted otherwise.
+#  Sections:
+#    SERVER       [server]
+#    LISTENERS    [tls]  [websocket]
+#    SECURITY     [security]
+#    MESSAGES     [messages]
+#    CHANNELS     [channels]
+#    OPERATORS    [[operators]]  [admin]  [debug_channel]
+#    CONNECTIONS  [[classes]]  [[webirc]]  [[vhosts]]
+#    LOGGING      [logging]
+#    LINKING      [links]  [[links.peers]]
 # =============================================================================
 
 
-# -----------------------------------------------------------------------------
-# [server] -- identity and the plaintext listener
-# -----------------------------------------------------------------------------
+# =============================================================================
+#  SERVER
+# =============================================================================
 [server]
 
-# Hostname reported in protocol prefixes (e.g. ":irc.example.org 001 ...").
-# Must contain a dot: clients treat a dotless prefix as a nick, not a server.
+# Hostname shown to clients. Must contain a dot: clients read a dotless
+# prefix as a nick.
 name = "irc.example.org"
 
-# Human-friendly network name shown in the welcome message.
+# Network name shown in the welcome message.
 network = "SekuriIRC Network"
 
-# URL of the network's icon, advertised to clients as IRCv3 draft/ICON in 005.
-# "" (default) advertises nothing.
+# Network icon URL, advertised as IRCv3 draft/ICON. "" = none.
 #icon = "https://example.org/icon.png"
 
-# Version string reported via 004 MYINFO / VERSION. Omit to use the running
-# package's version (sekurircd.__version__) -- the recommended default.
+# Server ID on a linked network: 3 characters, a digit then two of 0-9 A-Z
+# (e.g. "0AB"), unique across the network. "" (default) derives one from
+# [server] name, which is fine unless two server names happen to derive the same
+# one -- the link is then refused and you set a different sid on one of them.
+#sid = ""
+
+# Version string for 004/VERSION. Leave unset to report the running build.
 #version = "0.8.4"
 
-# Address to bind. 0.0.0.0 = reachable across the LAN; 127.0.0.1 = local only.
+# --- listening ---
+
+# 0.0.0.0 = all interfaces, 127.0.0.1 = this machine only.
 bind = "0.0.0.0"
 
-# Load balancers (HAProxy, nginx stream, a cloud LB) that speak the PROXY
-# protocol v1: connections from these IPs (globs) MUST start with a
-# "PROXY TCP4|TCP6 <src> <dst> <sport> <dport>" line, which gives the real
-# client address (K-lines, flood limits and cloaking then use it). A
-# connection from a listed IP that doesn't send one is dropped; a PROXY line
-# from any other IP is ignored as a plain command, so it can't be spoofed.
-#proxy_protocol_hosts = ["10.0.0.5"]
-
-# TCP port to listen on.
+# Plaintext client port.
 port = 6667
 
-# IPv6. Off by default: the server then listens and resolves exactly as it
-# always has (IPv4 only). On: every listener (clients, TLS, WebSocket, server
-# links) also gets an IPv6 socket on bind6, beside the IPv4 one -- separate
-# sockets, so IPv4 clients keep plain IPv4 addresses and every existing ban
-# still matches them. Reverse DNS, ident, DNSBL (reversed-nibble queries) and
-# link dialing then work over IPv6 too; the proxy scanner stays IPv4-only.
-# An IPv6 client is shown as e.g. 2001:db8::5 -- one that would start with
-# ':' as 0::1 (an IRC parameter can't start with ':'). Toggling it applies on
-# /REHASH. Masks everywhere (K/G/Z-lines, allowed_ips, oper hosts, exemptions,
-# classes) take CIDR as well as globs: "2001:db8::/32", "203.0.113.0/24".
+# Also listen on IPv6 (every listener: clients, TLS, WebSocket, links).
+# Masks everywhere accept CIDR too, e.g. "2001:db8::/32".
 #ipv6 = false
 #bind6 = "::"
 
-# Providers give each IPv6 customer a whole block (a /64, sometimes /56 or
-# /48), so per-IP limits -- max connections per IP, the connect-flood throttle
-# and its automatic Z-lines -- and host cloaks count an IPv6 client by its
-# first ipv6_limit_prefix bits. 64 = one subscriber; 128 = one address
-# (trivially dodged by rotating addresses). IPv4 is unaffected.
+# IPv6 clients are counted per /64 (one subscriber) for per-IP limits,
+# throttles and cloaks. 128 = per address (easy to dodge).
 #ipv6_limit_prefix = 64
 
+# --- load balancers ---
+
+# Hosts (globs) that speak PROXY protocol v1 to pass on the real client IP.
+# Connections from them must start with a PROXY line; from anyone else a
+# PROXY line is ignored, so it can't be spoofed.
+#proxy_protocol_hosts = ["10.0.0.5"]
+
+
+# =============================================================================
+#  LISTENERS
+# =============================================================================
 
 # -----------------------------------------------------------------------------
-# [security] -- limits, flood guards, cloaking, connection caps
+#  [tls] -- encrypted client port, next to the plaintext one
 # -----------------------------------------------------------------------------
-[security]
+[tls]
 
-# Maximum length (bytes) of a single inbound line before it is rejected.
-max_line_length = 512
+enabled = false
+port = 6697
 
-# Maximum number of parameters a single command may carry.
-max_params = 15
+# PEM certificate (or chain) and its key, relative to this file. Required when
+# enabled. A self-signed certificate works (clients must allow it):
+#   openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
+#     -keyout key.pem -out cert.pem -subj "/CN=irc.example.org"
+# For a trusted one: tools/mkcert.sh --domain irc.example.org
+cert_file = ""
+key_file = ""
 
-# Maximum allowed length of a nickname.
-max_nick_length = 30
+# Ask (never require) clients for a certificate, so a fingerprint bound with
+# /CERT ADD can log in through SASL EXTERNAL. Needs services running.
+request_client_cert = false
 
-# (The per-client flood guard, connection caps, connect-flood throttle, DNSBL,
-# proxy scanner and spam protection all live in the Protection bundle file --
-# see protection_file below and config/protection.template.toml.)
-
-# Seconds of silence before the server sends a keepalive PING, and seconds of
-# total silence (no line at all, including a PONG) before the connection is
-# dropped. ping_timeout must be greater than ping_interval.
-ping_interval = 120
-ping_timeout = 300
-
-# --- host cloaking ----------------------------------------------------------
-
-# Hide every client's real IP/hostname behind a cloak. The real address is
-# still kept internally (logs, K/G/Z-line and channel-ban matching, and
-# visible via /WHOIS to an oper or to the user themselves, RPL_WHOISHOST/378
-# "is actually connecting from ...") -- this only hides it from other users
-# on the wire.
-host_masking = false
-
-# str.format template for the cloak. Placeholders:
-#   {token}   deterministic hex string, HMAC'd from the client's resolved
-#             real hostname (or IP, before/without a resolved hostname) with
-#             host_masking_secret below -- same real host always gets the
-#             same cloak (stable across reconnects), but it can't be reversed
-#             or guessed without that secret.
-#   {network} [server] network above, lowercased and made hostname-safe.
-#   {suffix}  "users.{network}" until rDNS resolves a real hostname; from
-#             then on, if host_masking_keep_labels > 0, the trailing labels
-#             kept from that real hostname instead (see below). Ignore it
-#             (the default template does) for a fully opaque cloak.
-#
-# Default: fully opaque, e.g. "a1b2c3d4.users.SekurNet". To instead show a
-# partial cloak that keeps the ISP/domain visible, UnrealIRCd-style (e.g.
-# "a1b2c3d4.orange.es"), use "{token}.{suffix}" and set
-# host_masking_keep_labels to a nonzero value below.
-host_masking_format = "{token}.users.{network}"
-
-# Number of HMAC bytes hex-encoded into {token} (2 hex chars each).
-host_masking_token_bytes = 4
-
-# How many trailing dot-labels of a client's RESOLVED real hostname are kept
-# verbatim in {suffix} once rDNS confirms one (e.g. 2 keeps "orange.es" off
-# "dsl-host.dyn.orange.es"). 0 (the default) means {suffix} never reflects
-# the real host -- always the "users.{network}" fallback, i.e. a fully
-# opaque cloak. No public-suffix-list awareness: a ccTLD like "co.uk" needs 3
-# here, not 2, to keep the whole registrable domain. Has no effect unless
-# host_masking_format above actually references {suffix}.
-host_masking_keep_labels = 0
-
-# HMAC key behind {token}. Required reading before you rely on this cloak
-# for privacy: leave it empty and the daemon generates a random one at
-# startup (logged as a warning) -- fine for a single standalone server, but
-# it means every cloak changes on restart, and on a linked network each
-# server would cloak the same real host differently. Set an explicit secret
-# (any string; keep it out of version control) if you want cloaks stable
-# across restarts, or if this server links to others and they must all
-# cloak the same real host identically -- then every linked server needs
-# this SAME secret.
-host_masking_secret = ""
-
-# Give every successful /OPER a distinct, recognizable vhost (e.g.
-# netadmin.SekurNet) instead of leaving their prior host/cloak in place.
-oper_host_masking = false
-
-# str.format template for the oper vhost: {network} is [server] network
-# above, lowercased and made hostname-safe. No {token}/{suffix} (same host
-# for every oper -- it's meant to be recognizable, not private).
-oper_host_format = "netadmin.{network}"
-
-# --- bans ---------------------------------------------------------------
-
-# JSON file K/G/Z-lines (from /KLINE, /GLINE, /ZLINE, or DNSBL auto-action)
-# are saved to, so they survive /REHASH and a process restart. Relative to
-# this config file's directory. Empty (the default) means in-memory only --
-# lost on restart.
-klines_file = ""
-
-# --- default modes / auto-join ----------------------------------------------
-
-# User mode letters (no signs/args) applied automatically to every client
-# once it finishes registration. Empty means no defaults.
-# Only self-togglable flag modes are allowed: i (invisible), w (wallops),
-# d (suppress CTCP), s (server notices). "o" (operator) can never be granted
-# this way -- only /OPER does that. (User mode "Z" -- secure connection -- is
-# always set automatically for TLS clients and can't be configured here.)
-# "iw" is the big-network default: Libera.Chat and OFTC (both solanum/
-# hybrid-family ircds) set +i and +w on every connect by default.
-default_user_modes = "iw"
-
-# User modes every successful /OPER gets (UnrealIRCd's set::modes-on-oper,
-# Solanum's oper_umodes). o is always given; on top of it any of the
-# self modes above plus p (hide channels), I (hide idle), R (registered-only
-# PMs), D (no PMs), and the oper-only H (hide oper status), q (unkickable),
-# W (notice when someone /WHOISes you). A login's own `modes` (see
-# [[operators]]) replaces this for that login.
-oper_modes = "+osw"
-
-# Channel a client is auto-joined to right after a successful /OPER (created
-# on first use, same as any channel a client JOINs). Empty (the default)
-# means opers get no auto-join. The daemon does NOT enforce oper-only
-# membership on it -- lock it down yourself with normal channel modes
-# (e.g. +i, or +k with the key given only to opers) if you don't want
-# regular clients joining it too.
-#oper_auto_join = "#opers"
-
-# --- /DIE and /RESTART extra password ---------------------------------------
-
-# Optional extra password required by /DIE and /RESTART, on top of already
-# being an oper. Empty (the default, for all four fields below) means being
-# an oper is enough -- matching classic ircds. Same `password`/`password_hash`
-# split as [[operators]] below (at most one of each pair; generate a hash the
-# same way, with `sekurircd --hash-password`).
-#die_password_hash = "scrypt$16384$8$1$<salt-hex>$<digest-hex>"
-#restart_password_hash = "scrypt$16384$8$1$<salt-hex>$<digest-hex>"
-# Legacy plain-text equivalents, if you'd rather not hash these:
-#die_password = ""
-#restart_password = ""
-
-# --- Protection bundle -------------------------------------------------------
-
-# The optional abuse-protection layer: DNSBL blacklists, the active open-proxy
-# scanner, connection caps, the connect-flood throttle, the per-client flood
-# guard and spam protection, all in ONE file -- config/protection.template.toml.
-# Relative to this config file's directory. The file is optional; with none the
-# server runs on the built-in defaults (no DNSBL, no scanner, no caps). "" =
-# never look for one.
-#
-# Compatibility: the older keys that now live in the bundle -- flood_max_msgs,
-# flood_window, max_connections, max_connections_per_ip, connect_flood_max,
-# connect_flood_window, connect_flood_kline_duration, and the [dnsbl] and
-# [spam] sections -- are still read from THIS file, so an existing
-# sekurircd.toml keeps working untouched. When a bundle file exists, the keys
-# it sets take precedence. New setups should use the bundle.
-protection_file = "protection.toml"
-
-# --- reserved nicks, ident, reverse-DNS -------------------------------------
-
-# Nicknames (case-insensitive) no local client may take via NICK/USER --
-# 437 ERR_UNAVAILRESOURCE instead of letting them register/change to it.
-# Only usable by a user introduced through a server link (a services
-# package like Atheme/Anope, connected as a linked server) -- a local
-# client can never claim these no matter how it authenticates. On by
-# default: an unreserved "NickServ" is a ready-made phishing vector (anyone
-# takes the nick and asks others to "/msg NickServ IDENTIFY <password>").
-# Empty list ("[]") disables the check entirely.
-reserved_nicks = ["nickserv", "chanserv", "operserv", "memoserv", "hostserv", "botserv"]
-
-# RFC 1413 ident-protocol query on connect, to confirm (rather than just
-# trust) the ident a client's own USER command reports. Off by default --
-# an extra round-trip most clients' hosts don't run an identd for anyway,
-# so it usually just adds ident_timeout seconds of connect latency.
-ident_enabled = false
-ident_timeout = 3.0
-
-# Reverse-DNS resolution of the connecting IP. ON by default (standard ircd
-# behavior) -- set to false if you'd rather avoid the extra connect latency,
-# or just prefer bare IPs/opaque cloaks. Still runs even when host_masking
-# above is on: the daemon needs the real hostname for K/G-line and ban
-# matching and for the oper-only /WHOIS field regardless, and, if
-# host_masking_keep_labels is set, it's also where {suffix} comes from.
-# Without it (or when it fails/times out), a masked client keeps the
-# IP-keyed fallback cloak from connect time; an unmasked client just shows
-# the bare IP as before. A masked client's welcome burst waits for this
-# lookup (or rdns_timeout) same as an unmasked one now, where before it was
-# skipped and the client got cloaked and welcomed immediately.
-rdns_enabled = true
-rdns_timeout = 3.0
-
+# IRCv3 STS: tell clients to always use TLS here for this many seconds.
+# 0 = don't advertise it.
+sts_duration = 0
 
 # -----------------------------------------------------------------------------
-# [websocket] -- IRC over WebSocket, for browser clients (KiwiIRC, The Lounge's
-# web UI talks to the server it's hosted on, but standalone web clients connect
-# straight here). Runs alongside the other listeners on its own port.
+#  [websocket] -- IRC over WebSocket, for browser clients
 # -----------------------------------------------------------------------------
 [websocket]
+
 enabled = false
 port = 8080
 
-# wss://: serve this port over TLS using the [tls] certificate (needs [tls]
-# enabled). Alternatively leave this off and terminate TLS in a reverse proxy.
+# wss://, using the [tls] certificate (needs [tls] enabled). Or terminate TLS
+# in a reverse proxy instead.
 tls = false
 
-# Reverse proxies (nginx, Caddy, ...) whose X-Forwarded-For / X-Real-IP header
-# is believed for the real client address. Connections from any other IP keep
-# their own address -- the header is ignored, so it can't be spoofed.
+# Reverse proxies whose X-Forwarded-For / X-Real-IP is trusted for the real
+# client address. Everyone else's header is ignored.
 #trusted_proxies = ["127.0.0.1"]
 
-# Origin header globs a browser must present (e.g. ["https://chat.example.com"]).
-# Empty = any origin. Note a non-browser client sends no Origin at all, so it
-# is refused whenever this list is set -- leave it empty if you serve those too.
+# Origins a browser must come from, e.g. ["https://chat.example.org"].
+# Empty = any. When set, non-browser clients (no Origin) are refused.
 #allowed_origins = []
 
 
-# -----------------------------------------------------------------------------
-# [tls] -- TLS/SSL listener
-# -----------------------------------------------------------------------------
-# Runs ALONGSIDE the plaintext [server] listener above (never replaces it) on
-# its own port. Off by default -- opt in.
-[tls]
-enabled = false
+# =============================================================================
+#  SECURITY
+# =============================================================================
+[security]
 
-# Port for the TLS listener. 6697 ("ircs") is what most clients try first.
-port = 6697
+# --- protocol limits ---
 
-# PEM certificate (or chain) file, resolved relative to this config file's
-# directory. Required if enabled = true.
-cert_file = ""
+# Longest line accepted, in bytes.
+max_line_length = 512
 
-# PEM private key file matching cert_file, same resolution rule. Required if
-# enabled = true.
-#
-# Most deployments won't have a CA-signed certificate -- a self-signed one is
-# fine, encryption doesn't need a trusted CA, only clients that verify the
-# chain do. Generate one with:
-#
-#   openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
-#     -keyout key.pem -out cert.pem -subj "/CN=irc.example.com"
-#
-# Client-side, most IRC clients have an "only allow trusted certificates" (or
-# "verify SSL") option that must be UNCHECKED to connect to a self-signed
-# cert -- the connection is still encrypted either way.
-key_file = ""
+# Most parameters one command may carry.
+max_params = 15
 
-# Ask (never require) connecting clients for a TLS client certificate. A
-# client with no certificate still connects normally; one that presents a
-# certificate whose fingerprint has been bound to an account (see /CERT ADD
-# in README.md) can then log in via SASL EXTERNAL instead of a password.
-# Off by default -- no effect unless the services daemon (NickServ) is running.
-request_client_cert = false
+# Longest nickname.
+max_nick_length = 30
 
-# IRCv3 STS (Strict Transport Security): advertised in CAP LS only while
-# [tls] enabled is true. A plaintext-connecting client that understands it
-# switches to the TLS port and remembers to for this many seconds; an
-# already-TLS client just gets told how long to keep trusting it. 0 (the
-# default) means don't advertise it at all.
-sts_duration = 0
+# --- keepalive ---
+
+# Seconds idle before the server sends PING, and seconds of total silence
+# before the client is dropped. ping_timeout must be greater.
+ping_interval = 120
+ping_timeout = 300
+
+# --- Protection bundle ---
+
+# Connection caps, flood and spam protection, DNSBL and the proxy scanner live
+# in this file (see config/protection.template.toml). Relative to this file.
+# Missing file = built-in defaults (all of it off). "" = never look for one.
+protection_file = "protection.toml"
+
+# --- host cloaking ---
+
+# Hide users' real IPs and hostnames from other users. Opers, and the user
+# themselves, still see the real one in /WHOIS; bans still match it.
+host_masking = false
+
+# Cloak template:
+#   {token}    keyed hash of the real host (stable, can't be reversed)
+#   {network}  [server] network, lowercased
+#   {suffix}   "users.{network}", or the real host's last labels once rDNS
+#              resolves (see host_masking_keep_labels)
+# For an UnrealIRCd-style "a1b2c3d4.orange.es" use "{token}.{suffix}".
+host_masking_format = "{token}.users.{network}"
+
+# Hash bytes in {token} (2 hex characters each).
+host_masking_token_bytes = 4
+
+# Labels of the resolved hostname kept in {suffix} (2 keeps "orange.es").
+# 0 = never show the real host. "co.uk"-style domains need 3.
+host_masking_keep_labels = 0
+
+# Key behind {token}. Empty = random at each start, so cloaks change on every
+# restart and differ between linked servers. Set one (and the same one on
+# every linked server) for stable cloaks. Keep it out of version control.
+host_masking_secret = ""
+
+# Give opers a recognizable host after /OPER, e.g. netadmin.<network>.
+oper_host_masking = false
+oper_host_format = "netadmin.{network}"
+
+# --- lookups on connect ---
+
+# Reverse DNS of the client IP. Needed for hostname bans and
+# host_masking_keep_labels; off = faster connects, bare IPs.
+rdns_enabled = true
+rdns_timeout = 3.0
+
+# RFC 1413 ident check. Most hosts run no identd, so it mostly adds delay.
+ident_enabled = false
+ident_timeout = 3.0
+
+# --- bans ---
+
+# File that keeps K/G/Z-lines across restarts, relative to this file.
+# "" = in memory only.
+klines_file = ""
+
+# Nicks no local client may take (services use them). Stops anyone from
+# posing as NickServ to collect passwords. [] = none.
+reserved_nicks = ["nickserv", "chanserv", "operserv", "memoserv", "hostserv", "botserv"]
+
+# --- user modes ---
+
+# Set on every client after it connects. Self modes only: i (invisible),
+# w (wallops), d (deaf), T (no CTCP), s (server notices), B (bot), g, Z.
+# +o can never be given this way.
+default_user_modes = "iw"
+
+# Modes every /OPER gets. o is always included; others allowed: the ones
+# above, plus p, I, R, D and the oper-only H, q, W. An [[operators]] login's
+# own `modes` replaces this for that login.
+oper_modes = "+osw"
+
+# Channel opers are joined to after /OPER. Not locked down automatically: use
+# channel modes (+i, +k) to keep others out.
+#oper_auto_join = "#opers"
+
+# --- /DIE and /RESTART ---
+
+# Extra password for /DIE and /RESTART on top of being an oper.
+# Empty = being an oper is enough. Hash with: sekurircd --hash-password
+#die_password_hash = "scrypt$16384$8$1$<salt-hex>$<digest-hex>"
+#restart_password_hash = "scrypt$16384$8$1$<salt-hex>$<digest-hex>"
+# Plain-text versions (tools/confcheck.py --fix --write hashes them):
+#die_password = ""
+#restart_password = ""
 
 
-# -----------------------------------------------------------------------------
-# Accounts (NickServ, SASL, /REGISTER, /CERT) live in the services daemon
-# -----------------------------------------------------------------------------
-# bin/services hosts NickServ next to ChanServ and owns the account database;
-# every server relays SASL and REGISTER to it. Configure it in [nickserv] of
-# services/services.toml (see services/services.template.toml). An [accounts]
-# section left here from an older release is ignored (with a startup warning);
-# its accounts.json is used in place by the services daemon.
-
-
-# -----------------------------------------------------------------------------
-# [debug_channel] -- live in-IRC view of the daemon's own log
-# -----------------------------------------------------------------------------
-# Oper-only channel relaying the daemon's own WARNING+ log lines as server
-# NOTICEs -- a live in-IRC view of errors/warnings without tailing the log
-# file. Off by default. Pair `name` below with security.oper_auto_join
-# above (set it to the same channel name) to auto-join every oper into it.
-# JOIN is refused (401, hiding its existence) to anyone who isn't an oper,
-# regardless of whether it already exists -- unlike oper_auto_join's own
-# target channel, this one IS enforced by the daemon.
-[debug_channel]
-enabled = false
-name = "#server-debug"
-
-# Minimum level relayed: DEBUG, INFO, WARNING, ERROR, CRITICAL. WARNING only
-# shows failures; use INFO to also see connects/disconnects, oper actions
-# (OPER/KILL/K-LINE/SQUIT/CONNECT/REHASH), and link up/down.
-min_level = "WARNING"
-
-# Seconds between periodic "users/channels/connections/K-G-lines + CPU/mem"
-# snotes, logged at INFO (so they need min_level = INFO above to show up).
-# Includes how many active K/G/Z-lines came from the Protection bundle's
-# DNSBL hits and proxy scanner (plus the cumulative counts) as a rough read on
-# how much it is actually catching. 0 = off.
-stats_interval = 0
-
-# Path to the services daemon's pidfile (bin/services, e.g. "services/services.pid"),
-# to report its CPU/mem alongside the ircd's own in the periodic stats snote.
-# "" = don't. (The key keeps its old name; an old ".../chanserv.pid" value is
-# looked up as ".../services.pid".)
-chanserv_pidfile = ""
-
-
-# -----------------------------------------------------------------------------
-# [messages] -- MOTD and message limits
-# -----------------------------------------------------------------------------
+# =============================================================================
+#  MESSAGES
+# =============================================================================
 [messages]
 
-# MOTD file, resolved relative to this config file's directory.
+# Text files, relative to this file (made from their templates on first start).
 motd = "ircd.motd"
-
-# Shown to a user on /OPER success and by /OPERMOTD (opers only). Colors ok.
 oper_motd = "oper.motd"
-
-# Shown by /RULES. Keep it plain text, lines under 78 characters.
 rules = "ircd.rules"
 
-# Maximum number of bytes per PRIVMSG/NOTICE payload before truncation.
+# Longest PRIVMSG/NOTICE text, in bytes; longer is truncated.
 max_message_length = 400
 
-# How many recent PRIVMSG/NOTICE lines each channel remembers (in memory only,
-# lost on restart) for IRCv3 CHATHISTORY -- clients with the draft/chathistory
-# and batch caps can scroll back / catch up after a reconnect. Memory is
-# allocated per channel on its first message (about 0.7 KB per line kept).
-# 0 turns history off (the cap is then not advertised). Max 500.
+# --- history (IRCv3 CHATHISTORY) ---
+
+# Lines kept per channel for scrollback and catch-up. About 0.7 KB per line.
+# 0 = off, max 500.
 history_size = 50
 
-# Save the history (and read markers) to this file -- resolved relative to this
-# config file's directory -- so it survives restarts. Written at most every 30
-# seconds and on shutdown, readable only by the ircd's user (it can hold private
-# messages). "" (the default) keeps history in memory only.
+# Keep history across restarts (written every 30s and on shutdown, readable
+# only by the ircd's user). "" = memory only.
 #history_file = "history.json"
 
-# Also remember private messages between two logged-in accounts, so each side
-# can CHATHISTORY the conversation. Only used when history_size > 0.
+# Also keep private messages between two logged-in accounts.
 #history_dm = true
 
-# Also remember channel events (JOIN, PART, QUIT, KICK, MODE, TOPIC, NICK) and
-# TAGMSG reactions, replayed by CHATHISTORY to clients with the IRCv3
-# draft/event-playback cap; others still get only messages. Events share the
-# history_size slots with messages. Not kept for +D / +u channels.
+# Also keep joins, parts, kicks, modes, topics, nick changes and reactions
+# (shown to clients with draft/event-playback). Not for +D / +u channels.
 #history_events = true
 
-# IRCv3 UTF8ONLY: refuse (FAIL <cmd> INVALID_UTF8) and never relay any client
-# line that isn't valid UTF-8. Turn off only if you have users on legacy
-# charsets (latin1 etc.).
+# --- content ---
+
+# Refuse any line that isn't valid UTF-8 (IRCv3 UTF8ONLY). Turn off only for
+# users on legacy charsets.
 #utf8_only = true
 
-# IRCv3 CLIENTTAGDENY: client-only tags NOT relayed, names without the '+'.
-# "typing" blocks typing notifications; "*,-draft/react,-draft/reply" blocks
-# everything except reactions and replies. "" (default) relays them all.
+# Client tags not relayed, names without "+". "typing" blocks typing
+# notifications; "*,-draft/react,-draft/reply" blocks all but reactions
+# and replies. "" = relay all.
 #client_tag_deny = ""
 
-# Channel mode +G ("censor"): these words (case-insensitive, matched anywhere in
-# the text) are replaced with asterisks in messages to that channel.
+# Words starred out in channels with +G (case-insensitive).
 #censor_words = ["badword", "otherword"]
 
 
-# -----------------------------------------------------------------------------
-# [logging] -- file + console logging
-# -----------------------------------------------------------------------------
-[logging]
+# =============================================================================
+#  CHANNELS
+# =============================================================================
+[channels]
 
-# Master switch for file logging. When false, only the console handler is used.
-enabled = true
+# Only opers may create new channels (anyone may still join existing ones).
+restrict_creation = false
 
-# Directory for log files (created if missing). Relative -> CWD; absolute as-is.
-directory = "logs"
+# Channels anyone may create even when restrict_creation is on.
+allowed_channels = []
 
-# When true, DEBUG-level detail (every line in/out, per-command trace) is
-# written to the log file. When false, the `level` below governs what is
-# written.
-debug = false
+# Modes for a newly created channel: n, t, i, p, s, m.
+default_modes = "nt"
 
-# Minimum level written to the file when debug = false.
-# One of: DEBUG, INFO, WARNING, ERROR, CRITICAL
-level = "INFO"
+# Channels every client joins after connecting (they may /PART).
+auto_join = []
 
-# Base log file name inside `directory`. RotatingHandler appends .1 .2 ... on
-# rotation, rotating once the file exceeds `max_bytes` and keeping
-# `backup_count` rotated files (5 x 5 MiB ~ 25 MiB of history retained).
-file = "sekurircd.log"
-max_bytes = 5242880
-backup_count = 5
 
+# =============================================================================
+#  OPERATORS
+# =============================================================================
 
 # -----------------------------------------------------------------------------
-# [[operators]] -- IRC operator (/OPER) logins
-#
-# Optional per-login `privileges` limit which oper commands that login may use
-# (an oper without the key can use everything, as before):
-#   kill     KILL                          kline    KLINE/GLINE/ZLINE (+UN*), SPAMFILTER, PROTECT
-#   sa       SAJOIN/SAPART/SAMODE/SANICK   host     CHGHOST/SETHOST/CHGIDENT/USERIP
-#   wallops  WALLOPS/GLOBOPS               rehash   REHASH
-#   die      DIE/RESTART                   link     SQUIT/CONNECT
-#   (NickServ SUSPEND/FDROP/SASET are for services admins: [nickserv] admins in services.toml)
-#   all      everything. `privileges = []` grants none of the above (a "helper" oper).
-#   e.g.  privileges = ["kill", "kline", "wallops"]
-# Optional per-login `modes` replaces security.oper_modes for that login,
-#   e.g.  modes = "+oswW"   (a netadmin who wants WHOIS notices too)
+#  [[operators]] -- /OPER logins (none by default; add one per oper)
 # -----------------------------------------------------------------------------
-# None by default -- no one can /OPER until you add at least one table here.
-# Each requires exactly ONE of `password` or `password_hash`:
+#   name           login name for /OPER
+#   password_hash  from `sekurircd --hash-password` (recommended), or
+#   password       plain text (tools/confcheck.py --fix --write hashes it)
+#   hosts          ident@host masks this login may /OPER from; "*@*" = anywhere
+#   privileges     limit the login to some oper commands; unset = all:
+#                    kill     KILL             kline    K/G/Z-LINE, SPAMFILTER, PROTECT
+#                    sa       SAJOIN/SAPART/SAMODE/SANICK
+#                    host     CHGHOST/SETHOST/CHGIDENT/USERIP
+#                    wallops  WALLOPS/GLOBOPS  rehash   REHASH
+#                    die      DIE/RESTART      link     SQUIT/CONNECT
+#                    all      everything;  [] = none of these (a helper)
+#   modes          replaces [security] oper_modes for this login
+# Add or change one, then /REHASH. Services admins are set in services.toml.
 #
-#   - `password_hash` (recommended): a scrypt hash, so the config file holds
-#     no recoverable plaintext even if it leaks. Generate one with:
-#
-#         sekurircd --hash-password
-#
-#     and paste the printed "scrypt$..." string in as-is.
-#
-#   - `password` (legacy): plain text, compared with a constant-time check,
-#     but readable by anyone who can read this file -- protect its
-#     permissions if you use this instead of password_hash.
-#     `tools/confcheck.py --fix --write` turns it into a password_hash for
-#     you (same password; the ircd logs a reminder at start and /REHASH).
-#
-# `hosts` is required: a list of ident@host/IP masks (like [[vhosts]]
-# allowed_hosts) the login may /OPER from, matched against the connection's
-# real ident/IP, never the nick. Use "*@*" to allow that login from anywhere.
-# Add as many [[operators]] tables as you need -- multiple ircops are fully
-# supported.
-#
-# Adding a new oper or rotating an existing one's password: edit this file,
-# then either /REHASH from an already-opered client or restart the process --
-# no restart is strictly required, [[operators]] (like everything else here
-# except [server] bind/port and [tls]) is picked up live by /REHASH. See
-# "Adding or updating an IRC operator" in README.md for the full walkthrough.
-
 #[[operators]]
 #name = "admin"
 #password_hash = "scrypt$16384$8$1$<salt-hex>$<digest-hex>"
-#hosts = ["*@*"]
-
-#[[operators]]
-#name = "netadmin"
-#password_hash = "scrypt$16384$8$1$<salt-hex>$<digest-hex>"
-#hosts = ["*@203.0.113.42", "*@198.51.100.*"]
-
-#[[operators]]
-#name = "remote-helper"
 #password = "legacy-plaintext-example-do-not-use-in-production"
-#hosts = ["*@10.*"]
-
+#hosts = ["*@*"]
+#privileges = ["kill", "kline", "wallops"]
+#modes = "+oswW"
 
 # -----------------------------------------------------------------------------
-# [admin] -- /ADMIN contact info
+#  [admin] -- what /ADMIN shows (unset = "Not configured")
 # -----------------------------------------------------------------------------
-# All fields optional (blank -> "Not configured").
 #[admin]
 #location1 = "Somewhere, Some Country"
 #location2 = "Some Organization"
 #email = "admin@example.com"
 
+# -----------------------------------------------------------------------------
+#  [debug_channel] -- the server's own log, live in an oper-only channel
+# -----------------------------------------------------------------------------
+# Only opers can join it (others are told it doesn't exist). Set
+# [security] oper_auto_join to the same name to put opers in automatically.
+[debug_channel]
+
+enabled = false
+name = "#server-debug"
+
+# DEBUG, INFO, WARNING, ERROR or CRITICAL. INFO adds connects, oper actions
+# and link changes.
+min_level = "WARNING"
+
+# Seconds between stats lines (users, channels, bans, CPU and memory, what the
+# Protection bundle caught). Needs min_level = "INFO". 0 = off.
+stats_interval = 0
+
+# Services pidfile, to add their CPU and memory to the stats line. "" = don't.
+chanserv_pidfile = ""
+
+
+# =============================================================================
+#  CONNECTIONS
+# =============================================================================
 
 # -----------------------------------------------------------------------------
-# [[classes]] -- per-connection-class limits
+#  [[classes]] -- different limits for some hosts
 # -----------------------------------------------------------------------------
-# A client is put in the FIRST class whose `hosts` (IP globs) match its address
-# (after WEBIRC / PROXY / X-Forwarded-For rewrote it). Every limit is optional;
-# 0 or absent = use the global setting. Classes are for things like "let the
-# office network connect 200 clients, flood-guard the rest tighter".
-#   max_clients     simultaneous connections in this class
-#   max_per_ip      replaces [security] max_connections_per_ip for these clients
+# A client gets the FIRST class whose `hosts` (IP globs) match. Every limit is
+# optional; 0 or unset = the global setting.
+#   max_clients     connections in this class
+#   max_per_ip      replaces the per-IP connection cap
 #   sendq_max       bytes queued for a slow reader before "SendQ exceeded"
-#   flood_max_msgs / flood_window   replace the global per-client flood guard
+#   flood_max_msgs / flood_window   replace the flood guard
+#
 #[[classes]]
 #name = "office"
 #hosts = ["192.0.2.*"]
 #max_clients = 200
 #max_per_ip = 50
+#sendq_max = 0
 #flood_max_msgs = 40
 #flood_window = 10.0
 
-
 # -----------------------------------------------------------------------------
-# [[webirc]] -- trusted web gateways (KiwiIRC, The Lounge, ...) that may send
-# `WEBIRC <password> <gateway> <hostname> <ip>` before registration to tell
-# the server the real client's address. Both must match: the gateway's source
-# IP against `hosts` (IP globs, required) AND the password. Without this a
-# web client shows up as the gateway's own IP, so one K-line/flood limit hits
-# every web user at once. IPv4/IPv6 text is accepted; the hostname is
-# trusted as given (it is the gateway's claim), falling back to the IP.
+#  [[webirc]] -- trusted web gateways (KiwiIRC, The Lounge, ...)
+# -----------------------------------------------------------------------------
+# Lets a gateway pass on each web user's real IP with WEBIRC, so bans and
+# limits hit that user, not the whole gateway. Both the gateway's IP (`hosts`,
+# required) and the password must match.
+#
 #[[webirc]]
 #name = "kiwi"
 #password = "change-me"
 #hosts = ["203.0.113.10"]
 
-
 # -----------------------------------------------------------------------------
-# [[vhosts]] -- virtual hosts activated with /VHOST
+#  [[vhosts]] -- hosts users can switch to with /VHOST
 # -----------------------------------------------------------------------------
-# `allowed_hosts` is a list of ident@host/IP masks (NOT nicks -- a nick can
-# be grabbed by anyone once its owner disconnects, so matching by nick would
-# let an impersonator inherit vhost access). A bare mask with no "@" is
-# shorthand for "*@<mask>" (host/IP-only, any ident). A server operator may
-# activate ANY configured vhost regardless of this list. Add as many
-# [[vhosts]] tables as you need; omit `allowed_hosts` (or leave it empty)
-# for an oper-only vhost.
+# allowed_hosts: ident@host or IP masks (never nicks, which anyone can take).
+# A bare mask means any ident. Opers may use any vhost; leave allowed_hosts
+# empty for an oper-only one.
+#
 #[[vhosts]]
 #host = "elite.users.example.com"
 #allowed_hosts = ["*@203.0.113.42", "198.51.100.*"]
 
 
-# -----------------------------------------------------------------------------
-# [channels] -- creation policy and default modes
-# -----------------------------------------------------------------------------
-[channels]
+# =============================================================================
+#  LOGGING
+# =============================================================================
+[logging]
 
-# When true, only a server operator may create a channel nobody has joined
-# yet; everyone may still join a channel that already exists (whoever
-# created it), and anyone may create one listed in allowed_channels below.
-# When false (the default), any registered client may create any channel.
-restrict_creation = false
+# false = console only, no log file.
+enabled = true
 
-# Channel names exempt from restrict_creation -- any registered client may
-# create one of these even in restricted mode. Ignored when restrict_creation
-# is false.
-allowed_channels = []
+# Created if missing. Relative = to the working directory.
+directory = "logs"
 
-# Mode letters (no signs/args) applied automatically to a newly created
-# channel only -- never to one that already exists. Empty means no defaults.
-# Only argument-free flag modes are allowed: n (no external messages), i
-# (invite-only), p (private), t (topic locked to ops), s (secret), m
-# (moderated). The classic ircd default is "nt".
-default_modes = "nt"
+# Minimum level written: DEBUG, INFO, WARNING, ERROR, CRITICAL.
+level = "INFO"
 
-# Channels every client is auto-joined to right after registration (after
-# MOTD) -- same as if they'd typed /JOIN themselves, so they can /PART
-# afterward like any other channel. Created on first use. Empty (the
-# default) means no auto-join.
-auto_join = []
+# true = log every line in and out (very verbose), whatever `level` says.
+debug = false
+
+# File name, rotated at max_bytes, keeping backup_count old files
+# (5 x 5 MiB = about 25 MiB).
+file = "sekurircd.log"
+max_bytes = 5242880
+backup_count = 5
 
 
-# -----------------------------------------------------------------------------
-# [links] -- server-to-server linking (multi-server networks)
-# -----------------------------------------------------------------------------
-# OFF by default -- this daemon is single-server unless you opt in. Linked
-# servers form a tree (no loops; a loop link is refused) and share users,
-# channels, modes, topics, messages, G-lines and the account database
-# (NickServ is built into every server and answers from that shared
-# database). ChanServ links to any ONE server and serves the whole network --
-# never run a second copy. Each server needs a unique [server] name (with a
-# dot) and [server] sid, and every server should use the same
-# host_masking_secret so cloaks match. Servers of different versions link as
-# long as their link protocol overlaps (checked at handshake; a mismatch is
-# refused with an error, a different-but-compatible version is announced to
-# opers). See README.md "Linking servers".
+# =============================================================================
+#  LINKING -- multi-server networks and services
+# =============================================================================
+# Off by default. Also needed for services (NickServ + ChanServ), which link
+# in like a server. Linked servers form a tree and share users, channels,
+# bans and accounts. Each needs its own [server] name and sid, and the same
+# host_masking_secret. Different versions link as long as their link protocol
+# overlaps. tools/linkmgmt.py adds, edits and tests links for you.
 [links]
+
 enabled = false
 
-# "hub" accepts links, "leaf" only dials out, "both" does both. Whichever
-# side has `host`/`port` in its [[links.peers]] entry dials; the other side
-# lists the same peer without `host` and accepts it. Put `host` on ONE side.
+# "hub" accepts links, "leaf" only dials out, "both" does both.
 mode = "hub"
 
-# hub only: address/port the link listener binds to (separate from
-# [server]/[tls] -- clients never connect here, only other sekurircd nodes).
-# Note: on recent macOS, 7000 is sometimes already bound by the OS itself
-# (AirPlay/ControlCenter) -- pick another port if the hub fails to bind.
+# Where the link listener binds (hub). Separate from the client ports.
+# macOS sometimes uses 7000 itself: pick another port if it won't bind.
 bind = "0.0.0.0"
 port = 7000
-# The link listener's IPv6 socket, when [server] ipv6 is on.
+
+# The link listener's IPv6 address, when [server] ipv6 is on.
 #bind6 = "::"
 
-# Wrap the link connection in TLS: on a hub, reuses the [tls] cert/key above
-# on the link listener; on a leaf, requires TLS when dialing its uplink.
-# A dialing server presents its own [tls] cert/key too (when it has them), so
-# the other side can pin it -- see `fingerprint` below. With tls on, the link
-# listener still takes plain-text links from 127.0.0.1 (the services daemon,
-# which doesn't speak TLS); from anywhere else a link must be TLS.
+# TLS on links: a hub uses the [tls] cert/key on the link listener, a leaf
+# requires TLS to its uplink. Local plain-text links (services) still work.
 tls = false
 
-# leaf only: accept the hub's TLS certificate without CA validation (for a
-# self-signed hub cert with no shared CA infrastructure). Never set this on
-# a link exposed to the public internet without also trusting the exact peer
-# -- a `fingerprint` on the peer (below) is that, and replaces this flag.
+# Leaf: accept the hub's certificate without CA validation. Prefer pinning a
+# `fingerprint` on the peer, which replaces this.
 tls_insecure_skip_verify = false
 
-# Dial the [[links.peers]] that have a `host` at startup and again whenever the
-# link drops (with the backoff below). false = only when an oper runs
-# /CONNECT <peer-name>.
+# Dial the peers that have a `host` at start and after a drop. false = only
+# on /CONNECT.
 #autoconnect = true
+
+# --- timing ---
 
 ping_interval = 60.0
 ping_timeout = 180.0
 
-# dialing side: reconnect backoff (seconds), doubling from reconnect_delay up
-# to reconnect_delay_max after each failed attempt.
+# Reconnect backoff in seconds, doubling up to the max.
 reconnect_delay = 5.0
 reconnect_delay_max = 300.0
 
-# --- hub example -------------------------------------------------------
-# One [[links.peers]] entry per leaf allowed to connect, identified by the
-# name it presents in its own handshake (NOT [server].name -- that's this
-# node's own identity). No `host`/`port` here: the hub only ever accepts.
-# Exactly one of `password`/`password_hash` is required -- `password_hash`
-# (scrypt, generate with `sekurircd --hash-password`, same as
-# [[operators]]) is preferred so this config doesn't hold the raw secret;
-# the dialing side still needs the real (plain) password to send it.
-#
+# Longest line accepted from a linked server, in bytes.
+#max_line_length = 8192
+
+# -----------------------------------------------------------------------------
+#  [[links.peers]] -- one per server (or services) this one links with
+# -----------------------------------------------------------------------------
+#   name           the peer's own server name, as it presents itself
+#   host / port    set on the DIALING side only; the other side accepts
+#   password_hash  accepting side (from `sekurircd --hash-password`), or
+#   password       plain; the dialing side must use the plain one
+#   fingerprint    "sha256:<hex>" of the peer's certificate (needs tls = true).
+#                  Checked before any password; with it, the password may be
+#                  left out. Get it with: tools/linkmgmt.py fingerprint
+#   allowed_ips    IP globs the peer may connect from (accepting side)
+
+# Hub side: a leaf that connects in.
 #[[links.peers]]
 #name = "leaf1"
 #password_hash = "scrypt$16384$8$1$<salt-hex>$<digest-hex>"
-##password = "a-long-shared-secret-unique-to-this-pair"  # legacy plain-text alternative
-##fingerprint = "sha256:<64 hex digits>"
+#allowed_ips = ["203.0.113.5"]
 
-# Any peer, optional, needs [links] tls = true: the SHA-256 fingerprint of
-# the certificate that peer presents (its [tls] cert). The link is refused
-# unless it matches -- checked before a password is ever sent or compared.
-# Works with self-signed certs (no CA, no tls_insecure_skip_verify), and
-# with a fingerprint the password becomes optional: leave both password
-# keys out and the certificate alone authenticates the peer, so neither
-# side keeps a plain-text secret. Get a server's fingerprint with
-# `tools/linkmgmt.py fingerprint` on it. After renewing a certificate with
-# a new key, update the fingerprint on the other side and /REHASH.
-
-# hub only, optional: IP globs ('*'/'?') this peer is allowed to connect
-# from. If a firewall in front of the link port isn't an option, this is the
-# same protection Unreal's link{} / InspIRCd's <link> blocks give you: a
-# connection from anywhere else is rejected before the SERVER/PASS handshake
-# even starts, so scanner/bot noise never gets past accept(). Leave unset
-# (the default) for the old open-to-anyone behavior -- password auth still
-# protects the handshake itself either way, this just cuts the noise and the
-# blind-guess attempts.
-##allowed_ips = ["203.0.113.5"]
-
-# --- channel services (ChanServ) example --------------------------------
-# services/chanserv.py is a separate process (see services/services.template.toml)
-# that connects in exactly like a leaf, introducing one user (ChanServ) that
-# handles REGISTER/IDENTIFY/DROP -- see docs/channel-services-plan.md and
-# README.md's "Channel services" section. Requires [links] enabled+"hub"
-# (above) plus this peer entry; the password (plain here, or its hash below)
-# must match the plain `[link] password` in services/services.toml exactly
-# -- chanserv.py has to send the actual secret, so only this (accepting)
-# side gets to store a hash instead. Not running chanserv.py is the same as
-# leaving channel services disabled -- there is no separate on/off switch
-# on the ircd side.
-#
+# Hub side: services (bin/services). Same name and plain password as [link]
+# in services/services.toml.
 #[[links.peers]]
 #name = "services.sekurircd.local"
 #password_hash = "scrypt$16384$8$1$<salt-hex>$<digest-hex>"
-##password = "a-long-shared-secret-unique-to-this-pair"  # legacy plain-text alternative
-# chanserv.py usually runs on the same box -- worth locking to it:
-##allowed_ips = ["127.0.0.1"]
+#allowed_ips = ["127.0.0.1"]
 
-# --- leaf example --------------------------------------------------------
-# Exactly one [[links.peers]] entry: the hub to dial. `name` here is the
-# HUB's name (validated against the hub's handshake reply), and this leaf
-# presents ITS OWN [server].name when connecting. Must be plain `password`
-# here (not `password_hash`) -- dialing out means actually sending the
-# secret, which a one-way hash can't reproduce; the hub side above is where
-# `password_hash` applies.
-#
-#[links]
-#enabled = true
-#mode = "leaf"
-#
+# Leaf side (with mode = "leaf"): the hub to dial. name = the HUB's name.
 #[[links.peers]]
 #name = "hub1"
-#password = "a-long-shared-secret-unique-to-this-pair"
 #host = "hub.example.net"
 #port = 7000
-##fingerprint = "sha256:<64 hex digits>"   # the hub's certificate (see above)
+#password = "a-long-shared-secret-unique-to-this-pair"
+#fingerprint = "sha256:<64 hex digits>"   # the hub's certificate (see above)

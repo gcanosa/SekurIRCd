@@ -280,7 +280,10 @@ copy with `--config`.
 # 1. build
 make            # -> bin/sekurircd, bin/services
 
-# 2. configure
+# 2. configure: answer a few questions and get config/sekurircd.toml + services/services.toml
+#    (passwords hashed, both daemons' --check run on the result; same as ./bin/sekurircd --makeconf)
+tools/makeconf.py
+# ...or by hand from the documented template:
 cp config/sekurircd.template.toml config/sekurircd.toml
 # config/ircd.motd, oper.motd, ircd.rules are created from their templates at first start: edit those
 # edit config/sekurircd.toml (port, operators, [links] for services, ...)

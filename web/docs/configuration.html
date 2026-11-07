@@ -23,7 +23,8 @@
 <main class="docs">
 <h1>configuration</h1>
 <p>Copy <code>config/sekurircd.template.toml</code> to a live file and point the daemon at it with <code>--config</code>.
-  The template documents every key. <code>REHASH</code> (or <code>--rehash</code>) reloads it without dropping anyone.</p>
+  The template documents every key. To start from answers instead, run <code>tools/makeconf.py</code>
+  (or <code>sekurircd --makeconf</code>), or use the <a href="wizard.html">web wizard</a>; see <a href="install.html#makeconf">install</a>. <code>REHASH</code> (or <code>--rehash</code>) reloads it without dropping anyone.</p>
 <p>Relative paths: <code>motd</code>, <code>oper_motd</code>, <code>rules</code>, <code>tls.cert_file</code> and <code>tls.key_file</code> resolve against the config file's
   directory; <code>logging.directory</code> resolves against the current working directory. Absolute paths always work.</p>
 <p>The MOTD, oper MOTD, rules and spam filters are your own files, not tracked by git. The repo ships <code>config/ircd.template.motd</code>,

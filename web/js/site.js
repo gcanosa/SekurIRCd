@@ -6,6 +6,7 @@
   var DOCS = [
     ["install", "Install", "docs/install.html"],
     ["configuration", "Configuration", "docs/configuration.html"],
+    ["wizard", "Config wizard", "docs/wizard.html"],
     ["commands", "Commands & modes", "docs/commands.html"],
     ["protection", "Protection bundle", "docs/protection.html"],
     ["ircv3", "IRCv3 & SASL", "docs/ircv3.html"],

@@ -149,3 +149,24 @@ a.card:hover .os { background: var(--link); }
 .os-linux { --i: url(../img/os/linux.svg); }
 .os-raspberrypi { --i: url(../img/os/raspberrypi.svg); }
 .os-source { --i: url(../img/os/source.svg); }
+
+/* config wizard */
+.wz fieldset { border: 1px solid var(--border); border-radius: 8px; background: var(--panel); margin: 0 0 16px; padding: 12px 16px 14px; }
+.wz legend { color: var(--link); padding: 0 6px; }
+.wz label { display: block; margin: 8px 0; color: var(--ink); }
+.wz small, .wz .hint { color: var(--muted); font-size: .82rem; }
+.wz .hint { margin: 4px 0 8px; }
+.wz input:not([type=checkbox]), .wz select {
+  display: block; width: 100%; margin-top: 3px; padding: 5px 8px; font: inherit; color: var(--fg);
+  background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
+}
+.wz input:focus, .wz select:focus { border-color: var(--link); outline: none; }
+.wz label.chk { display: flex; gap: 8px; align-items: baseline; color: var(--fg); }
+.wz input[type=checkbox] { accent-color: var(--burgundy); }
+.wz .row { display: grid; gap: 0 14px; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); align-items: end; }
+.wz .oper { grid-template-columns: 1fr 1fr 1.4fr auto; }
+.wz .oper .btn { margin: 8px 0; padding: 5px 12px; }
+.wz .btn { font: inherit; background: none; cursor: pointer; }
+.docs .btn.primary { font: inherit; cursor: pointer; }
+[hidden] { display: none !important; }
+@media (max-width: 760px) { .wz .oper { grid-template-columns: minmax(0, 1fr); } }

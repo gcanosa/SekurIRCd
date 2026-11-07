@@ -46,7 +46,7 @@ static int exe_path(char *out, size_t outsz) {
 
 static void usage(const char *prog) {
     printf("usage: %s [-c|--config PATH] [-v|--verbose] [--hash-password] [--version]\n"
-           "       %*s [-d|--daemon] [--pidfile PATH] [--stop] [--rehash] [-t|--check]\n",
+           "       %*s [-d|--daemon] [--pidfile PATH] [--stop] [--rehash] [-t|--check] [--makeconf]\n",
            prog, (int)strlen(prog), "");
 }
 
@@ -79,6 +79,33 @@ static int hash_password_cli(void) {
     char hash[256];
     if (crypto_hash_password(pw1, hash, sizeof hash) != 0) { fprintf(stderr, "Hashing failed.\n"); return 1; }
     printf("%s\n", hash);
+    return 0;
+}
+
+/* --makeconf: the config generator is tools/makeconf.py (Python, stdlib only) -- run it when this
+ * binary sits in a checkout (bin/../tools), else say where to get it. Arguments after --makeconf
+ * are passed through (-c PATH, -s PATH, --print). */
+static int makeconf(char **args) {
+    char exe[4096], tool[4200];
+    if (exe_path(exe, sizeof exe)) {
+        char *slash = strrchr(exe, '/');
+        if (slash) *slash = '\0';
+        snprintf(tool, sizeof tool, "%s/../tools/makeconf.py", exe);
+        if (access(tool, R_OK) == 0) {
+            char *argv2[64] = { "python3", tool };
+            int n = 2;
+            for (; *args && n < 63; args++) argv2[n++] = *args;
+            argv2[n] = NULL;
+            execvp("python3", argv2);
+            fprintf(stderr, "sekurircd: could not run python3 (%s); run %s yourself\n", strerror(errno), tool);
+            return 1;
+        }
+    }
+    printf("The config generator is tools/makeconf.py in the SekurIRCd source tree (Python 3.8+, no extra packages):\n\n"
+           "    git clone https://github.com/gcanosa/SekurIRCd.git && cd SekurIRCd\n"
+           "    tools/makeconf.py                    writes config/sekurircd.toml and services/services.toml\n"
+           "    tools/makeconf.py -c /etc/sekurircd/sekurircd.toml -s /etc/sekurircd/services.toml\n\n"
+           "Or in a browser: https://gcanosa.github.io/SekurIRCd/docs/wizard.html\n");
     return 0;
 }
 
@@ -180,6 +207,7 @@ int main(int argc, char **argv) {
         else if (strcmp(a, "--stop") == 0) do_stop = 1;
         else if (strcmp(a, "--rehash") == 0) do_rehash = 1;
         else if (strcmp(a, "-t") == 0 || strcmp(a, "--check") == 0) do_check = 1;
+        else if (strcmp(a, "--makeconf") == 0) return makeconf(argv + i + 1);
         else if (strcmp(a, "--version") == 0) {
             /* Off a release tag the line still ends in the release number: upgrade.py up to 1.2.3 checks
              * endswith(<version.h>), and runs from the OLD checkout when upgrading to newer commits. */

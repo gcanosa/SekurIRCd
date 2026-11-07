@@ -40,7 +40,28 @@ make debug      # ASan+UBSan build -> bin/sekurircd-debug
 make check      # build and run tests/unit.c
 make clean</pre>
 
+<h2 id="makeconf">create the config</h2>
+<p>The quickest way is to let SekurIRCd ask. <code>tools/makeconf.py</code> asks about the server, TLS, cloaking, operators and services.
+  It then writes a complete <code>config/sekurircd.toml</code>, a <code>config/protection.toml</code> if you turn on the
+  Protection bundle, and, if you want NickServ and ChanServ, a <code>services/services.toml</code> whose link settings match it. <code>bin/sekurircd --makeconf</code> runs the same tool.</p>
+<pre>tools/makeconf.py                  # writes config/sekurircd.toml and services/services.toml
+./bin/sekurircd --makeconf         # the same, started from the ircd binary
+tools/makeconf.py -c /etc/sekurircd/sekurircd.toml -s /etc/sekurircd/services.toml   # other paths
+tools/makeconf.py --print          # write nothing, print the files</pre>
+<ul>
+  <li>Passwords are typed without echo and stored as scrypt hashes. Services get a random link password, written in plain text only
+    in <code>services.toml</code>, the side that has to send it.</li>
+  <li>The files are created readable only by you (0600). An existing file is backed up as <code>&lt;file&gt;.bak-&lt;date&gt;</code> first.</li>
+  <li>Both daemons' own <code>--check</code> must accept the result, or the old files are put back.</li>
+  <li>With the <a href="protection.html">Protection bundle</a> on, it also asks about connection limits, the flood guard,
+    the DNSBL, spam protection and the proxy scanner, and writes <code>protection.toml</code>.</li>
+  <li>It can make a self-signed TLS certificate.</li>
+</ul>
+<p>It needs Python 3.8 or newer and no extra packages. It ships in the source tree, not with <code>make install</code>; an installed
+  <code>sekurircd --makeconf</code> prints where to get it. To use a browser instead, the <a href="wizard.html">web wizard</a> builds the same two files.</p>
+
 <h2 id="run">run</h2>
+<p>To write the config by hand instead, start from the documented template:</p>
 <pre>cp config/sekurircd.template.toml config/sekurircd.toml
 # edit config/sekurircd.toml (port, operators, TLS, ...)
 cp config/protection.template.toml config/protection.toml   # optional: the Protection bundle

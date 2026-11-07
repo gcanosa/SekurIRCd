@@ -1,50 +1,37 @@
 # =============================================================================
-#  sekurircd -- Protection bundle
+#  SekurIRCd -- Protection bundle
 # =============================================================================
 #
-# The Protection bundle is SekurIRCd's optional abuse-protection layer. One
-# file groups every knob that keeps drones, botnets, open proxies and spammers
-# off the network:
+#  Optional abuse protection in one file: connection limits, flood and spam
+#  protection, DNSBL blacklists and an open-proxy scanner.
 #
-#   [exempt]      addresses that are never checked
-#   [connection]  total / per-IP connection caps and the connect-flood throttle
-#   [flood]       the per-client message flood guard
-#   [spam]        spam protection (new-connection PM lock, content filters,
-#                 recipient/repeat limits)
-#   [blacklist]   DNSBL lookups -- ban addresses already known to be bad
-#   [scanner]     active open-proxy scanner -- find bad addresses yourself
+#  Setup:
+#    1. cp config/protection.template.toml config/protection.toml
+#       (found through [security] protection_file in sekurircd.toml)
+#    2. edit it -- if you turn the scanner on, set [scanner.target] ip
+#    3. /REHASH, then /PROTECT to see what is active
 #
-# It lives next to sekurircd.toml and is found through [security]
-# protection_file (default "protection.toml"). The file is OPTIONAL: with none,
-# the daemon runs on the same keys in sekurircd.toml exactly as before. When it
-# exists, whatever it sets wins over the matching sekurircd.toml key -- so a
-# key you leave out here simply keeps its sekurircd.toml (or built-in) value.
-# Edit it, then /REHASH; no restart needed (in-flight scans finish on the old
-# settings).
+#  Anything set here wins over the same setting in sekurircd.toml. Bans, scan
+#  results and problems are logged under "protection" and shown in your
+#  [debug_channel].
 #
-#   1. cp config/protection.template.toml /etc/sekurircd/protection.toml
-#   2. edit it (at minimum: [scanner.target] ip, if you turn the scanner on)
-#   3. /REHASH, then /PROTECT to see what is active
-#
-# Where things show up: every ban, scan verdict and config problem is logged
-# with the tag `protection` (or `dnsbl`) and relayed into your
-# [debug_channel] -- so a #server-debug you already watch doubles as the
-# Protection bundle's live feed, including a rolling stats line every
-# stats_interval. `/PROTECT` (server opers) prints the current state.
+#  Sections:
+#    [exempt]      addresses never checked
+#    [connection]  connection caps and the connect-flood throttle
+#    [flood]       per-client message flood guard
+#    [spam]        spam protection
+#    [blacklist]   DNSBL lookups: bans addresses others already reported
+#    [scanner]     open-proxy scanner: finds bad addresses itself
 # =============================================================================
 
 
 # -----------------------------------------------------------------------------
-# [exempt] -- never checked
+#  EXEMPT -- never DNSBL-checked or scanned
 # -----------------------------------------------------------------------------
-# IP globs ('*' and '?') for addresses that are never DNSBL-checked and never
-# scanned. Matched against the connecting IP only. There are very few good
-# reasons to use this -- the scanner has no false positives to work around --
-# but one is real: a trusted machine that is *supposed* to run a proxy (a
-# bouncer host, your own VPN egress) would otherwise be scanned, found "open",
-# and banned. Note this does NOT exempt from the connection caps or flood
-# throttle below.
+# IP globs ("*", "?"). Useful for a trusted host that runs a proxy on purpose
+# (a bouncer, your VPN exit). Connection caps and the flood throttle still apply.
 [exempt]
+
 ips = [
     "127.*",
     # "10.*", "192.168.*",
@@ -52,142 +39,120 @@ ips = [
 
 
 # -----------------------------------------------------------------------------
-# [connection] -- connection caps and the connect-flood throttle
+#  CONNECTION -- caps and connect-flood throttle
 # -----------------------------------------------------------------------------
 [connection]
 
-# Hard cap on total simultaneous connections (registered or not); refused with
-# a plain ERROR before registration. 0 = unlimited.
+# Total simultaneous connections. 0 = unlimited.
 max_connections = 0
 
-# Hard cap on simultaneous connections from one IP; 0 = unlimited. A cheap
-# defence against a host opening lots of sockets -- it doesn't need that host
-# to be on any blacklist yet.
+# Simultaneous connections from one IP. 0 = unlimited.
 max_connections_per_ip = 0
 
-# Connect-rate throttle: an IP that opens more than connect_flood_max
-# connections within connect_flood_window seconds gets an automatic Z-line for
-# connect_flood_ban_duration ("10m", "1h", "1d"; "" = permanent). Catches
-# scanners and port-probes that connect and drop too fast for the per-IP cap
-# (a concurrency limit) to ever see. 0 disables it.
-#
-# The scanner below is aware of this: connections that its own probes relay
-# back to this server do not count towards the throttle or the per-IP cap.
+# More than connect_flood_max connections from one IP within
+# connect_flood_window seconds = automatic Z-line for
+# connect_flood_ban_duration ("10m", "1h", "1d"; "" = permanent).
+# 0 turns it off. The proxy scanner's own probes never count.
 connect_flood_max = 5
 connect_flood_window = 10.0
 connect_flood_ban_duration = "10m"
 
 
 # -----------------------------------------------------------------------------
-# [flood] -- per-client message flood guard
+#  FLOOD -- per-client message flood guard
 # -----------------------------------------------------------------------------
-# A registered client that sends more than max_msgs lines inside a sliding
-# window of `window` seconds is disconnected.
+# More than max_msgs lines within `window` seconds = disconnected.
 [flood]
+
 max_msgs = 20
 window = 1.0
 
 
 # -----------------------------------------------------------------------------
-# [spam] -- spam protection (private messages, notices, channels)
+#  SPAM -- private messages, notices and channels
 # -----------------------------------------------------------------------------
-# Catches what the flood guard and the blacklists can't: a bot that connects
-# politely, then advertises to lots of users or channels. Three independent
-# layers, all inert unless `enabled = true`:
-#   1. New-connection restriction: a fresh connection can't PM users for
-#      `new_user_period` (channels stay open, and it can always message
-#      services and opers, so nobody is locked out of asking for help).
-#   2. Regex content filters from `filters_file` (see config/spamfilters.template.conf
-#      for the format and examples), plus /SPAMFILTER for live management.
-#   3. Recipient/repeat limits: messaging more than `max_targets` different
-#      people/channels, or sending the same text to `max_repeat` of them,
-#      inside `target_window`.
-# Operators get a server notice (+s) for every action, including the message
-# text, so rules and limits are easy to tune. Off by default; try
-# limit_action = "warn" and filter rules with the `warn` action first.
-# Applies to this server's own users only; each linked server keeps its own
-# copy of the filters file.
+# Three layers, all off until enabled = true:
+#   1. new connections can't PM users for new_user_period (services and
+#      opers stay reachable)
+#   2. regex content filters from filters_file, managed live with /SPAMFILTER
+#      (format: config/spamfilters.template.conf)
+#   3. limits on how many targets one client messages, and on repeated text
+# Opers with +s see every action, message included. Start with "warn" as the
+# limit_action and in filter rules, then tighten. Each server applies its own
+# copy to its own users.
 [spam]
+
 enabled = false
 
-# Who is never checked. Services and opers are always safe when exempt_opers is
-# on; exempt_identified skips anyone logged in to an account (SASL or
-# /REGISTER), the cheapest way to let regulars through.
+# --- who is skipped ---
+
 exempt_opers = true
+
+# Anyone logged in to an account (the cheapest way to let regulars through).
 exempt_identified = true
 
-# Connections older than this stop being subject to layer 3 (the limits) --
-# not the content filters. "0" = the limits always apply. Example: "1h".
+# Connections older than this skip layer 3 (not the filters). "0" = never.
 trust_age = "0"
 
-# Layer 1. "0" turns it off. Durations: "30s", "10m", "1h", "1d".
+# --- layer 1: new-connection PM lock ---
+
+# "0" = off. Durations: "30s", "10m", "1h", "1d".
 new_user_period = "30s"
 
-# Layer 3. 0 disables that check. max_targets is at most 31, max_repeat at most
-# 32. Repeats only count for texts of 8+ characters.
+# --- layer 3: target and repeat limits ---
+
+# 0 turns a check off. max_targets <= 31, max_repeat <= 32; repeats count
+# only for texts of 8+ characters.
 max_targets = 5
 target_window = "30s"
 max_repeat = 4
 
-# What a breach of layer 3 does: "block" (drop the message), "warn" (only tell
-# opers), "kill" (disconnect), or "zline" (disconnect + Z-line the IP for
-# zline_duration; "0" = permanent).
+# "block" (drop the message), "warn" (tell opers only), "kill", or "zline"
+# (kill + Z-line for zline_duration; "0" = permanent).
 limit_action = "block"
 zline_duration = "1h"
 
-# Layer 2 on/off. Relative to this file's directory; "" = no file, rules added
-# with /SPAMFILTER then live in memory only and are lost on restart.
+# --- layer 2: content filters ---
+
+# Relative to this file. "" = no file: /SPAMFILTER rules live in memory only.
 filters_enabled = true
 filters_file = "spamfilters.conf"
 
 
 # -----------------------------------------------------------------------------
-# [blacklist] -- DNSBL lookups
+#  BLACKLIST -- DNSBL lookups
 # -----------------------------------------------------------------------------
-# Every connecting IP is looked up in each zone below (standard reversed-octet
-# DNS query -- works with any provider). A listing that passes the zone's
-# reply rules bans the address before the client can do anything. Bad
-# addresses somebody ELSE already found: cheap, but only as good as the list.
-#
-# Adds no connect latency for the client's own traffic, but a client's input is
-# held until the lookups finish (at most `timeout` seconds per attempt).
-#
-# This replaces the older [dnsbl] section of sekurircd.toml, which still works
-# when this file defines no zones (and logs a deprecation warning).
+# Every connecting IP is looked up in each zone below. A listing that matches
+# the zone's rules bans it before it can do anything. The client's input waits
+# for the lookups (at most `timeout` seconds). Replaces the old [dnsbl]
+# section of sekurircd.toml.
 [blacklist]
+
 enabled = true
 
-# Seconds to wait for the lookups before treating the address as "not listed".
+# Seconds to wait before treating an address as not listed.
 timeout = 5.0
 
-# What a listing does:
-#   "zline"   refuse + Z-line the IP (IP-only, checked before anything else on
-#             later connects, so they skip the DNS lookup entirely)
-#   "kline"   refuse + K-line the IP (also matches user@host masks)
-#   "reject"  refuse just this connection
+# "zline" (ban the IP, checked first on later connects), "kline" (also
+# matches user@host masks) or "reject" (refuse this connection only).
 action = "zline"
 
-# How long a zline/kline lasts: "1d", "12h", "30m", or seconds. Dynamic IPs get
-# reassigned, so a permanent ban off one listing is rarely right. "" = permanent.
+# "1d", "12h", "30m" or seconds; "" = permanent. IPs get reassigned, so
+# permanent bans from a listing are rarely right.
 ban_duration = "1d"
 
-# One [[blacklist.zone]] per DNSBL, checked together; the first (in file order)
-# whose reply rules match decides. Keys:
-#   name         the zone hostname                                    (required)
-#   type         "reply"   the answer's last octet must EQUAL a code below
-#                "bitmask" the octet is a bit set; a code matches if its bit is on
-#   replies      ["<code>:<text>", ...] which answers count, and what they mean.
-#                Empty = ANY listing bans.
-#   ban_unknown  listed with a code NOT in replies: ban anyway? (default true)
-#                Set false to ban only the categories you list -- for a
-#                general-purpose list this is what keeps you from banning on
-#                categories you don't care about.
-#   reason       shown to the banned user and in the ban record.
-#                %i = their IP, %t = the zone, %r = the matched reply text.
+# --- zones ---
+# One [[blacklist.zone]] per list; the first match (in file order) decides.
+#   name         zone hostname (required)
+#   type         "reply": the answer's last octet must equal a code below
+#                "bitmask": a code matches if its bit is set
+#   replies      ["<code>:<text>", ...]; empty = any listing bans
+#   ban_unknown  ban on a code not in replies too (default true); false =
+#                ban only the categories you list
+#   reason       shown to the user: %i = IP, %t = zone, %r = reply text
+
+# EFnet RBL: IRC-focused (open proxies, drones, spam hosts), free, no query limits.
 [[blacklist.zone]]
-# EFnet RBL -- an IRC-specific, no-strings-attached list of open proxies,
-# drones and spamming hosts. No usage terms beyond "don't abuse it", and no
-# query-volume limits, which is why it is the default.
 name = "rbl.efnetrbl.org"
 type = "reply"
 ban_unknown = true
@@ -200,60 +165,47 @@ replies = [
     "5:drones / flooding",
 ]
 
-# Another zone, for illustration (commented out -- verify a zone is still
-# live and read its terms before relying on it; dead zones just time out
-# silently and protect nothing):
+# Another zone, as an example. Check a zone is alive and read its terms first:
+# a dead zone just times out and protects nothing. (DroneBL closed its public
+# DNSBL in 2021.)
 #
 # [[blacklist.zone]]
-# name = "zen.spamhaus.org"       # aimed at email abuse; free only for
-#                                 # low-volume, non-commercial use
-# type = "reply"                 # use "bitmask" for lists that OR category bits
-# ban_unknown = false             # only the codes listed below
+# name = "zen.spamhaus.org"       # email-focused; free for low-volume, non-commercial use
+# type = "reply"
+# ban_unknown = false
 # replies = ["4:exploited host", "5:exploited host", "6:exploited host", "7:exploited host"]
 # reason = "Listed in %t (%r)"
-#
-# DroneBL (dnsbl.dronebl.org) is NOT recommended: the project announced it shut
-# down its public DNSBL in 2021, so the zone likely no longer resolves.
 
 
 # -----------------------------------------------------------------------------
-# [scanner] -- active open-proxy scanner
+#  SCANNER -- active open-proxy scanner
 # -----------------------------------------------------------------------------
-# A blacklist only knows about proxies somebody already reported. The scanner
-# finds the rest: when a client connects, the server opens connections BACK to
-# that client's IP on the classic proxy ports and asks each to relay to
-# `target` -- this server's own address. If this server's own connect banner
-# (`*** Looking up your hostname`) comes back through the relay, the address is
-# a working open proxy and is banned, and the client along with anyone else
-# connected from it. The scan runs in the background: the client registers and
-# chats as normal until a scan confirms, so honest users never wait on it.
+# When a client connects, the server connects back to its IP on common proxy
+# ports and asks each to relay to this server. If this server's own banner
+# comes back, the address is an open proxy and gets banned. Scans run in the
+# background: clients are never kept waiting.
 #
-# READ THIS before turning it on:
-#   * It makes outbound connections to arbitrary addresses on the internet.
-#     Some networks treat that as a port scan and send abuse reports to your
-#     hosting provider. Know your provider's policy first. Set log_all_scans =
-#     true if you want an audit trail proving it was you.
-#   * target.ip MUST be this server's PUBLIC address, reachable from anywhere.
-#     A proxy out on the internet can't reach 127.0.0.1 or 192.168.x.x, so a
-#     private address means the scanner runs and never finds anything. The
-#     server logs a warning at startup if it looks private.
-#   * Off by default. Try action = "reject" first if you want to watch what it
-#     finds before it starts banning.
+# Before turning it on:
+#   * it makes outbound connections to arbitrary hosts; some providers treat
+#     that as port scanning -- check yours (log_all_scans keeps an audit trail)
+#   * [scanner.target] ip must be this server's PUBLIC address, or it never
+#     finds anything (a warning is logged if it looks private)
+#   * try action = "reject" first to watch what it finds
 [scanner]
+
 enabled = false
 
-# What a confirmed proxy gets: "zline" (IP-only ban), "kline", or "reject"
-# (disconnect only, no ban recorded).
+# "zline", "kline" or "reject" (disconnect only, no ban).
 action = "zline"
 ban_duration = "1d"
 
-# %i = the IP, %t = the protocol that worked, %p = the port.
+# %i = IP, %t = protocol that worked, %p = port.
 reason = "Open %t proxy found on your host (port %p) -- secure it and reconnect"
 
-# Probes to run against each new client, "type:port". Types: http (CONNECT),
-# httppost, socks4, socks5. Each entry is one socket per scanned client, so a
-# long list costs file descriptors: the defaults are the ports where open
-# proxies actually turn up.
+# --- probes ---
+
+# "type:port", types: http (CONNECT), httppost, socks4, socks5. One socket per
+# entry per client, so keep it short.
 protocols = [
     "http:80",
     "http:8080",
@@ -265,45 +217,40 @@ protocols = [
     "socks5:1080",
 ]
 
-# Seconds a probe may take end to end before it is abandoned. Nearly every
-# working proxy answers within a few seconds; a short timeout also keeps
-# resource use low.
+# Seconds before a probe is abandoned.
 timeout = 10.0
 
-# Give up on a probe after reading this many bytes without seeing a target
-# string. Don't raise it much: hosts that stream endless data can otherwise
-# tie up your sockets. 4096 is plenty for any real proxy.
+# Give up after reading this many bytes without a match.
 max_read = 4096
 
-# Cap on probe sockets open at once, across all clients (each new client uses
-# one per protocol above). Past it, new clients simply aren't scanned until it
-# drains -- a connection flood can't exhaust your file descriptors.
+# Most probe sockets open at once; past it new clients aren't scanned until
+# it drains, so a flood can't exhaust file descriptors.
 max_concurrent = 256
 
-# Source address for probes, if this machine has several ("" = system default).
+# Source address for probes ("" = system default).
 bind = ""
 
-# How long an address that came back clean is left alone before it is scanned
-# again ("1h", "1d"; "0" = scan every connection). Saves work for regulars and
-# reconnect loops, but be aware of the trade: anyone running a proxy can
-# switch it off for one scan, connect, and switch it back on. Off by default.
+# --- caching and logging ---
+
+# Leave a clean address alone this long before scanning it again ("1h",
+# "1d"; "0" = scan every connection). Saves work, but a proxy switched off
+# for one scan then slips through.
 negcache = "0"
 
-# Log every probe's outcome (level DEBUG -- goes to the log file, not the
-# debug channel).
+# Log every probe result at DEBUG (log file only).
 log_all_scans = false
 
-# Where probes ask the proxy to connect, and what proves it worked.
+# --- target: where probes relay to ---
 [scanner.target]
-# THIS SERVER's public IPv4 address. Required when enabled.
+
+# THIS server's public IPv4 address. Required when the scanner is on.
 ip = ""
-# A port this server accepts plain IRC connections on.
+
+# A plain (non-TLS) client port on this server.
 port = 6667
-# Strings that, appearing in the data read back through a relay, prove it
-# worked. The default is what this server itself sends on connect, plus the
-# two refusals a relayed probe can get instead of a banner (the relayed
-# connection is still a connection: it can hit a cap or a ban and be told so,
-# which proves the relay worked just as well). Leave unset unless you know why.
+
+# Text that proves a relay worked: this server's connect banner plus the two
+# refusals a relayed probe may get instead. Leave unset unless you know why.
 #strings = [
 #    "*** Looking up your hostname",
 #    "ERROR :Closing Link",
