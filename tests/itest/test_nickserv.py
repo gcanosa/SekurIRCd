@@ -111,6 +111,7 @@ def test_last_login_note_on_identify_and_sasl():
         assert any("identified" in l for l in first) and not any("Last login" in l for l in first), first
         second = ns(s.client("ll2", user="second"), "IDENTIFY llacct password1")
         assert any(re.search(r"Last login from: ~?first@\S+ on \w{3} \d\d \d\d:\d\d:\d\d \d{4} \+0000\.", l) for l in second), second
+        assert any("Last login from: " in l and "second@" in l for l in ns(s.client("ll2b"), "INFO llacct")) is False, "hidden from others"
         c = s.client("ll3", register=False, user="third", extra=["CAP REQ :sasl"])
         c.send("AUTHENTICATE PLAIN")
         c.expect(r"AUTHENTICATE \+")
@@ -119,3 +120,4 @@ def test_last_login_note_on_identify_and_sasl():
         c.send("CAP END"); c.send("NICK ll3"); c.send("USER third 0 * :x")
         c.expect(r" 001 ")
         c.expect(r"Last login from: ~?second@", 3)
+        assert any(re.search(r"Last login from: ~?third@", l) for l in ns(c, "INFO")), "INFO shows the current login to the owner"

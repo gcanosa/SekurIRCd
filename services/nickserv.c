@@ -818,6 +818,14 @@ static void cmd_info(nsuser_t *u, const char *a) {
     }
     const char *fp = accounts_fingerprint(&g_acc, who);
     if (fp) sayf(u->nick, "Certificate fingerprint: %s", fp);
+    long at;
+    const char *last = accounts_last_login(&g_acc, who, &at);
+    if (last && at) {
+        time_t t = (time_t)at;
+        char lw[48];
+        strftime(lw, sizeof lw, "%b %d %H:%M:%S %Y +0000", gmtime(&t));
+        sayf(u->nick, "Last login from: %s on %s", last, lw);
+    }
 }
 
 static void cmd_cert(nsuser_t *u, const char *sub) {
