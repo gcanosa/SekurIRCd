@@ -227,6 +227,46 @@ static void login(const char *id, const char *account) {
     if (u) { snprintf(u->account, sizeof u->account, "%s", account ? account : ""); if (account) u->enforce_at = 0; }
 }
 
+/* "Last login from: ..." to `u`, then record this login as the new last one. */
+static void last_login_note(nsuser_t *u) {
+    long at;
+    const char *prev = accounts_last_login(&g_acc, u->account, &at);
+    if (prev && at) {
+        time_t t = (time_t)at;
+        char when[48];
+        strftime(when, sizeof when, "%b %d %H:%M:%S %Y +0000", gmtime(&t));
+        sayf(u->nick, "Last login from: %s on %s.", prev, when);
+    }
+    char mask[200];
+    snprintf(mask, sizeof mask, "%s@%s", u->user, u->host);
+    accounts_set_last_login(&g_acc, u->account, mask);
+}
+
+/* SASL logins land before the user is on the network (or arrive as SVCACCOUNT): remember (account, ip) for a minute
+ * so the matching SVCUSER/SVCACCOUNT gets the note -- and the resend-everyone burst after a services restart doesn't. */
+#define SASL_SEEN 64
+static struct { char account[64], ip[64]; time_t at; } g_sasl_seen[SASL_SEEN];
+static int g_sasl_seen_next;
+
+static void sasl_seen_add(const char *account, const char *ip) {
+    int i = g_sasl_seen_next++ % SASL_SEEN; /* ponytail: ring of 64, a burst of >64 SASL logins/min loses some notes */
+    snprintf(g_sasl_seen[i].account, sizeof g_sasl_seen[i].account, "%s", account);
+    snprintf(g_sasl_seen[i].ip, sizeof g_sasl_seen[i].ip, "%s", ip);
+    g_sasl_seen[i].at = time(NULL);
+}
+
+static void sasl_seen_check(nsuser_t *u) {
+    if (!u->account[0]) return;
+    time_t now = time(NULL);
+    for (int i = 0; i < SASL_SEEN; i++)
+        if (g_sasl_seen[i].at && now - g_sasl_seen[i].at <= 60 && strcmp(g_sasl_seen[i].ip, u->ip) == 0 &&
+            strcasecmp(g_sasl_seen[i].account, u->account) == 0) {
+            g_sasl_seen[i].at = 0;
+            last_login_note(u);
+            return;
+        }
+}
+
 static void logout_all(const char *account) {
     nsuser_t *u, *tmp;
     HASH_ITER(hh, g_by_uid, u, tmp)
@@ -424,6 +464,7 @@ static void sasl_send(const char *cid, const char *kind, const char *data) { wir
 static void sasl_done(sasl_t *s, const char *account) {
     if (account) {
         login(s->cid, account);
+        sasl_seen_add(account, s->ip);
         sasl_send(s->cid, "D", "S");
         log_info("nickserv", "SASL %s login as %s (%s)", s->mech, account, s->ip);
     } else {
@@ -598,6 +639,7 @@ static void ev_user(irc_message_t *m) {
     snprintf(u->certfp, sizeof u->certfp, "%s", strcmp(m->params[6], "*") ? m->params[6] : "");
     snprintf(u->server, sizeof u->server, "%s", m->params[7]);
     if (renamed) enforce_check(u);
+    if (fresh) sasl_seen_check(u);
 }
 
 int ns_event(irc_message_t *m) {
@@ -618,7 +660,7 @@ int ns_event(irc_message_t *m) {
         if (u) {
             snprintf(u->account, sizeof u->account, "%s", strcmp(m->params[1], "*") ? m->params[1] : "");
             if (u->account[0] && strcasecmp(u->account, u->enforce_owner) == 0) u->enforce_at = 0;
-            if (u->account[0]) cs_user_login(u->nick);
+            if (u->account[0]) { cs_user_login(u->nick); sasl_seen_check(u); }
         }
         return 1;
     }
@@ -636,6 +678,7 @@ void ns_session_start(void) {
     users_clear(); /* the hub resends everyone after SVCWATCH */
     if (!C.enabled) { svc_queue_line("SVCWATCH USERS"); return; } /* ChanServ still wants the QUIT/NICK feed */
     memset(g_sasl, 0, sizeof g_sasl);
+    memset(g_sasl_seen, 0, sizeof g_sasl_seen);
     char line[600];
     irc_build(line, sizeof line, NULL, 0, NULL, "NICK", (const char *[]){C.nick, C.user, C.host}, 3, C.realname);
     svc_queue_line(line);
@@ -688,6 +731,7 @@ static void cmd_identify(nsuser_t *u, const char *a, const char *b) {
     snprintf(keep, sizeof keep, "%s", name);
     login(u->uid, keep);
     sayf(u->nick, "You are now identified for %s", keep);
+    last_login_note(u);
     log_info("nickserv", "%s identified as %s", u->nick, keep);
 }
 
@@ -860,6 +904,7 @@ int ns_privmsg(const char *target, const char *from_nick, const char *text) {
                 snprintf(keep, sizeof keep, "%s", name);
                 login(u->uid, keep);
                 sayf(u->nick, "Account %s registered -- you are now logged in as it", keep);
+                last_login_note(u);
                 if (b) begin_email(u->nick, keep, b);
             }
         }

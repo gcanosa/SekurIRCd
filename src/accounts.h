@@ -86,6 +86,10 @@ void accounts_set_hash(account_store_t *st, const char *name, const char *hash);
 /* Delete the account. 1 if it existed. */
 int accounts_drop(account_store_t *st, const char *name);
 
+/* Last successful login: "user@host" and when (0 / NULL = never recorded). set_last_login stamps now. */
+const char *accounts_last_login(account_store_t *st, const char *name, long *at);
+void accounts_set_last_login(account_store_t *st, const char *name, const char *mask);
+
 /* Contact email. set_email stores it unverified; with a pending code (set_pending_email) it only becomes the email once
  * check_verify sees the matching, unexpired code. */
 const char *accounts_email(account_store_t *st, const char *name);

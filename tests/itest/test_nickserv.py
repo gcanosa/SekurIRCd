@@ -1,4 +1,4 @@
-import os, stat, tempfile, time
+import os, re, stat, tempfile, time
 from harness import Server
 from test_accounts import register
 from test_accounts2 import ns, sasl_plain
@@ -102,3 +102,20 @@ def test_whois_nickserv_and_service_aliases():
     with Server() as s:
         c = s.client("al2")
         assert any(" 401 " in l for l in c.say("WHOIS NickServ")), "no NickServ without the services daemon"
+
+def test_last_login_note_on_identify_and_sasl():
+    import base64
+    with Server(cfg={"accounts": {"enabled": True, "store_file": "acc.json"}}) as s:
+        register(s, "ll0", "llacct", "password1")
+        first = ns(s.client("ll1", user="first"), "IDENTIFY llacct password1")
+        assert any("identified" in l for l in first) and not any("Last login" in l for l in first), first
+        second = ns(s.client("ll2", user="second"), "IDENTIFY llacct password1")
+        assert any(re.search(r"Last login from: ~?first@\S+ on \w{3} \d\d \d\d:\d\d:\d\d \d{4} \+0000\.", l) for l in second), second
+        c = s.client("ll3", register=False, user="third", extra=["CAP REQ :sasl"])
+        c.send("AUTHENTICATE PLAIN")
+        c.expect(r"AUTHENTICATE \+")
+        c.send("AUTHENTICATE " + base64.b64encode(b"\0llacct\0password1").decode())
+        c.expect(r" 903 ")
+        c.send("CAP END"); c.send("NICK ll3"); c.send("USER third 0 * :x")
+        c.expect(r" 001 ")
+        c.expect(r"Last login from: ~?second@", 3)

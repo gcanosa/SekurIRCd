@@ -395,6 +395,23 @@ int accounts_drop(account_store_t *st, const char *name) {
     return 1;
 }
 
+const char *accounts_last_login(account_store_t *st, const char *name, long *at) {
+    cJSON *rec = find(st, name);
+    cJSON *m = cJSON_GetObjectItemCaseSensitive(rec, "last_login_from"), *t = cJSON_GetObjectItemCaseSensitive(rec, "last_login_at");
+    *at = cJSON_IsNumber(t) ? (long)t->valuedouble : 0;
+    return cJSON_IsString(m) ? m->valuestring : NULL;
+}
+
+void accounts_set_last_login(account_store_t *st, const char *name, const char *mask) {
+    cJSON *rec = find(st, name);
+    if (!rec) return;
+    cJSON_DeleteItemFromObjectCaseSensitive(rec, "last_login_from");
+    cJSON_DeleteItemFromObjectCaseSensitive(rec, "last_login_at");
+    cJSON_AddStringToObject(rec, "last_login_from", mask);
+    cJSON_AddNumberToObject(rec, "last_login_at", (double)time(NULL));
+    commit(st, rec);
+}
+
 const char *accounts_email(account_store_t *st, const char *name) {
     cJSON *v = cJSON_GetObjectItemCaseSensitive(find(st, name), "email");
     return cJSON_IsString(v) ? v->valuestring : NULL;
