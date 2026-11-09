@@ -90,6 +90,10 @@ int accounts_drop(account_store_t *st, const char *name);
 const char *accounts_last_login(account_store_t *st, const char *name, long *at);
 void accounts_set_last_login(account_store_t *st, const char *name, const char *mask);
 
+/* Channels joined at every login (NickServ SET AJOIN): comma-separated, NULL = none. set_ajoin("" or NULL) clears it. */
+const char *accounts_ajoin(account_store_t *st, const char *name);
+void accounts_set_ajoin(account_store_t *st, const char *name, const char *list);
+
 /* Contact email. set_email stores it unverified; with a pending code (set_pending_email) it only becomes the email once
  * check_verify sees the matching, unexpired code. */
 const char *accounts_email(account_store_t *st, const char *name);

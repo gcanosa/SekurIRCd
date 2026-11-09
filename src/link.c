@@ -823,7 +823,7 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
         HASH_ITER(hh, srv->users, u, tmp) if (u->registered) send_svc_user(srv, lc, u, SVC_EV_USER);
         return 0;
     }
-    if (!strcmp(msg.command, "SVSLOGIN") || !strcmp(msg.command, "SVSNICK") || !strcmp(msg.command, "KILL") ||
+    if (!strcmp(msg.command, "SVSLOGIN") || !strcmp(msg.command, "SVSJOIN") || !strcmp(msg.command, "SVSNICK") || !strcmp(msg.command, "KILL") ||
         !strcmp(msg.command, "SVCSASL") || !strcmp(msg.command, "SVCREGRESULT")) {
         svc_command(srv, svc, &msg);
         return 0;

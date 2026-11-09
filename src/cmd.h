@@ -59,7 +59,7 @@ void broadcast_chghost(server_t *srv, client_t *cl, const char *old_prefix); /* 
 struct channel;
 int channel_flood_event(server_t *srv, struct channel *chan, char type);
 void server_chan_mode(server_t *srv, struct channel *chan, const char *modes, const char *arg);
-void svc_command(server_t *srv, client_t *svc, irc_message_t *msg); /* SVSLOGIN/SVSNICK/KILL/SVCSASL/SVCREGRESULT */
+void svc_command(server_t *srv, client_t *svc, irc_message_t *msg); /* SVSLOGIN/SVSJOIN/SVSNICK/KILL/SVCSASL/SVCREGRESULT */
 int client_cert_fingerprint(client_t *cl, char *out, size_t outsz);
 void cmd_accept(server_t *srv, client_t *cl, irc_message_t *msg);
 struct member;
@@ -129,6 +129,7 @@ void cmd_apply_channel_mode(server_t *srv, client_t *cl, channel_t *chan,
  * [channels] auto_join (same "bypass the usual join gate" role as
  * commands.force_join in the Python daemon). */
 void cmd_force_join(server_t *srv, client_t *cl, const char *chan_name);
+void cmd_svsjoin(server_t *srv, client_t *cl, const char *list); /* SVSJOIN: a login's AJOIN list, through the JOIN checks */
 
 /* User handlers (cmd_user.c) */
 void cmd_privmsg(server_t *srv, client_t *cl, irc_message_t *msg);

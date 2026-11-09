@@ -10,7 +10,7 @@
  *   NICK <nick> <user> <host> :<realname>   -- introduce a service pseudo-client (up to LINK_MAX_BOTS; a later line
  *                                              acts as the bot its ":nick!user@host" prefix names, else the first)
  *   SVCWATCH USERS                          -- subscribe to the user feed (link_svc_user)
- *   SVSLOGIN/SVSNICK/KILL/SVCSASL/SVCREGRESULT <id> ...  -- account services (cmd_reg.c's svc_command)
+ *   SVSLOGIN/SVSJOIN/SVSNICK/KILL/SVCSASL/SVCREGRESULT <id> ...  -- account services (cmd_reg.c's svc_command)
  *   PRIVMSG/NOTICE <target> :<text>         -- literal IRC lines, relayed verbatim
  *   PING / PONG                             -- keepalive
  * A pseudo-client (client_t with fd == -1) forwards client_send() over its link_conn's socket (see client.c).

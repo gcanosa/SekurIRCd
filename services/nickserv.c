@@ -9,7 +9,8 @@
  *   SVCNICK <uid> <newnick>    SVCQUIT <uid>    SVCACCOUNT <uid> <account|*>
  *   SVCSASL <cid> S <mech> <certfp|*> <ip>  |  SVCSASL <cid> C <data>  |  SVCSASL <cid> D A
  *   SVCREGISTER <cid> <ip> <account> <email|*> :<password>
- * What we send: SVSLOGIN <id> <account|*> [regts], SVSNICK <id> <nick>, KILL <id> :reason, SVCSASL <cid> C|D ...,
+ * What we send: SVSLOGIN <id> <account|*> [regts], SVSJOIN <id> <#chan,...> (SET AJOIN, after a login), SVSNICK <id> <nick>,
+ * KILL <id> :reason, SVCSASL <cid> C|D ...,
  * SVCREGRESULT <cid> SUCCESS|FAIL <code> <account> :text. <id> is a UID or a SASL client id (see link.h). */
 #include "svc.h"
 
@@ -215,6 +216,18 @@ static void wire(const char *cmd, const char **p, int n, const char *trailing) {
     char line[700];
     irc_build(line, sizeof line, NULL, 0, NULL, cmd, p, n, trailing);
     svc_queue_line(line);
+}
+
+/* SET AJOIN: the channels an account joins at every login -- one comma-separated list, so it fits one SVSJOIN line. */
+#define AJOIN_MAX 10
+#define AJOIN_LEN 200
+
+/* The account's AJOIN list to the hub, which joins `uid` through its normal JOIN checks (SVSJOIN, cmd_svsjoin). Sent from
+ * the SVCACCOUNT handler only: the hub echoes SVCACCOUNT for every login (IDENTIFY, REGISTER, SASL), so that is the one
+ * trigger -- sending it from login() as well would announce a refused channel twice. */
+static void ajoin_send(const char *uid, const char *account) {
+    const char *list = accounts_ajoin(&g_acc, account);
+    if (list && list[0]) wire("SVSJOIN", (const char *[]){uid, list}, 2, NULL);
 }
 
 /* Log `id` in as `account` (NULL = log out). The hub sets it on the user's own server, which announces it network-wide. */
@@ -660,7 +673,7 @@ int ns_event(irc_message_t *m) {
         if (u) {
             snprintf(u->account, sizeof u->account, "%s", strcmp(m->params[1], "*") ? m->params[1] : "");
             if (u->account[0] && strcasecmp(u->account, u->enforce_owner) == 0) u->enforce_at = 0;
-            if (u->account[0]) { cs_user_login(u->nick); sasl_seen_check(u); }
+            if (u->account[0]) { cs_user_login(u->nick); sasl_seen_check(u); ajoin_send(u->uid, u->account); }
         }
         return 1;
     }
@@ -805,6 +818,8 @@ static void cmd_info(nsuser_t *u, const char *a) {
     }
     int self = u->account[0] && strcasecmp(u->account, who) == 0;
     if (!self && !is_admin(u)) return; /* the owner (and services admins) also see the email and grouped nicks */
+    const char *ajoin = accounts_ajoin(&g_acc, who);
+    if (ajoin && ajoin[0]) sayf(u->nick, "Auto-join: %s", ajoin);
     const char *em = accounts_email(&g_acc, who);
     sayf(u->nick, "Email: %s%s", em ? em : "(none)", em ? (accounts_email_verified(&g_acc, who) ? " (verified)" : " (unverified)") : "");
     int gn = accounts_group_count(&g_acc, who);
@@ -878,9 +893,34 @@ static void cmd_admin(nsuser_t *u, const char *cmd, const char *a, const char *b
     log_info("nickserv", "%s", m);
 }
 
+/* SET AJOIN <#chan[,#chan...]> | OFF -- the channels this account joins at every login. Names are checked here; the hub
+ * still applies the usual JOIN checks (bans, +i, +k, +l, +R ...) when it joins them, so nothing is bypassed. */
+static void cmd_set_ajoin(nsuser_t *u, const char *list) {
+    if (strcasecmp(list, "OFF") == 0) {
+        accounts_set_ajoin(&g_acc, u->account, NULL);
+        say(u->nick, "Auto-join cleared");
+        log_info("nickserv", "%s cleared the AJOIN list of %s", u->nick, u->account);
+        return;
+    }
+    char buf[420], out[AJOIN_LEN] = "";
+    snprintf(buf, sizeof buf, "%s", list);
+    int n = 0;
+    char *save = NULL;
+    for (char *ch = strtok_r(buf, ",", &save); ch; ch = strtok_r(NULL, ",", &save)) {
+        if (!irc_valid_channel(ch, 50)) { sayf(u->nick, "Not a valid channel name: %s", ch); return; }
+        if (++n > AJOIN_MAX) { sayf(u->nick, "At most %d auto-join channels", AJOIN_MAX); return; }
+        if (strlen(out) + strlen(ch) + 2 > sizeof out) { say(u->nick, "That channel list is too long"); return; }
+        if (out[0]) strcat(out, ",");
+        strcat(out, ch);
+    }
+    accounts_set_ajoin(&g_acc, u->account, out);
+    sayf(u->nick, "Auto-join set to %s -- you will join these at every login", out);
+    log_info("nickserv", "%s set the AJOIN list of %s to %s", u->nick, u->account, out);
+}
+
 static void cmd_help(nsuser_t *u) {
     say(u->nick, "Commands: REGISTER <password> [email], IDENTIFY [account] <password>, LOGOUT, INFO [account], "
-                 "SET PASSWORD <old> <new>, SET EMAIL <address>, VERIFY <code>, GROUP, UNGROUP <nick>, GHOST <nick>, "
+                 "SET PASSWORD <old> <new>, SET EMAIL <address>, SET AJOIN <#chan,...>|OFF, VERIFY <code>, GROUP, UNGROUP <nick>, GHOST <nick>, "
                  "REGAIN <nick>, RESETPASS <account> [<code> <new password>], CERT ADD|DEL|INFO, DROP <password>");
     if (is_admin(u)) say(u->nick, "Admin commands: SUSPEND <account> [reason], UNSUSPEND <account>, FDROP <account>, SASET PASSWORD <account> <new>");
 }
@@ -957,6 +997,10 @@ int ns_privmsg(const char *target, const char *from_nick, const char *text) {
         if (!u->account[0]) say(u->nick, "You must IDENTIFY first");
         else if (!b) say(u->nick, "Syntax: SET EMAIL <address>");
         else begin_email(u->nick, u->account, b);
+    } else if (strcasecmp(cmd, "SET") == 0 && a && strcasecmp(a, "AJOIN") == 0) {
+        if (!u->account[0]) say(u->nick, "You must IDENTIFY first");
+        else if (!b) say(u->nick, "Syntax: SET AJOIN <#channel[,#channel...]> | SET AJOIN OFF");
+        else cmd_set_ajoin(u, b);
     } else if (strcasecmp(cmd, "VERIFY") == 0) {
         if (!u->account[0]) say(u->nick, "You must IDENTIFY first");
         else if (!a) say(u->nick, "Syntax: VERIFY <code>");

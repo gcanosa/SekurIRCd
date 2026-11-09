@@ -412,6 +412,19 @@ void accounts_set_last_login(account_store_t *st, const char *name, const char *
     commit(st, rec);
 }
 
+const char *accounts_ajoin(account_store_t *st, const char *name) {
+    cJSON *v = cJSON_GetObjectItemCaseSensitive(find(st, name), "ajoin");
+    return cJSON_IsString(v) ? v->valuestring : NULL;
+}
+
+void accounts_set_ajoin(account_store_t *st, const char *name, const char *list) {
+    cJSON *rec = find(st, name);
+    if (!rec) return;
+    cJSON_DeleteItemFromObjectCaseSensitive(rec, "ajoin");
+    if (list && list[0]) cJSON_AddStringToObject(rec, "ajoin", list);
+    commit(st, rec);
+}
+
 const char *accounts_email(account_store_t *st, const char *name) {
     cJSON *v = cJSON_GetObjectItemCaseSensitive(find(st, name), "email");
     return cJSON_IsString(v) ? v->valuestring : NULL;

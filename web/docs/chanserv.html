@@ -75,7 +75,7 @@ password_hash = "scrypt$16384$8$1$&lt;salt-hex&gt;$&lt;digest-hex&gt;"   # from 
 <pre>/msg NickServ REGISTER &lt;password&gt; [email]       # the account is named after your nick
 /msg NickServ IDENTIFY [account] &lt;password&gt;     # or log in with SASL while connecting
 /msg NickServ GHOST &lt;nick&gt;  |  REGAIN &lt;nick&gt;   # free your nick, on any server
-/msg NickServ SET PASSWORD &lt;old&gt; &lt;new&gt;  |  SET EMAIL &lt;address&gt;  |  VERIFY &lt;code&gt;
+/msg NickServ SET PASSWORD &lt;old&gt; &lt;new&gt;  |  SET EMAIL &lt;address&gt;  |  SET AJOIN &lt;#chan,...&gt;|OFF  |  VERIFY &lt;code&gt;
 /msg NickServ RESETPASS &lt;account&gt;               # mails a code to the verified address
 /msg NickServ GROUP  |  UNGROUP &lt;nick&gt;  |  CERT ADD|DEL|INFO  |  INFO [account]  |  DROP &lt;password&gt;</pre>
 

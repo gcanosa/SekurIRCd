@@ -293,6 +293,21 @@ static void do_join_one(server_t *srv, client_t *cl, const char *chan_name, cons
     if (!is_new && !(cl->umodes & UMODE_O)) channel_flood_event(srv, chan, 'j');
 }
 
+/* SVSJOIN from services (the account's NickServ SET AJOIN list, comma-separated): each channel goes through the normal
+ * JOIN checks (+b +i +k +l +R +z ...), so a refusal is announced like a typed JOIN -- but a channel they are already in
+ * is skipped quietly, since a login can repeat the list. */
+void cmd_svsjoin(server_t *srv, client_t *cl, const char *list) {
+    char buf[512];
+    snprintf(buf, sizeof buf, "%s", list);
+    char *save = NULL;
+    for (char *name = strtok_r(buf, ",", &save); name; name = strtok_r(NULL, ",", &save)) {
+        if (!irc_valid_channel(name, 50)) continue;
+        channel_t *chan = server_find_channel(srv, name);
+        if (chan && channel_find_member(chan, cl)) continue;
+        do_join_one(srv, cl, name, NULL);
+    }
+}
+
 void cmd_join(server_t *srv, client_t *cl, irc_message_t *msg) {
     if (strcmp(msg->params[0], "0") == 0) { /* RFC 2812: JOIN 0 leaves every channel */
         char names[MAX_CHANNELS_PER_CLIENT][CHAN_NAMELEN];

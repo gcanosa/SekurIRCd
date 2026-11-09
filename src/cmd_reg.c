@@ -729,7 +729,7 @@ static client_t *svc_target(server_t *srv, const char *id, char *route, size_t r
     return c;
 }
 
-/* A line from services (its own link, or relayed by netsync): SVSLOGIN, SVSNICK, KILL, SVCSASL, SVCREGRESULT. Every one
+/* A line from services (its own link, or relayed by netsync): SVSLOGIN, SVSJOIN, SVSNICK, KILL, SVCSASL, SVCREGRESULT. Every one
  * names its target first; one that isn't ours is passed on toward its server. `svc` is the bot it came from (NULL when
  * relayed -- the sending services' server already checked that). */
 void svc_command(server_t *srv, client_t *svc, irc_message_t *msg) {
@@ -751,6 +751,8 @@ void svc_command(server_t *srv, client_t *svc, irc_message_t *msg) {
         snprintf(cl->acct_created_for, sizeof cl->acct_created_for, "%s", msg->params[1]);
         server_login(srv, cl, msg->params[1]);
         log_info("sasl", "%s logged in as %s", cl->nick[0] ? cl->nick : cl->ip, msg->params[1]);
+    } else if (!strcmp(c, "SVSJOIN") && msg->nparams >= 2) {
+        if (cl->registered) cmd_svsjoin(srv, cl, msg->params[1]); /* not yet on the network: the SVCACCOUNT path retries */
     } else if (!strcmp(c, "SVSNICK") && msg->nparams >= 2) {
         if (cl->registered) force_nick_change(srv, cl, msg->params[1]);
     } else if (!strcmp(c, "KILL")) {
