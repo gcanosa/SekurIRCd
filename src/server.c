@@ -716,10 +716,10 @@ void server_send_isupport(server_t *srv, client_t *cl) {
     const char *tokens[] = {
         netbuf, "CHANTYPES=#", "CHANMODES=beI,k,lfjL,imnprstzCNPQSTVROMcDuGK", "PREFIX=(qaohv)~&@%+",
         nicklen, chanlen, topiclen, "CASEMAPPING=ascii", "MODES=6",
-        "STATUSMSG=~&@%+", "AWAYLEN=390", "KICKLEN=300",
+        "STATUSMSG=~&@%+", "AWAYLEN=399", "KICKLEN=300",
         "MAXLIST=b:100,e:100,I:100", "EXCEPTS=e", "INVEX=I", "MONITOR=100", "WATCH=128", "SILENCE=15",
         "EXTBAN=~,amnrzjtSf", "ELIST=MNU", "WHOX", "CHANLIMIT=#:200", "BOT=B", "CALLERID=g", "LINELEN=512",
-        "TARGMAX=PRIVMSG:4,NOTICE:4,KICK:1,JOIN:1,PART:1,WHOIS:1", srv->cfg.messages.history_size > 0 ? histtok : NULL, srv->cfg.messages.history_size > 0 ? "MSGREFTYPES=msgid,timestamp" : NULL,
+        "TARGMAX=PRIVMSG:4,NOTICE:4,KICK:1,JOIN:,PART:,WHOIS:", /* JOIN/PART/WHOIS: blank = no limit, they take lists */ srv->cfg.messages.history_size > 0 ? histtok : NULL, srv->cfg.messages.history_size > 0 ? "MSGREFTYPES=msgid,timestamp" : NULL,
         srv->cfg.messages.utf8_only ? "UTF8ONLY" : NULL, srv->cfg.server.icon[0] ? icontok : NULL, srv->cfg.messages.client_tag_deny[0] ? denytok : NULL,
     };
     int total = 0;

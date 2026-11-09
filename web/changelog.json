@@ -3,6 +3,7 @@
     "tag": "Unreleased",
     "date": "",
     "changes": [
+      "ISUPPORT now tells the truth about three limits: TARGMAX lists JOIN, PART and WHOIS with no limit (they take comma lists, as before), AWAYLEN=399 matches what is stored, and KICK reasons are cut to KICKLEN=300 bytes (on a character boundary) before they are sent to the channel",
       "NickServ: after IDENTIFY or a SASL login it now tells you where and when the account last logged in (\"Last login from: ~user@host on Nov 06 02:17:10 2026 +0000.\"), so a login you did not make stands out. INFO shows it too, to the account owner and services admins. The first login after upgrading only records it",
       "tools/backup-config.sh --restore [ARCHIVE|DIR] restores a config backup: it lists the backups to pick from, shows which files are new or changed, backs up the current files first, then runs confcheck (and the daemons' --check) on the result and rolls back if it fails. Archives with paths outside config/ and services/ are refused",
       "confcheck --fix --write now also fixes the file permissions it warns about (chmod 600 on config files, backups and the TLS key, go-w on config directories), for files you own; ones needing sudo or a chown are still left to you. --fix alone previews them",

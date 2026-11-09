@@ -17,6 +17,7 @@
 #include <time.h>
 
 #define MAX_CHANNELS_PER_CLIENT 200
+#define KICK_MAX_REASON 300 /* advertised as KICKLEN=300 in server.c */
 
 #define invite_key_of(c) client_invite_key(c)
 
@@ -851,7 +852,17 @@ void cmd_knock(server_t *srv, client_t *cl, irc_message_t *msg) {
 void cmd_kick(server_t *srv, client_t *cl, irc_message_t *msg) {
     const char *chan_name = msg->params[0];
     const char *target_nick = msg->params[1];
-    const char *reason = msg->nparams > 2 ? msg->params[msg->nparams - 1] : cl->nick;
+    /* cut to KICKLEN bytes, backing off to a character boundary */
+    char reason_buf[KICK_MAX_REASON + 1];
+    const char *raw = msg->nparams > 2 ? msg->params[msg->nparams - 1] : cl->nick;
+    size_t rl = strlen(raw);
+    if (rl > KICK_MAX_REASON) {
+        rl = KICK_MAX_REASON;
+        while (rl > 0 && ((unsigned char)raw[rl] & 0xC0) == 0x80) rl--;
+    }
+    memcpy(reason_buf, raw, rl);
+    reason_buf[rl] = '\0';
+    const char *reason = reason_buf;
 
     channel_t *chan = server_find_channel(srv, chan_name);
     if (!chan) { err_no_such_channel(cl, chan_name); return; }
