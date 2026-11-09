@@ -5,6 +5,8 @@
 (function () {
   var root = document.getElementById("sekurchat");
   if (!root) return;
+  var CHEV_L = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg>';
+  var CHEV_R = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18l6-6-6-6"/></svg>';
   root.innerHTML = // static markup only; nothing from the network or the user goes through innerHTML
     '<form id="connect" class="chat-form">' +
     '<p>Join the <strong>SekurNet</strong> IRC network from your browser. Pick a nickname and one or more channels.</p>' +
@@ -23,7 +25,10 @@
     '<p class="hint">Separate channels with spaces or commas. Prefer a desktop client? Connect to <code>irc.sekurnet.org</code> port 6697 (TLS) or 6667 (plain).</p>' +
     '</form>' +
     '<section id="chat" class="chat" hidden>' +
-    '<div class="chat-bar"><div id="tabs" class="chat-tabs" role="tablist"></div>' +
+    '<div class="chat-bar">' +
+    '<button id="tabs-left" class="tabnav" type="button" aria-label="Scroll tabs left" title="Scroll tabs left" hidden>' + CHEV_L + '</button>' +
+    '<div id="tabs" class="chat-tabs" role="tablist"></div>' +
+    '<button id="tabs-right" class="tabnav" type="button" aria-label="Scroll tabs right" title="Scroll tabs right" hidden>' + CHEV_R + '</button>' +
     '<button id="list-btn" class="tool" type="button" aria-label="Browse channels" title="Browse channels">' +
     '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
     '<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg></button>' +
@@ -63,6 +68,23 @@
   var form = $("connect"), app = $("chat"), nickIn = $("nick"), chanIn = $("chan"), err = $("conn-err");
   var acctIn = $("acct"), passIn = $("pass");
   var tabs = $("tabs"), log = $("log"), users = $("users"), topic = $("topic"), input = $("input"), typingEl = $("typing");
+  // mouse wheel over the tab strip scrolls it sideways (plain wheels only move vertically otherwise); shift+wheel and trackpad swipes already work
+  tabs.addEventListener("wheel", function (e) {
+    if (e.shiftKey || Math.abs(e.deltaY) <= Math.abs(e.deltaX) || tabs.scrollWidth <= tabs.clientWidth) return;
+    tabs.scrollLeft += e.deltaY; e.preventDefault();
+  }, { passive: false });
+  // arrows at the strip's edges appear only when the tabs overflow; they step the strip and dim at the ends
+  var tabsL = $("tabs-left"), tabsR = $("tabs-right");
+  function tabNav() {
+    var over = tabs.scrollWidth > tabs.clientWidth + 1;
+    tabsL.hidden = tabsR.hidden = !over;
+    tabsL.disabled = tabs.scrollLeft <= 0;
+    tabsR.disabled = tabs.scrollLeft + tabs.clientWidth >= tabs.scrollWidth - 1;
+  }
+  tabsL.onclick = function () { tabs.scrollBy({ left: -160, behavior: "smooth" }); };
+  tabsR.onclick = function () { tabs.scrollBy({ left: 160, behavior: "smooth" }); };
+  tabs.addEventListener("scroll", tabNav);
+  addEventListener("resize", tabNav);
 
   // Highest prefix first (the server's PREFIX=(qaohv)~&@%+); "" is a regular user.
   var GROUPS = [{ prefix: "~", name: "Owners", cls: "owner" }, { prefix: "&", name: "Admins", cls: "admin" }, { prefix: "@", name: "Operators", cls: "op" },
@@ -396,6 +418,7 @@
       }
       tabs.appendChild(a);
     });
+    tabNav();
   }
   function closeBuf(name) {
     if (isChan(name)) return send("PART " + name); // the PART echo closes the tab

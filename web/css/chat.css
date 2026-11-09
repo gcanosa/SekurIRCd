@@ -91,7 +91,8 @@
 .chat { display: flex; flex-direction: column; border: 1px solid var(--c-border); border-radius: 6px; background: var(--c-panel); overflow: hidden; height: 70vh; height: 70dvh; min-height: 320px; }
 .chat[hidden], .chat-form[hidden], .chat-users[hidden] { display: none; }
 .chat-bar { display: flex; border-bottom: 1px solid var(--c-border); background: var(--c-panel2); }
-.chat-tabs { display: flex; gap: 2px; overflow-x: auto; flex: 1; scrollbar-width: none; }
+.chat-tabs { display: flex; gap: 2px; overflow-x: auto; flex: 1; min-width: 0; scrollbar-width: none; }
+.chat-tabs::-webkit-scrollbar { display: none; }
 .chat-bar button { background: none; border: 0; color: var(--c-muted); font: inherit; padding: 8px 12px; cursor: pointer; white-space: nowrap; }
 .chat-tabs button[aria-current] { color: var(--c-ink); box-shadow: inset 0 -2px var(--c-acc); }
 .chat-tabs button.unread { color: var(--link); }
@@ -136,3 +137,6 @@
   #users > div { padding: 6px 0; }
   .chat-send .btn { padding: 8px 12px; }
 }
+.chat-bar .tabnav { display: flex; align-items: center; padding: 0 6px; border-right: 1px solid var(--c-border); }
+.chat-bar .tabnav:disabled { opacity: .3; cursor: default; }
+.chat-bar .tabnav[hidden] { display: none; }
