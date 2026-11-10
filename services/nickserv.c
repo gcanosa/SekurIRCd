@@ -228,8 +228,8 @@ static void wire(const char *cmd, const char **p, int n, const char *trailing) {
 #define AJOIN_LEN 200
 
 /* The account's AJOIN list to the hub, which joins `uid` through its normal JOIN checks (SVSJOIN, cmd_svsjoin). Sent from
- * the SVCACCOUNT handler only: the hub echoes SVCACCOUNT for every login (IDENTIFY, REGISTER, SASL), so that is the one
- * trigger -- sending it from login() as well would announce a refused channel twice. */
+ * SVCACCOUNT (IDENTIFY, REGISTER, SASL re-auth), and from SVCUSER for a SASL login made before registration -- the hub
+ * sends no SVCACCOUNT for those. Never from login() too, or a refused channel is announced twice. */
 static void ajoin_send(const char *uid, const char *account) {
     const char *list = accounts_ajoin(&g_acc, account);
     if (list && list[0]) wire("SVSJOIN", (const char *[]){uid, list}, 2, NULL);
@@ -273,16 +273,18 @@ static void sasl_seen_add(const char *account, const char *ip) {
     g_sasl_seen[i].at = time(NULL);
 }
 
-static void sasl_seen_check(nsuser_t *u) {
-    if (!u->account[0]) return;
+/* 1 if `u` matches a SASL login from the last minute (consumed): a real login, not a services-restart resend. */
+static int sasl_seen_check(nsuser_t *u) {
+    if (!u->account[0]) return 0;
     time_t now = time(NULL);
     for (int i = 0; i < SASL_SEEN; i++)
         if (g_sasl_seen[i].at && now - g_sasl_seen[i].at <= 60 && strcmp(g_sasl_seen[i].ip, u->ip) == 0 &&
             strcasecmp(g_sasl_seen[i].account, u->account) == 0) {
             g_sasl_seen[i].at = 0;
             last_login_note(u);
-            return;
+            return 1;
         }
+    return 0;
 }
 
 static void logout_all(const char *account) {
@@ -657,7 +659,7 @@ static void ev_user(irc_message_t *m) {
     snprintf(u->certfp, sizeof u->certfp, "%s", strcmp(m->params[6], "*") ? m->params[6] : "");
     snprintf(u->server, sizeof u->server, "%s", m->params[7]);
     if (renamed) enforce_check(u);
-    if (fresh) sasl_seen_check(u);
+    if (fresh && sasl_seen_check(u)) ajoin_send(u->uid, u->account); /* SASL: no SVCACCOUNT follows */
 }
 
 int ns_event(irc_message_t *m) {

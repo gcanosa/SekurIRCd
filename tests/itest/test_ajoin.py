@@ -61,3 +61,18 @@ def test_ajoin_applies_to_a_user_on_another_server():
         assert "ajnetfar" in names, "the join reached the rest of the network: %r" % names
     finally:
         n.stop()
+
+
+def test_ajoin_after_sasl_login():
+    """SASL logs in before registration, so no SVCACCOUNT follows -- the SVCUSER path has to send the AJOIN."""
+    import base64
+    with Server(cfg=ACC) as s:
+        c = register(s, "ajsasl", "ajsaslacct", "password1")
+        assert any("Auto-join set to #ajsasl" in l for l in ns(c, "SET AJOIN #ajsasl")), "set"
+        p = s.client("ajsaslnew", register=False, extra=["CAP REQ :sasl", "NICK ajsaslnew", "USER u 0 * :u"])
+        p.send("AUTHENTICATE PLAIN")
+        p.expect(r"AUTHENTICATE \+")
+        p.send("AUTHENTICATE " + base64.b64encode(b"\0ajsaslacct\0password1").decode())
+        assert p.saw(r" 903 ", 3)
+        got = raw_after(p, "CAP END", 3.0)
+        assert any(" JOIN #ajsasl" in l for l in got), "SASL login joined the AJOIN channel: %r" % got
