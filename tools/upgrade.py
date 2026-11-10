@@ -198,9 +198,24 @@ def build_state(cur):
         started = run(["env", "LC_ALL=C", "ps", "-o", "lstart=", "-p", m[1]], check=False).stdout.strip()
         try: restart = time.mktime(time.strptime(started, "%a %b %d %H:%M:%S %Y")) < os.path.getmtime("bin/sekurircd") - 1
         except ValueError: pass
+        if restart and services_only_upgrade(cur["sha"]): restart = False  # same ircd code, only services were restarted
     why = (f"bin/sekurircd is {binv or 'missing'}, this source builds {cur['full']}" if rebuild else
            "the running ircd was started before bin/sekurircd was rebuilt" if restart else "")
     return binv, rebuild, restart, why
+
+
+def services_only_upgrade(sha):
+    """True if the last upgrade, to `sha`, left the ircd source unchanged and restarted only services."""
+    try:
+        s = json.load(open(STATE_FILE))
+        return bool(s.get("services_only")) and s["to"]["sha"] == sha
+    except (OSError, ValueError, KeyError):
+        return False
+
+
+def ircd_unchanged(base, sha):
+    """No ircd source change between `base` and `sha` (src/ and the Makefile): the running ircd already is that code."""
+    return run(["git", "diff", "--quiet", base, sha, "--", "src", "Makefile"], check=False).returncode == 0
 
 
 def latest_release() -> Any:
@@ -320,16 +335,23 @@ def daemon_status():
             if (m := re.match(r"(sekurircd|services|chanserv):\s+(\w+)", ln))}
 
 
-def restart_daemons():
-    out(); warn(bold("Restarting disconnects every connected user"))
-    info("Users are dropped and must reconnect; services (NickServ + ChanServ) re-link after the ircd is back.")
-    info("Usually a few seconds -- pick a quiet moment.")
+def restart_daemons(services_only=False):
+    """services_only: the ircd code didn't change, so only bin/services restarts and nobody is disconnected."""
+    out()
+    if services_only:
+        ok(bold("The ircd is unchanged: only services (NickServ + ChanServ) restart -- nobody is disconnected"))
+        info("NickServ/ChanServ leave and re-link within seconds; SASL/IDENTIFY wait for them meanwhile.")
+    else:
+        warn(bold("Restarting disconnects every connected user"))
+        info("Users are dropped and must reconnect; services (NickServ + ChanServ) re-link after the ircd is back.")
+        info("Usually a few seconds -- pick a quiet moment.")
     if ARGS.restart: go = True
     elif ARGS.no_restart: go = False
-    else: go = ask("Stop the running services and start the new version now?", False)
+    else: go = ask("Restart services with the new version now?" if services_only else
+                   "Stop the running services and start the new version now?", services_only)
     if not go:
         warn("Not restarting. The daemons keep running the " + bold("OLD") + " version until you do:")
-        info(bold("./sekurircd stop && ./sekurircd start"))
+        info(bold("./sekurircd restart-services" if services_only else "./sekurircd stop && ./sekurircd start"))
         return False
     if shutil.which("systemctl") and run(["systemctl", "--user", "is-active", "--quiet", "sekurircd"], check=False).returncode == 0:
         # systemd owns the daemons: a wrapper stop would just get them respawned (Restart=on-failure)
@@ -339,12 +361,24 @@ def restart_daemons():
             os.remove(f"{ud}/chanserv.service")
             run(["systemctl", "--user", "daemon-reload"], check=False)
             ok("stopped and removed the old chanserv.service")
-        units = [u for u in ("sekurircd", "services", "chanserv") if os.path.exists(f"{ud}/{u}.service")]
+        units = [u for u in (("services",) if services_only else ("sekurircd", "services", "chanserv"))
+                 if os.path.exists(f"{ud}/{u}.service")]
         run(["systemctl", "--user", "restart", *units], check=False)
         time.sleep(2)
         st = daemon_status()
         for name, up in st.items(): (ok if up else fail)(f"{name}: {'running' if up else 'NOT running'} (systemd)")
-        return True if st.get("sekurircd") else None
+        return True if st.get("services" if services_only else "sekurircd") else None
+    if services_only:
+        r = run(["./sekurircd", "restart-services"], check=False)
+        time.sleep(2)
+        st = daemon_status()
+        for name, up in st.items(): (ok if up else fail)(f"{name}: {'running' if up else 'NOT running'}")
+        if st.get("services"): return True
+        for l in (r.stdout + r.stderr).strip().splitlines(): info(dim("  " + l))
+        if os.path.exists("services/services.log"):
+            info(dim("tail of services/services.log:"))
+            for l in open("services/services.log", errors="replace").read().splitlines()[-8:]: info(dim("  " + l))
+        return None
     print(dim("  --- ./sekurircd stop")); run(["./sekurircd", "stop"], check=False)
     for _ in range(20):
         if not any(daemon_status().values()): break
@@ -765,8 +799,12 @@ def upgrade(cur, st, tgt):
 
     step("Installing")
     had_prev = install_binaries()
+    # nothing in the ircd's source changed and the running ircd is current: restart services alone, keep everyone connected
+    svc_only = (bool(st.get("sekurircd")) and tgt["sha"] != cur["sha"] and not cur.get("rebuild") and not cur.get("restart")
+                and ircd_unchanged(tgt.get("rewritten_base") or cur["sha"], tgt["sha"]))
     state = {"time": time.strftime("%Y-%m-%d %H:%M:%S"), "from": {k: cur[k] for k in ("sha", "version", "full", "branch")},
-             "to": {k: tgt[k] for k in ("sha", "version", "full")}, "prev_binaries": had_prev, "parked": [f"{f}.upstream-{tgt['version']}" for f in kept], "backups": backups, "log": LOG.path}
+             "to": {k: tgt[k] for k in ("sha", "version", "full")}, "prev_binaries": had_prev, "parked": [f"{f}.upstream-{tgt['version']}" for f in kept], "backups": backups, "log": LOG.path,
+             "services_only": svc_only}
     json.dump(state, open(STATE_FILE, "w"), indent=2)
 
     systemd_step()
@@ -781,9 +819,10 @@ def upgrade(cur, st, tgt):
         info(f"Fix it (see {bold('tools/confcheck.py')}), then ./sekurircd restart -- or {bold('tools/upgrade.py --rollback')}")
         LOG.w("RESULT: INSTALLED, config check failed, not restarted"); print(dim(f"  Log: {LOG.path}")); sys.exit(1)
     fix_config()
-    result = restart_daemons() if any(st.values()) else None
+    result = restart_daemons(svc_only) if any(st.values()) else None
     if not any(st.values()): info("No daemons were running -- start them with ./sekurircd start")
-    if result is None and any(st.values()) and not ARGS.no_restart and ask("The new ircd did not come up. Roll back now?", True):
+    what = "services" if svc_only else "ircd"
+    if result is None and any(st.values()) and not ARGS.no_restart and ask(f"The new {what} did not come up. Roll back now?", True):
         rollback(); return
 
     out(); out(bold(green("━━ Upgrade complete")))
@@ -857,7 +896,7 @@ def rollback():
         else:
             run(["systemctl", "--user", "daemon-reload"], check=False)
     st = daemon_status()
-    if any(st.values()): restart_daemons()
+    if any(st.values()): restart_daemons(bool(s.get("services_only")) and bool(st.get("sekurircd")))
     for f in s.get("parked", []):
         if os.path.exists(f): os.remove(f)
     os.remove(STATE_FILE)
@@ -947,7 +986,7 @@ def main():
     ap.add_argument("-y", "--yes", action="store_true", help="accept defaults (restart stays off unless --restart)")
     ap.add_argument("--dry-run", action="store_true", help="show everything, change nothing")
     ap.add_argument("--backup-dir", help="where backups go (default: ask, ~/sekurircd-backups)")
-    ap.add_argument("--restart", action="store_true", help="restart services without asking")
+    ap.add_argument("--restart", action="store_true", help="restart without asking (only services when the ircd code is unchanged)")
     ap.add_argument("--no-restart", action="store_true", help="never restart")
     ap.add_argument("--systemd", choices=("skip", "update", "enable"), help="systemd user units: skip, rewrite them, or rewrite + enable (default: ask; --yes = skip)")
     ap.add_argument("--rollback", action="store_true", help="undo the last upgrade")

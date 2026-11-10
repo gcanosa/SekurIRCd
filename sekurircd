@@ -101,6 +101,21 @@ cmd_restart() {
     cmd_start
 }
 
+# Services only: users stay connected; NickServ/ChanServ leave and re-link (a few seconds without SASL/IDENTIFY).
+cmd_restart_services() {
+    services_configured || { echo "services:  not configured ($SERVICES_CONFIG missing)" >&2; return 1; }
+    pid_running "$IRCD_PIDFILE" || { echo "sekurircd is not running -- use '$0 start'" >&2; return 1; }
+    require_bin "$SERVICES_BIN"
+    pid_running "$SERVICES_PIDFILE" && "$SERVICES_BIN" --stop --pidfile "$SERVICES_PIDFILE"
+    stop_old_chanserv || return 1
+    for _ in $(seq 1 20); do pid_running "$SERVICES_PIDFILE" || break; sleep 0.5; done
+    pid_running "$SERVICES_PIDFILE" && { echo "services:  still running after 10s -- not starting a second copy" >&2; return 1; }
+    "$SERVICES_BIN" --config "$SERVICES_CONFIG" --daemon --pidfile "$SERVICES_PIDFILE" || {
+        echo "services:  failed to start (exit $?) -- see services/services.log" >&2
+        return 1
+    }
+}
+
 cmd_status() {
     if pid_running "$IRCD_PIDFILE"; then
         echo "sekurircd: running (pid $(cat "$IRCD_PIDFILE"))"
@@ -129,6 +144,7 @@ case "${1:-}" in
     start)   cmd_start ;;
     stop)    cmd_stop ;;
     restart) cmd_restart ;;
+    restart-services) cmd_restart_services ;;
     status)  cmd_status ;;
-    *) echo "usage: $0 {start|stop|restart|status}" >&2; exit 1 ;;
+    *) echo "usage: $0 {start|stop|restart|restart-services|status}" >&2; exit 1 ;;
 esac
