@@ -77,27 +77,48 @@ password_hash = "scrypt$16384$8$1$&lt;salt-hex&gt;$&lt;digest-hex&gt;"   # from 
 /msg NickServ GHOST &lt;nick&gt;  |  REGAIN &lt;nick&gt;   # free your nick, on any server
 /msg NickServ SET PASSWORD &lt;old&gt; &lt;new&gt;  |  SET EMAIL &lt;address&gt;  |  SET AJOIN &lt;#chan,...&gt;|OFF  |  VERIFY &lt;code&gt;
 /msg NickServ RESETPASS &lt;account&gt;               # mails a code to the verified address
-/msg NickServ GROUP  |  UNGROUP &lt;nick&gt;  |  CERT ADD|DEL|INFO  |  INFO [account]  |  DROP &lt;password&gt;</pre>
+/msg NickServ GROUP  |  UNGROUP &lt;nick&gt;  |  CERT ADD|DEL|INFO  |  INFO [account]  |  DROP &lt;password&gt;
+/msg NickServ LISTLOGINS  |  LISTCHANS          # your logged-in connections; channels you found or have =account access in
+/msg NickServ STATUS|ACC [nick]                 # 3 = logged in to the nick's account, 1 = not, 0 = offline/unregistered (for bots)</pre>
 
 <h2 id="chanserv">ChanServ</h2>
 
 <h2>commands</h2>
-<pre>/msg ChanServ REGISTER #chan &lt;password&gt;            # you must be opped on #chan
-/msg ChanServ IDENTIFY #chan &lt;password&gt;            # every new connection, to reclaim founder status
-/msg ChanServ DROP #chan &lt;password&gt;
-/msg ChanServ SETPASS #chan &lt;old&gt; &lt;new&gt;
-/msg ChanServ JOIN #chan &lt;password&gt;                # GUARD: ChanServ stays in the channel
-/msg ChanServ PART #chan &lt;password&gt;
-/msg ChanServ TOPICLOCK #chan ON|OFF &lt;password&gt;
+<pre>/msg ChanServ REGISTER #chan [password]            # you must be opped on #chan
+/msg ChanServ IDENTIFY #chan [password]            # every new connection, to reclaim founder status
+/msg ChanServ DROP #chan [password]
+/msg ChanServ SETPASS #chan [old] &lt;new&gt;
+/msg ChanServ JOIN #chan [password]                # GUARD: ChanServ stays in the channel
+/msg ChanServ PART #chan [password]
+/msg ChanServ TOPICLOCK #chan ON|OFF [password]
+/msg ChanServ TOPIC #chan &lt;text&gt; [password]
+/msg ChanServ TOPICAPPEND|TOPICPREPEND #chan &lt;text&gt; [password]   # joined to the topic with " | "
+/msg ChanServ TOPICSWAP #chan &lt;search&gt;:&lt;replace&gt; [password]     # first match only
 /msg ChanServ INFO #chan
-/msg ChanServ ACCESS #chan ADD|DEL|LIST [&lt;mask&gt; &lt;v|h|o&gt;] &lt;password&gt;
-/msg ChanServ AKICK #chan ADD|DEL|LIST [&lt;mask&gt;] &lt;password&gt;
-/msg ChanServ SUCCESSOR #chan SET &lt;mask&gt; &lt;password&gt;
+/msg ChanServ ACCESS #chan ADD|DEL|LIST [&lt;mask&gt; &lt;v|h|o&gt;] [password]
+/msg ChanServ AKICK #chan ADD|DEL|LIST [&lt;mask&gt;] [password]
+/msg ChanServ SUCCESSOR #chan SET &lt;mask&gt; [password]
 /msg ChanServ SUCCESSOR #chan CLAIM &lt;new-password&gt;
 /msg ChanServ SET #chan MLOCK|DESC|URL|ENTRYMSG ...
-/msg ChanServ SET #chan FOUNDER &lt;account|-&gt; &lt;password&gt;
-/msg ChanServ SET #chan PRIVATE|RESTRICTED|SECUREOPS ON|OFF &lt;password&gt;
+/msg ChanServ SET #chan FOUNDER &lt;account|-&gt; [password]
+/msg ChanServ SET #chan PRIVATE|RESTRICTED|SECUREOPS ON|OFF [password]
 /msg ChanServ HELP</pre>
+<p><b>No password while logged in.</b> If you are logged in to NickServ (IDENTIFY or SASL), ChanServ uses your account:
+  the founder account can do everything, and an <code>=account</code> ACCESS entry can do what its level allows. Each level adds to the one before.</p>
+<table>
+<tr><th>level</th><th>commands</th></tr>
+<tr><td><code>v</code></td><td>VOICE/DEVOICE, INVITE and UNBAN on yourself</td></tr>
+<tr><td><code>h</code></td><td>KICK, TOPIC, TOPICAPPEND/TOPICPREPEND/TOPICSWAP, HALFOP yourself; VOICE, INVITE, UNBAN others</td></tr>
+<tr><td><code>o</code></td><td>OP/DEOP, HALFOP others, AKICK ADD/DEL</td></tr>
+<tr><td><code>a</code></td><td>TOPICLOCK, ACCESS ADD/DEL for levels below <code>a</code>, ADMIN yourself</td></tr>
+<tr><td><code>q</code></td><td>SET (except FOUNDER), JOIN/PART, OWNER yourself, ADMIN others, ACCESS up to <code>a</code></td></tr>
+<tr><td>founder</td><td>DROP, SETPASS, SET FOUNDER, SUCCESSOR, OWNER others, ACCESS up to <code>q</code></td></tr>
+</table>
+<p>Protection: KICK and the DE* commands never work on someone whose access is at or above yours, so an <code>o</code> can't deop or kick
+  the founder or an admin. The founder can act on anyone.</p>
+<p>Hostmask ACCESS entries still give modes on join, but never command access: only an account does. If you type the channel password
+  anyway, ChanServ removes it before using the rest, so it never ends up in a topic or kick reason. A channel registered without an account has no founder
+  account until you run <code>SET #chan FOUNDER &lt;account&gt; &lt;password&gt;</code> once.</p>
 <p>The password belongs to the channel record; anyone who knows it can IDENTIFY as founder. <code>IDENTIFY</code> lasts for the connection
   only and must be repeated after reconnecting. <code>/HELP</code> in ChanServ prints exact syntax for each command.</p>
 <p><code>FOUNDER</code> ties the channel to an account, recognised on join, which may use <code>*</code> as the password. <code>PRIVATE</code> hides the

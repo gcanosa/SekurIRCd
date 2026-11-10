@@ -172,6 +172,11 @@ static nsuser_t *user_by_nick(const char *nick) {
     return u;
 }
 
+const char *ns_account_of(const char *nick) {
+    nsuser_t *u = user_by_nick(nick);
+    return u && u->account[0] ? u->account : NULL;
+}
+
 static void user_set_nick(nsuser_t *u, const char *nick) {
     nsuser_t *f = NULL;
     if (u->cf[0]) { HASH_FIND(hn, g_by_nick, u->cf, strlen(u->cf), f); if (f == u) HASH_DELETE(hn, g_by_nick, u); }
@@ -918,10 +923,50 @@ static void cmd_set_ajoin(nsuser_t *u, const char *list) {
     log_info("nickserv", "%s set the AJOIN list of %s to %s", u->nick, u->account, out);
 }
 
+/* STATUS / ACC <nick>: is that nick logged in to the account that owns it? For bots. 0 = offline or not registered,
+ * 1 = online but not logged in to its owner, 3 = logged in to its owner (2, "recognised by ACCESS", is never given:
+ * there is no ACCESS list, CERT logs in outright). STATUS answers Anope's way, ACC Atheme's. */
+static void cmd_status(nsuser_t *u, const char *cmd, const char *nick) {
+    if (!nick) nick = u->nick;
+    nsuser_t *t = user_by_nick(nick);
+    const char *owner = accounts_owner_of_nick(&g_acc, nick);
+    int level = !t || !owner ? 0 : t->account[0] && strcasecmp(t->account, owner) == 0 ? 3 : 1;
+    if (strcasecmp(cmd, "ACC") == 0) sayf(u->nick, "%s ACC %d", t ? t->nick : nick, level);
+    else sayf(u->nick, "STATUS %s %d %s", t ? t->nick : nick, level, level == 3 ? owner : "*");
+}
+
+static void cmd_listlogins(nsuser_t *u) {
+    if (!u->account[0]) { say(u->nick, "You must IDENTIFY first"); return; }
+    int n = 0;
+    nsuser_t *x, *tmp;
+    HASH_ITER(hh, g_by_uid, x, tmp)
+        if (strcasecmp(x->account, u->account) == 0) {
+            n++;
+            sayf(u->nick, "  %s (%s@%s) on %s%s", x->nick, x->user, x->host, x->server, x == u ? " -- this connection" : "");
+        }
+    sayf(u->nick, "%d connection%s logged in as %s", n, n == 1 ? "" : "s", u->account);
+}
+
+struct listchans_ctx { const char *to; int n; };
+static void listchans_one(const char *chan, const char *level, void *ctx) {
+    struct listchans_ctx *c = ctx;
+    c->n++;
+    sayf(c->to, "  %-24s %s", chan, level);
+}
+
+static void cmd_listchans(nsuser_t *u) {
+    if (!u->account[0]) { say(u->nick, "You must IDENTIFY first"); return; }
+    struct listchans_ctx c = {u->nick, 0};
+    cs_account_chans(u->account, listchans_one, &c);
+    if (c.n) sayf(u->nick, "%d channel%s where %s is founder or on the access list (=%s)", c.n, c.n == 1 ? "" : "s", u->account, u->account);
+    else sayf(u->nick, "%s is not founder of, or on the access list (=%s) of, any registered channel", u->account, u->account);
+}
+
 static void cmd_help(nsuser_t *u) {
     say(u->nick, "Commands: REGISTER <password> [email], IDENTIFY [account] <password>, LOGOUT, INFO [account], "
                  "SET PASSWORD <old> <new>, SET EMAIL <address>, SET AJOIN <#chan,...>|OFF, VERIFY <code>, GROUP, UNGROUP <nick>, GHOST <nick>, "
-                 "REGAIN <nick>, RESETPASS <account> [<code> <new password>], CERT ADD|DEL|INFO, DROP <password>");
+                 "REGAIN <nick>, RESETPASS <account> [<code> <new password>], CERT ADD|DEL|INFO, DROP <password>, "
+                 "STATUS|ACC [nick], LISTLOGINS, LISTCHANS");
     if (is_admin(u)) say(u->nick, "Admin commands: SUSPEND <account> [reason], UNSUSPEND <account>, FDROP <account>, SASET PASSWORD <account> <new>");
 }
 
@@ -980,6 +1025,9 @@ int ns_privmsg(const char *target, const char *from_nick, const char *text) {
     else if (strcasecmp(cmd, "SUSPEND") == 0 || strcasecmp(cmd, "UNSUSPEND") == 0 || strcasecmp(cmd, "FDROP") == 0 ||
              strcasecmp(cmd, "SASET") == 0) cmd_admin(u, cmd, a, b, c3, text);
     else if (strcasecmp(cmd, "INFO") == 0) cmd_info(u, a);
+    else if (strcasecmp(cmd, "STATUS") == 0 || strcasecmp(cmd, "ACC") == 0) cmd_status(u, cmd, a);
+    else if (strcasecmp(cmd, "LISTLOGINS") == 0) cmd_listlogins(u);
+    else if (strcasecmp(cmd, "LISTCHANS") == 0) cmd_listchans(u);
     else if (strcasecmp(cmd, "CERT") == 0) cmd_cert(u, a);
     else if (strcasecmp(cmd, "SET") == 0 && a && strcasecmp(a, "PASSWORD") == 0) {
         if (!u->account[0]) say(u->nick, "You must IDENTIFY first");

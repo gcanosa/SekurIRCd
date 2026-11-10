@@ -925,7 +925,7 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
         channel_t *chan = server_find_channel(srv, msg.params[0]);
         if (!chan) return 0;
         const char *newtopic = msg.nparams > 1 ? msg.params[msg.nparams - 1] : "";
-        snprintf(chan->topic, sizeof chan->topic, "%s", newtopic);
+        snprintf(chan->topic, TOPIC_MAX_LEN + 1, "%s", newtopic); /* TOPICLEN, same cap as cmd_topic */
         client_prefix(svc, chan->topic_setter, sizeof chan->topic_setter);
         chan->topic_time = time(NULL);
         char prefix[320];
@@ -1040,6 +1040,17 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
         const char *rp[] = {msg.params[0], msg.params[1], rank, ts};
         irc_build(reply, sizeof reply, NULL, 0, NULL, "WHOISCHANREPLY", rp, 4, NULL);
         link_forward_line(lc, reply);
+        return 0;
+    }
+    if (strcasecmp(msg.command, "SVCTOPIC") == 0) {
+        /* SVCTOPIC <chan>: just the live topic, for ChanServ TOPICAPPEND/TOPICPREPEND/TOPICSWAP. No such channel:
+         * the reply has no topic parameter at all (an empty topic is still " :"). */
+        if (msg.nparams < 1) return 0;
+        channel_t *chan = server_find_channel(srv, msg.params[0]);
+        char tline[600];
+        irc_build(tline, sizeof tline, NULL, 0, NULL, "SVCTOPIC", (const char *[]){chan ? chan->name : msg.params[0]}, 1,
+                  chan ? chan->topic : NULL);
+        link_forward_line(lc, tline);
         return 0;
     }
     if (strcasecmp(msg.command, "SVCMEMBERS") == 0) {

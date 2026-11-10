@@ -12,7 +12,7 @@
  * internals), same design rule as the Python original.
  *
  * Command set: REGISTER, IDENTIFY, DROP, JOIN/PART (GUARD), SETPASS,
- * TOPICLOCK, INFO, ACCESS, SUCCESSOR, AKICK, SET (MLOCK/DESC/URL/ENTRYMSG),
+ * TOPIC, TOPICAPPEND/TOPICPREPEND/TOPICSWAP, TOPICLOCK, INFO, ACCESS, SUCCESSOR, AKICK, SET (MLOCK/DESC/URL/ENTRYMSG),
  * HELP. REGISTER's "must hold ops" check and IDENTIFY/ACCESS's op-grants
  * ride two small link-protocol extensions (WHOISCHAN query, trusted
  * JOIN/PART/MODE/KICK) -- see src/link.h and src/link.c's `lc->service`
@@ -27,6 +27,7 @@
 #include "../src/vendor/uthash.h"
 
 #include <ctype.h>
+#include <openssl/crypto.h>
 #include <errno.h>
 #include <limits.h>
 #include <fcntl.h>
@@ -642,7 +643,9 @@ static int fail_slot(const char *nick, int create) {
     return free_slot;
 }
 
-static cJSON *check_password(const char *from_nick, const char *chan, const char *password) {
+static void touch_last_used(cJSON *rec);
+/* `fail_msg`: the reply on a wrong password (NULL = "Password incorrect."). */
+static cJSON *check_password(const char *from_nick, const char *chan, const char *password, const char *fail_msg) {
     cJSON *rec = store_get(chan);
     if (!rec) { reply(from_nick, "That channel isn't registered."); return NULL; }
     if (fail_slot(from_nick, 0) >= 0) {
@@ -658,12 +661,17 @@ static cJSON *check_password(const char *from_nick, const char *chan, const char
     }
     if (!founder_ok && (!hash[0] || !crypto_verify_password(password, hash))) {
         g_fails[fail_slot(from_nick, 1)].until = time(NULL) + FAIL_COOLDOWN;
-        reply(from_nick, "Password incorrect.");
+        reply(from_nick, fail_msg ? fail_msg : "Password incorrect.");
         log_warn("chanserv", "failed password for %s from %s", chan, from_nick);
         return NULL;
     }
-    /* A successful password check is "the channel is still in use" for expiry
-     * purposes. Refreshed at most hourly so routine commands don't dirty the store. */
+    touch_last_used(rec);
+    return rec;
+}
+
+/* A successful password check (or account-authorized command) is "the channel is still in use" for expiry
+ * purposes. Refreshed at most hourly so routine commands don't dirty the store. */
+static void touch_last_used(cJSON *rec) {
     cJSON *lu = cJSON_GetObjectItemCaseSensitive(rec, "last_used");
     time_t now = time(NULL);
     if (!cJSON_IsNumber(lu) || now - (time_t)lu->valuedouble > 3600) {
@@ -671,7 +679,6 @@ static cJSON *check_password(const char *from_nick, const char *chan, const char
         cJSON_AddNumberToObject(rec, "last_used", (double)now);
         store_save();
     }
-    return rec;
 }
 
 /* MLOCK: (re)assert the locked flag modes on the ircd. */
@@ -893,6 +900,100 @@ static struct {
     time_t sent_at;
 } g_pending_claim;
 
+/* --- command access: services account or channel password ---
+ * Ranks v < h < o < a < q < F (founder). A sender logged in to the founder account, or IDENTIFYd to the channel this
+ * session, is F; one whose account has an =account ACCESS entry has that entry's level. Hostmask ACCESS entries give
+ * modes on join but never command access. The channel password still works for everything (it means F). */
+static int lvl_rank(char c) {
+    const char *r = "vhoaqF", *p = c ? strchr(r, c) : NULL;
+    return p ? (int)(p - r) + 1 : 0;
+}
+static const char *lvl_name(char c) {
+    switch (c) {
+    case 'v': return "voice (v)"; case 'h': return "halfop (h)"; case 'o': return "op (o)";
+    case 'a': return "admin (a)"; case 'q': return "owner (q)"; default: return "founder";
+    }
+}
+
+/* `nick`'s command level on `rec`, given the account it is logged in to (NULL/"" = none). */
+static char nick_level(cJSON *rec, const char *nick, const char *account) {
+    const char *fa = rec_str(rec, "founder");
+    if (account && account[0] && fa[0] && strcasecmp(fa, account) == 0) return 'F';
+    if (is_identified(rec_str(rec, "name"), nick)) return 'F';
+    if (!account || !account[0]) return 0;
+    cJSON *access = cJSON_GetObjectItemCaseSensitive(rec, "access"), *e;
+    cJSON_ArrayForEach(e, access)
+        if (cJSON_IsString(e) && e->string[0] == '=' && strcasecmp(e->string + 1, account) == 0) return e->valuestring[0];
+    return 0;
+}
+static char sender_level(cJSON *rec, const char *from_nick) { return nick_level(rec, from_nick, g_from_account); }
+
+/* Protection: KICK, and taking a rank away, can't hit someone whose access is at or above yours (the founder, at F,
+ * can act on anyone). 1 = refused (and told). */
+static int protected_target(const char *from_nick, cJSON *rec, char got, const char *target) {
+    if (got == 'F' || strcasecmp(target, from_nick) == 0) return 0;
+    char tl = nick_level(rec, target, ns_account_of(target));
+    if (!tl || lvl_rank(tl) < lvl_rank(got)) return 0;
+    char m[250];
+    snprintf(m, sizeof m, "%s has %s access on %s, at or above yours -- refused.", target, lvl_name(tl), rec_str(rec, "name"));
+    reply(from_nick, m);
+    return 1;
+}
+
+/* Authorize a command on `chan` that needs level `need`. `tail` is what follows the command's fixed arguments and may
+ * end in the channel password (it may be NULL). Enough account level: no password needed -- but a last word that IS
+ * the password (typed out of habit) is still cut off, so it never lands in a topic, kick reason or MODE. Otherwise the
+ * last word must be the password, as before. On success `tail` has the password removed and *got is the level the
+ * sender acts with. */
+static cJSON *authorize(const char *from_nick, const char *chan, char *tail, char need, char *got) {
+    cJSON *rec = store_get(chan);
+    if (!rec) { reply(from_nick, "That channel isn't registered."); return NULL; }
+    char empty[1] = "";
+    if (!tail) tail = empty;
+    while (*tail && tail[strlen(tail) - 1] == ' ') tail[strlen(tail) - 1] = '\0';
+    char *sp = strrchr(tail, ' '), *word = sp ? sp + 1 : tail;
+    char lvl = sender_level(rec, from_nick);
+    if (lvl_rank(lvl) >= lvl_rank(need)) {
+        const char *hash = rec_str(rec, "pw_hash");
+        /* ponytail: one scrypt check per command that has a last word, the same cost every command paid before */
+        if (*word && (strcmp(word, "*") == 0 || (hash[0] && crypto_verify_password(word, hash)))) {
+            if (strcmp(word, "*") != 0) lvl = 'F';
+            *word = '\0';
+            if (sp) *sp = '\0';
+        }
+        touch_last_used(rec);
+        if (got) *got = lvl;
+        return rec;
+    }
+    char m[300];
+    if (lvl) snprintf(m, sizeof m, "You need %s access on %s for that (yours is %s), or add the channel password.",
+                      lvl_name(need), chan, lvl_name(lvl));
+    else snprintf(m, sizeof m, "You need %s access on %s for that: log in to NickServ with an account on its access list "
+                  "(=account), or add the channel password.", lvl_name(need), chan);
+    if (!*word) { reply(from_nick, m); return NULL; }
+    char password[128];
+    snprintf(password, sizeof password, "%s", word);
+    *word = '\0';
+    if (sp) *sp = '\0';
+    /* on the access list, the last word was more likely text than a password guess: say why, but it still counts as a failed try */
+    if (!check_password(from_nick, chan, password, lvl ? m : NULL)) { OPENSSL_cleanse(password, sizeof password); return NULL; }
+    OPENSSL_cleanse(password, sizeof password);
+    if (got) *got = 'F';
+    return rec;
+}
+
+/* Level needed to give/take mode `letter` on someone else (on yourself it is the letter itself). */
+static char other_need(char letter) {
+    switch (letter) { case 'v': return 'h'; case 'h': return 'o'; case 'o': return 'o'; case 'a': return 'q'; default: return 'F'; }
+}
+static int need_more(const char *from_nick, char got, char need, const char *chan) {
+    if (lvl_rank(got) >= lvl_rank(need)) return 0;
+    char m[200];
+    snprintf(m, sizeof m, "You need %s access on %s for that.", lvl_name(need), chan);
+    reply(from_nick, m);
+    return 1;
+}
+
 static void cmd_register(const char *from_nick, char *args) {
     char *save = NULL;
     char *chan = strtok_r(args, " ", &save);
@@ -947,9 +1048,8 @@ static void finish_register(void) {
 static void cmd_identify(const char *from_nick, char *args) {
     char *save = NULL;
     char *chan = strtok_r(args, " ", &save);
-    char *password = strtok_r(NULL, " ", &save);
-    if (!chan || !password) { reply(from_nick, "Syntax: IDENTIFY <#channel> <password>"); return; }
-    if (!check_password(from_nick, chan, password)) return;
+    if (!chan) { reply(from_nick, "Syntax: IDENTIFY <#channel> [password]"); return; }
+    if (!authorize(from_nick, chan, save, 'F', NULL)) return;
     mark_identified(chan, from_nick);
     /* Trusted MODE (see link.c's `lc->service` branch) -- applies even if
      * ChanServ itself isn't sitting in the channel (no GUARD needed). */
@@ -1000,9 +1100,8 @@ static void expire_sweep(void) {
 static void cmd_drop(const char *from_nick, char *args) {
     char *save = NULL;
     char *chan = strtok_r(args, " ", &save);
-    char *password = strtok_r(NULL, " ", &save);
-    if (!chan || !password) { reply(from_nick, "Syntax: DROP <#channel> <password>"); return; }
-    cJSON *rec = check_password(from_nick, chan, password);
+    if (!chan) { reply(from_nick, "Syntax: DROP <#channel> [password]"); return; }
+    cJSON *rec = authorize(from_nick, chan, save, 'F', NULL);
     if (!rec) return;
     wire_mode(chan, "-r", NULL);
     if (rec_bool(rec, "guard")) wire_part(chan);
@@ -1019,9 +1118,8 @@ static void cmd_drop(const char *from_nick, char *args) {
 static void cmd_guard_join(const char *from_nick, char *args) {
     char *save = NULL;
     char *chan = strtok_r(args, " ", &save);
-    char *password = strtok_r(NULL, " ", &save);
-    if (!chan || !password) { reply(from_nick, "Syntax: JOIN <#channel> <password>"); return; }
-    cJSON *rec = check_password(from_nick, chan, password);
+    if (!chan) { reply(from_nick, "Syntax: JOIN <#channel> [password]"); return; }
+    cJSON *rec = authorize(from_nick, chan, save, 'q', NULL);
     if (!rec) return;
     rec_set_bool(rec, "guard", 1);
     store_save();
@@ -1032,9 +1130,8 @@ static void cmd_guard_join(const char *from_nick, char *args) {
 static void cmd_guard_part(const char *from_nick, char *args) {
     char *save = NULL;
     char *chan = strtok_r(args, " ", &save);
-    char *password = strtok_r(NULL, " ", &save);
-    if (!chan || !password) { reply(from_nick, "Syntax: PART <#channel> <password>"); return; }
-    cJSON *rec = check_password(from_nick, chan, password);
+    if (!chan) { reply(from_nick, "Syntax: PART <#channel> [password]"); return; }
+    cJSON *rec = authorize(from_nick, chan, save, 'q', NULL);
     if (!rec) return;
     rec_set_bool(rec, "guard", 0);
     store_save();
@@ -1047,11 +1144,12 @@ static void cmd_setpass(const char *from_nick, char *args) {
     char *chan = strtok_r(args, " ", &save);
     char *old_password = strtok_r(NULL, " ", &save);
     char *new_password = strtok_r(NULL, " ", &save);
-    if (!chan || !old_password || !new_password || !new_password[0]) {
-        reply(from_nick, "Syntax: SETPASS <#channel> <old-password> <new-password>");
+    if (old_password && !new_password) { new_password = old_password; old_password = NULL; } /* founder by account */
+    if (!chan || !new_password || !new_password[0]) {
+        reply(from_nick, "Syntax: SETPASS <#channel> [old-password] <new-password>");
         return;
     }
-    cJSON *rec = check_password(from_nick, chan, old_password);
+    cJSON *rec = authorize(from_nick, chan, old_password, 'F', NULL);
     if (!rec) return;
     char hash[256];
     if (crypto_hash_password(new_password, hash, sizeof hash) != 0) { reply(from_nick, "Internal error -- try again."); return; }
@@ -1060,16 +1158,27 @@ static void cmd_setpass(const char *from_nick, char *args) {
     reply(from_nick, "Password changed.");
 }
 
+void cs_account_chans(const char *account, void (*cb)(const char *chan, const char *level, void *ctx), void *ctx) {
+    for (cJSON *rec = g_store->child; rec; rec = rec->next) {
+        if (strcasecmp(rec_str(rec, "founder"), account) == 0) { cb(rec_str(rec, "name"), "founder", ctx); continue; }
+        cJSON *access = cJSON_GetObjectItemCaseSensitive(rec, "access"), *e;
+        cJSON_ArrayForEach(e, access)
+            if (e->string[0] == '=' && strcasecmp(e->string + 1, account) == 0 && cJSON_IsString(e)) {
+                cb(rec_str(rec, "name"), e->valuestring, ctx);
+                break;
+            }
+    }
+}
+
 static void cmd_topiclock(const char *from_nick, char *args) {
     char *save = NULL;
     char *chan = strtok_r(args, " ", &save);
     char *setting = strtok_r(NULL, " ", &save);
-    char *password = strtok_r(NULL, " ", &save);
-    if (!chan || !setting || !password || (strcasecmp(setting, "on") != 0 && strcasecmp(setting, "off") != 0)) {
-        reply(from_nick, "Syntax: TOPICLOCK <#channel> ON|OFF <password>");
+    if (!chan || !setting || (strcasecmp(setting, "on") != 0 && strcasecmp(setting, "off") != 0)) {
+        reply(from_nick, "Syntax: TOPICLOCK <#channel> ON|OFF [password]");
         return;
     }
-    cJSON *rec = check_password(from_nick, chan, password);
+    cJSON *rec = authorize(from_nick, chan, save, 'a', NULL);
     if (!rec) return;
     int on = strcasecmp(setting, "on") == 0;
     rec_set_bool(rec, "topiclock", on);
@@ -1140,15 +1249,20 @@ static void cmd_access(const char *from_nick, char *args) {
     } else if (strcasecmp(sub, "ADD") == 0) {
         char *mask = strtok_r(NULL, " ", &save);
         char *level = strtok_r(NULL, " ", &save);
-        char *password = strtok_r(NULL, " ", &save);
-        if (!mask || !level || !password) { reply(from_nick, "Syntax: ACCESS <#channel> ADD <mask> <v|h|o|a|q> <password>"); return; }
+        if (!mask || !level) { reply(from_nick, "Syntax: ACCESS <#channel> ADD <mask> <v|h|o|a|q> [password]"); return; }
         char levelbuf[2]; levelbuf[0] = (char)tolower((unsigned char)level[0]); levelbuf[1] = '\0';
         if (access_level_rank(levelbuf) < 0) { reply(from_nick, "Level must be one of: v h o a q"); return; }
-        if (!check_password(from_nick, chan, password)) return;
+        char got = 0;
+        if (!authorize(from_nick, chan, save, 'a', &got)) return;
+        if (lvl_rank(levelbuf[0]) >= lvl_rank(got)) { reply(from_nick, "You can only give access levels below your own."); return; }
         char norm[300];
         if (normalize_mask(mask, norm, sizeof norm) != 0) { reply(from_nick, "That mask needs a host (a nick alone never grants access) -- see HELP ACCESS"); return; }
         cJSON *access = cJSON_GetObjectItemCaseSensitive(rec, "access");
         if (!access) { access = cJSON_CreateObject(); cJSON_AddItemToObject(rec, "access", access); }
+        cJSON *prev = cJSON_GetObjectItem(access, norm);
+        if (cJSON_IsString(prev) && lvl_rank(prev->valuestring[0]) >= lvl_rank(got)) {
+            reply(from_nick, "That entry is at or above your own level -- you can't change it."); return;
+        }
         if (!cJSON_HasObjectItem(access, norm) && cJSON_GetArraySize(access) >= MAX_LIST_ENTRIES) {
             reply(from_nick, "That access list is full."); return;
         }
@@ -1160,12 +1274,16 @@ static void cmd_access(const char *from_nick, char *args) {
         wire_svcmembers(chan); /* apply it to whoever is already in the channel (handle_svcmember) */
     } else if (strcasecmp(sub, "DEL") == 0) {
         char *mask = strtok_r(NULL, " ", &save);
-        char *password = strtok_r(NULL, " ", &save);
-        if (!mask || !password) { reply(from_nick, "Syntax: ACCESS <#channel> DEL <mask> <password>"); return; }
-        if (!check_password(from_nick, chan, password)) return;
+        if (!mask) { reply(from_nick, "Syntax: ACCESS <#channel> DEL <mask> [password]"); return; }
+        char got = 0;
+        if (!authorize(from_nick, chan, save, 'a', &got)) return;
         char norm[300];
         if (normalize_mask(mask, norm, sizeof norm) != 0) { reply(from_nick, "That mask needs a host -- see HELP ACCESS"); return; }
         cJSON *access = cJSON_GetObjectItemCaseSensitive(rec, "access");
+        cJSON *cur = access ? cJSON_GetObjectItem(access, norm) : NULL;
+        if (cJSON_IsString(cur) && lvl_rank(cur->valuestring[0]) >= lvl_rank(got)) {
+            reply(from_nick, "You can only remove access levels below your own."); return;
+        }
         int existed = access && cJSON_HasObjectItem(access, norm);
         /* Case-insensitive delete to match cJSON_HasObjectItem's own
          * case-insensitive lookup above -- the CaseSensitive delete used to
@@ -1203,9 +1321,8 @@ static void cmd_akick(const char *from_nick, char *args) {
         }
     } else if (strcasecmp(sub, "ADD") == 0) {
         char *mask = strtok_r(NULL, " ", &save);
-        char *password = strtok_r(NULL, " ", &save);
-        if (!mask || !password) { reply(from_nick, "Syntax: AKICK <#channel> ADD <mask> <password>"); return; }
-        if (!check_password(from_nick, chan, password)) return;
+        if (!mask) { reply(from_nick, "Syntax: AKICK <#channel> ADD <mask> [password]"); return; }
+        if (!authorize(from_nick, chan, save, 'o', NULL)) return;
         char norm[300];
         if (normalize_mask(mask, norm, sizeof norm) != 0) { reply(from_nick, "That mask needs a host -- see HELP AKICK"); return; }
         cJSON *akick = cJSON_GetObjectItemCaseSensitive(rec, "akick");
@@ -1221,9 +1338,8 @@ static void cmd_akick(const char *from_nick, char *args) {
         wire_svcmembers(chan); /* kick anyone already inside who matches (handle_svcmember) */
     } else if (strcasecmp(sub, "DEL") == 0) {
         char *mask = strtok_r(NULL, " ", &save);
-        char *password = strtok_r(NULL, " ", &save);
-        if (!mask || !password) { reply(from_nick, "Syntax: AKICK <#channel> DEL <mask> <password>"); return; }
-        if (!check_password(from_nick, chan, password)) return;
+        if (!mask) { reply(from_nick, "Syntax: AKICK <#channel> DEL <mask> [password]"); return; }
+        if (!authorize(from_nick, chan, save, 'o', NULL)) return;
         char norm[300];
         if (normalize_mask(mask, norm, sizeof norm) != 0) { reply(from_nick, "That mask needs a host -- see HELP AKICK"); return; }
         cJSON *akick = cJSON_GetObjectItemCaseSensitive(rec, "akick");
@@ -1255,9 +1371,8 @@ static void cmd_successor(const char *from_nick, const char *prefix, char *args)
 
     if (strcasecmp(sub, "SET") == 0) {
         char *mask = strtok_r(NULL, " ", &save);
-        char *password = strtok_r(NULL, " ", &save);
-        if (!mask || !password) { reply(from_nick, "Syntax: SUCCESSOR <#channel> SET <mask> <password>"); return; }
-        if (!check_password(from_nick, chan, password)) return;
+        if (!mask) { reply(from_nick, "Syntax: SUCCESSOR <#channel> SET <mask> [password]"); return; }
+        if (!authorize(from_nick, chan, save, 'F', NULL)) return;
         char norm[300];
         if (normalize_mask(mask, norm, sizeof norm) != 0) { reply(from_nick, "That mask needs a host -- see HELP SUCCESSOR"); return; }
         rec_set_str(rec, "successor", norm);
@@ -1367,7 +1482,7 @@ static int mlock_parse(const char *value, char *on, size_t onsz, char *off, size
 }
 
 static void cmd_set(const char *from_nick, char *args) {
-    static const char *USAGE = "Syntax: SET <#channel> MLOCK|DESC|URL|ENTRYMSG|FOUNDER|PRIVATE|RESTRICTED|SECUREOPS <value> <password>";
+    static const char *USAGE = "Syntax: SET <#channel> MLOCK|DESC|URL|ENTRYMSG|FOUNDER|PRIVATE|RESTRICTED|SECUREOPS <value> [password]";
     char *save = NULL;
     char *chan = strtok_r(args, " ", &save);
     char *option = strtok_r(NULL, " ", &save);
@@ -1380,32 +1495,23 @@ static void cmd_set(const char *from_nick, char *args) {
     int known = 0;
     for (size_t i = 0; i < sizeof OPTS / sizeof OPTS[0]; i++) if (strcmp(optlower, OPTS[i]) == 0) known = 1;
     if (!known) { reply(from_nick, USAGE); return; }
-    /* Remainder is "[value ]password" -- split on the LAST space so a value may itself contain spaces. */
-    char *rest = save;
-    if (!rest || !*rest) { reply(from_nick, USAGE); return; }
-    char *last_space = strrchr(rest, ' ');
-    char value[300] = "", password[128];
-    if (last_space) {
-        size_t vl = (size_t)(last_space - rest);
-        if (vl >= sizeof value) vl = sizeof value - 1;
-        memcpy(value, rest, vl); value[vl] = '\0';
-        snprintf(password, sizeof password, "%s", last_space + 1);
-    } else {
-        snprintf(password, sizeof password, "%s", rest);
-    }
+    /* Remainder is "[value] [password]": authorize() takes the password off the end, so a value may contain spaces.
+     * FOUNDER is the founder's; everything else needs owner (q) access. */
+    if (!authorize(from_nick, chan, save, strcmp(optlower, "founder") == 0 ? 'F' : 'q', NULL)) return;
+    char value[300];
+    snprintf(value, sizeof value, "%s", save ? save : "");
     char on[32], off[32], fields[N_MLOCK_PARAMS][80], err[120];
     if (strcmp(optlower, "mlock") == 0 && !mlock_parse(value, on, sizeof on, off, sizeof off, fields, err, sizeof err)) { reply(from_nick, err); return; }
     int flag_val = -1;
     if (!strcmp(optlower, "private") || !strcmp(optlower, "restricted") || !strcmp(optlower, "secureops")) {
         if (strcasecmp(value, "on") == 0) flag_val = 1;
         else if (strcasecmp(value, "off") == 0) flag_val = 0;
-        else { char m[100]; snprintf(m, sizeof m, "Syntax: SET <#channel> %s ON|OFF <password>", option); reply(from_nick, m); return; }
+        else { char m[100]; snprintf(m, sizeof m, "Syntax: SET <#channel> %s ON|OFF [password]", option); reply(from_nick, m); return; }
     }
     if (strcmp(optlower, "founder") == 0 && value[0] && strcmp(value, "-") != 0 && !irc_valid_user(value, 30)) {
         reply(from_nick, "FOUNDER must be an account name (or - to clear it)");
         return;
     }
-    if (!check_password(from_nick, chan, password)) return;
     char msg[350];
     if (strcmp(optlower, "mlock") == 0) {
         rec_set_str(rec, "mlock", on);
@@ -1433,7 +1539,7 @@ static void cmd_set(const char *from_nick, char *args) {
         rec_set_str(rec, "founder", strcmp(value, "-") == 0 ? "" : value);
         store_save();
         wire_svcmembers(chan);
-        snprintf(msg, sizeof msg, value[0] && strcmp(value, "-") != 0 ? "Founder account for %s is now %s (use * as the password while logged in as it)" : "Founder account for %s cleared", chan, value);
+        snprintf(msg, sizeof msg, value[0] && strcmp(value, "-") != 0 ? "Founder account for %s is now %s (no password needed while logged in as it)" : "Founder account for %s cleared", chan, value);
         reply(from_nick, msg);
         return;
     } else {
@@ -1478,16 +1584,17 @@ static void cmd_list_channels(const char *from_nick, char *args) {
 static void cmd_chanmode_one(const char *from_nick, char *args, const char *name, char sign, char letter) {
     char *save = NULL;
     char *chan = strtok_r(args, " ", &save);
-    char *a = strtok_r(NULL, " ", &save);
-    char *b = strtok_r(NULL, " ", &save);
-    if (!chan || !a) {
-        char m[100]; snprintf(m, sizeof m, "Syntax: %s <#channel> [nick] <password>", name);
+    if (!chan) {
+        char m[100]; snprintf(m, sizeof m, "Syntax: %s <#channel> [nick] [password]", name);
         reply(from_nick, m);
         return;
     }
-    const char *target = b ? a : from_nick;
-    const char *password = b ? b : a;
-    if (!check_password(from_nick, chan, password)) return;
+    char got = 0;
+    cJSON *rec = authorize(from_nick, chan, save, letter, &got);
+    if (!rec) return;
+    const char *target = save && *save ? strtok_r(NULL, " ", &save) : from_nick;
+    if (strcasecmp(target, from_nick) != 0 && need_more(from_nick, got, other_need(letter), chan)) return;
+    if (sign == '-' && protected_target(from_nick, rec, got, target)) return;
     char modestring[3] = {sign, letter, '\0'};
     wire_mode(chan, modestring, target);
     char msg[200];
@@ -1498,12 +1605,11 @@ static void cmd_chanmode_one(const char *from_nick, char *args, const char *name
 static void cmd_svc_invite(const char *from_nick, char *args) {
     char *save = NULL;
     char *chan = strtok_r(args, " ", &save);
-    char *a = strtok_r(NULL, " ", &save);
-    char *b = strtok_r(NULL, " ", &save);
-    if (!chan || !a) { reply(from_nick, "Syntax: INVITE <#channel> [nick] <password>"); return; }
-    const char *target = b ? a : from_nick;
-    const char *password = b ? b : a;
-    if (!check_password(from_nick, chan, password)) return;
+    if (!chan) { reply(from_nick, "Syntax: INVITE <#channel> [nick] [password]"); return; }
+    char got = 0;
+    if (!authorize(from_nick, chan, save, 'v', &got)) return;
+    const char *target = save && *save ? strtok_r(NULL, " ", &save) : from_nick;
+    if (strcasecmp(target, from_nick) != 0 && need_more(from_nick, got, 'h', chan)) return;
     wire_invite(chan, target);
     char msg[200]; snprintf(msg, sizeof msg, "Invited %s to %s", target, chan);
     reply(from_nick, msg);
@@ -1512,12 +1618,11 @@ static void cmd_svc_invite(const char *from_nick, char *args) {
 static void cmd_svc_unban(const char *from_nick, char *args) {
     char *save = NULL;
     char *chan = strtok_r(args, " ", &save);
-    char *a = strtok_r(NULL, " ", &save);
-    char *b = strtok_r(NULL, " ", &save);
-    if (!chan || !a) { reply(from_nick, "Syntax: UNBAN <#channel> [nick] <password>"); return; }
-    const char *target = b ? a : from_nick;
-    const char *password = b ? b : a;
-    if (!check_password(from_nick, chan, password)) return;
+    if (!chan) { reply(from_nick, "Syntax: UNBAN <#channel> [nick] [password]"); return; }
+    char got = 0;
+    if (!authorize(from_nick, chan, save, 'v', &got)) return;
+    const char *target = save && *save ? strtok_r(NULL, " ", &save) : from_nick;
+    if (strcasecmp(target, from_nick) != 0 && need_more(from_nick, got, 'h', chan)) return;
     wire_unban(chan, target);
     char msg[200]; snprintf(msg, sizeof msg, "Removed any ban matching %s on %s", target, chan);
     reply(from_nick, msg);
@@ -1527,63 +1632,131 @@ static void cmd_svc_kick(const char *from_nick, char *args) {
     char *save = NULL;
     char *chan = strtok_r(args, " ", &save);
     char *target = strtok_r(NULL, " ", &save);
-    if (!chan || !target || !save || !*save) { reply(from_nick, "Syntax: KICK <#channel> <nick> [reason] <password>"); return; }
-    /* Remainder is "[reason ]password" -- split on the LAST space, same as
-     * cmd_set's value/password split, so a reason may itself contain spaces. */
-    char *rest = save;
-    char *last_space = strrchr(rest, ' ');
-    char reason[300] = "", password[128];
-    if (last_space) {
-        size_t rl = (size_t)(last_space - rest);
-        if (rl >= sizeof reason) rl = sizeof reason - 1;
-        memcpy(reason, rest, rl); reason[rl] = '\0';
-        snprintf(password, sizeof password, "%s", last_space + 1);
-    } else {
-        snprintf(password, sizeof password, "%s", rest);
-    }
-    if (!check_password(from_nick, chan, password)) return;
+    if (!chan || !target) { reply(from_nick, "Syntax: KICK <#channel> <nick> [reason] [password]"); return; }
+    /* Remainder is "[reason] [password]": authorize() takes the password off the end. */
+    char got = 0;
+    cJSON *rec = authorize(from_nick, chan, save, 'h', &got);
+    if (!rec || protected_target(from_nick, rec, got, target)) return;
+    char reason[300];
+    snprintf(reason, sizeof reason, "%s", save ? save : "");
     wire_kick(chan, target, reason[0] ? reason : "Kicked");
     char msg[300]; snprintf(msg, sizeof msg, "Kicked %s from %s", target, chan);
     reply(from_nick, msg);
 }
 
-static void cmd_svc_topic(const char *from_nick, char *args) {
+/* TOPIC sets the topic outright. TOPICAPPEND/TOPICPREPEND/TOPICSWAP build on the live topic, which ChanServ only
+ * tracks under TOPICLOCK, so they ask the hub (SVCTOPIC <chan>) and finish in topic_pending_done when it answers. */
+enum { TOP_SET, TOP_APPEND, TOP_PREPEND, TOP_SWAP };
+#define CS_TOPICLEN 307 /* the ircd's TOPICLEN (TOPIC_MAX_LEN) */
+/* ponytail: 8 slots, the oldest is overwritten; an unanswered request ages out after 30s */
+static struct { char chan[128], nick[64], text[300]; int op; time_t at; } g_topic_pend[8];
+static int g_topic_pend_next;
+
+static void cmd_svc_topic(const char *from_nick, char *args, const char *verb, int op) {
     char *save = NULL;
     char *chan = strtok_r(args, " ", &save);
-    if (!chan || !save || !*save) { reply(from_nick, "Syntax: TOPIC <#channel> <text> <password>"); return; }
-    char *rest = save;
-    char *last_space = strrchr(rest, ' ');
-    char topic[300] = "", password[128];
-    if (last_space) {
-        size_t tl = (size_t)(last_space - rest);
-        if (tl >= sizeof topic) tl = sizeof topic - 1;
-        memcpy(topic, rest, tl); topic[tl] = '\0';
-        snprintf(password, sizeof password, "%s", last_space + 1);
-    } else {
-        snprintf(password, sizeof password, "%s", rest);
+    const char *syn = op == TOP_SWAP ? "<search>:<replace>" : "<text>";
+    char err[200];
+    if (!chan) { snprintf(err, sizeof err, "Syntax: %s <#channel> %s [password]", verb, syn); reply(from_nick, err); return; }
+    if (!authorize(from_nick, chan, save, 'h', NULL)) return;
+    char topic[300];
+    snprintf(topic, sizeof topic, "%s", save ? save : "");
+    if (op != TOP_SET && (!topic[0] || (op == TOP_SWAP && (topic[0] == ':' || !strchr(topic, ':'))))) {
+        snprintf(err, sizeof err, "Syntax: %s <#channel> %s [password]", verb, syn); reply(from_nick, err); return;
     }
-    if (!check_password(from_nick, chan, password)) return;
-    wire_topic(chan, topic);
-    char msg[300]; snprintf(msg, sizeof msg, "Topic set on %s", chan);
-    reply(from_nick, msg);
+    if (op == TOP_SET) {
+        wire_topic(chan, topic);
+        char msg[300]; snprintf(msg, sizeof msg, "Topic set on %s", chan);
+        reply(from_nick, msg);
+        return;
+    }
+    int k = g_topic_pend_next++ % 8;
+    snprintf(g_topic_pend[k].chan, sizeof g_topic_pend[k].chan, "%s", chan);
+    snprintf(g_topic_pend[k].nick, sizeof g_topic_pend[k].nick, "%s", from_nick);
+    snprintf(g_topic_pend[k].text, sizeof g_topic_pend[k].text, "%s", topic);
+    g_topic_pend[k].op = op;
+    g_topic_pend[k].at = time(NULL);
+    char line[300];
+    irc_build(line, sizeof line, NULL, 0, NULL, "SVCTOPIC", (const char *[]){chan}, 1, NULL);
+    queue_line(line);
+}
+
+/* SVCTOPIC <chan> [:<topic>] from the hub: finish any TOPICAPPEND/TOPICPREPEND/TOPICSWAP waiting on it. No topic
+ * parameter = no such channel. */
+static void topic_pending_done(const irc_message_t *msg) {
+    char want[128], have[128];
+    irc_casefold(want, sizeof want, msg->params[0]);
+    time_t now = time(NULL);
+    for (int k = 0; k < 8; k++) {
+        if (!g_topic_pend[k].at) continue;
+        if (now - g_topic_pend[k].at > 30) { g_topic_pend[k].at = 0; continue; }
+        irc_casefold(have, sizeof have, g_topic_pend[k].chan);
+        if (strcmp(want, have) != 0) continue;
+        g_topic_pend[k].at = 0;
+        const char *nick = g_topic_pend[k].nick, *text = g_topic_pend[k].text;
+        char out[700], note[400];
+        if (msg->nparams < 2) {
+            snprintf(note, sizeof note, "%s is empty right now (nobody in it), so it has no topic to change", msg->params[0]);
+            reply(nick, note);
+            continue;
+        }
+        const char *cur = msg->params[msg->nparams - 1];
+        if (g_topic_pend[k].op == TOP_SWAP) {
+            const char *colon = strchr(text, ':');
+            size_t sl = (size_t)(colon - text);
+            const char *hit = NULL;
+            for (const char *q = cur; *q && !hit; q++) if (strncmp(q, text, sl) == 0) hit = q;
+            if (!hit) {
+                snprintf(note, sizeof note, "\"%.*s\" isn't in the topic of %s", (int)sl, text, msg->params[0]);
+                reply(nick, note);
+                continue;
+            }
+            snprintf(out, sizeof out, "%.*s%s%s", (int)(hit - cur), cur, colon + 1, hit + sl);
+        } else if (!cur[0]) {
+            snprintf(out, sizeof out, "%s", text);
+        } else if (g_topic_pend[k].op == TOP_APPEND) {
+            snprintf(out, sizeof out, "%s | %s", cur, text);
+        } else {
+            snprintf(out, sizeof out, "%s | %s", text, cur);
+        }
+        if (strlen(out) > CS_TOPICLEN) {
+            snprintf(note, sizeof note, "That would make the topic of %s %zu characters; the limit is %d",
+                     msg->params[0], strlen(out), CS_TOPICLEN);
+            reply(nick, note);
+            continue;
+        }
+        wire_topic(msg->params[0], out);
+        snprintf(note, sizeof note, "Topic set on %s", msg->params[0]);
+        reply(nick, note);
+    }
 }
 
 static void cmd_help(const char *from_nick, char *args) {
     (void)args;
     reply(from_nick, "ChanServ commands:");
-    reply(from_nick, "  REGISTER #channel <password>  -- register a channel you currently op");
-    reply(from_nick, "  IDENTIFY #channel <password>  -- reclaim founder status this session");
-    reply(from_nick, "  DROP #channel <password>      -- unregister a channel");
-    reply(from_nick, "  JOIN #channel <password>      -- ChanServ joins and stays, protecting the");
+    reply(from_nick, "  Logged in to NickServ (or SASL)? No password needed: the founder account can do everything,");
+    reply(from_nick, "  an =account ACCESS entry can do what its level allows:");
+    reply(from_nick, "    v  VOICE/DEVOICE yourself, INVITE/UNBAN yourself");
+    reply(from_nick, "    h  + KICK, TOPIC/TOPICAPPEND/TOPICPREPEND/TOPICSWAP, HALFOP yourself, VOICE/INVITE/UNBAN others");
+    reply(from_nick, "    o  + OP/DEOP, HALFOP others, AKICK ADD/DEL");
+    reply(from_nick, "    a  + TOPICLOCK, ACCESS ADD/DEL (below your level), ADMIN yourself");
+    reply(from_nick, "    q  + SET (not FOUNDER), JOIN/PART, OWNER yourself, ADMIN others");
+    reply(from_nick, "    founder  DROP, SETPASS, SET FOUNDER, SUCCESSOR, OWNER others");
+    reply(from_nick, "  KICK and taking a rank away never work on someone at or above your own level (the founder can act on anyone).");
+    reply(from_nick, "  The channel password still works for everything; IDENTIFY with it counts as founder until you quit.");
+    reply(from_nick, "  REGISTER #channel [password]  -- register a channel you currently op");
+    reply(from_nick, "  IDENTIFY #channel [password]  -- reclaim founder status this session");
+    reply(from_nick, "  DROP #channel [password]      -- unregister a channel");
+    reply(from_nick, "  JOIN #channel [password]      -- ChanServ joins and stays, protecting the");
     reply(from_nick, "                                    channel from ever emptying/being destroyed");
-    reply(from_nick, "  PART #channel <password>      -- ChanServ leaves (undoes JOIN above)");
-    reply(from_nick, "  SETPASS #channel <old> <new>  -- change a channel's password");
-    reply(from_nick, "  TOPICLOCK #channel ON|OFF <password>");
+    reply(from_nick, "  PART #channel [password]      -- ChanServ leaves (undoes JOIN above)");
+    reply(from_nick, "  SETPASS #channel [old] <new>  -- change a channel's password");
+    reply(from_nick, "  TOPICLOCK #channel ON|OFF [password]");
     reply(from_nick, "                                -- remember the topic and restore it when");
     reply(from_nick, "                                   ChanServ (re)joins (server restart, channel");
     reply(from_nick, "                                   emptied out, etc.)");
     reply(from_nick, "  INFO #channel                 -- show registration/GUARD/TOPICLOCK status");
-    reply(from_nick, "  ACCESS #channel ADD <mask> <v|h|o|a|q> <password>");
+    reply(from_nick, "  ACCESS #channel ADD <mask> <v|h|o|a|q> [password]");
     reply(from_nick, "                                -- auto-grant +v/+h/+o/+a(admin)/+q(owner) on every JOIN matching");
     reply(from_nick, "                                   <mask>, without sharing the password. Accepts");
     reply(from_nick, "                                   a bare host (*.example.com), user@host, or a");
@@ -1594,40 +1767,44 @@ static void cmd_help(const char *from_nick, char *args) {
     reply(from_nick, "                                   use this if host_masking is on, since the");
     reply(from_nick, "                                   cloak shown in JOIN/WHOIS is random per");
     reply(from_nick, "                                   connection and can never match a hostmask");
-    reply(from_nick, "  ACCESS #channel DEL <mask> <password>");
+    reply(from_nick, "  ACCESS #channel DEL <mask> [password]");
     reply(from_nick, "                                -- remove a mask from the access list");
     reply(from_nick, "  ACCESS #channel LIST          -- show the access list");
-    reply(from_nick, "  SUCCESSOR #channel SET <mask> <password>");
+    reply(from_nick, "  SUCCESSOR #channel SET <mask> [password]");
     reply(from_nick, "                                -- designate who may CLAIM founder status if");
     reply(from_nick, "                                   nobody is currently IDENTIFY'd for this channel");
     reply(from_nick, "  SUCCESSOR #channel CLAIM <new-password>");
     reply(from_nick, "                                -- become founder (only works from the designated");
     reply(from_nick, "                                   mask, and only while nobody is IDENTIFY'd)");
-    reply(from_nick, "  AKICK #channel ADD <mask> <password>");
+    reply(from_nick, "  AKICK #channel ADD <mask> [password]");
     reply(from_nick, "                                -- auto-kick anyone matching <mask> on JOIN;");
     reply(from_nick, "                                   same mask forms as ACCESS, incl. =accountname");
-    reply(from_nick, "  AKICK #channel DEL <mask> <password>");
+    reply(from_nick, "  AKICK #channel DEL <mask> [password]");
     reply(from_nick, "                                -- remove a mask from the auto-kick list");
     reply(from_nick, "  AKICK #channel LIST           -- show the auto-kick list");
-    reply(from_nick, "  SET #channel MLOCK <+modes-modes [params]> <password>");
+    reply(from_nick, "  SET #channel MLOCK <+modes-modes [params]> [password]");
     reply(from_nick, "                                -- lock modes; ChanServ puts back any that get changed (empty clears).");
     reply(from_nick, "                                   e.g. +ntk-s secretkey forces n t k(key) on and s off; k l f j L");
     reply(from_nick, "                                   take their parameters in order. No sign means +.");
-    reply(from_nick, "  SET #channel FOUNDER <account|-> <password>");
+    reply(from_nick, "  SET #channel FOUNDER <account|-> [password]");
     reply(from_nick, "                                -- the founder ACCOUNT is recognised on join and may use * as the password");
-    reply(from_nick, "  SET #channel PRIVATE|RESTRICTED|SECUREOPS ON|OFF <password>");
+    reply(from_nick, "  SET #channel PRIVATE|RESTRICTED|SECUREOPS ON|OFF [password]");
     reply(from_nick, "                                -- PRIVATE hides it from LIST; RESTRICTED kicks anyone not on the access list;");
     reply(from_nick, "                                   SECUREOPS takes ops away from anyone the access list doesn't back");
     reply(from_nick, "  LIST [pattern]                -- registered channels (not PRIVATE ones)");
-    reply(from_nick, "  SET #channel DESC|URL|ENTRYMSG <text> <password>");
+    reply(from_nick, "  SET #channel DESC|URL|ENTRYMSG <text> [password]");
     reply(from_nick, "                                -- free-text metadata (DESC/URL shown by INFO,");
     reply(from_nick, "                                   ENTRYMSG sent to whoever JOINs); empty clears");
-    reply(from_nick, "  OP|DEOP|VOICE|DEVOICE|HALFOP|DEHALFOP|ADMIN|DEADMIN|OWNER|DEOWNER #channel [nick] <password>");
+    reply(from_nick, "  OP|DEOP|VOICE|DEVOICE|HALFOP|DEHALFOP|ADMIN|DEADMIN|OWNER|DEOWNER #channel [nick] [password]");
     reply(from_nick, "                                -- set/remove that rank; nick defaults to yourself");
-    reply(from_nick, "  INVITE #channel [nick] <password>  -- invite yourself or someone else in");
-    reply(from_nick, "  UNBAN #channel [nick] <password>   -- remove any ban matching yourself/someone");
-    reply(from_nick, "  KICK #channel <nick> [reason] <password>  -- kick someone out");
-    reply(from_nick, "  TOPIC #channel <text> <password>          -- set the topic");
+    reply(from_nick, "  INVITE #channel [nick] [password]  -- invite yourself or someone else in");
+    reply(from_nick, "  UNBAN #channel [nick] [password]   -- remove any ban matching yourself/someone");
+    reply(from_nick, "  KICK #channel <nick> [reason] [password]  -- kick someone out");
+    reply(from_nick, "  TOPIC #channel <text> [password]          -- set the topic");
+    reply(from_nick, "  TOPICAPPEND|TOPICPREPEND #channel <text> [password]");
+    reply(from_nick, "                                -- add <text> after/before the current topic, joined by \" | \"");
+    reply(from_nick, "  TOPICSWAP #channel <search>:<replace> [password]");
+    reply(from_nick, "                                -- replace the first <search> in the topic with <replace>");
 }
 
 #define CTCP_DELIM '\x01'
@@ -1691,7 +1868,10 @@ static void dispatch_privmsg(const char *from_nick, const char *from_prefix, con
     else if (strcasecmp(verb, "INVITE") == 0) cmd_svc_invite(from_nick, rest);
     else if (strcasecmp(verb, "UNBAN") == 0) cmd_svc_unban(from_nick, rest);
     else if (strcasecmp(verb, "KICK") == 0) cmd_svc_kick(from_nick, rest);
-    else if (strcasecmp(verb, "TOPIC") == 0) cmd_svc_topic(from_nick, rest);
+    else if (strcasecmp(verb, "TOPIC") == 0) cmd_svc_topic(from_nick, rest, "TOPIC", TOP_SET);
+    else if (strcasecmp(verb, "TOPICAPPEND") == 0) cmd_svc_topic(from_nick, rest, "TOPICAPPEND", TOP_APPEND);
+    else if (strcasecmp(verb, "TOPICPREPEND") == 0) cmd_svc_topic(from_nick, rest, "TOPICPREPEND", TOP_PREPEND);
+    else if (strcasecmp(verb, "TOPICSWAP") == 0) cmd_svc_topic(from_nick, rest, "TOPICSWAP", TOP_SWAP);
     else if (strcasecmp(verb, "HELP") == 0) cmd_help(from_nick, rest);
     else reply(from_nick, "Unknown command. Try HELP.");
 }
@@ -2144,6 +2324,7 @@ static void process_line(char *line) {
         /* TOPICLOCK ON just asked for the live topic: it becomes the locked one (an empty one leaves the first topic
          * set afterwards as the baseline). */
         if (msg.nparams < 1) return;
+        topic_pending_done(&msg);
         cJSON *rec = store_get(msg.params[0]);
         if (rec && rec_bool(rec, "topiclock") && !rec_str(rec, "topic")[0] && msg.nparams > 1) {
             rec_set_str(rec, "topic", msg.params[msg.nparams - 1]);

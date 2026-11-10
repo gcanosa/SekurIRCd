@@ -108,3 +108,52 @@ def test_private_hidden_from_list():
         txt = " ".join(r)
         assert "#visible" in txt and "#hidden" not in txt, txt
         assert "#hidden" in " ".join(cs(g, "LIST")), "its founder still sees it"
+
+
+def test_account_levels_need_no_password():
+    s = net()
+    with s, ChanServ(s, s.link_port, password=PW):
+        f = setup(s, None, "fnd", "founder1")  # founder account: no password at all
+        assert any("is now ON" in l for l in cs(f, "SET #cs PRIVATE ON")), "founder account SET without a password"
+        cs(f, "TOPIC #cs hello world")
+        assert any("hello world" in l and " 332 " in l for l in f.say("TOPIC #cs"))
+        cs(f, "TOPIC #cs leaked? chanpass1")  # the password typed out of habit is cut off, not published
+        t = " ".join(l for l in f.say("TOPIC #cs") if " 332 " in l)
+        assert t.endswith(":leaked?") and "chanpass1" not in t, t
+        h = account_client(s, "hop", "hopacct")
+        v = account_client(s, "vce", "vceacct")
+        for n in ("hop", "vce"):
+            s_ = {"hop": h, "vce": v}[n]
+            s_.say("JOIN #cs", 0.3)
+        assert any("now has h access" in l for l in cs(f, "ACCESS #cs ADD =hopacct h"))
+        assert any("now has v access" in l for l in cs(f, "ACCESS #cs ADD =vceacct v"))
+        # halfop: topic and kick yes, op no, voice others yes, ACCESS no
+        cs(h, "TOPIC #cs by the halfop")
+        assert any("by the halfop" in l for l in f.say("TOPIC #cs"))
+        assert any("need op (o) access" in l for l in cs(h, "OP #cs"))
+        assert any("+v vce" in l for l in cs(h, "VOICE #cs vce"))
+        assert any("need admin (a) access" in l for l in cs(h, "ACCESS #cs ADD =x v"))
+        # voice: itself only
+        assert any("need halfop (h) access" in l for l in cs(v, "VOICE #cs hop"))
+        assert any("need halfop (h) access" in l for l in cs(v, "TOPIC #cs nope"))
+        # the channel password still works for anyone (after the 3s cooldown the refused "nope" above started)
+        time.sleep(3)
+        assert any("+o vce" in l for l in cs(v, "OP #cs chanpass1", 1.5))
+        # no account: the last word is a password guess, as before; with no words at all, a hint
+        anon = s.client("anon")
+        assert any("Password incorrect" in l for l in cs(anon, "TOPIC #cs x"))
+        assert any("log in to NickServ" in l for l in cs(anon, "JOIN #cs"))
+        # admin can manage levels below its own only
+        a = account_client(s, "adm", "admacct")
+        cs(f, "ACCESS #cs ADD =admacct a")
+        assert any("below your own" in l for l in cs(a, "ACCESS #cs ADD =zz a"))
+        assert any("now has o access" in l for l in cs(a, "ACCESS #cs ADD =zz o"))
+        assert any("at or above your own" in l for l in cs(a, "ACCESS #cs ADD =admacct v")), "can't demote itself/peers"
+        assert any("need owner (q) access" in l for l in cs(a, "SET #cs DESC hi"))
+        assert any("need founder access" in l for l in cs(a, "DROP #cs"))
+        # protection: nobody below the founder can kick or take ranks from someone at or above their own level
+        assert any("at or above yours" in l for l in cs(a, "DEOP #cs fnd")), "admin can't deop the founder"
+        assert any("at or above yours" in l for l in cs(a, "KICK #cs fnd bye")), "admin can't kick the founder"
+        assert any("at or above yours" in l for l in cs(h, "KICK #cs adm bye")), "halfop can't kick an admin"
+        assert any("Kicked hop" in l for l in cs(a, "KICK #cs hop bye")), "admin can kick a halfop"
+        assert "fnd" in " ".join(f.say("NAMES #cs"))

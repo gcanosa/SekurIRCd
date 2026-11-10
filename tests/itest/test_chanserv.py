@@ -146,6 +146,27 @@ def test_topiclock_reverts_other_topics_and_takes_the_live_one():
             assert "new official" in " ".join(f.say("TOPIC #tl")), "ChanServ TOPIC moves the lock"
 
 
+
+def test_topicappend_prepend_swap():
+    s = net()
+    with s:
+        with ChanServ(s, s.link_port, password=LINK_PW):
+            f = _reg(s, "#tp")
+            topic = lambda: " ".join(l for l in f.say("TOPIC #tp") if " 332 " in l)
+            f.say("PRIVMSG ChanServ :TOPICAPPEND #tp first pw12345", 1.0)
+            assert topic().endswith(":first"), "append onto an empty topic is just the text"
+            f.say("PRIVMSG ChanServ :TOPICAPPEND #tp news here pw12345", 1.0)
+            f.say("PRIVMSG ChanServ :TOPICPREPEND #tp Welcome pw12345", 1.0)
+            assert topic().endswith(":Welcome | first | news here"), topic()
+            f.say("PRIVMSG ChanServ :TOPICSWAP #tp news here:no news pw12345", 1.0)
+            assert topic().endswith(":Welcome | first | no news"), topic()
+            r = " ".join(f.say("PRIVMSG ChanServ :TOPICSWAP #tp nothere:x pw12345", 1.0))
+            assert "isn't in the topic" in r, r
+            r = " ".join(f.say("PRIVMSG ChanServ :TOPICAPPEND #tp %s pw12345" % ("x" * 290), 1.0))
+            assert "the limit is 307" in r, r
+            s.client("stranger").say("PRIVMSG ChanServ :TOPICAPPEND #tp x wrongpw", 1.0)
+            assert topic().endswith(":Welcome | first | no news"), "a bad password changes nothing"
+
 def test_mlock_enforced_without_guard_join():
     s = net()
     with s:

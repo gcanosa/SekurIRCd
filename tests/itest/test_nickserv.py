@@ -121,3 +121,29 @@ def test_last_login_note_on_identify_and_sasl():
         c.expect(r" 001 ")
         c.expect(r"Last login from: ~?second@", 3)
         assert any(re.search(r"Last login from: ~?third@", l) for l in ns(c, "INFO")), "INFO shows the current login to the owner"
+
+
+def test_status_acc_listlogins_listchans():
+    with Server(cfg={"accounts": {"enabled": True, "store_file": "acc.json"}}) as s:
+        c = register(s, "stu", "stu", "password1")
+        other = s.client("nobody")
+        assert any("STATUS stu 3 stu" in l for l in ns(other, "STATUS stu"))
+        assert any("stu ACC 3" in l for l in ns(other, "ACC stu"))
+        assert any("nobody ACC 0" in l for l in ns(other, "ACC nobody")), "unregistered nick"
+        c.say("NICK stu2", 0.3)
+        sq = s.client("stu")
+        assert any("STATUS stu 1 *" in l for l in ns(other, "STATUS stu")), "online, not logged in to its owner"
+        assert any("IDENTIFY first" in l for l in ns(sq, "LISTLOGINS"))
+        c3 = s.client("stu3")
+        assert any("identified" in l.lower() for l in ns(c3, "IDENTIFY stu password1")), "second login"
+        r = ns(c, "LISTLOGINS")
+        assert any("2 connections logged in as stu" in l for l in r) and any("this connection" in l for l in r), r
+        c.say("JOIN #lc1", 0.3)
+        c.say("PRIVMSG ChanServ :REGISTER #lc1 pw12345", 1.5)
+        o = register(s, "own2", "own2", "password2")
+        o.say("JOIN #lc2", 0.3)
+        o.say("PRIVMSG ChanServ :REGISTER #lc2 pw12345", 1.5)
+        o.say("PRIVMSG ChanServ :ACCESS #lc2 ADD =stu o pw12345", 1.0)
+        r = " ".join(ns(c, "LISTCHANS"))
+        assert "#lc1" in r and "founder" in r and "#lc2" in r and "2 channels" in r, r
+        assert any("not founder of" in l for l in ns(register(s, "nochan", "nochan", "password3"), "LISTCHANS"))
