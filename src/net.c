@@ -721,7 +721,7 @@ static client_t *accept_common(server_t *srv, int listen_fd) {
     if (srv->cfg.security.rdns_enabled) {
         /* Runs under masking too now: cl->realhost must be the real resolved
          * name -- it's what K/G-lines, ChanServ and channel bans match
-         * against, and what WHOIS's oper-only 338 line reveals to opers (see
+         * against, and what WHOIS's oper-only 378 line reveals to opers (see
          * cmd_user.c) -- and, if host_masking_keep_labels > 0, it's also the
          * source for the cloak's {suffix}. See drain_worker_results. */
         job_t j; memset(&j, 0, sizeof j);
@@ -1051,7 +1051,7 @@ static void drain_worker_results(server_t *srv) {
                 if (r->success) {
                     /* realhost is what K/G-lines, ChanServ's SVCJOIN and
                      * channel bans match against, and what WHOIS's oper-only
-                     * 338 line reveals -- always update it to the resolved
+                     * 378 line reveals -- always update it to the resolved
                      * name (see cl->realhost's comment in client.h), even
                      * under masking now that this job runs either way. The
                      * *displayed* host only follows it verbatim when masking
