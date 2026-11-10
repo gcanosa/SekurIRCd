@@ -93,6 +93,9 @@ void accounts_set_last_login(account_store_t *st, const char *name, const char *
 /* Channels joined at every login (NickServ SET AJOIN): comma-separated, NULL = none. set_ajoin("" or NULL) clears it. */
 const char *accounts_ajoin(account_store_t *st, const char *name);
 void accounts_set_ajoin(account_store_t *st, const char *name, const char *list);
+/* NickServ SET ALWAYS-ON: keep the account's nick on the network (detached) after its connection drops. */
+int accounts_always_on(account_store_t *st, const char *name);
+void accounts_set_always_on(account_store_t *st, const char *name, int on);
 
 /* Contact email. set_email stores it unverified; with a pending code (set_pending_email) it only becomes the email once
  * check_verify sees the matching, unexpired code. */

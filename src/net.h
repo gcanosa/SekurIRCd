@@ -39,5 +39,8 @@ void net_apply_listeners(struct server *srv);
 int net_run(struct server *srv);
 
 int net_flood_charge(struct server *srv, struct client *cl);
+/* Always-on (see client.h): keep `cl` on the network without its connection / resume a kept session into `cl`. */
+void net_detach_client(struct server *srv, struct client *cl, const char *why, int quiet);
+int net_takeover(struct server *srv, struct client *cl);
 
 #endif /* SEKURIRCD_NET_H */

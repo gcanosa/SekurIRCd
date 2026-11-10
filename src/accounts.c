@@ -425,6 +425,18 @@ void accounts_set_ajoin(account_store_t *st, const char *name, const char *list)
     commit(st, rec);
 }
 
+int accounts_always_on(account_store_t *st, const char *name) {
+    return cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(find(st, name), "always_on"));
+}
+
+void accounts_set_always_on(account_store_t *st, const char *name, int on) {
+    cJSON *rec = find(st, name);
+    if (!rec) return;
+    cJSON_DeleteItemFromObjectCaseSensitive(rec, "always_on");
+    if (on) cJSON_AddTrueToObject(rec, "always_on");
+    commit(st, rec);
+}
+
 const char *accounts_email(account_store_t *st, const char *name) {
     cJSON *v = cJSON_GetObjectItemCaseSensitive(find(st, name), "email");
     return cJSON_IsString(v) ? v->valuestring : NULL;

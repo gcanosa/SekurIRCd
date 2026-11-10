@@ -434,6 +434,7 @@ void cmd_quit(server_t *srv, client_t *cl, irc_message_t *msg) {
     if (cl->quitting) return; /* a spam rule already disconnected them with its own reason */
     if (spammy) reason = "Client Quit";
     snprintf(cl->quit_reason, sizeof cl->quit_reason, "Quit: %s", reason);
+    cl->soft_quit = 1; /* an always-on client stays on the network (as on Ergo) */
     client_mark_quit(cl);
 }
 
@@ -746,7 +747,17 @@ void svc_command(server_t *srv, client_t *svc, irc_message_t *msg) {
     }
     const char *c = msg->command;
     if (!strcmp(c, "SVSLOGIN") && msg->nparams >= 2) {
-        if (strcmp(msg->params[1], "*") == 0) { if (cl->account[0]) server_logout(srv, cl); return; }
+        if (strcmp(msg->params[1], "*") == 0) {
+            cl->always_on = 0;
+            if (cl->account[0]) server_logout(srv, cl);
+            if (cl->detached_at) { snprintf(cl->quit_reason, sizeof cl->quit_reason, "Logged out"); client_mark_quit(cl); }
+            return;
+        }
+        cl->always_on = msg->nparams > 3 ? atol(msg->params[3]) : 0; /* services' 4th parameter, see nickserv.c login() */
+        if (cl->account[0] && !strcasecmp(cl->account, msg->params[1])) { /* SET ALWAYS-ON re-sent the login: only the flag changed */
+            if (cl->detached_at && !cl->always_on) { snprintf(cl->quit_reason, sizeof cl->quit_reason, "Always-on disabled"); client_mark_quit(cl); }
+            return;
+        }
         cl->acct_created = msg->nparams > 2 ? atol(msg->params[2]) : 0;
         snprintf(cl->acct_created_for, sizeof cl->acct_created_for, "%s", msg->params[1]);
         server_login(srv, cl, msg->params[1]);

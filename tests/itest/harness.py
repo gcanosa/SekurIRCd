@@ -84,7 +84,7 @@ class Server:
     def _start_services(self):
         acc = self.cfg.get("accounts", {})
         ns = []
-        for k in ("enforce_nicks", "enforce_grace", "max_accounts", "email_command", "admins", "network"):
+        for k in ("enforce_nicks", "enforce_grace", "max_accounts", "email_command", "admins", "network", "always_on", "always_on_expire_days"):
             if k in acc:
                 ns.append(f"{k} = {toml_value(acc[k])}")
         store = os.path.join(self.dir, acc.get("store_file", "accounts.json"))

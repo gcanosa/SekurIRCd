@@ -32,7 +32,7 @@ void client_unmark_dirty(client_t *cl) {
 
 void client_mark_quit(client_t *cl) {
     cl->quitting = 1;
-    if (cl->dead_q || cl->fd < 0 || !cl->srv) return;
+    if (cl->dead_q || (cl->fd < 0 && !cl->detached_at) || !cl->srv) return; /* a detached always-on client is torn down like a connection */
     cl->dead_q = 1;
     cl->dead_next = cl->srv->dead_head;
     cl->srv->dead_head = cl;
@@ -216,6 +216,7 @@ void client_send(client_t *cl, const char *line) {
     size_t total = len + tl + 2, pending = client_sendq_len(cl);
     if (pending + total > (cl->sendq_max ? cl->sendq_max : (size_t)SENDQ_MAX)) {
         client_mark_quit(cl);
+        cl->soft_quit = 1;
         snprintf(cl->quit_reason, sizeof cl->quit_reason, "SendQ exceeded");
         return;
     }

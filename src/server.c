@@ -366,7 +366,7 @@ client_t *server_find_by_conn_id(server_t *srv, uint64_t conn_id) {
     return cl;
 }
 
-static void unlink_connection(server_t *srv, client_t *cl) {
+void server_unlink_connection(server_t *srv, client_t *cl) {
     /* A service pseudo-client (fd == -1, see link.h) was never linked into
      * all_clients in the first place (server_add_connection is only called
      * for a real accepted socket) -- its all_prev/all_next are both NULL
@@ -696,7 +696,8 @@ void server_remove_client(server_t *srv, client_t *cl, const char *quit_reason) 
         HASH_FIND_STR(srv->users, cl->casefold_nick, found);
         if (found == cl) HASH_DEL(srv->users, cl);
     }
-    unlink_connection(srv, cl);
+    server_unlink_connection(srv, cl);
+    if (cl->detached_at) srv->n_ghosts--;
     client_free(cl);
 }
 

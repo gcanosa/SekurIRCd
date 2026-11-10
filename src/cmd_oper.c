@@ -174,7 +174,7 @@ void cmd_kill(server_t *srv, client_t *cl, irc_message_t *msg) {
         server_notify_opers(srv, snote);
         return;
     }
-    if (target->fd < 0) {
+    if (target->fd < 0 && !target->detached_at) { /* (a detached always-on user is killable) */
         /* A service pseudo-client isn't in net.c's teardown sweep -- marking
          * it quitting would just silently mute it forever. SQUIT its link. */
         const char *p[] = {target->nick};

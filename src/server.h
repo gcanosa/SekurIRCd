@@ -96,6 +96,7 @@ typedef struct server {
     client_t *by_conn_id;   /* uthash (hh_conn), keyed by conn_id -- real (fd >= 0) connections
                               * only, see server_add_connection; O(1) worker-result lookup */
     int n_clients;          /* includes not-yet-registered connections */
+    int n_ghosts;           /* detached always-on clients (in users/by_uid, not in all_clients) */
     uint64_t next_conn_id;  /* monotonic; see client_t.conn_id / worker.h */
     int max_users_seen;     /* peak of HASH_COUNT(users), for LOCALUSERS/GLOBALUSERS/STATSCONN */
     long total_connections; /* every accept(), regardless of whether it registered */
@@ -200,6 +201,8 @@ void server_add_user(server_t *srv, client_t *cl);
  * a poll tick) owns the socket lifecycle. Safe to call exactly once per
  * client. */
 void server_remove_client(server_t *srv, client_t *cl, const char *quit_reason);
+/* Out of all_clients, the per-IP count and the conn_id index (a real connection only: no-op when fd < 0). */
+void server_unlink_connection(server_t *srv, client_t *cl);
 
 /* Send 001-005 + LUSERS + MOTD, matching server._send_welcome's order. */
 void server_send_welcome(server_t *srv, client_t *cl);

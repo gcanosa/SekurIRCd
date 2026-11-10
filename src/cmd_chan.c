@@ -146,6 +146,15 @@ static int n_channels_of(client_t *cl) {
     return n;
 }
 
+void cmd_replay_join(client_t *cl, channel_t *chan) {
+    char prefix[320], line[600];
+    client_prefix(cl, prefix, sizeof prefix);
+    if (cl->caps & CAP_EXTENDED_JOIN) irc_build(line, sizeof line, NULL, 0, prefix, "JOIN", (const char *[]){chan->name, cl->account[0] ? cl->account : "*"}, 2, cl->realname);
+    else irc_build(line, sizeof line, NULL, 0, prefix, "JOIN", (const char *[]){chan->name}, 1, NULL);
+    client_send(cl, line);
+    send_join_burst(cl, chan);
+}
+
 void cmd_force_join(server_t *srv, client_t *cl, const char *chan_name) {
     if (!irc_valid_channel(chan_name, 50)) return;
     channel_t *existing = server_find_channel(srv, chan_name);

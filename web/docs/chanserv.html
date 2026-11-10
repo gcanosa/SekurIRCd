@@ -70,12 +70,14 @@ password_hash = "scrypt$16384$8$1$&lt;salt-hex&gt;$&lt;digest-hex&gt;"   # from 
 #admins        = ["youraccount"]   # SUSPEND/UNSUSPEND/FDROP/SASET PASSWORD, full INFO
 #enforce_nicks = false             # rename unidentified users of registered nicks...
 #enforce_grace = 60                # ...after this many seconds
+#always_on     = true              # false = SET ALWAYS-ON is off on this network
+#always_on_expire_days = 30       # a detached always-on nick is kept this long (0 = until the ircd restarts)
 #max_accounts  = 0                 # 0 = unlimited
 #email_command = "/usr/local/bin/send-verification"   # mails SET EMAIL / RESETPASS codes</pre>
 <pre>/msg NickServ REGISTER &lt;password&gt; [email]       # the account is named after your nick
 /msg NickServ IDENTIFY [account] &lt;password&gt;     # or log in with SASL while connecting
 /msg NickServ GHOST &lt;nick&gt;  |  REGAIN &lt;nick&gt;   # free your nick, on any server
-/msg NickServ SET PASSWORD &lt;old&gt; &lt;new&gt;  |  SET EMAIL &lt;address&gt;  |  SET AJOIN &lt;#chan,...&gt;|OFF  |  VERIFY &lt;code&gt;
+/msg NickServ SET PASSWORD &lt;old&gt; &lt;new&gt;  |  SET EMAIL &lt;address&gt;  |  SET AJOIN &lt;#chan,...&gt;|OFF  |  SET ALWAYS-ON ON|OFF  |  VERIFY &lt;code&gt;
 /msg NickServ RESETPASS &lt;account&gt;               # mails a code to the verified address
 /msg NickServ GROUP  |  UNGROUP &lt;nick&gt;  |  CERT ADD|DEL|INFO  |  INFO [account]  |  DROP &lt;password&gt;
 /msg NickServ LISTLOGINS  |  LISTCHANS          # your logged-in connections; channels you found or have =account access in

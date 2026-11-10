@@ -1047,6 +1047,11 @@ static void broadcast_away(server_t *srv, client_t *cl) {
     server_monitor_extend(srv, cl, line, CAP_AWAY_NOTIFY);
 }
 
+void cmd_away_changed(server_t *srv, client_t *cl) {
+    broadcast_away(srv, cl);
+    netsync_user_away(srv, cl);
+}
+
 void cmd_away(server_t *srv, client_t *cl, irc_message_t *msg) {
     if (!cl->registered) { /* draft/pre-away: set the status quietly before registration finishes */
         if (!(cl->caps & CAP_PRE_AWAY)) { err_not_registered(cl); return; }

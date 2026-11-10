@@ -74,6 +74,10 @@ void cmd_rename(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_channel_rename_apply(struct server *srv, struct channel *chan, struct client *by, const char *newname, const char *reason);
 void cmd_announce_join(struct channel *chan, struct client *cl);
 void cmd_chathistory(server_t *srv, client_t *cl, irc_message_t *msg);
+/* Always-on: tell channel-mates (away-notify) and the network that cl's away state changed. */
+void cmd_away_changed(server_t *srv, client_t *cl);
+/* Always-on takeover: JOIN + topic + NAMES of a channel cl is already in, to cl alone. */
+void cmd_replay_join(client_t *cl, struct channel *chan);
 void cmd_tagmsg(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_globops(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_chgident(server_t *srv, client_t *cl, irc_message_t *msg);

@@ -167,6 +167,14 @@ typedef struct client {
     int is_away;
     char away[400];
 
+    /* Always-on (NickServ SET ALWAYS-ON, sent with SVSLOGIN): when the connection drops for a reason of its own
+     * (soft_quit), the client stays on the network detached -- fd -1, out of all_clients -- until the account
+     * reconnects with SASL and takes it over (net_takeover), always_on seconds pass, or something kills it. */
+    long always_on;         /* 0 = off, -1 = no expiry, else seconds a detached session is kept */
+    int soft_quit;          /* this quit is the connection's own doing (closed, timed out, /QUIT): may detach */
+    time_t detached_at;     /* nonzero = detached (no connection) since then */
+    int auto_away;          /* is_away was set by the detach, not by the user */
+
     time_t signon_time;
     time_t last_activity;   /* last line received */
     int ping_sent;          /* a PING is outstanding, awaiting PONG */

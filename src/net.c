@@ -32,6 +32,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
@@ -320,6 +321,7 @@ static ssize_t io_write(client_t *cl, const void *buf, size_t len) {
 static int ws_out_append(client_t *cl, const unsigned char *data, size_t len) {
     if (cl->ws_out_len + len > SENDQ_MAX) { /* a reader that never drains: same policy as sbuf */
         client_mark_quit(cl);
+        cl->soft_quit = 1;
         snprintf(cl->quit_reason, sizeof cl->quit_reason, "SendQ exceeded");
         return -1;
     }
@@ -431,7 +433,8 @@ static ssize_t ws_read(client_t *cl, void *buf, size_t len) {
         if (opcode == 8) { /* close */
             ws_send_frame(cl, 8, payload, plen >= 2 ? 2 : 0);
             client_mark_quit(cl);
-            snprintf(cl->quit_reason, sizeof cl->quit_reason, "WebSocket closed");
+            cl->soft_quit = 1;
+        snprintf(cl->quit_reason, sizeof cl->quit_reason, "WebSocket closed");
             break;
         }
         if (opcode == 9) ws_send_frame(cl, 10, payload, plen); /* ping -> pong */
@@ -831,9 +834,165 @@ static void close_client(server_t *srv, client_t *cl) {
     log_write(cl->nick[0] ? LOG_INFO : LOG_DEBUG, "conn", "disconnecting %s (%s): %s",
               cl->nick[0] ? cl->nick : "*", cl->ip, cl->quit_reason);
     int fd = cl->fd;
+    int soft = cl->soft_quit; /* before the last write: its failure must not turn a KILL into a detach */
     if (fd >= 0 && !cl->tls_handshaking) write_client(cl); /* best effort: ERROR/flood notice etc. */
+    if (soft && fd >= 0 && cl->always_on && cl->account[0] && cl->registered && !cl->is_service) {
+        net_detach_client(srv, cl, cl->quit_reason, 0);
+        return;
+    }
     server_remove_client(srv, cl, cl->quit_reason[0] ? cl->quit_reason : "Client Quit");
     if (fd >= 0) close(fd);
+}
+
+/* --- always-on ------------------------------------------------------------------------------------------------- */
+
+/* Drop cl's connection but keep the client on the network: same nick, uid, channels and modes, nothing sent to anyone
+ * but an away status (unless `quiet`: a takeover that reattaches it right away). The caller has already forgotten the
+ * fd in the event loop and flushed what it could. Opers lose oper: it was a password, not the account, that gave it. */
+void net_detach_client(server_t *srv, client_t *cl, const char *why, int quiet) {
+    log_info("conn", "detaching %s (%s): %s", cl->nick, cl->ip, why);
+    if (cl->conn_id) worker_cancel(cl->conn_id);
+    server_unlink_connection(srv, cl); /* needs fd >= 0 */
+    net_release_class(srv, cl);
+    if (cl->ssl) { SSL_free(cl->ssl); cl->ssl = NULL; }
+    if (cl->fd >= 0) close(cl->fd);
+    cl->fd = -1;
+    cl->tls_handshaking = cl->tls_want_write = 0;
+    cl->ws = 0;
+    free(cl->ws_in); free(cl->ws_out);
+    cl->ws_in = cl->ws_out = NULL;
+    cl->ws_in_len = cl->ws_in_cap = cl->ws_out_len = cl->ws_out_cap = 0;
+    cl->rbuf_len = 0;
+    cl->sbuf_off = cl->sbuf_len = 0;
+    cl->label_capture = cl->label_defer = 0;
+    cl->label_pending[0] = '\0';
+    free(cl->ml); cl->ml = NULL;
+    cl->conn_id = 0;
+    cl->quitting = cl->soft_quit = 0;
+    cl->dead_q = 0; /* already off the dead list (net_run pops before close_client) */
+    cl->quit_reason[0] = '\0';
+    cl->ping_sent = 0;
+    /* MONITOR/WATCH notify a connection; nobody is there to notify */
+    server_watch_index_drop(srv, cl);
+    if (cl->is_watcher) { srv->n_watchers--; cl->is_watcher = 0; }
+    free(cl->monitor); free(cl->watch);
+    cl->monitor = cl->watch = NULL;
+    cl->n_monitor = cl->n_watch = 0;
+    cl->detached_at = time(NULL);
+    srv->n_ghosts++;
+    unsigned before = cl->umodes;
+    if (cl->umodes & UMODE_O) {
+        cl->umodes &= ~(UMODE_O | UMODE_Q | UMODE_H | UMODE_WHOISNOTE);
+        cl->oper_name[0] = '\0';
+        cl->oper_privs = 0;
+    }
+    if (cl->umodes != before) netsync_user_modes(srv, cl);
+    if (quiet) return;
+    if (!cl->is_away) {
+        cl->is_away = cl->auto_away = 1;
+        snprintf(cl->away, sizeof cl->away, "Detached (always-on)");
+        cmd_away_changed(srv, cl);
+    }
+    char snote[400];
+    snprintf(snote, sizeof snote, "Client detached (always-on): %s (%s@%s) [%s] [%s]", cl->nick, cl->user, cl->realhost, why, cl->ip);
+    server_notify_opers(srv, snote);
+}
+
+/* The account's other session on this server that `cl` should take over: a detached one, or (if cl itself is
+ * always-on) a live one. ponytail: walks every user once per always-on login; an account index if that ever shows up. */
+static client_t *takeover_target(server_t *srv, client_t *cl) {
+    client_t *u, *tmp;
+    HASH_ITER(hh, srv->users, u, tmp)
+        if (u != cl && !u->remote && !u->is_service && u->registered && !u->quitting && u->account[0] &&
+            !strcasecmp(u->account, cl->account) && (u->detached_at || (cl->always_on && u->always_on)))
+            return u;
+    return NULL;
+}
+
+/* `cl` finished registering (SASL'd in) and the account has a session here to resume: cl becomes that client -- its
+ * nick, uid, channels, modes and visible user@host -- and the old client_t goes away without a QUIT. Only cl's own
+ * connection state (socket, TLS, caps, IP) stays. 1 if it happened (cl is then registered and welcomed). */
+int net_takeover(server_t *srv, client_t *cl) {
+    if (!cl->account[0]) return 0;
+    client_t *g = takeover_target(srv, cl);
+    if (!g) return 0;
+    if (g->fd >= 0) { /* live: its connection is closed, as if it had dropped */
+        client_send(g, "ERROR :Closing Link: Session taken over by a new connection");
+        if (!g->tls_handshaking) write_client(g);
+        client_unmark_dirty(g);
+        ev_forget(g->fd, &g->ev_mask);
+        net_detach_client(srv, g, "Session taken over", 1);
+    }
+    unsigned old_modes = g->umodes;
+    int was_away = g->is_away;
+
+    client_t *found;
+    if (cl->casefold_nick[0]) { HASH_FIND_STR(srv->users, cl->casefold_nick, found); if (found == cl) HASH_DEL(srv->users, cl); }
+    HASH_DEL(srv->users, g);
+    HASH_DELETE(hh_uid, srv->by_uid, g);
+    snprintf(cl->nick, sizeof cl->nick, "%s", g->nick);
+    snprintf(cl->casefold_nick, sizeof cl->casefold_nick, "%s", g->casefold_nick);
+    snprintf(cl->user, sizeof cl->user, "%s", g->user);
+    cl->ident_confirmed = g->ident_confirmed;
+    snprintf(cl->host, sizeof cl->host, "%s", g->host); /* what everyone already sees: no CHGHOST */
+    snprintf(cl->realname, sizeof cl->realname, "%s", g->realname);
+    snprintf(cl->uid, sizeof cl->uid, "%s", g->uid);
+    cl->nserver = g->nserver;
+    cl->nick_ts = g->nick_ts;
+    cl->umodes = (g->umodes & ~UMODE_Z) | (cl->umodes & UMODE_Z); /* +Z follows this connection's TLS */
+    cl->acct_created = g->acct_created;
+    snprintf(cl->acct_created_for, sizeof cl->acct_created_for, "%s", g->acct_created_for);
+    if (!g->auto_away && g->is_away) { cl->is_away = 1; snprintf(cl->away, sizeof cl->away, "%s", g->away); }
+    /* per-nick preferences move; per-connection ones (MONITOR, caps) are cl's own */
+    cl->silence = g->silence; cl->n_silence = g->n_silence; g->silence = NULL; g->n_silence = 0;
+    cl->accept = g->accept; cl->n_accept = g->n_accept; g->accept = NULL; g->n_accept = 0;
+    cl->channels = g->channels;
+    g->channels = NULL;
+    int nchan = 0;
+    for (chan_node_t *n = cl->channels; n; n = n->next, nchan++) {
+        member_t *m = channel_find_member(n->chan, g);
+        if (!m) continue;
+        HASH_DEL(n->chan->members, m);
+        m->client = cl;
+        m->cache_valid = 0;
+        HASH_ADD_PTR(n->chan->members, client, m);
+    }
+    HASH_ADD(hh_uid, srv->by_uid, uid, strlen(cl->uid), cl);
+    server_add_user(srv, cl);
+    /* g is now an empty husk. Not freed here: this pass may still hold an event for the socket it just lost, so it
+     * goes through the deferred teardown (quitting, nothing left to announce: no uid, nick or channels). */
+    g->registered = 0;
+    g->uid[0] = g->nick[0] = g->casefold_nick[0] = '\0';
+    g->account[0] = '\0';
+    client_mark_quit(g);
+
+    cl->registered = 1;
+    if (!cl->certfp[0]) client_cert_fingerprint(cl, cl->certfp, sizeof cl->certfp);
+    char snote[400];
+    snprintf(snote, sizeof snote, "Client reattached (always-on): %s (%s@%s) [%s]", cl->nick, cl->user, cl->realhost, cl->ip);
+    server_notify_opers(srv, snote);
+    log_info("conn", "%s (%s) resumed its always-on session", cl->nick, cl->ip);
+    server_send_welcome(srv, cl);
+    if (cl->umodes != old_modes) netsync_user_modes(srv, cl);
+    if (was_away != cl->is_away) cmd_away_changed(srv, cl);
+    for (chan_node_t *n = cl->channels; n; n = n->next) cmd_replay_join(cl, n->chan);
+    char msg[200];
+    snprintf(msg, sizeof msg, "Resumed your always-on session (%d channel%s)", nchan, nchan == 1 ? "" : "s");
+    notice_self(srv, cl, msg);
+    return 1;
+}
+
+/* Detached clients past their always_on time quit for real. Checked every 30s: they're kept for days. */
+static void expire_detached(server_t *srv, time_t now) {
+    static time_t last;
+    if (!srv->n_ghosts || now - last < 30) return;
+    last = now;
+    client_t *u, *tmp;
+    HASH_ITER(hh, srv->users, u, tmp)
+        if (u->detached_at && !u->quitting && u->always_on > 0 && now - u->detached_at >= u->always_on) {
+            snprintf(u->quit_reason, sizeof u->quit_reason, "Always-on session expired");
+            client_mark_quit(u);
+        }
 }
 
 /* Reads from `cl`, splits complete lines, and dispatches each through the
@@ -842,10 +1001,11 @@ static void close_client(server_t *srv, client_t *cl) {
 static int read_client_once(server_t *srv, client_t *cl) {
     char tmp[4096];
     ssize_t n = cl->ws ? ws_read(cl, tmp, sizeof tmp) : io_read(cl, tmp, sizeof tmp);
-    if (n == 0) { client_mark_quit(cl); snprintf(cl->quit_reason, sizeof cl->quit_reason, "Remote host closed the connection"); return 0; }
+    if (n == 0) { client_mark_quit(cl); cl->soft_quit = 1; snprintf(cl->quit_reason, sizeof cl->quit_reason, "Remote host closed the connection"); return 0; }
     if (n < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) return 0;
         client_mark_quit(cl);
+        cl->soft_quit = 1;
         snprintf(cl->quit_reason, sizeof cl->quit_reason, "Read error");
         return 0;
     }
@@ -991,7 +1151,8 @@ static void write_client(client_t *cl) {
             cl->ws_out = client_buf_shrink(cl->ws_out, cl->ws_out_len, &cl->ws_out_cap, SBUF_SHRINK_ABOVE, 0);
         } else if (w < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
             client_mark_quit(cl);
-            snprintf(cl->quit_reason, sizeof cl->quit_reason, "Write error");
+            cl->soft_quit = 1;
+        snprintf(cl->quit_reason, sizeof cl->quit_reason, "Write error");
         }
         return;
     }
@@ -1012,6 +1173,7 @@ static void write_client(client_t *cl) {
         }
     } else if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
         client_mark_quit(cl);
+        cl->soft_quit = 1;
         snprintf(cl->quit_reason, sizeof cl->quit_reason, "Write error");
     }
 }
@@ -1159,7 +1321,8 @@ static void tick(server_t *srv) {
             snprintf(cl->quit_reason, sizeof cl->quit_reason, "Registration timeout");
         } else if (idle > srv->cfg.security.ping_timeout) {
             client_mark_quit(cl);
-            snprintf(cl->quit_reason, sizeof cl->quit_reason, "Ping timeout: %d seconds", (int)idle);
+            cl->soft_quit = 1;
+        snprintf(cl->quit_reason, sizeof cl->quit_reason, "Ping timeout: %d seconds", (int)idle);
         } else if (!cl->ping_sent && idle > srv->cfg.security.ping_interval) {
             char line[200];
             snprintf(line, sizeof line, "PING :%s", srv->cfg.server.name);
@@ -1167,6 +1330,7 @@ static void tick(server_t *srv) {
             cl->ping_sent = 1;
         }
     }
+    expire_detached(srv, now);
     link_tick(srv);
     link_leaf_tick(srv);
     protection_tick(srv);
@@ -1380,7 +1544,7 @@ int net_run(server_t *srv) {
                 client_t *cl = (client_t *)(tag & ~(uintptr_t)3u); /* teardown is deferred to the end of the pass, so this is still alive */
                 if (cl->quitting) break;
                 if (e->hup && !e->r) {
-                    if (!cl->quit_reason[0]) snprintf(cl->quit_reason, sizeof cl->quit_reason, "Connection reset");
+                    if (!cl->quit_reason[0]) { cl->soft_quit = 1; snprintf(cl->quit_reason, sizeof cl->quit_reason, "Connection reset"); }
                     client_mark_quit(cl);
                     break;
                 }
@@ -1435,6 +1599,10 @@ int net_run(server_t *srv) {
     /* uthash keeps its own bucket-array bookkeeping behind the head entry, so HASH_CLEAR dereferences that head: it has to
      * run while the clients are still alive (it frees only the table, never the entries). Done after the sweep below it
      * read a freed client -- invisible normally, a crash with scribbled free memory. */
+    { /* detached always-on clients aren't in all_clients */
+        client_t *u, *tmp;
+        HASH_ITER(hh, srv->users, u, tmp) if (u->detached_at) { HASH_DEL(srv->users, u); client_free(u); }
+    }
     HASH_CLEAR(hh, srv->users);
     HASH_CLEAR(hh_conn, srv->by_conn_id);
     client_t *cl = srv->all_clients;

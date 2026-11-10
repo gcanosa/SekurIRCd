@@ -9,7 +9,7 @@
  *   SVCNICK <uid> <newnick>    SVCQUIT <uid>    SVCACCOUNT <uid> <account|*>
  *   SVCSASL <cid> S <mech> <certfp|*> <ip>  |  SVCSASL <cid> C <data>  |  SVCSASL <cid> D A
  *   SVCREGISTER <cid> <ip> <account> <email|*> :<password>
- * What we send: SVSLOGIN <id> <account|*> [regts], SVSJOIN <id> <#chan,...> (SET AJOIN, after a login), SVSNICK <id> <nick>,
+ * What we send: SVSLOGIN <id> <account|*> [regts [always-on secs]], SVSJOIN <id> <#chan,...> (SET AJOIN, after a login), SVSNICK <id> <nick>,
  * KILL <id> :reason, SVCSASL <cid> C|D ...,
  * SVCREGRESULT <cid> SUCCESS|FAIL <code> <account> :text. <id> is a UID or a SASL client id (see link.h). */
 #include "svc.h"
@@ -49,6 +49,8 @@ static struct {
     char network[128];
     int network_set; /* [nickserv] network given (else the hub's SVCINFO names it) */
     int enforce_nicks, enforce_grace;
+    int always_on;         /* SET ALWAYS-ON allowed on this network */
+    long always_on_expire; /* seconds a detached always-on nick is kept (0 = until the ircd restarts) */
     char admins[NS_MAX_ADMINS][64];
     int n_admins;
 } C;
@@ -108,6 +110,9 @@ int ns_config(toml_table_t *raw, const char *config_path, char *err, size_t errs
     C.enforce_grace = t_int(t, "enforce_grace", 60);
     if (C.enforce_grace < 5) C.enforce_grace = 5;
     if (C.enforce_grace > 600) C.enforce_grace = 600;
+    C.always_on = t_bool(t, "always_on", 1);
+    int days = t_int(t, "always_on_expire_days", 30);
+    C.always_on_expire = days > 0 ? (long)days * 86400 : 0;
     toml_array_t *ad = t ? toml_array_in(t, "admins") : NULL;
     for (int i = 0; ad && i < toml_array_nelem(ad) && C.n_admins < NS_MAX_ADMINS; i++) {
         toml_datum_t d = toml_string_at(ad, i);
@@ -235,11 +240,14 @@ static void ajoin_send(const char *uid, const char *account) {
     if (list && list[0]) wire("SVSJOIN", (const char *[]){uid, list}, 2, NULL);
 }
 
-/* Log `id` in as `account` (NULL = log out). The hub sets it on the user's own server, which announces it network-wide. */
+/* Log `id` in as `account` (NULL = log out). The hub sets it on the user's own server, which announces it network-wide.
+ * The 4th parameter is always-on: how many seconds the user's server keeps the nick after the connection drops (-1 =
+ * until it restarts), "0" = off. Older servers ignore it. Sent again by SET ALWAYS-ON to update a live login. */
 static void login(const char *id, const char *account) {
-    char ts[24];
+    char ts[24], ao[24] = "0";
     snprintf(ts, sizeof ts, "%ld", account ? accounts_created_at(&g_acc, account) : 0L);
-    if (account) wire("SVSLOGIN", (const char *[]){id, account, ts}, 3, NULL);
+    if (account && C.always_on && accounts_always_on(&g_acc, account)) snprintf(ao, sizeof ao, "%ld", C.always_on_expire ? C.always_on_expire : -1L);
+    if (account) wire("SVSLOGIN", (const char *[]){id, account, ts, ao}, 4, NULL);
     else wire("SVSLOGIN", (const char *[]){id, "*"}, 2, NULL);
     nsuser_t *u = user_by_uid(id);
     if (u) { snprintf(u->account, sizeof u->account, "%s", account ? account : ""); if (account) u->enforce_at = 0; }
@@ -925,6 +933,22 @@ static void cmd_set_ajoin(nsuser_t *u, const char *list) {
     log_info("nickserv", "%s set the AJOIN list of %s to %s", u->nick, u->account, out);
 }
 
+/* SET ALWAYS-ON ON|OFF: re-sent to every connection logged in to the account, so it takes effect at once. */
+static void cmd_set_always_on(nsuser_t *u, const char *v) {
+    int on = !strcasecmp(v, "ON") || !strcasecmp(v, "TRUE") || !strcmp(v, "1");
+    if (!on && strcasecmp(v, "OFF") && strcasecmp(v, "FALSE") && strcmp(v, "0")) { say(u->nick, "Syntax: SET ALWAYS-ON ON|OFF"); return; }
+    if (on && !C.always_on) { say(u->nick, "Always-on is disabled on this network"); return; }
+    char account[64]; /* login() rewrites u->account: never hand it its own buffer */
+    snprintf(account, sizeof account, "%s", u->account);
+    accounts_set_always_on(&g_acc, account, on);
+    nsuser_t *x, *tmp;
+    HASH_ITER(hh, g_by_uid, x, tmp) if (strcasecmp(x->account, account) == 0) login(x->uid, account);
+    if (on) sayf(u->nick, "Always-on enabled: your nick stays online when you disconnect%s. Reconnect with SASL to resume it.",
+                 C.always_on_expire ? "" : " (until the server restarts)");
+    else say(u->nick, "Always-on disabled");
+    log_info("nickserv", "%s turned always-on %s for %s", u->nick, on ? "on" : "off", account);
+}
+
 /* STATUS / ACC <nick>: is that nick logged in to the account that owns it? For bots. 0 = offline or not registered,
  * 1 = online but not logged in to its owner, 3 = logged in to its owner (2, "recognised by ACCESS", is never given:
  * there is no ACCESS list, CERT logs in outright). STATUS answers Anope's way, ACC Atheme's. */
@@ -966,7 +990,7 @@ static void cmd_listchans(nsuser_t *u) {
 
 static void cmd_help(nsuser_t *u) {
     say(u->nick, "Commands: REGISTER <password> [email], IDENTIFY [account] <password>, LOGOUT, INFO [account], "
-                 "SET PASSWORD <old> <new>, SET EMAIL <address>, SET AJOIN <#chan,...>|OFF, VERIFY <code>, GROUP, UNGROUP <nick>, GHOST <nick>, "
+                 "SET PASSWORD <old> <new>, SET EMAIL <address>, SET AJOIN <#chan,...>|OFF, SET ALWAYS-ON ON|OFF, VERIFY <code>, GROUP, UNGROUP <nick>, GHOST <nick>, "
                  "REGAIN <nick>, RESETPASS <account> [<code> <new password>], CERT ADD|DEL|INFO, DROP <password>, "
                  "STATUS|ACC [nick], LISTLOGINS, LISTCHANS");
     if (is_admin(u)) say(u->nick, "Admin commands: SUSPEND <account> [reason], UNSUSPEND <account>, FDROP <account>, SASET PASSWORD <account> <new>");
@@ -1051,6 +1075,10 @@ int ns_privmsg(const char *target, const char *from_nick, const char *text) {
         if (!u->account[0]) say(u->nick, "You must IDENTIFY first");
         else if (!b) say(u->nick, "Syntax: SET AJOIN <#channel[,#channel...]> | SET AJOIN OFF");
         else cmd_set_ajoin(u, b);
+    } else if (strcasecmp(cmd, "SET") == 0 && a && strcasecmp(a, "ALWAYS-ON") == 0) {
+        if (!u->account[0]) say(u->nick, "You must IDENTIFY first");
+        else if (!b) sayf(u->nick, "Always-on is %s. Syntax: SET ALWAYS-ON ON|OFF", accounts_always_on(&g_acc, u->account) && C.always_on ? "on" : "off");
+        else cmd_set_always_on(u, b);
     } else if (strcasecmp(cmd, "VERIFY") == 0) {
         if (!u->account[0]) say(u->nick, "You must IDENTIFY first");
         else if (!a) say(u->nick, "Syntax: VERIFY <code>");

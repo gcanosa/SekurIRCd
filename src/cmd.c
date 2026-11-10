@@ -1,4 +1,5 @@
 #include "cmd.h"
+#include "net.h"
 #include "protection.h"
 
 #include <stdio.h>
@@ -192,6 +193,7 @@ void cmd_send_welcome_if_ready(server_t *srv, client_t *cl) {
         server_notify_opers(srv, snote);
         return;
     }
+    if (net_takeover(srv, cl)) return; /* always-on: resumed the account's kept session instead of joining as new */
     cl->registered = 1;
 
     /* Must land before server_send_welcome: its post-MOTD RPL_UMODEIS line
