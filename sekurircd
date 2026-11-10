@@ -22,6 +22,23 @@ SERVICES_CONFIG=services/services.toml
 SERVICES_PIDFILE=services/services.pid
 OLD_CHANSERV_PIDFILE=services/chanserv.pid # the standalone bin/chanserv that bin/services replaced
 
+# Like an IRC join/part: "-->" a daemon came up (green), "<--" a daemon was stopped as asked (cyan -- not red, a
+# requested stop is not a problem). Green ✔ for a finished job, red ✘ only for real failures. Colour only on a terminal, and never with NO_COLOR.
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+    C_UP=$'\033[32m' C_DOWN=$'\033[36m' C_BAD=$'\033[31m' C_OK=$'\033[1;32m' C_OFF=$'\033[0m'
+else
+    C_UP='' C_DOWN='' C_BAD='' C_OK='' C_OFF=''
+fi
+# ✔ / ✘ where the terminal can show them, + / x where it can't
+case "$(locale charmap 2>/dev/null)" in UTF-8|utf8) M_OK='✔' M_BAD='✘' ;; *) M_OK='+' M_BAD='x' ;; esac
+# every marker is 4 columns wide, so the daemon names line up in one column
+say_up()   { echo "${C_UP}-->${C_OFF} $*"; }
+say_down() { echo "${C_DOWN}<--${C_OFF} $*"; }
+say_info() { echo "    $*"; }
+say_bad()  { echo " ${C_BAD}${M_BAD}${C_OFF}  $*" >&2; }
+say_ok()   { echo " ${C_OK}${M_OK}${C_OFF}  $1 ${C_OK}OK${C_OFF} -- $2"; }       # say_ok restart: "sekurircd restarted ..."
+say_fail() { echo " ${C_BAD}${M_BAD}${C_OFF}  $1 ${C_BAD}FAILED${C_OFF} -- $2" >&2; }
+
 services_configured() { [ -f "$SERVICES_CONFIG" ]; }
 
 pid_running() {
@@ -42,8 +59,36 @@ proc_running() {
     pgrep -f "$1" >/dev/null 2>&1
 }
 
+pid_of() { pid_running "$1" && cat "$1" || echo "-"; }
+
+# "services restarted (old pid 1 -> new pid 2)", or "services started (pid 2, it was not running before)"
+what_happened() {
+    local name="$1" old="$2" new="$3"
+    if [ "$old" = "-" ]; then echo "$name started (pid $new, it was not running before)"
+    else echo "$name restarted (old pid $old -> new pid $new)"; fi
+}
+
+# A daemon detaches before its pidfile is written: give it a few seconds to show up alive, then say so either way.
+confirm_up() {
+    local name="$1" pidfile="$2" log="$3"
+    for _ in $(seq 1 20); do
+        pid_running "$pidfile" && { say_up "$name running (pid $(cat "$pidfile"))"; return 0; }
+        sleep 0.25
+    done
+    say_bad "$name did NOT come up -- see $log"
+    return 1
+}
+
 require_bin() {
-    [ -x "$1" ] || { echo "$1 not found -- run 'make' first" >&2; exit 1; }
+    [ -x "$1" ] || { say_bad "$1 not found -- run 'make' first"; exit 1; }
+}
+
+# stop_one <label> <binary> <pidfile>: the binary's own --stop (it waits for the exit), shown as a part.
+stop_one() {
+    local label="$1" bin="$2" pidfile="$3" out
+    if ! pid_running "$pidfile"; then say_info "$label was not running"; return 0; fi
+    if out=$("$bin" --stop --pidfile "$pidfile" 2>&1); then say_down "$out"
+    else say_bad "$out"; return 1; fi
 }
 
 # An old bin/chanserv still running next to bin/services would put two ChanServs on the link: stop it through its own
@@ -52,68 +97,81 @@ stop_old_chanserv() {
     pid_running "$OLD_CHANSERV_PIDFILE" || return 0
     local pid
     pid=$(cat "$OLD_CHANSERV_PIDFILE")
-    echo "chanserv:  stopping the old standalone ChanServ (pid $pid) -- bin/services replaces it"
     kill "$pid" 2>/dev/null
     for _ in $(seq 1 20); do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
-    kill -0 "$pid" 2>/dev/null && { echo "chanserv:  pid $pid did not stop -- not starting services next to it" >&2; return 1; }
+    kill -0 "$pid" 2>/dev/null && { say_bad "chanserv:  pid $pid did not stop -- not starting services next to it"; return 1; }
     rm -f "$OLD_CHANSERV_PIDFILE"
+    say_down "chanserv:  stopped the old standalone ChanServ (pid $pid) -- bin/services replaces it"
 }
 
 cmd_start() {
-    [ "$(id -u)" != 0 ] || echo "WARNING: running as root is not recommended -- the daemons never need it (ports are >1024). Use an unprivileged user." >&2
+    [ "$(id -u)" != 0 ] || say_bad "running as root is not recommended -- the daemons never need it (ports are >1024). Use an unprivileged user." >&2
     require_bin "$IRCD_BIN"
     # Don't bring services up against an ircd that refused to start (port in use, bad config...).
     "$IRCD_BIN" --config "$IRCD_CONFIG" --daemon --pidfile "$IRCD_PIDFILE" || {
-        echo "sekurircd: failed to start (exit $?)" >&2
+        say_bad "sekurircd: failed to start (exit $?) -- see the message above"
         return 1
     }
+    confirm_up "sekurircd:" "$IRCD_PIDFILE" logs/sekurircd.log || return 1
     if services_configured; then
         require_bin "$SERVICES_BIN"
         stop_old_chanserv || return 1
         "$SERVICES_BIN" --config "$SERVICES_CONFIG" --daemon --pidfile "$SERVICES_PIDFILE" || {
-            echo "services:  failed to start (exit $?) -- see services/services.log" >&2
+            say_bad "services:  failed to start (exit $?) -- see services/services.log"
             return 1
         }
+        confirm_up "services: " "$SERVICES_PIDFILE" services/services.log || return 1
     else
-        echo "services:  not configured ($SERVICES_CONFIG missing) -- skipping (no NickServ/ChanServ, no SASL)"
+        say_info "services:  not configured ($SERVICES_CONFIG missing) -- skipping (no NickServ/ChanServ, no SASL)"
     fi
 }
 
 cmd_stop() {
     if services_configured; then
-        [ -x "$SERVICES_BIN" ] && pid_running "$SERVICES_PIDFILE" && "$SERVICES_BIN" --stop --pidfile "$SERVICES_PIDFILE"
+        stop_one "services: " "$SERVICES_BIN" "$SERVICES_PIDFILE"
         stop_old_chanserv
     fi
-    [ -x "$IRCD_BIN" ] && "$IRCD_BIN" --stop --pidfile "$IRCD_PIDFILE"
-    true # stopping an already-stopped daemon exits non-zero upstream; that's not a script failure
+    stop_one "sekurircd:" "$IRCD_BIN" "$IRCD_PIDFILE"
+    true # a daemon that didn't stop is reported above; restart checks again before starting anything
 }
 
 cmd_restart() {
+    local old_ircd old_svc
+    old_ircd=$(pid_of "$IRCD_PIDFILE"); old_svc=$(pid_of "$SERVICES_PIDFILE")
     cmd_stop
     for _ in $(seq 1 20); do
         pid_running "$SERVICES_PIDFILE" || pid_running "$IRCD_PIDFILE" || break
         sleep 0.5
     done
     if pid_running "$SERVICES_PIDFILE" || pid_running "$IRCD_PIDFILE"; then
-        echo "restart: old daemon(s) still running after 10s -- not starting a second copy" >&2
+        say_fail restart: "old daemon(s) still running after 10s -- not starting a second copy"
         return 1
     fi
-    cmd_start
+    cmd_start || { say_fail restart: "see the lines above"; return 1; }
+    say_ok restart: "$(what_happened sekurircd "$old_ircd" "$(pid_of "$IRCD_PIDFILE")")"
+    services_configured && say_ok restart: "$(what_happened services "$old_svc" "$(pid_of "$SERVICES_PIDFILE")")"
+    true
 }
 
 # Services only: users stay connected; NickServ/ChanServ leave and re-link (a few seconds without SASL/IDENTIFY).
 cmd_restart_services() {
-    services_configured || { echo "services:  not configured ($SERVICES_CONFIG missing)" >&2; return 1; }
-    pid_running "$IRCD_PIDFILE" || { echo "sekurircd is not running -- use '$0 start'" >&2; return 1; }
+    services_configured || { say_fail restart-services: "services are not configured ($SERVICES_CONFIG missing)"; return 1; }
+    pid_running "$IRCD_PIDFILE" || { say_fail restart-services: "sekurircd is not running, nothing was changed -- start everything with '$0 start'"; return 1; }
     require_bin "$SERVICES_BIN"
-    pid_running "$SERVICES_PIDFILE" && "$SERVICES_BIN" --stop --pidfile "$SERVICES_PIDFILE"
+    local old_svc
+    old_svc=$(pid_of "$SERVICES_PIDFILE")
+    stop_one "services: " "$SERVICES_BIN" "$SERVICES_PIDFILE"
     stop_old_chanserv || return 1
     for _ in $(seq 1 20); do pid_running "$SERVICES_PIDFILE" || break; sleep 0.5; done
-    pid_running "$SERVICES_PIDFILE" && { echo "services:  still running after 10s -- not starting a second copy" >&2; return 1; }
+    pid_running "$SERVICES_PIDFILE" && { say_fail restart-services: "services still running after 10s -- not starting a second copy"; return 1; }
     "$SERVICES_BIN" --config "$SERVICES_CONFIG" --daemon --pidfile "$SERVICES_PIDFILE" || {
-        echo "services:  failed to start (exit $?) -- see services/services.log" >&2
+        say_bad "services:  failed to start (exit $?) -- see services/services.log"
+        say_fail restart-services: "services are down, sekurircd is still running"
         return 1
     }
+    confirm_up "services: " "$SERVICES_PIDFILE" services/services.log || { say_fail restart-services: "services are down, sekurircd is still running"; return 1; }
+    say_ok restart-services: "$(what_happened services "$old_svc" "$(cat "$SERVICES_PIDFILE")")"
+    say_info "sekurircd was not touched (pid $(cat "$IRCD_PIDFILE")) -- nobody was disconnected"
 }
 
 cmd_status() {

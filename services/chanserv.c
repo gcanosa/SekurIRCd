@@ -2457,18 +2457,18 @@ static int pidfile_is_live(const char *path) {
 
 static int stop_daemon(const char *pidfile) {
     long pid = read_pidfile(pidfile);
-    if (pid <= 0) { fprintf(stderr, "services: no running daemon (can't read a pid from %s)\n", pidfile); return 1; }
+    if (pid <= 0) { fprintf(stderr, "services:  no running daemon (can't read a pid from %s)\n", pidfile); return 1; }
     if (kill((pid_t)pid, SIGTERM) != 0) {
-        fprintf(stderr, "services: could not signal process %ld: %s\n", pid, strerror(errno));
+        fprintf(stderr, "services:  could not signal process %ld: %s\n", pid, strerror(errno));
         return 1;
     }
     time_t deadline = time(NULL) + 10;
     while (time(NULL) < deadline) {
-        if (kill((pid_t)pid, 0) != 0 && errno == ESRCH) { printf("services: stopped (pid %ld)\n", pid); return 0; }
+        if (kill((pid_t)pid, 0) != 0 && errno == ESRCH) { printf("services:  stopped (pid %ld)\n", pid); return 0; }
         struct timespec ts = {0, 200000000L};
         nanosleep(&ts, NULL);
     }
-    fprintf(stderr, "services: process %ld did not stop in time\n", pid);
+    fprintf(stderr, "services:  process %ld did not stop in time\n", pid);
     return 1;
 }
 
@@ -2498,10 +2498,10 @@ int main(int argc, char **argv) {
 
     char errbuf[256];
     if (load_app_config(config_path, &g_cfg, errbuf, sizeof errbuf) != 0) {
-        fprintf(stderr, "services: %s\n", errbuf);
+        fprintf(stderr, "services:  %s\n", errbuf);
         return 2;
     }
-    if (do_check) { printf("services: configuration OK (%s)\n", config_path); return 0; }
+    if (do_check) { printf("services:  configuration OK (%s)\n", config_path); return 0; }
 
     /* Unlike sekurircd's own main.c (see its pidfile_is_live), this was
      * missing entirely -- starting chanserv twice against the same pidfile
@@ -2510,7 +2510,7 @@ int main(int argc, char **argv) {
      * peer name twice in /MAP. */
     if (pidfile[0] && pidfile_is_live(pidfile)) {
         long existing = read_pidfile(pidfile);
-        fprintf(stderr, "services: a daemon is already running (pid %ld, pidfile %s) "
+        fprintf(stderr, "services:  a daemon is already running (pid %ld, pidfile %s) "
                          "-- refusing to start a second one and clobber its pidfile\n",
                 existing, pidfile);
         return 2;
@@ -2552,7 +2552,7 @@ int main(int argc, char **argv) {
     store_index_all();
     if (ns_start(errbuf, sizeof errbuf) != 0) {
         log_error("nickserv", "%s", errbuf);
-        fprintf(stderr, "services: %s\n", errbuf);
+        fprintf(stderr, "services:  %s\n", errbuf);
         if (pidfile[0]) unlink(pidfile);
         return 1;
     }
