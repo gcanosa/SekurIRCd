@@ -59,20 +59,20 @@ static account_store_t g_acc;
 
 /* --- config ---------------------------------------------------------------------------------------------------- */
 
-static void t_str(toml_table_t *t, const char *k, char *out, size_t outsz) {
+static void t_str(toml_node_t *t, const char *k, char *out, size_t outsz) {
     if (!t) return;
-    toml_datum_t d = toml_string_in(t, k);
-    if (d.ok) { snprintf(out, outsz, "%s", d.u.s); free(d.u.s); }
+    toml_node_t *d = tx_string(t, k);
+    if (d) snprintf(out, outsz, "%s", d->u.s);
 }
-static int t_int(toml_table_t *t, const char *k, int def) {
+static int t_int(toml_node_t *t, const char *k, int def) {
     if (!t) return def;
-    toml_datum_t d = toml_int_in(t, k);
-    return d.ok && d.u.i >= INT_MIN && d.u.i <= INT_MAX ? (int)d.u.i : def;
+    toml_node_t *d = tx_int(t, k);
+    return d && d->u.int64 >= INT_MIN && d->u.int64 <= INT_MAX ? (int)d->u.int64 : def;
 }
-static int t_bool(toml_table_t *t, const char *k, int def) {
+static int t_bool(toml_node_t *t, const char *k, int def) {
     if (!t) return def;
-    toml_datum_t d = toml_bool_in(t, k);
-    return d.ok ? d.u.b : def;
+    toml_node_t *d = tx_bool(t, k);
+    return d ? d->u.boolean : def;
 }
 
 /* `rel` resolved against the directory `base` (a file path) lives in. */
@@ -85,14 +85,14 @@ static void beside(const char *base, const char *rel, char *out, size_t outsz) {
 
 static int file_exists(const char *p) { struct stat st; return stat(p, &st) == 0; }
 
-int ns_config(toml_table_t *raw, const char *config_path, char *err, size_t errsz) {
+int ns_config(toml_node_t *raw, const char *config_path, char *err, size_t errsz) {
     memset(&C, 0, sizeof C);
-    toml_table_t *t = toml_table_in(raw, "nickserv");
+    toml_node_t *t = tx_table(raw, "nickserv");
     C.enabled = t_bool(t, "enabled", 1);
     snprintf(C.nick, sizeof C.nick, "NickServ");
     snprintf(C.user, sizeof C.user, "NickServ");
     snprintf(C.host, sizeof C.host, "services.sekurircd.local");
-    toml_table_t *cs = toml_table_in(raw, "chanserv"); /* same services host as ChanServ unless set */
+    toml_node_t *cs = tx_table(raw, "chanserv"); /* same services host as ChanServ unless set */
     t_str(cs, "host", C.host, sizeof C.host);
     snprintf(C.realname, sizeof C.realname, "Nickname and Account Service");
     t_str(t, "nick", C.nick, sizeof C.nick);
@@ -113,10 +113,10 @@ int ns_config(toml_table_t *raw, const char *config_path, char *err, size_t errs
     C.always_on = t_bool(t, "always_on", 1);
     int days = t_int(t, "always_on_expire_days", 30);
     C.always_on_expire = days > 0 ? (long)days * 86400 : 0;
-    toml_array_t *ad = t ? toml_array_in(t, "admins") : NULL;
-    for (int i = 0; ad && i < toml_array_nelem(ad) && C.n_admins < NS_MAX_ADMINS; i++) {
-        toml_datum_t d = toml_string_at(ad, i);
-        if (d.ok) { snprintf(C.admins[C.n_admins++], sizeof C.admins[0], "%s", d.u.s); free(d.u.s); }
+    toml_node_t *ad = t ? tx_array(t, "admins") : NULL;
+    for (int i = 0; ad && i < tx_len(ad) && C.n_admins < NS_MAX_ADMINS; i++) {
+        toml_node_t *d = tx_at(ad, i, TOML_STRING);
+        if (d) snprintf(C.admins[C.n_admins++], sizeof C.admins[0], "%s", d->u.s);
     }
     if (!irc_valid_nick(C.nick, 30)) { snprintf(err, errsz, "[nickserv] nick is not a valid nickname"); return -1; }
     if (C.email_command[0] && C.email_command[0] != '/') { snprintf(err, errsz, "[nickserv] email_command must be an absolute path"); return -1; }

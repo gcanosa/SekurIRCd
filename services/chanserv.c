@@ -23,7 +23,7 @@
 #include "../src/log.h"
 #include "../src/proto.h"
 #include "../src/vendor/cJSON.h"
-#include "../src/vendor/toml.h"
+#include "../src/tomlx.h"
 #include "../src/vendor/uthash.h"
 
 #include <ctype.h>
@@ -92,20 +92,20 @@ static void resolve_against_dir(const char *base_path, const char *rel, char *ou
     snprintf(out, outsz, "%s", resolved);
 }
 
-static void toml_str(toml_table_t *tab, const char *key, const char *def, char *out, size_t outsz) {
-    if (tab && toml_key_exists(tab, key)) {
-        toml_datum_t d = toml_string_in(tab, key);
-        if (d.ok) { snprintf(out, outsz, "%s", d.u.s); free(d.u.s); return; }
+static void toml_str(toml_node_t *tab, const char *key, const char *def, char *out, size_t outsz) {
+    if (tab && tx_get(tab, key)) {
+        toml_node_t *d = tx_string(tab, key);
+        if (d) { snprintf(out, outsz, "%s", d->u.s); return; }
     }
     /* Callers pass the same buffer as both `def` and `out` (the field's
      * current value doubles as its default), and snprintf with overlapping
      * source and destination is undefined behaviour. */
     if (out != def) snprintf(out, outsz, "%s", def);
 }
-static int toml_int(toml_table_t *tab, const char *key, int def) {
-    if (tab && toml_key_exists(tab, key)) {
-        toml_datum_t d = toml_int_in(tab, key);
-        if (d.ok && d.u.i >= INT_MIN && d.u.i <= INT_MAX) return (int)d.u.i; /* out of range: keep the default rather than wrap */
+static int toml_int(toml_node_t *tab, const char *key, int def) {
+    if (tab && tx_get(tab, key)) {
+        toml_node_t *d = tx_int(tab, key);
+        if (d && d->u.int64 >= INT_MIN && d->u.int64 <= INT_MAX) return (int)d->u.int64; /* out of range: keep the default rather than wrap */
     }
     return def;
 }
@@ -123,18 +123,18 @@ static int load_app_config(const char *path, app_cfg_t *cfg, char *errbuf, size_
 
     FILE *fp = fopen(path, "rb");
     if (!fp) { snprintf(errbuf, errbufsz, "config file not found: %s", path); return -1; }
-    char toml_err[256];
-    toml_table_t *raw = toml_parse_file(fp, toml_err, sizeof toml_err);
+    toml_result_t res = toml_parse_file(fp);
     fclose(fp);
-    if (!raw) { snprintf(errbuf, errbufsz, "invalid TOML in %s: %s", path, toml_err); return -1; }
+    if (!res.ok) { snprintf(errbuf, errbufsz, "invalid TOML in %s: %s", path, res.errmsg); toml_free(res); return -1; }
+    toml_node_t *raw = &res.toptab;
 
-    toml_table_t *link = toml_table_in(raw, "link");
+    toml_node_t *link = tx_table(raw, "link");
     toml_str(link, "host", cfg->link_host, cfg->link_host, sizeof cfg->link_host);
     cfg->link_port = toml_int(link, "port", cfg->link_port);
     toml_str(link, "name", "", cfg->link_name, sizeof cfg->link_name);
     toml_str(link, "password", "", cfg->link_password, sizeof cfg->link_password);
 
-    toml_table_t *cs = toml_table_in(raw, "chanserv");
+    toml_node_t *cs = tx_table(raw, "chanserv");
     toml_str(cs, "nick", cfg->nick, cfg->nick, sizeof cfg->nick);
     toml_str(cs, "user", cfg->user, cfg->user, sizeof cfg->user);
     toml_str(cs, "host", cfg->host, cfg->host, sizeof cfg->host);
@@ -145,15 +145,15 @@ static int load_app_config(const char *path, app_cfg_t *cfg, char *errbuf, size_
     if (cfg->expire_days < 0) cfg->expire_days = 0;
     if (cfg->expire_days > 3650) cfg->expire_days = 3650;
 
-    toml_table_t *st = toml_table_in(raw, "storage");
+    toml_node_t *st = tx_table(raw, "storage");
     toml_str(st, "path", cfg->storage_path, cfg->storage_path, sizeof cfg->storage_path);
     cfg->backup_count = toml_int(st, "backup_count", cfg->backup_count);
     if (cfg->backup_count < 0) cfg->backup_count = 0; /* a negative count skipped store_load's loop entirely -> empty store -> next save wiped it */
     if (cfg->backup_count > 50) cfg->backup_count = 50; /* each rotation is that many rename()s */
     resolve_against_dir(path, cfg->storage_path, cfg->storage_path, sizeof cfg->storage_path);
 
-    if (ns_config(raw, path, errbuf, errbufsz) != 0) { toml_free(raw); return -1; }
-    toml_free(raw);
+    if (ns_config(raw, path, errbuf, errbufsz) != 0) { toml_free(res); return -1; }
+    toml_free(res);
     if (!cfg->link_name[0] || !cfg->link_password[0]) {
         snprintf(errbuf, errbufsz, "[link] name and password are required");
         return -1;

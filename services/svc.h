@@ -3,7 +3,7 @@
 #define SEKURIRCD_SVC_H
 
 #include "../src/proto.h"
-#include "../src/vendor/toml.h"
+#include "../src/tomlx.h"
 
 #include <stddef.h>
 
@@ -23,7 +23,7 @@ void cs_account_chans(const char *account, void (*cb)(const char *chan, const ch
 
 /* nickserv.c -------------------------------------------------------------------------------------------------- */
 /* [nickserv] from services.toml (`config_path` resolves relative paths). -1 + err on a bad value. */
-int ns_config(toml_table_t *raw, const char *config_path, char *err, size_t errsz);
+int ns_config(toml_node_t *raw, const char *config_path, char *err, size_t errsz);
 int ns_enabled(void);
 /* Load the account database. -1 + err if it exists but can't be read (never starts empty over it). */
 int ns_start(char *err, size_t errsz);

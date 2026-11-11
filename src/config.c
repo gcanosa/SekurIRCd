@@ -7,7 +7,7 @@
 #include "log.h"
 #include "proto.h"
 #include "version.h"
-#include "vendor/toml.h"
+#include "tomlx.h"
 
 #include <ctype.h>
 #include <limits.h>
@@ -53,89 +53,87 @@ static int norm_oper_modes(char *m, const char *field, char *errbuf, size_t errb
  * (channel.CHAN_MODES - MODE_ARG - {"r"}) */
 #define CHAN_FLAG_MODES "niptsmz"
 
-/* --- tomlc99 helpers -------------------------------------------------------- */
+/* --- TOML helpers (tomlc17 via tomlx.h) ------------------------------------- */
 
-static toml_table_t *cfg_get_section(toml_table_t *raw, const char *name,
+static toml_node_t *cfg_get_section(toml_node_t *raw, const char *name,
                                       char *errbuf, size_t errbufsz, int *err) {
     *err = 0;
-    toml_table_t *sec = toml_table_in(raw, name);
-    if (!sec && toml_key_exists(raw, name)) {
+    toml_node_t *sec = tx_table(raw, name);
+    if (!sec && tx_get(raw, name)) {
         snprintf(errbuf, errbufsz, "[%s] must be a table", name);
         *err = -1;
     }
     return sec;
 }
 
-static int cfg_get_bool(toml_table_t *tab, const char *key, int def, int *out,
+static int cfg_get_bool(toml_node_t *tab, const char *key, int def, int *out,
                          char *errbuf, size_t errbufsz, const char *fieldname) {
-    if (!tab || !toml_key_exists(tab, key)) { *out = def; return 0; }
-    toml_datum_t d = toml_bool_in(tab, key);
-    if (!d.ok) {
+    if (!tab || !tx_get(tab, key)) { *out = def; return 0; }
+    toml_node_t *d = tx_bool(tab, key);
+    if (!d) {
         snprintf(errbuf, errbufsz, "%s must be a boolean (true/false)", fieldname);
         return -1;
     }
-    *out = d.u.b;
+    *out = d->u.boolean;
     return 0;
 }
 
-static int cfg_get_int(toml_table_t *tab, const char *key, int def, int *out,
+static int cfg_get_int(toml_node_t *tab, const char *key, int def, int *out,
                         char *errbuf, size_t errbufsz, const char *fieldname) {
-    if (!tab || !toml_key_exists(tab, key)) { *out = def; return 0; }
-    toml_datum_t d = toml_int_in(tab, key);
-    if (!d.ok) {
+    if (!tab || !tx_get(tab, key)) { *out = def; return 0; }
+    toml_node_t *d = tx_int(tab, key);
+    if (!d) {
         snprintf(errbuf, errbufsz, "%s is not a valid int", fieldname);
         return -1;
     }
-    if (d.u.i < INT_MIN || d.u.i > INT_MAX) { /* (int) would silently wrap, e.g. port = 4294973963 -> 6667 */
+    if (d->u.int64 < INT_MIN || d->u.int64 > INT_MAX) { /* (int) would silently wrap, e.g. port = 4294973963 -> 6667 */
         snprintf(errbuf, errbufsz, "%s is out of range", fieldname);
         return -1;
     }
-    *out = (int)d.u.i;
+    *out = (int)d->u.int64;
     return 0;
 }
 
-static int cfg_get_long(toml_table_t *tab, const char *key, long def, long *out,
+static int cfg_get_long(toml_node_t *tab, const char *key, long def, long *out,
                          char *errbuf, size_t errbufsz, const char *fieldname) {
-    if (!tab || !toml_key_exists(tab, key)) { *out = def; return 0; }
-    toml_datum_t d = toml_int_in(tab, key);
-    if (!d.ok) {
+    if (!tab || !tx_get(tab, key)) { *out = def; return 0; }
+    toml_node_t *d = tx_int(tab, key);
+    if (!d) {
         snprintf(errbuf, errbufsz, "%s is not a valid int", fieldname);
         return -1;
     }
-    *out = (long)d.u.i;
+    *out = (long)d->u.int64;
     return 0;
 }
 
-static int cfg_get_double(toml_table_t *tab, const char *key, double def, double *out,
+static int cfg_get_double(toml_node_t *tab, const char *key, double def, double *out,
                            char *errbuf, size_t errbufsz, const char *fieldname) {
-    if (!tab || !toml_key_exists(tab, key)) { *out = def; return 0; }
-    toml_datum_t d = toml_double_in(tab, key);
-    if (d.ok) { *out = d.u.d; return 0; }
-    toml_datum_t di = toml_int_in(tab, key); /* a bare int literal is a valid float too */
-    if (di.ok) { *out = (double)di.u.i; return 0; }
+    if (!tab || !tx_get(tab, key)) { *out = def; return 0; }
+    toml_node_t *d = tx_get(tab, key);
+    if (d->type == TOML_FP64) { *out = d->u.fp64; return 0; }
+    if (d->type == TOML_INT64) { *out = (double)d->u.int64; return 0; } /* a bare int literal is a valid float too */
     snprintf(errbuf, errbufsz, "%s is not a valid float", fieldname);
     return -1;
 }
 
-static int cfg_get_str(toml_table_t *tab, const char *key, const char *def,
+static int cfg_get_str(toml_node_t *tab, const char *key, const char *def,
                         char *out, size_t outsz,
                         char *errbuf, size_t errbufsz, const char *fieldname) {
-    if (!tab || !toml_key_exists(tab, key)) { snprintf(out, outsz, "%s", def); return 0; }
-    toml_datum_t d = toml_string_in(tab, key);
-    if (!d.ok) {
+    if (!tab || !tx_get(tab, key)) { snprintf(out, outsz, "%s", def); return 0; }
+    toml_node_t *d = tx_string(tab, key);
+    if (!d) {
         snprintf(errbuf, errbufsz, "%s is not a valid string", fieldname);
         return -1;
     }
-    snprintf(out, outsz, "%s", d.u.s);
-    free(d.u.s);
+    snprintf(out, outsz, "%s", d->u.s);
     return 0;
 }
 
 /* A duration string ("30s", "10m", "1h", "1d", bare seconds) or "" / "0" for
  * zero, stored as seconds. */
-static int cfg_get_duration(toml_table_t *tab, const char *key, long def, long *out,
+static int cfg_get_duration(toml_node_t *tab, const char *key, long def, long *out,
                              char *errbuf, size_t errbufsz, const char *fieldname) {
-    if (!tab || !toml_key_exists(tab, key)) { *out = def; return 0; }
+    if (!tab || !tx_get(tab, key)) { *out = def; return 0; }
     char buf[32];
     if (cfg_get_str(tab, key, "", buf, sizeof buf, errbuf, errbufsz, fieldname)) return -1;
     if (buf[0] == '\0') { *out = 0; return 0; }
@@ -148,32 +146,31 @@ static int cfg_get_duration(toml_table_t *tab, const char *key, long def, long *
     return 0;
 }
 
-static int cfg_get_str_array(toml_table_t *tab, const char *key,
+static int cfg_get_str_array(toml_node_t *tab, const char *key,
                               char out[][CFG_STR], int max, int *n,
                               char *errbuf, size_t errbufsz, const char *fieldname) {
     *n = 0;
-    if (!tab || !toml_key_exists(tab, key)) return 0;
-    toml_array_t *arr = toml_array_in(tab, key);
+    if (!tab || !tx_get(tab, key)) return 0;
+    toml_node_t *arr = tx_array(tab, key);
     if (!arr) {
         snprintf(errbuf, errbufsz, "%s must be an array of strings", fieldname);
         return -1;
     }
-    int cnt = toml_array_nelem(arr);
+    int cnt = tx_len(arr);
     if (cnt > max) { /* truncating silently would e.g. leave the 65th exempt IP scanned/banned */
         snprintf(errbuf, errbufsz, "%s has too many entries (max %d)", fieldname, max);
         return -1;
     }
     for (int i = 0; i < cnt; i++) {
-        toml_datum_t d = toml_string_at(arr, i);
-        if (!d.ok) {
+        toml_node_t *d = tx_at(arr, i, TOML_STRING);
+        if (!d) {
             snprintf(errbuf, errbufsz, "%s must be an array of strings", fieldname);
             return -1;
         }
         if (i < max) {
-            snprintf(out[i], CFG_STR, "%s", d.u.s);
+            snprintf(out[i], CFG_STR, "%s", d->u.s);
             (*n)++;
         }
-        free(d.u.s);
     }
     return 0;
 }
@@ -462,7 +459,7 @@ void config_defaults(config_t *out) {
 /* [spam]. Defaults are the values already in `out`, so this can run twice --
  * once over sekurircd.toml, once over the Protection bundle file -- with the
  * second pass only overriding the keys that file actually sets. */
-static int parse_spam(toml_table_t *sp, config_t *out, char *errbuf, size_t errbufsz) {
+static int parse_spam(toml_node_t *sp, config_t *out, char *errbuf, size_t errbufsz) {
     cfg_spam_t *o = &out->spam;
     /* cfg_get_str snprintf's the default into `out`; passing `out` itself as
      * the default would be an overlapping copy, so hand it a snapshot. */
@@ -505,19 +502,19 @@ static int parse_spam(toml_table_t *sp, config_t *out, char *errbuf, size_t errb
 
 /* --- build from parsed TOML ---------------------------------------------------- */
 
-static int build_config(toml_table_t *raw, const char *path, config_t *out,
+static int build_config(toml_node_t *raw, const char *path, config_t *out,
                          char *errbuf, size_t errbufsz) {
     config_defaults(out);
     snprintf(out->path, CFG_PATH, "%s", path ? path : "");
 
     int err;
-    toml_table_t *srv = cfg_get_section(raw, "server", errbuf, errbufsz, &err);
+    toml_node_t *srv = cfg_get_section(raw, "server", errbuf, errbufsz, &err);
     if (err) return -1;
-    toml_table_t *sec = cfg_get_section(raw, "security", errbuf, errbufsz, &err);
+    toml_node_t *sec = cfg_get_section(raw, "security", errbuf, errbufsz, &err);
     if (err) return -1;
-    toml_table_t *msg = cfg_get_section(raw, "messages", errbuf, errbufsz, &err);
+    toml_node_t *msg = cfg_get_section(raw, "messages", errbuf, errbufsz, &err);
     if (err) return -1;
-    toml_table_t *log = cfg_get_section(raw, "logging", errbuf, errbufsz, &err);
+    toml_node_t *log = cfg_get_section(raw, "logging", errbuf, errbufsz, &err);
     if (err) return -1;
 
     if (cfg_get_str(srv, "name", "sekuri", out->server.name, CFG_STR, errbuf, errbufsz, "server.name")) return -1;
@@ -559,7 +556,7 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
     /* security.reserved_nicks: default differs from "absent -> []" (every
      * other array here), so it needs its own presence check like Python's
      * sec.get(..., DEFAULT_RESERVED_NICKS). */
-    if (sec && toml_key_exists(sec, "reserved_nicks")) {
+    if (sec && tx_get(sec, "reserved_nicks")) {
         if (cfg_get_str_array(sec, "reserved_nicks", out->security.reserved_nicks,
                                CFG_MAX_RESERVED_NICKS, &out->security.n_reserved_nicks,
                                errbuf, errbufsz, "security.reserved_nicks")) return -1;
@@ -722,12 +719,12 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
     if (out->logging.backup_count < 0) { snprintf(errbuf, errbufsz, "logging.backup_count must be >= 0"); return -1; }
 
     /* [[operators]] */
-    if (toml_key_exists(raw, "operators")) {
-        toml_array_t *arr = toml_array_in(raw, "operators");
+    if (tx_get(raw, "operators")) {
+        toml_node_t *arr = tx_array(raw, "operators");
         if (!arr) { snprintf(errbuf, errbufsz, "[[operators]] must be an array of tables"); return -1; }
-        int cnt = toml_array_nelem(arr);
+        int cnt = tx_len(arr);
         for (int i = 0; i < cnt; i++) {
-            toml_table_t *o = toml_table_at(arr, i);
+            toml_node_t *o = tx_at(arr, i, TOML_TABLE);
             if (!o) { snprintf(errbuf, errbufsz, "operators[%d] must be a table", i); return -1; }
             if (i >= CFG_MAX_OPERATORS) { snprintf(errbuf, errbufsz, "too many [[operators]] entries (max %d)", CFG_MAX_OPERATORS); return -1; }
             CFG_NEXT(out->operators, i, errbuf, errbufsz);
@@ -771,12 +768,12 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
                     }
                 }
                 /* privileges = [] is an explicit "none of the restricted commands" -- distinct from the key being absent (everything). */
-                if (toml_key_exists(o, "privileges") && npv == 0) op->privs = 0x100u; /* only the unrestricted commands */
+                if (tx_get(o, "privileges") && npv == 0) op->privs = 0x100u; /* only the unrestricted commands */
             }
             snprintf(fn, sizeof fn, "operators[%d].modes", i);
             if (cfg_get_str(o, "modes", "", op->modes, sizeof op->modes, errbuf, errbufsz, fn)) return -1;
             if (norm_oper_modes(op->modes, fn, errbuf, errbufsz)) return -1;
-            if (toml_key_exists(o, "modes") && !op->modes[0]) snprintf(op->modes, sizeof op->modes, "+"); /* modes = "+o": just o, not the default */
+            if (tx_get(o, "modes") && !op->modes[0]) snprintf(op->modes, sizeof op->modes, "+"); /* modes = "+o": just o, not the default */
             for (int j = 0; j < op->n_hosts; j++) {
                 if (!op->hosts[j][0] || strpbrk(op->hosts[j], " \t\r\n")) {
                     snprintf(errbuf, errbufsz, "operators[%d].hosts[%d] must be a non-empty mask with no whitespace", i, j);
@@ -789,7 +786,7 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
 
     {
         int e;
-        toml_table_t *adm = cfg_get_section(raw, "admin", errbuf, errbufsz, &e);
+        toml_node_t *adm = cfg_get_section(raw, "admin", errbuf, errbufsz, &e);
         if (e) return -1;
         if (cfg_get_str(adm, "location1", "", out->admin.location1, CFG_STR, errbuf, errbufsz, "admin.location1")) return -1;
         if (cfg_get_str(adm, "location2", "", out->admin.location2, CFG_STR, errbuf, errbufsz, "admin.location2")) return -1;
@@ -797,12 +794,12 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
     }
 
     /* [[vhosts]] */
-    if (toml_key_exists(raw, "vhosts")) {
-        toml_array_t *arr = toml_array_in(raw, "vhosts");
+    if (tx_get(raw, "vhosts")) {
+        toml_node_t *arr = tx_array(raw, "vhosts");
         if (!arr) { snprintf(errbuf, errbufsz, "[[vhosts]] must be an array of tables"); return -1; }
-        int cnt = toml_array_nelem(arr);
+        int cnt = tx_len(arr);
         for (int i = 0; i < cnt; i++) {
-            toml_table_t *v = toml_table_at(arr, i);
+            toml_node_t *v = tx_at(arr, i, TOML_TABLE);
             if (!v) { snprintf(errbuf, errbufsz, "vhosts[%d] must be a table", i); return -1; }
             if (i >= CFG_MAX_VHOSTS) { snprintf(errbuf, errbufsz, "too many [[vhosts]] entries (max %d)", CFG_MAX_VHOSTS); return -1; }
             CFG_NEXT(out->vhosts, i, errbuf, errbufsz);
@@ -827,12 +824,12 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
     }
 
     /* [[classes]] */
-    if (toml_key_exists(raw, "classes")) {
-        toml_array_t *arr = toml_array_in(raw, "classes");
+    if (tx_get(raw, "classes")) {
+        toml_node_t *arr = tx_array(raw, "classes");
         if (!arr) { snprintf(errbuf, errbufsz, "[[classes]] must be an array of tables"); return -1; }
-        int cnt = toml_array_nelem(arr);
+        int cnt = tx_len(arr);
         for (int i = 0; i < cnt; i++) {
-            toml_table_t *t = toml_table_at(arr, i);
+            toml_node_t *t = tx_at(arr, i, TOML_TABLE);
             if (!t) { snprintf(errbuf, errbufsz, "classes[%d] must be a table", i); return -1; }
             if (i >= CFG_MAX_CLASSES) { snprintf(errbuf, errbufsz, "too many [[classes]] entries (max %d)", CFG_MAX_CLASSES); return -1; }
             CFG_NEXT(out->classes, i, errbuf, errbufsz);
@@ -866,12 +863,12 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
     }
 
     /* [[webirc]] */
-    if (toml_key_exists(raw, "webirc")) {
-        toml_array_t *arr = toml_array_in(raw, "webirc");
+    if (tx_get(raw, "webirc")) {
+        toml_node_t *arr = tx_array(raw, "webirc");
         if (!arr) { snprintf(errbuf, errbufsz, "[[webirc]] must be an array of tables"); return -1; }
-        int cnt = toml_array_nelem(arr);
+        int cnt = tx_len(arr);
         for (int i = 0; i < cnt; i++) {
-            toml_table_t *w = toml_table_at(arr, i);
+            toml_node_t *w = tx_at(arr, i, TOML_TABLE);
             if (!w) { snprintf(errbuf, errbufsz, "webirc[%d] must be a table", i); return -1; }
             if (i >= CFG_MAX_WEBIRC) { snprintf(errbuf, errbufsz, "too many [[webirc]] entries (max %d)", CFG_MAX_WEBIRC); return -1; }
             CFG_NEXT(out->webirc, i, errbuf, errbufsz);
@@ -898,7 +895,7 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
     /* [channels] */
     {
         int e;
-        toml_table_t *chan = cfg_get_section(raw, "channels", errbuf, errbufsz, &e);
+        toml_node_t *chan = cfg_get_section(raw, "channels", errbuf, errbufsz, &e);
         if (e) return -1;
         if (cfg_get_bool(chan, "restrict_creation", 0, &out->channels.restrict_creation, errbuf, errbufsz, "channels.restrict_creation")) return -1;
         if (cfg_get_str_array(chan, "allowed_channels", out->channels.allowed_channels, CFG_MAX_ALLOWED_CHANNELS, &out->channels.n_allowed_channels, errbuf, errbufsz, "channels.allowed_channels")) return -1;
@@ -921,7 +918,7 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
     /* [dnsbl] */
     {
         int e;
-        toml_table_t *dns = cfg_get_section(raw, "dnsbl", errbuf, errbufsz, &e);
+        toml_node_t *dns = cfg_get_section(raw, "dnsbl", errbuf, errbufsz, &e);
         if (e) return -1;
         if (cfg_get_str_array(dns, "zones", out->dnsbl.zones, CFG_MAX_DNSBL_ZONES, &out->dnsbl.n_zones, errbuf, errbufsz, "dnsbl.zones")) return -1;
         for (int i = 0; i < out->dnsbl.n_zones; i++)
@@ -949,7 +946,7 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
     /* [spam] */
     {
         int e;
-        toml_table_t *sp = cfg_get_section(raw, "spam", errbuf, errbufsz, &e);
+        toml_node_t *sp = cfg_get_section(raw, "spam", errbuf, errbufsz, &e);
         if (e) return -1;
         if (parse_spam(sp, out, errbuf, errbufsz)) return -1;
     }
@@ -957,7 +954,7 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
     /* [websocket] */
     {
         int e;
-        toml_table_t *w = cfg_get_section(raw, "websocket", errbuf, errbufsz, &e);
+        toml_node_t *w = cfg_get_section(raw, "websocket", errbuf, errbufsz, &e);
         if (e) return -1;
         if (cfg_get_bool(w, "enabled", 0, &out->websocket.enabled, errbuf, errbufsz, "websocket.enabled")) return -1;
         if (cfg_get_int(w, "port", 8080, &out->websocket.port, errbuf, errbufsz, "websocket.port")) return -1;
@@ -973,7 +970,7 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
     /* [tls] */
     {
         int e;
-        toml_table_t *t = cfg_get_section(raw, "tls", errbuf, errbufsz, &e);
+        toml_node_t *t = cfg_get_section(raw, "tls", errbuf, errbufsz, &e);
         if (e) return -1;
         if (cfg_get_bool(t, "enabled", 0, &out->tls.enabled, errbuf, errbufsz, "tls.enabled")) return -1;
         if (cfg_get_int(t, "port", 6697, &out->tls.port, errbuf, errbufsz, "tls.port")) return -1;
@@ -1002,7 +999,7 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
     /* [links] */
     {
         int e;
-        toml_table_t *lk = cfg_get_section(raw, "links", errbuf, errbufsz, &e);
+        toml_node_t *lk = cfg_get_section(raw, "links", errbuf, errbufsz, &e);
         if (e) return -1;
         if (cfg_get_bool(lk, "enabled", 0, &out->links.enabled, errbuf, errbufsz, "links.enabled")) return -1;
         if (cfg_get_str(lk, "mode", "hub", out->links.mode, sizeof out->links.mode, errbuf, errbufsz, "links.mode")) return -1;
@@ -1018,12 +1015,12 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
         if (cfg_get_double(lk, "reconnect_delay", 5.0, &out->links.reconnect_delay, errbuf, errbufsz, "links.reconnect_delay")) return -1;
         if (cfg_get_double(lk, "reconnect_delay_max", 300.0, &out->links.reconnect_delay_max, errbuf, errbufsz, "links.reconnect_delay_max")) return -1;
 
-        if (lk && toml_key_exists(lk, "peers")) {
-            toml_array_t *arr = toml_array_in(lk, "peers");
+        if (lk && tx_get(lk, "peers")) {
+            toml_node_t *arr = tx_array(lk, "peers");
             if (!arr) { snprintf(errbuf, errbufsz, "[[links.peers]] must be an array of tables"); return -1; }
-            int cnt = toml_array_nelem(arr);
+            int cnt = tx_len(arr);
             for (int i = 0; i < cnt; i++) {
-                toml_table_t *pe = toml_table_at(arr, i);
+                toml_node_t *pe = tx_at(arr, i, TOML_TABLE);
                 if (!pe) { snprintf(errbuf, errbufsz, "links.peers[%d] must be a table", i); return -1; }
                 if (i >= CFG_MAX_LINK_PEERS) { snprintf(errbuf, errbufsz, "too many [[links.peers]] entries (max %d)", CFG_MAX_LINK_PEERS); return -1; }
                 CFG_NEXT(out->links.peers, i, errbuf, errbufsz);
@@ -1139,7 +1136,7 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
     /* [accounts] */
     {
         int e;
-        toml_table_t *acc = cfg_get_section(raw, "accounts", errbuf, errbufsz, &e);
+        toml_node_t *acc = cfg_get_section(raw, "accounts", errbuf, errbufsz, &e);
         if (e) return -1;
         if (cfg_get_bool(acc, "enabled", 0, &out->accounts.enabled, errbuf, errbufsz, "accounts.enabled")) return -1;
         if (cfg_get_str(acc, "store_file", "accounts.json", out->accounts.store_file, CFG_PATH, errbuf, errbufsz, "accounts.store_file")) return -1;
@@ -1160,7 +1157,7 @@ static int build_config(toml_table_t *raw, const char *path, config_t *out,
     /* [debug_channel] */
     {
         int e;
-        toml_table_t *dbg = cfg_get_section(raw, "debug_channel", errbuf, errbufsz, &e);
+        toml_node_t *dbg = cfg_get_section(raw, "debug_channel", errbuf, errbufsz, &e);
         if (e) return -1;
         if (cfg_get_bool(dbg, "enabled", 0, &out->debug_channel.enabled, errbuf, errbufsz, "debug_channel.enabled")) return -1;
         if (cfg_get_str(dbg, "name", "#server-debug", out->debug_channel.name, CFG_STR, errbuf, errbufsz, "debug_channel.name")) return -1;
@@ -1207,14 +1204,14 @@ static int check_duration(const char *field, const char *v, char *errbuf, size_t
     return 0;
 }
 
-static int parse_bl_zones(toml_table_t *bl, cfg_protection_t *p, char *errbuf, size_t errbufsz) {
-    if (!bl || !toml_key_exists(bl, "zone")) return 0;
-    toml_array_t *arr = toml_array_in(bl, "zone");
+static int parse_bl_zones(toml_node_t *bl, cfg_protection_t *p, char *errbuf, size_t errbufsz) {
+    if (!bl || !tx_get(bl, "zone")) return 0;
+    toml_node_t *arr = tx_array(bl, "zone");
     if (!arr) { snprintf(errbuf, errbufsz, "[[blacklist.zone]] must be an array of tables"); return -1; }
-    int cnt = toml_array_nelem(arr);
+    int cnt = tx_len(arr);
     if (cnt > CFG_MAX_BLACKLISTS) { snprintf(errbuf, errbufsz, "at most %d [[blacklist.zone]] entries are supported", CFG_MAX_BLACKLISTS); return -1; }
     for (int i = 0; i < cnt; i++) {
-        toml_table_t *t = toml_table_at(arr, i);
+        toml_node_t *t = tx_at(arr, i, TOML_TABLE);
         cfg_blacklist_t *z = &p->blacklists[p->n_blacklists];
         char type[16], replies[CFG_MAX_BL_REPLIES][CFG_STR];
         int nrep = 0;
@@ -1245,7 +1242,7 @@ static int parse_bl_zones(toml_table_t *bl, cfg_protection_t *p, char *errbuf, s
     return 0;
 }
 
-static int parse_scanner(toml_table_t *sc, cfg_protection_t *p, char *errbuf, size_t errbufsz) {
+static int parse_scanner(toml_node_t *sc, cfg_protection_t *p, char *errbuf, size_t errbufsz) {
     char dflt_a[sizeof p->scan_action], dflt_d[sizeof p->scan_ban_duration], dflt_r[CFG_STR];
     snprintf(dflt_a, sizeof dflt_a, "%s", p->scan_action);
     snprintf(dflt_d, sizeof dflt_d, "%s", p->scan_ban_duration);
@@ -1278,7 +1275,7 @@ static int parse_scanner(toml_table_t *sc, cfg_protection_t *p, char *errbuf, si
         p->n_protocols++;
     }
 
-    toml_table_t *tg = sc ? toml_table_in(sc, "target") : NULL;
+    toml_node_t *tg = sc ? tx_table(sc, "target") : NULL;
     if (cfg_get_str(tg, "ip", "", p->target_ip, sizeof p->target_ip, errbuf, errbufsz, "scanner.target.ip")) return -1;
     if (cfg_get_int(tg, "port", p->target_port, &p->target_port, errbuf, errbufsz, "scanner.target.port")) return -1;
     if (cfg_get_str_array(tg, "strings", p->target_strings, CFG_MAX_TARGET_STRINGS, &p->n_target_strings, errbuf, errbufsz, "scanner.target.strings")) return -1;
@@ -1315,16 +1312,16 @@ static int parse_scanner(toml_table_t *sc, cfg_protection_t *p, char *errbuf, si
 }
 
 /* Overlays a parsed protection file onto `out`. */
-static int apply_protection(toml_table_t *raw, config_t *out, char *errbuf, size_t errbufsz) {
+static int apply_protection(toml_node_t *raw, config_t *out, char *errbuf, size_t errbufsz) {
     cfg_security_t *sec = &out->security;
     cfg_protection_t *p = &out->protection;
     int e;
 
-    toml_table_t *ex = cfg_get_section(raw, "exempt", errbuf, errbufsz, &e);
+    toml_node_t *ex = cfg_get_section(raw, "exempt", errbuf, errbufsz, &e);
     if (e) return -1;
     if (cfg_get_str_array(ex, "ips", p->exempt, CFG_MAX_EXEMPTS, &p->n_exempt, errbuf, errbufsz, "exempt.ips")) return -1;
 
-    toml_table_t *cn = cfg_get_section(raw, "connection", errbuf, errbufsz, &e);
+    toml_node_t *cn = cfg_get_section(raw, "connection", errbuf, errbufsz, &e);
     if (e) return -1;
     char dur[sizeof sec->connect_flood_kline_duration];
     snprintf(dur, sizeof dur, "%s", sec->connect_flood_kline_duration);
@@ -1337,18 +1334,18 @@ static int apply_protection(toml_table_t *raw, config_t *out, char *errbuf, size
     if (sec->max_connections_per_ip < 0) { snprintf(errbuf, errbufsz, "connection.max_connections_per_ip must be >= 0 (0 = unlimited)"); return -1; }
     if (check_duration("connection.connect_flood_ban_duration", sec->connect_flood_kline_duration, errbuf, errbufsz)) return -1;
 
-    toml_table_t *fl = cfg_get_section(raw, "flood", errbuf, errbufsz, &e);
+    toml_node_t *fl = cfg_get_section(raw, "flood", errbuf, errbufsz, &e);
     if (e) return -1;
     if (cfg_get_int(fl, "max_msgs", sec->flood_max_msgs, &sec->flood_max_msgs, errbuf, errbufsz, "flood.max_msgs")) return -1;
     if (cfg_get_double(fl, "window", sec->flood_window, &sec->flood_window, errbuf, errbufsz, "flood.window")) return -1;
     if (sec->flood_max_msgs < 1) { snprintf(errbuf, errbufsz, "flood.max_msgs must be >= 1"); return -1; }
     if (sec->flood_window <= 0) { snprintf(errbuf, errbufsz, "flood.window must be > 0"); return -1; }
 
-    toml_table_t *sp = cfg_get_section(raw, "spam", errbuf, errbufsz, &e);
+    toml_node_t *sp = cfg_get_section(raw, "spam", errbuf, errbufsz, &e);
     if (e) return -1;
     if (sp && parse_spam(sp, out, errbuf, errbufsz)) return -1;
 
-    toml_table_t *bl = cfg_get_section(raw, "blacklist", errbuf, errbufsz, &e);
+    toml_node_t *bl = cfg_get_section(raw, "blacklist", errbuf, errbufsz, &e);
     if (e) return -1;
     if (bl) {
         p->bl_configured = 1;
@@ -1368,7 +1365,7 @@ static int apply_protection(toml_table_t *raw, config_t *out, char *errbuf, size
             return -1;
         }
     }
-    toml_table_t *sc = cfg_get_section(raw, "scanner", errbuf, errbufsz, &e);
+    toml_node_t *sc = cfg_get_section(raw, "scanner", errbuf, errbufsz, &e);
     if (e) return -1;
     if (sc && parse_scanner(sc, p, errbuf, errbufsz)) return -1;
     return 0;
@@ -1409,21 +1406,21 @@ static int load_protection_file(config_t *out, char *errbuf, size_t errbufsz) {
     if (config_protection_path(out, path, sizeof path)) {
         FILE *fp = fopen(path, "rb");
         if (fp) { /* a missing file is fine: enabling the bundle is "copy the template" */
-            char toml_err[256];
-            toml_table_t *raw = toml_parse_file(fp, toml_err, sizeof toml_err);
+            toml_result_t res = toml_parse_file(fp);
             fclose(fp);
-            if (!raw) {
-                snprintf(errbuf, errbufsz, "invalid TOML in %s: %s", path, toml_err);
+            if (!res.ok) {
+                snprintf(errbuf, errbufsz, "invalid TOML in %s: %s", path, res.errmsg);
+                toml_free(res);
                 return -1;
             }
             out->protection.loaded = 1;
-            int rc = apply_protection(raw, out, errbuf, errbufsz);
+            int rc = apply_protection(&res.toptab, out, errbuf, errbufsz);
             if (rc) {
                 char msg[512];
                 snprintf(msg, sizeof msg, "%s: %s", path, errbuf);
                 snprintf(errbuf, errbufsz, "%s", msg);
             }
-            toml_free(raw);
+            toml_free(res);
             if (rc) return -1;
         }
     }
@@ -1459,16 +1456,16 @@ int config_load(const char *path, config_t *out, char *errbuf, size_t errbufsz) 
         snprintf(errbuf, errbufsz, "config file not found: %s", resolved);
         return -1;
     }
-    char toml_err[256];
-    toml_table_t *raw = toml_parse_file(fp, toml_err, sizeof toml_err);
+    toml_result_t res = toml_parse_file(fp);
     fclose(fp);
-    if (!raw) {
-        snprintf(errbuf, errbufsz, "invalid TOML in %s: %s", resolved, toml_err);
+    if (!res.ok) {
+        snprintf(errbuf, errbufsz, "invalid TOML in %s: %s", resolved, res.errmsg);
+        toml_free(res);
         return -1;
     }
 
-    int rc = build_config(raw, resolved, out, errbuf, errbufsz);
-    toml_free(raw);
+    int rc = build_config(&res.toptab, resolved, out, errbuf, errbufsz);
+    toml_free(res);
     if (rc == 0) rc = load_protection_file(out, errbuf, errbufsz);
     if (rc != 0) config_free(out); /* build_config started from defaults, so whatever it allocated is ours to drop */
     return rc;

@@ -271,7 +271,7 @@ copy with `--config`.
   randomness, and the TLS listener. On macOS: `brew install openssl@3` (the
   Makefile finds it automatically via `pkg-config` or the usual Homebrew
   prefixes). On Linux: `apt install libssl-dev` or equivalent.
-- Everything else (`tomlc99`, `cJSON`, `uthash`/`utlist`) is vendored in
+- Everything else (`tomlc17`, `cJSON`, `uthash`/`utlist`) is vendored in
   `src/vendor/` -- no other install step.
 
 ## Quick start
