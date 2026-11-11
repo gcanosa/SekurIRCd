@@ -272,6 +272,10 @@ const char *config_scan_proto_name(int type) {
     return "?";
 }
 
+void config_alwayson_path(const config_t *cfg, char *out, size_t outsz) {
+    resolve_against_config_dir(cfg, "alwayson.json", out, outsz); /* ponytail: fixed name next to the config, a key if anyone needs another */
+}
+
 int config_history_path(const config_t *cfg, char *out, size_t outsz) {
     resolve_against_config_dir(cfg, cfg->messages.history_file, out, outsz);
     return 1;

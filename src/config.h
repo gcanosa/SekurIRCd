@@ -386,6 +386,8 @@ int config_scan_proto_parse(const char *name);
 const char *config_scan_proto_name(int type);
 /* Returns 1 and fills `out`, or 0 (out untouched) if accounts are disabled. */
 int config_history_path(const config_t *cfg, char *out, size_t outsz);
+/* Always-on sessions kept across restarts (net.c): alwayson.json next to the config. */
+void config_alwayson_path(const config_t *cfg, char *out, size_t outsz);
 int config_accounts_path(const config_t *cfg, char *out, size_t outsz);
 void config_tls_cert_path(const config_t *cfg, char *out, size_t outsz);
 void config_tls_key_path(const config_t *cfg, char *out, size_t outsz);

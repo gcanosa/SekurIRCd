@@ -150,3 +150,42 @@ def test_detached_user_stays_on_the_rest_of_the_network():
         assert not any(" JOIN " in l or " QUIT" in l for l in far.drain(0.5))
     finally:
         n.stop()
+
+
+def test_survives_ircd_restart():
+    """Detached and still-connected always-on users both come back (detached) after a restart, resumable as before."""
+    with Server(cfg=ACC) as s:
+        a, _ = setup(s, "aorst", "aorstacct", watcher=False)
+        a.say("MODE #ao +v aorst", 0.3)  # a rank that has to come back too (it opped itself by creating #ao)
+        a.close()
+        time.sleep(0.5)
+        live, _ = setup(s, "aolive2", "aolive2acct", watcher=False)  # still connected when the server stops
+        s.restart()
+        b = s.client("aorstw")
+        names = " ".join(l for l in b.say("NAMES #ao", 0.6) if " 353 " in l)
+        assert "@+aorst" in names or "@aorst" in names, "the detached user is back in #ao with its op: %r" % names
+        assert "aolive2" in names, "the connected one is kept too: %r" % names
+        assert any(" 301 " in l and "Detached" in l for l in b.say("WHOIS aolive2", 0.6)), "and is now detached"
+        c = sasl_connect(s, "aorstnew", "aorstacct", "password1")
+        burst = c.drain(1.0) + c.lines
+        assert any(" 001 aorst " in l for l in burst), "resumed under the kept nick after the restart: %r" % burst[:3]
+        assert any("Resumed your always-on session (1 channel)" in l for l in burst), burst
+
+
+def test_expiry_counts_through_restarts():
+    """The detach time is saved, not reset by a restart: a session past its expiry doesn't come back."""
+    import json, os
+    with Server(cfg={"accounts": {**ACC["accounts"], "always_on_expire_days": 1}}) as s:
+        a, _ = setup(s, "aoold", "aooldacct", watcher=False)
+        a.close()
+        time.sleep(0.5)
+        s.proc.terminate()
+        s.proc.wait(8)
+        path = os.path.join(s.dir, "alwayson.json")
+        saved = json.load(open(path))
+        assert [e["nick"] for e in saved] == ["aoold"] and saved[0]["always_on"] == 86400, saved
+        saved[0]["detached_at"] -= 86400 + 60  # pretend it detached over a day ago
+        json.dump(saved, open(path, "w"))
+        s.start()
+        b = s.client("aooldw")
+        assert not any(" 311 " in l for l in b.say("WHOIS aoold", 0.6)), "expired while down: not restored"

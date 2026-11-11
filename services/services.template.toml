@@ -89,8 +89,8 @@ realname = "Channel Registration Service"
 # Always-on: users can run /msg NickServ SET ALWAYS-ON ON so their nick stays
 # online (in its channels, marked away) after they disconnect, and reconnecting
 # with SASL to the same server resumes it. false turns the command off.
-# always_on_expire_days: how long a disconnected always-on nick is kept
-# (0 = until the ircd restarts).
+# always_on_expire_days: how long a disconnected always-on nick is kept, counted
+# from when it disconnected, also across ircd restarts (0 = never expires).
 #always_on = true
 #always_on_expire_days = 30
 

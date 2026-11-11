@@ -8,6 +8,7 @@
 /config/protection.toml
 /config/accounts.json
 /config/klines.json
+/config/alwayson.json
 /config/tls/
 /config/*.json.bak*
 # live MOTD/rules/spam filters: the admin's (and the server's), created from config/*.template.* when missing

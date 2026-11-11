@@ -17,6 +17,8 @@
 #include "log.h"
 #include "server.h"
 #include "worker.h"
+#include "netsync.h"
+#include "vendor/cJSON.h"
 #include "ws.h"
 
 #include <openssl/err.h>
@@ -995,6 +997,135 @@ static void expire_detached(server_t *srv, time_t now) {
         }
 }
 
+/* Always-on sessions survive a restart: every local always-on user (detached or still connected) is written to
+ * alwayson.json, and the next start brings each back detached. A connected one counts as detached from the moment it
+ * was saved; a detached one keeps its original detach time, so the expiry clock runs through restarts and downtime. */
+static int alwayson_wanted(const client_t *u) {
+    return !u->remote && !u->is_service && u->registered && !u->quitting && u->account[0] && u->always_on && u->uid[0];
+}
+
+static void str_item(cJSON *o, const char *k, const char *v) { cJSON_AddStringToObject(o, k, v); }
+static const char *get_str(const cJSON *o, const char *k) {
+    const cJSON *v = cJSON_GetObjectItemCaseSensitive(o, k);
+    return cJSON_IsString(v) ? v->valuestring : "";
+}
+static double get_num(const cJSON *o, const char *k) {
+    const cJSON *v = cJSON_GetObjectItemCaseSensitive(o, k);
+    return cJSON_IsNumber(v) ? v->valuedouble : 0;
+}
+
+/* ponytail: rewrites the whole (small) file every 60s while anyone is always-on; crash loses at most that much. */
+static void alwayson_save(server_t *srv, int force) {
+    static time_t last;
+    static int had; /* the last write had entries: an empty one must still replace it */
+    time_t now = time(NULL);
+    if (!force && now - last < 60) return;
+    last = now;
+    cJSON *arr = cJSON_CreateArray();
+    int n = 0;
+    client_t *u, *tmp;
+    HASH_ITER(hh, srv->users, u, tmp) {
+        if (!alwayson_wanted(u)) continue;
+        cJSON *o = cJSON_CreateObject();
+        str_item(o, "nick", u->nick); str_item(o, "user", u->user); str_item(o, "host", u->host);
+        str_item(o, "realhost", u->realhost); str_item(o, "ip", u->ip); str_item(o, "realname", u->realname);
+        str_item(o, "account", u->account); str_item(o, "acct_created_for", u->acct_created_for);
+        if (u->is_away && !u->auto_away) str_item(o, "away", u->away);
+        cJSON_AddNumberToObject(o, "acct_created", (double)u->acct_created);
+        cJSON_AddNumberToObject(o, "nick_ts", (double)u->nick_ts);
+        cJSON_AddNumberToObject(o, "umodes", (double)(u->umodes & ~(UMODE_O | UMODE_Q | UMODE_H | UMODE_WHOISNOTE)));
+        cJSON_AddNumberToObject(o, "ident_confirmed", u->ident_confirmed);
+        cJSON_AddNumberToObject(o, "always_on", (double)u->always_on);
+        cJSON_AddNumberToObject(o, "detached_at", (double)(u->detached_at ? u->detached_at : now));
+        cJSON *chans = cJSON_AddArrayToObject(o, "channels");
+        for (chan_node_t *c = u->channels; c; c = c->next) {
+            member_t *m = channel_find_member(c->chan, u);
+            cJSON *e = cJSON_CreateArray();
+            cJSON_AddItemToArray(e, cJSON_CreateString(c->chan->name));
+            cJSON_AddItemToArray(e, cJSON_CreateNumber(m ? m->rank : 0));
+            cJSON_AddItemToArray(chans, e);
+        }
+        cJSON_AddItemToArray(arr, o);
+        n++;
+    }
+    if (n || had || force) {
+        char path[CFG_PATH], tmpath[CFG_PATH + 8];
+        config_alwayson_path(&srv->cfg, path, sizeof path);
+        snprintf(tmpath, sizeof tmpath, "%s.tmp", path);
+        char *txt = cJSON_PrintUnformatted(arr);
+        int fd = open(tmpath, O_WRONLY | O_CREAT | O_TRUNC, 0600); /* IPs and real hosts */
+        int ok = fd >= 0 && txt && write(fd, txt, strlen(txt)) == (ssize_t)strlen(txt) && fsync(fd) == 0;
+        if (fd >= 0 && close(fd) != 0) ok = 0;
+        if (ok && rename(tmpath, path) == 0) had = n;
+        else { unlink(tmpath); log_error("conn", "could not write %s -- always-on sessions may not survive a restart", path); }
+        free(txt);
+    }
+    cJSON_Delete(arr);
+}
+
+static void alwayson_restore(server_t *srv) {
+    char path[CFG_PATH];
+    config_alwayson_path(&srv->cfg, path, sizeof path);
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return;
+    char *buf = NULL;
+    long len = fseek(fp, 0, SEEK_END) == 0 ? ftell(fp) : -1;
+    if (len > 0 && len < (16L << 20) && fseek(fp, 0, SEEK_SET) == 0 && (buf = malloc((size_t)len + 1))) buf[fread(buf, 1, (size_t)len, fp)] = '\0';
+    fclose(fp);
+    cJSON *arr = buf ? cJSON_Parse(buf) : NULL;
+    free(buf);
+    time_t now = time(NULL);
+    int restored = 0, expired = 0;
+    cJSON *o;
+    cJSON_ArrayForEach(o, arr) {
+        const char *nick = get_str(o, "nick"), *account = get_str(o, "account");
+        long always_on = (long)get_num(o, "always_on");
+        time_t detached_at = (time_t)get_num(o, "detached_at");
+        if (!account[0] || !always_on || !detached_at || !irc_valid_nick(nick, NICKLEN - 1) || server_find_user(srv, nick)) continue;
+        if (always_on > 0 && now - detached_at >= always_on) { expired++; continue; } /* ran out while we were down */
+        client_t *cl = client_new(-1, srv);
+        if (!cl) break;
+        snprintf(cl->nick, sizeof cl->nick, "%s", nick);
+        irc_casefold(cl->casefold_nick, sizeof cl->casefold_nick, nick);
+        snprintf(cl->user, sizeof cl->user, "%s", get_str(o, "user"));
+        snprintf(cl->host, sizeof cl->host, "%s", get_str(o, "host"));
+        snprintf(cl->realhost, sizeof cl->realhost, "%s", get_str(o, "realhost"));
+        snprintf(cl->ip, sizeof cl->ip, "%s", get_str(o, "ip"));
+        snprintf(cl->realname, sizeof cl->realname, "%s", get_str(o, "realname"));
+        snprintf(cl->account, sizeof cl->account, "%s", account);
+        snprintf(cl->acct_created_for, sizeof cl->acct_created_for, "%s", get_str(o, "acct_created_for"));
+        cl->acct_created = (long)get_num(o, "acct_created");
+        cl->nick_ts = (long)get_num(o, "nick_ts");
+        cl->umodes = (unsigned)get_num(o, "umodes") | UMODE_R;
+        cl->ident_confirmed = (int)get_num(o, "ident_confirmed");
+        cl->always_on = always_on;
+        cl->detached_at = detached_at;
+        cl->got_nick = cl->got_user = cl->registered = 1;
+        const char *away = get_str(o, "away");
+        cl->is_away = 1;
+        cl->auto_away = !away[0];
+        snprintf(cl->away, sizeof cl->away, "%s", away[0] ? away : "Detached (always-on)");
+        server_add_user(srv, cl);
+        netsync_assign_uid(srv, cl); /* no links yet: the first burst introduces it */
+        srv->n_ghosts++;
+        cJSON *e;
+        cJSON_ArrayForEach(e, cJSON_GetObjectItemCaseSensitive(o, "channels")) {
+            const char *name = cJSON_IsString(cJSON_GetArrayItem(e, 0)) ? cJSON_GetArrayItem(e, 0)->valuestring : "";
+            if (!irc_valid_channel(name, 50)) continue;
+            channel_t *chan = server_get_or_create_channel(srv, name);
+            if (!chan || channel_find_member(chan, cl)) continue;
+            member_t *m = channel_add_member(chan, cl);
+            if (!m) { server_maybe_drop_channel(srv, chan); continue; }
+            m->rank = cJSON_IsNumber(cJSON_GetArrayItem(e, 1)) ? cJSON_GetArrayItem(e, 1)->valueint : 0; /* the status it had */
+            if (server_attach_membership(cl, chan) != 0) { channel_remove_member(chan, cl); server_maybe_drop_channel(srv, chan); }
+        }
+        restored++;
+    }
+    cJSON_Delete(arr);
+    if (restored || expired) log_info("conn", "always-on: restored %d detached session(s) from %s%s", restored, path,
+                                      expired ? " (some had expired while the server was down)" : "");
+}
+
 /* Reads from `cl`, splits complete lines, and dispatches each through the
  * max_line_length/max_params/flood-guard choke point -- the C equivalent of
  * server._read_loop's per-line validation before commands.handle. */
@@ -1331,6 +1462,7 @@ static void tick(server_t *srv) {
         }
     }
     expire_detached(srv, now);
+    alwayson_save(srv, 0);
     link_tick(srv);
     link_leaf_tick(srv);
     protection_tick(srv);
@@ -1451,6 +1583,7 @@ int net_run(server_t *srv) {
     apply_v6_listeners(srv);
     if (srv->cfg.links.autoconnect) link_dial_peers(srv, 1, NULL); /* every dial-out peer, now (later attempts back off per peer in link_leaf_tick) */
 
+    alwayson_restore(srv); /* before any link bursts, so they carry the restored sessions */
     server_install_debug_log_hook(srv);
     time_t last_tick = time(NULL);
 
@@ -1599,6 +1732,7 @@ int net_run(server_t *srv) {
     /* uthash keeps its own bucket-array bookkeeping behind the head entry, so HASH_CLEAR dereferences that head: it has to
      * run while the clients are still alive (it frees only the table, never the entries). Done after the sweep below it
      * read a freed client -- invisible normally, a crash with scribbled free memory. */
+    alwayson_save(srv, 1); /* every always-on user, connected or not, comes back detached on the next start */
     { /* detached always-on clients aren't in all_clients */
         client_t *u, *tmp;
         HASH_ITER(hh, srv->users, u, tmp) if (u->detached_at) { HASH_DEL(srv->users, u); client_free(u); }

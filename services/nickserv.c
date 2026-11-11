@@ -50,7 +50,7 @@ static struct {
     int network_set; /* [nickserv] network given (else the hub's SVCINFO names it) */
     int enforce_nicks, enforce_grace;
     int always_on;         /* SET ALWAYS-ON allowed on this network */
-    long always_on_expire; /* seconds a detached always-on nick is kept (0 = until the ircd restarts) */
+    long always_on_expire; /* seconds a detached always-on nick is kept (0 = never expires) */
     char admins[NS_MAX_ADMINS][64];
     int n_admins;
 } C;
@@ -944,7 +944,7 @@ static void cmd_set_always_on(nsuser_t *u, const char *v) {
     nsuser_t *x, *tmp;
     HASH_ITER(hh, g_by_uid, x, tmp) if (strcasecmp(x->account, account) == 0) login(x->uid, account);
     if (on) sayf(u->nick, "Always-on enabled: your nick stays online when you disconnect%s. Reconnect with SASL to resume it.",
-                 C.always_on_expire ? "" : " (until the server restarts)");
+                 C.always_on_expire ? "" : " (no expiry)");
     else say(u->nick, "Always-on disabled");
     log_info("nickserv", "%s turned always-on %s for %s", u->nick, on ? "on" : "off", account);
 }
