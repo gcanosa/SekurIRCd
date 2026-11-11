@@ -989,11 +989,65 @@ static void cmd_listchans(nsuser_t *u) {
 }
 
 static void cmd_help(nsuser_t *u) {
-    say(u->nick, "Commands: REGISTER <password> [email], IDENTIFY [account] <password>, LOGOUT, INFO [account], "
-                 "SET PASSWORD <old> <new>, SET EMAIL <address>, SET AJOIN <#chan,...>|OFF, SET ALWAYS-ON ON|OFF, VERIFY <code>, GROUP, UNGROUP <nick>, GHOST <nick>, "
-                 "REGAIN <nick>, RESETPASS <account> [<code> <new password>], CERT ADD|DEL|INFO, DROP <password>, "
-                 "STATUS|ACC [nick], LISTLOGINS, LISTCHANS");
-    if (is_admin(u)) say(u->nick, "Admin commands: SUSPEND <account> [reason], UNSUSPEND <account>, FDROP <account>, SASET PASSWORD <account> <new>");
+    static const char *const lines[] = {
+        "NickServ commands:",
+        "  Your account is named after the nick you REGISTER with. Logging in (IDENTIFY, or SASL when you connect)",
+        "  is what ChanServ, AJOIN and always-on go by. Commands below marked * need you to be logged in.",
+        " Account:",
+        "  REGISTER <password> [email]   -- register your current nick as an account and log in to it.",
+        "                                   Password: 6-199 characters. With an email, a code is mailed",
+        "                                   to you -- confirm it with VERIFY",
+        "  IDENTIFY [account] <password> -- log in (ID works too). Without an account, your current nick",
+        "                                   is used. Repeated wrong passwords lock you out for a minute",
+        "  LOGOUT                      * -- log out of your account (you keep your nick)",
+        "  INFO [account]                -- when an account was registered; for your own account also",
+        "                                   email, grouped nicks, AJOIN, certificate and last login",
+        "  VERIFY <code>               * -- confirm your email address with the code that was mailed",
+        "  RESETPASS <account>           -- forgot your password? Mails a code to the account's verified",
+        "                                   email address, then:",
+        "  RESETPASS <account> <code> <new password>",
+        "                                -- set a new password with that code (valid for an hour). Every",
+        "                                   session logged in with the old password is logged out",
+        "  DROP <password>             * -- permanently delete your account. Cannot be undone",
+        " Settings:",
+        "  SET PASSWORD <current> <new>* -- change your password",
+        "  SET EMAIL <address>         * -- change your email address (a new VERIFY code is mailed)",
+        "  SET AJOIN <#chan[,#chan...]>* -- channels you join automatically at every login",
+        "  SET AJOIN OFF               * -- clear that list. Bans, +i, +k and +l still apply as usual",
+        "  SET ALWAYS-ON ON|OFF        * -- keep your nick online and in your channels when you",
+        "                                   disconnect; reconnect with SASL to pick it up again.",
+        "                                   SET ALWAYS-ON alone shows whether it is on",
+        "  CERT ADD                    * -- bind the TLS client certificate you're connected with, so",
+        "                                   SASL EXTERNAL logs you in without a password",
+        "  CERT DEL                    * -- remove it (SASL EXTERNAL stops working for the account)",
+        "  CERT INFO                   * -- show the fingerprint on file",
+        " Nicks:",
+        "  GROUP                       * -- add the nick you are using now to your account (up to 10),",
+        "                                   so it is protected and logs in to the same account",
+        "  UNGROUP <nick>              * -- remove a nick from your account",
+        "  GHOST <nick>                * -- disconnect a session using one of your nicks (e.g. a stale",
+        "                                   connection after a dropped link)",
+        "  REGAIN <nick>               * -- take one of your nicks back: whoever has it is renamed to a",
+        "                                   guest nick and you switch to it",
+        " Lookups:",
+        "  STATUS [nick]                 -- is <nick> logged in to the account that owns it?",
+        "                                   Reply: STATUS <nick> <0|1|3> <account>. 0 = offline or not",
+        "                                   registered, 1 = online but not logged in, 3 = logged in",
+        "  ACC [nick]                    -- the same in Atheme's format: <nick> ACC <0|1|3>",
+        "  LISTLOGINS                  * -- every connection logged in to your account right now",
+        "  LISTCHANS                   * -- channels where you are founder or on the access list",
+        "  HELP                          -- this list",
+    };
+    static const char *const admin[] = {
+        " Services admin commands:",
+        "  SUSPEND <account> [reason]    -- lock an account: it is logged out everywhere and cannot log in",
+        "  UNSUSPEND <account>           -- lift a suspension",
+        "  FDROP <account>               -- delete an account without its password",
+        "  SASET PASSWORD <account> <new password>",
+        "                                -- set an account's password",
+    };
+    for (size_t i = 0; i < sizeof lines / sizeof *lines; i++) say(u->nick, lines[i]);
+    if (is_admin(u)) for (size_t i = 0; i < sizeof admin / sizeof *admin; i++) say(u->nick, admin[i]);
 }
 
 int ns_privmsg(const char *target, const char *from_nick, const char *text) {
