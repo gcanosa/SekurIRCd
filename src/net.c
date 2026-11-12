@@ -403,10 +403,11 @@ static ssize_t ws_read(client_t *cl, void *buf, size_t len) {
         char resp[256];
         if (ws_parse_request(req, &wr) != 0) ws_reject(cl, "400 Bad Request");
         else if (!ws_origin_ok(srv, wr.origin)) ws_reject(cl, "403 Forbidden");
-        else if (ws_build_response(wr.key, wr.text_proto, resp, sizeof resp) < 0) ws_reject(cl, "500 Internal Server Error");
+        else if (ws_build_response(wr.key, wr.proto, resp, sizeof resp) < 0) ws_reject(cl, "500 Internal Server Error");
         else {
             ws_out_append(cl, (const unsigned char *)resp, strlen(resp));
             cl->ws = 2;
+            cl->ws_bin = wr.proto == WS_PROTO_BINARY;
             /* Behind a trusted reverse proxy the socket peer is the proxy: believe its forwarded client address,
              * and that the browser reached it over TLS (+z, so +z channels and +Z users accept it). */
             for (int i = 0; i < srv->cfg.websocket.n_trusted_proxies; i++) {
@@ -455,7 +456,7 @@ static ssize_t ws_read(client_t *cl, void *buf, size_t len) {
     return -1;
 }
 
-/* Moves the complete lines queued in sbuf into ws_out as text frames. */
+/* Moves the complete lines queued in sbuf into ws_out as text frames (binary ones for binary.ircv3.net). */
 static void ws_encode_pending(client_t *cl) {
     size_t pos = cl->sbuf_off;
     while (pos < cl->sbuf_len) {
@@ -464,7 +465,7 @@ static void ws_encode_pending(client_t *cl) {
         size_t end = (size_t)(nl - cl->sbuf);
         size_t l = end - pos;
         if (l > 0 && cl->sbuf[end - 1] == '\r') l--;
-        ws_send_frame(cl, 1, (const unsigned char *)cl->sbuf + pos, l);
+        ws_send_frame(cl, cl->ws_bin ? 2 : 1, (const unsigned char *)cl->sbuf + pos, l);
         pos = end + 1;
     }
     cl->sbuf_off = pos;

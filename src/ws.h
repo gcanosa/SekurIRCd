@@ -8,6 +8,8 @@
 
 #include "config.h"
 
+#define WS_PROTO_TEXT 1   /* text.ircv3.net: text frames */
+#define WS_PROTO_BINARY 2 /* binary.ircv3.net: binary frames (the lines are bytes, not necessarily UTF-8) */
 #define WS_MAX_PAYLOAD 4000 /* must stay below net.c's 4096-byte read buffer (a frame is handed over whole); plenty for an IRC line */
 
 /* Sec-WebSocket-Accept value for a client's Sec-WebSocket-Key. 0 on success. */
@@ -16,7 +18,8 @@ int ws_accept_key(const char *client_key, char *out, size_t outsz);
 typedef struct {
     char key[64];       /* Sec-WebSocket-Key */
     char origin[256];   /* "" if absent */
-    int text_proto;     /* client offered the text.ircv3.net subprotocol */
+    int proto;          /* the IRCv3 subprotocol we answer with: WS_PROTO_TEXT if the client offered text.ircv3.net (preferred: Kiwi IRC
+                         * requires it), else WS_PROTO_BINARY for binary.ircv3.net, else 0 (none offered) */
     int https;          /* X-Forwarded-Proto is https at every hop -- only believed from a trusted proxy */
     char forwarded[256]; /* raw X-Forwarded-For (else X-Real-IP) value, "" if absent -- see ws_forwarded_client */
 } ws_request_t;
@@ -29,8 +32,8 @@ int ws_parse_request(const char *req, ws_request_t *out);
  * 0 and `out` filled, or -1 if the list is empty. */
 int ws_forwarded_client(const char *list, const char globs[][CFG_MASK], int nglobs, char *out, size_t outsz);
 
-/* Builds the "101 Switching Protocols" response; echoes Sec-WebSocket-Protocol: text.ircv3.net when text_proto (Kiwi IRC requires it). Returns its length, or -1. */
-int ws_build_response(const char *client_key, int text_proto, char *out, size_t outsz);
+/* Builds the "101 Switching Protocols" response; echoes Sec-WebSocket-Protocol for proto (a WS_PROTO_*, 0 = none). Returns its length, or -1. */
+int ws_build_response(const char *client_key, int proto, char *out, size_t outsz);
 
 /* Writes just the header of an unmasked server->client frame carrying `len` payload bytes (`out` needs 10). Returns its length. */
 size_t ws_frame_header(unsigned char *out, int opcode, size_t len);

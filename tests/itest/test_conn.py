@@ -76,6 +76,27 @@ def test_websocket_plain_and_forwarded_ip():
         assert ws_read(bad, 0.6).startswith(b"HTTP/1.1 400")
 
 
+def test_websocket_ircv3_subprotocols():
+    # text.ircv3.net wins when both are offered (Kiwi IRC needs it); binary.ircv3.net alone gets binary frames both ways
+    s = Server(cfg={"websocket": {"enabled": True, "port": 0}})
+    s.cfg["websocket"]["port"] = s.ws_port
+    with s:
+        for i, (offered, answered, opcode) in enumerate([("binary.ircv3.net", "binary.ircv3.net", 2), ("text.ircv3.net", "text.ircv3.net", 1),
+                                                         ("binary.ircv3.net, text.ircv3.net", "text.ircv3.net", 1), ("", None, 1)]):
+            sock = ws_connect(s.ws_port, f"Sec-WebSocket-Protocol: {offered}\r\n" if offered else "")
+            buf = ws_read(sock)
+            head = buf[:buf.index(b"\r\n\r\n")].decode()
+            assert head.startswith("HTTP/1.1 101"), head
+            got = [l.split(": ", 1)[1] for l in head.split("\r\n") if l.lower().startswith("sec-websocket-protocol:")]
+            assert got == ([answered] if answered else []), (offered, head)
+            nick = f"sp{i}"
+            sock.sendall(ws_frame(f"NICK {nick}", opcode) + ws_frame(f"USER {nick} 0 * :x", opcode))
+            frames, _ = ws_parse(buf[buf.index(b"\r\n\r\n") + 4:] + ws_read(sock, 1.2))
+            assert any(" 001 " in t for o, t in frames), (offered, frames[:3])
+            assert {o for o, t in frames} == {opcode}, (offered, {o for o, t in frames})
+            sock.close()
+
+
 def make_cert(d):
     crt, key = os.path.join(d, "t.crt"), os.path.join(d, "t.key")
     subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", key, "-out", crt, "-days", "1",

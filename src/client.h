@@ -86,6 +86,7 @@ typedef struct client {
     unsigned shun_gen;    /* server_is_shunned cache: kline_gen + 1 when `shunned` is current */
     int shunned;
     int ws;               /* 0 plain IRC, 1 awaiting the WebSocket upgrade request, 2 framing active (net.c) */
+    int ws_bin;           /* it negotiated binary.ircv3.net: our messages go out as binary frames, else text */
     unsigned char *ws_in; /* raw bytes read from the transport, not yet decoded */
     size_t ws_in_len, ws_in_cap;
     unsigned char *ws_out; /* encoded frames / handshake reply waiting for the socket */

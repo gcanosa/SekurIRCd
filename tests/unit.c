@@ -1064,12 +1064,16 @@ static void test_websocket_helpers(void) {
     assert(ws_forwarded_client("6.6.6.6, 198.51.100.4", proxies, 1, fwd, sizeof fwd) == 0 && strcmp(fwd, "198.51.100.4") == 0);
     assert(ws_forwarded_client("6.6.6.6, 198.51.100.4, 10.0.0.1", proxies, 2, fwd, sizeof fwd) == 0 && strcmp(fwd, "198.51.100.4") == 0);
     assert(ws_forwarded_client(" 203.0.113.9 ", proxies, 2, fwd, sizeof fwd) == 0 && strcmp(fwd, "203.0.113.9") == 0);
-    assert(!r.text_proto && !r.https);
+    assert(!r.proto && !r.https);
     assert(ws_parse_request("GET / HTTP/1.1\r\nUpgrade: websocket\r\nSec-WebSocket-Key: k\r\nX-Forwarded-Proto: https", &r) == 0 && r.https);
     assert(ws_parse_request("GET / HTTP/1.1\r\nUpgrade: websocket\r\nSec-WebSocket-Key: k\r\nX-Forwarded-Proto: https, http", &r) == 0 && !r.https);
-    assert(ws_parse_request("GET / HTTP/1.1\r\nUpgrade: websocket\r\nSec-WebSocket-Key: k\r\nSec-WebSocket-Protocol: binary.ircv3.net, text.ircv3.net", &r) == 0 && r.text_proto);
+    assert(ws_parse_request("GET / HTTP/1.1\r\nUpgrade: websocket\r\nSec-WebSocket-Key: k\r\nSec-WebSocket-Protocol: binary.ircv3.net, text.ircv3.net", &r) == 0 && r.proto == WS_PROTO_TEXT);
+    assert(ws_parse_request("GET / HTTP/1.1\r\nUpgrade: websocket\r\nSec-WebSocket-Key: k\r\nSec-WebSocket-Protocol: binary.ircv3.net", &r) == 0 && r.proto == WS_PROTO_BINARY);
+    assert(ws_parse_request("GET / HTTP/1.1\r\nUpgrade: websocket\r\nSec-WebSocket-Key: k\r\nSec-WebSocket-Protocol: chat, v1.example", &r) == 0 && r.proto == 0);
+    assert(ws_parse_request("GET / HTTP/1.1\r\nUpgrade: websocket\r\nSec-WebSocket-Key: k", &r) == 0 && r.proto == 0);
     char resp[256];
-    assert(ws_build_response("k", 1, resp, sizeof resp) > 0 && strstr(resp, "Sec-WebSocket-Protocol: text.ircv3.net\r\n\r\n"));
+    assert(ws_build_response("k", WS_PROTO_TEXT, resp, sizeof resp) > 0 && strstr(resp, "Sec-WebSocket-Protocol: text.ircv3.net\r\n\r\n"));
+    assert(ws_build_response("k", WS_PROTO_BINARY, resp, sizeof resp) > 0 && strstr(resp, "Sec-WebSocket-Protocol: binary.ircv3.net\r\n\r\n"));
     assert(ws_build_response("k", 0, resp, sizeof resp) > 0 && !strstr(resp, "Sec-WebSocket-Protocol"));
     assert(ws_parse_request("GET / HTTP/1.1\r\nHost: x", &r) == -1);
     /* a masked client text frame "hi" */

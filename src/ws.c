@@ -55,8 +55,10 @@ int ws_parse_request(const char *req, ws_request_t *out) {
     header_value(req, "Origin", out->origin, sizeof out->origin);
     char sub[128] = "";
     if (header_value(req, "Sec-WebSocket-Protocol", sub, sizeof sub))
-        for (char *save, *t = strtok_r(sub, ", \t", &save); t; t = strtok_r(NULL, ", \t", &save))
-            if (strcasecmp(t, "text.ircv3.net") == 0) out->text_proto = 1;
+        for (char *save, *t = strtok_r(sub, ", \t", &save); t; t = strtok_r(NULL, ", \t", &save)) {
+            if (strcasecmp(t, "text.ircv3.net") == 0) out->proto = WS_PROTO_TEXT; /* wins over binary, whatever the order offered */
+            else if (strcasecmp(t, "binary.ircv3.net") == 0 && !out->proto) out->proto = WS_PROTO_BINARY;
+        }
     if (!header_value(req, "X-Forwarded-For", out->forwarded, sizeof out->forwarded))
         header_value(req, "X-Real-IP", out->forwarded, sizeof out->forwarded);
     /* "https" at every hop: a client sending "https" through a proxy that appends gets "https, http" -- not TLS */
@@ -88,13 +90,14 @@ int ws_forwarded_client(const char *list, const char globs[][CFG_MASK], int nglo
     }
 }
 
-int ws_build_response(const char *client_key, int text_proto, char *out, size_t outsz) {
+int ws_build_response(const char *client_key, int proto, char *out, size_t outsz) {
     char acc[64];
     if (ws_accept_key(client_key, acc, sizeof acc) != 0) return -1;
     int n = snprintf(out, outsz,
                      "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
                      "Sec-WebSocket-Accept: %s\r\n%s\r\n", acc,
-                     text_proto ? "Sec-WebSocket-Protocol: text.ircv3.net\r\n" : "");
+                     proto == WS_PROTO_TEXT ? "Sec-WebSocket-Protocol: text.ircv3.net\r\n"
+                     : proto == WS_PROTO_BINARY ? "Sec-WebSocket-Protocol: binary.ircv3.net\r\n" : "");
     return (n > 0 && (size_t)n < outsz) ? n : -1;
 }
 
