@@ -88,8 +88,13 @@
 <tr><td><code>batch</code> <code>draft/chathistory</code> <code>draft/read-marker</code></td><td>Recent history, catching up after a reconnect, and the read position.</td></tr>
 <tr><td><code>multi-prefix</code> <code>userhost-in-names</code></td><td>Correct ranks in the user list, and hosts for ban masks.</td></tr>
 <tr><td><code>away-notify</code> <code>account-notify</code> <code>extended-join</code> <code>chghost</code></td><td>The away and logged-in markers, and keeping ban masks right after a host change. When you join, one <code>WHO #channel %tcnfa</code> (WHOX) fills in who is already away or logged in.</td></tr>
+<tr><td><code>draft/multiline</code></td><td>A multi-line paste goes out as one message (up to the server's line and byte limits; a bigger one falls back to one line at a time), and one from another client shows as a block.</td></tr>
+<tr><td><code>draft/message-redaction</code></td><td>A deleted message shows as "(message deleted)". Right click (tap on phones) your own nick on one of your lines to delete it.</td></tr>
+<tr><td><code>draft/channel-rename</code> <code>invite-notify</code> <code>standard-replies</code> <code>cap-notify</code></td><td>A renamed channel keeps its tab, invites in a channel are shown, errors arrive as FAIL lines, and history or login turning on or off mid-session is picked up.</td></tr>
 </table></div>
-<p>See <a href="ircv3.html">IRCv3 &amp; SASL</a> for what the server offers. The chat does not request <code>draft/multiline</code>, so messages sent that way by other clients reach it as separate lines.</p>
+<p>When you log in, private chats with messages from the last 24 hours reopen (<code>CHATHISTORY TARGETS</code>), so an always-on account sees what came in while it was away.
+  Opening the chat with the same account in another tab or device takes the session over; the old tab then waits until you send something there instead of reconnecting and taking it back.</p>
+<p>See <a href="ircv3.html">IRCv3 &amp; SASL</a> for what the server offers.</p>
 </main>
 </div>
 <footer id="site-footer"></footer>

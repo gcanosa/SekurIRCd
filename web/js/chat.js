@@ -60,7 +60,8 @@
   var MAX_CHANS = 10;
   // IRCv3 capabilities we use when the server offers them ("sasl" is added only when logging in).
   var WANT_CAPS = ["server-time", "message-tags", "batch", "draft/chathistory", "echo-message", "multi-prefix", "userhost-in-names", "draft/read-marker",
-                    "away-notify", "account-notify", "extended-join", "chghost"];
+                    "away-notify", "account-notify", "extended-join", "chghost", "standard-replies", "invite-notify",
+                    "draft/multiline", "draft/message-redaction", "draft/channel-rename"];
   var HISTORY_ON_JOIN = 50; // messages shown when you join; a reconnect fetches everything missed (server max 100)
 
   var $ = function (id) { return document.getElementById(id); };
@@ -93,7 +94,7 @@
   var CLIENT = "SekurNet WebChat", CLIENT_V = "2.0";
   var BAR = " \x0314│\x0f ", SITE = "https://www.sekurnet.org/chat/";
   var QUIT_MSG = "\x02" + CLIENT + "\x02 v" + CLIENT_V + BAR + SITE; // the default quit message, same branding as CTCP VERSION
-  var ws, nick, wantChan, registered, tries = 0, closing = false, timer, away = false, awayTimer;
+  var ws, nick, wantChan, registered, tries = 0, closing = false, timer, away = false, awayTimer, taken = false; // taken: another session of the account took this one over
   var bufs = dict(), active = "*";
   var avail = dict(), caps = dict(), auth = null, sasl = null, account = "", batches = dict();
   var unseen = 0, baseTitle = document.title, sent = [], spos = 0;
@@ -234,7 +235,7 @@
                ["notice", "\u25b8"], ["err", "!"], ["evt", "\u2022"]];
   function addLine(l, bulk) { // bulk: draw() adds hundreds in a row and scrolls once at the end; measuring the log per line forced a layout each time
     var stick = !bulk && log.scrollTop + log.clientHeight >= log.scrollHeight - 30;
-    var d = document.createElement("div"); d.className = "ln " + l.cls;
+    var d = document.createElement("div"); d.className = "ln " + l.cls; if (l.id) d.dataset.id = l.id;
     var s = document.createElement("span"); s.className = "ts"; s.textContent = l.t + " ";
     d.appendChild(s);
     var ic = EVT_ICONS.filter(function (i) { return d.classList.contains(i[0]); })[0];
@@ -254,7 +255,7 @@
   log.addEventListener("click", function (e) { // a nick in the log: click to message them, tap (phones) for the menu
     var n = nickAt(e);
     if (!n) return;
-    if (coarse) openMenu(n, e.clientX, e.clientY); else if (key(n) !== key(nick)) { query(n); input.focus(); }
+    if (coarse) openMenu(n, e.clientX, e.clientY, lineId(e)); else if (key(n) !== key(nick)) { query(n); input.focus(); }
   });
   // External links: confirm first, showing the real host (punycode, so a look-alike domain shows as xn--...).
   // Plain clicks only: ctrl/cmd/shift/middle click and "open in new tab" are a deliberate choice and go straight through.
@@ -285,7 +286,8 @@
     linkDlg.querySelector("input").checked = false; linkDlg.returnValue = "";
     linkDlg.showModal();
   });
-  log.addEventListener("contextmenu", function (e) { var n = nickAt(e); if (n) { e.preventDefault(); openMenu(n, e.clientX, e.clientY); } });
+  log.addEventListener("contextmenu", function (e) { var n = nickAt(e); if (n) { e.preventDefault(); openMenu(n, e.clientX, e.clientY, lineId(e)); } });
+  function lineId(e) { var l = e.target.closest(".ln.me"); return l && l.dataset.id || ""; } // one of your own lines with a msgid: the menu offers to delete it
 
   function dlg(html) { var d = document.createElement("dialog"); d.className = "chat-dlg"; d.innerHTML = html; app.appendChild(d); return d; } // static markup only
 
@@ -357,8 +359,8 @@
     pasteDlg.classList.toggle("warn", big);
     q("h3").textContent = over ? "Too many lines to paste" : big ? "This will post " + n + " lines in " + to : "Send " + n + " lines?";
     q(".why").textContent = over ? n + " lines is more than this chat sends at once (" + PASTE_MAX + ")."
-      : big ? "Pasting this much floods the conversation, and many channels and their operators kick or ban for it. The lines go out one at a time, but everyone in " + to + " still has to scroll past all of them."
-      : "Each line is sent as its own message to " + to + ".";
+      : big ? "Pasting this much floods the conversation, and many channels and their operators kick or ban for it. " + (caps["draft/multiline"] ? "It goes out as one message, but" : "The lines go out one at a time, but") + " everyone in " + to + " still has to scroll past all of them."
+      : (caps["draft/multiline"] && n <= 24 ? "The lines go to " + to + " together, as one message." : "Each line is sent as its own message to " + to + ".");
     q(".prev").textContent = lines.slice(0, 5).map(function (l) { return l.length > 80 ? l.slice(0, 80) + " ..." : l; }).join("\n") + (n > 5 ? "\n... and " + (n - 5) + " more" : "");
     alt.textContent = ""; alt.hidden = !big;
     if (big) {
@@ -381,9 +383,20 @@
     else if (pasteDlg.returnValue === "send") queuePaste(j.to, j.lines);
     input.focus();
   });
+  var mlSeq = 0;
   function queuePaste(to, lines) {
     if (!bufs[key(to)]) return;
     activity("");
+    var ml = /max-bytes=(\d+)/.exec(avail["draft/multiline"] || ""), mll = /max-lines=(\d+)/.exec(avail["draft/multiline"] || "");
+    var body = lines.map(function (l) { return cut(l, MAX_BODY); });
+    if (caps["draft/multiline"] && caps.batch && ml && mll && body.length <= +mll[1] && enc.encode(body.join("\n")).length <= +ml[1]) {
+      var ref = "p" + (++mlSeq); // draft/multiline: the whole paste is one message, sent at once, shown to others as a block
+      send("BATCH +" + ref + " draft/multiline " + to);
+      body.forEach(function (l) { send("@batch=" + ref + " PRIVMSG " + to + " :" + l); });
+      send("BATCH -" + ref);
+      if (!caps["echo-message"]) say(to, body.join("\n"), "me", { from: nick, kind: "msg" });
+      return;
+    }
     pasteQ = pasteQ.concat(lines.map(function (l) { return [to, l]; }));
     say(active, "Sending " + lines.length + " lines, one every " + PASTE_GAP / 1000 + " s. /stop cancels the rest.", "evt");
     if (!pasteT) pump();
@@ -495,12 +508,13 @@
   menu.className = "chat-menu"; menu.hidden = true; menu.setAttribute("role", "menu");
   root.appendChild(menu);
   function closeMenu() { menu.hidden = true; }
-  function openMenu(n, x, y) {
+  function openMenu(n, x, y, mid) {
     var b = bufs[key(active)], chan = b && isChan(b.name) ? b.name : "", self = key(n) === key(nick);
     var myRank = chan ? b.users[Object.keys(b.users).filter(function (u) { return key(u) === key(nick); })[0]] || "" : "";
     var theirs = chan ? b.users[n] || "" : "", op = "~&@".indexOf(myRank) >= 0 && myRank, half = op || myRank === "%";
     var mask = banMask(n);
     var groups = [ // [section, [icon, label, action, danger?] ...]; falsy entries are left out
+      ["Message", [self && mid && caps["draft/message-redaction"] && ["ban", "Delete this message", function () { send("REDACT " + active + " " + mid); }, 1]]],
       ["Talk", [!self && ["msg", "Send private message", function () { query(n); showUsers(false); }],
                 !self && ["at", "Mention in message", function () { var v = input.value; input.value = v + (v && !/\s$/.test(v) ? " " : "") + n + (v ? " " : ": "); }]]],
       ["Info", [["info", "Whois", function () { send("WHOIS " + n + " " + n); }], // asking the user's own server also returns idle time
@@ -626,6 +640,12 @@
     if (!isChan(name) && !account) return; // private history is kept only between logged-in accounts
     var b = buf(name);
     send(b.last ? "CHATHISTORY AFTER " + name + " timestamp=" + b.last + " 100" : "CHATHISTORY LATEST " + name + " * " + HISTORY_ON_JOIN);
+  }
+
+  // Private chats with recent messages reopen after a reload (an always-on account may have received some while you were away).
+  function targets() {
+    if (!caps["draft/chathistory"] || !caps.batch || !account) return;
+    send("CHATHISTORY TARGETS timestamp=" + new Date(Date.now() - 864e5).toISOString() + " timestamp=" + new Date().toISOString() + " 20");
   }
 
   // --- read markers (draft/read-marker): where you stopped reading, shared by every session of your account ---
@@ -766,9 +786,15 @@
     });
   }
 
-  function onLine(raw) {
-    var m = parse(raw), p = m.params, me = nick, c = m.cmd, isMe = function (n) { return key(n) === key(me); };
+  function onLine(raw) { handle(parse(raw)); }
+  function handle(m) {
+    var p = m.params, me = nick, c = m.cmd, isMe = function (n) { return key(n) === key(me); };
     var bt = m.tags.batch && batches[m.tags.batch], meta = { time: m.tags.time, id: m.tags.msgid, hist: !!bt };
+    if (bt && bt.type === "draft/multiline" && (c === "PRIVMSG" || c === "NOTICE")) { // collected; shown as one message when the batch ends
+      var mt = p[1] || "";
+      if (!bt.lines) { bt.lines = mt; bt.m = m; } else bt.lines += ("draft/multiline-concat" in m.tags ? "" : "\n") + mt;
+      return;
+    }
     if (c === "PING") return send("PONG :" + (p[0] || ""));
     if (c === "CAP") {
       var sub = p[1], more = p[2] === "*", list = (more ? p[3] : p[2]) || "";
@@ -786,6 +812,12 @@
         return;
       }
       if (sub === "NAK" && !registered) send("CAP END");
+      if (sub === "NEW") { // cap-notify (implied by CAP LS 302): e.g. chat history switched on, or services came back
+        list.split(" ").forEach(function (t) { if (t) { var e = t.indexOf("="); avail[e < 0 ? t : t.slice(0, e)] = e < 0 ? "" : t.slice(e + 1); } });
+        var more2 = WANT_CAPS.filter(function (x) { return x in avail && !caps[x]; });
+        if (more2.length) send("CAP REQ :" + more2.join(" "));
+      }
+      if (sub === "DEL") list.split(" ").forEach(function (x) { delete caps[x]; delete avail[x]; });
       return;
     }
     if (c === "AUTHENTICATE") return saslStep(p[0]);
@@ -809,9 +841,14 @@
     if (c === "906" || c === "907" || c === "908") return;
     if (c === "BATCH") {
       var id = p[0].slice(1);
-      if (p[0][0] === "+") batches[id] = { type: p[1], target: p[2], n: 0 };
+      if (p[0][0] === "+") batches[id] = { type: p[1], target: p[2], n: 0, tags: m.tags };
       else if (batches[id]) {
         var done = batches[id]; delete batches[id];
+        if (done.type === "draft/multiline" && done.m) { // replayed as one PRIVMSG/NOTICE: lines joined by new lines, with the batch's time, msgid and outer batch
+          var one = done.m, tg = { time: done.tags.time || one.tags.time, msgid: done.tags.msgid };
+          if (done.tags.batch) tg.batch = done.tags.batch;
+          return handle({ tags: tg, prefix: one.prefix, nick: one.nick, cmd: one.cmd, params: [one.params[0], done.lines] });
+        }
         if (done.type === "chathistory" && done.n) {
           say(done.target, "── " + done.n + " message" + (done.n > 1 ? "s" : "") + " from history ──", "evt hist-end");
           if (key(done.target) === key(active)) { draw(); markSoon(); } // place the "new messages" divider
@@ -819,12 +856,32 @@
       }
       return;
     }
+    if (c === "CHATHISTORY" && p[0] === "TARGETS") { // reopen a private chat that had messages lately; channels come back by joining
+      if (p[1] && !isChan(p[1]) && !bufs[key(p[1])]) { buf(p[1]).unread = true; history(p[1]); drawTabs(); }
+      return;
+    }
+    if (c === "REDACT") { // draft/message-redaction: someone took a message back
+      var rn = isChan(p[0]) ? p[0] : isMe(p[0]) ? m.nick : p[0], rb2 = bufs[key(rn)];
+      if (!rb2 || !rb2.ids[p[1]]) return;
+      rb2.lines.forEach(function (l) { if (l.id === p[1]) { l.text = "(message deleted" + (p[2] ? ": " + p[2] : "") + ")"; l.cls += " redacted"; l.kind = "msg"; } });
+      if (key(rn) === key(active)) draw();
+      return;
+    }
+    if (c === "RENAME") { // draft/channel-rename: the tab, its history and read marker move to the new name
+      var ob = bufs[key(p[0])];
+      if (!ob) return;
+      delete bufs[key(p[0])]; bufs[key(p[1])] = ob; ob.name = p[1];
+      if (key(active) === key(p[0])) active = p[1];
+      say(p[1], m.nick + " renamed " + p[0] + " to " + p[1] + (p[2] ? " (" + p[2] + ")" : ""), "evt topic", meta);
+      return draw();
+    }
     if (c === "FAIL" && p[0] === "CHATHISTORY") return; // e.g. no private history for guests: nothing to show
     if (c === "FAIL" || c === "WARN" || c === "NOTE") return say(active, p[0] + ": " + p[p.length - 1], c === "FAIL" ? "err" : "evt"); // standard replies (RENAME, REGISTER ...)
     if (c === "WALLOPS") return say("*", "[Wallops] " + m.nick + ": " + p[0], "notice", meta);
     if (c === "001") {
       registered = true; tries = 0; armAway(); nick = p[0]; say("*", p[1], "", meta);
       if (wantChan) send("JOIN " + wantChan);
+      targets();
       Object.keys(bufs).forEach(function (k) { if (k !== "*" && !isChan(k)) history(bufs[k].name); }); // private chats kept across a reconnect
       return;
     }
@@ -927,7 +984,8 @@
     if (c === "PRIVMSG" || c === "NOTICE") {
       var mine = isMe(m.nick), server = m.prefix.indexOf("!") < 0;
       if (!mine && ignored[key(m.nick)]) return; // no line, no chime, no CTCP reply
-      var target = isChan(p[0]) ? p[0] : server ? "*" : mine ? p[0] : m.nick; // our own echoed DM belongs in the recipient's tab
+      var to0 = p[0].replace(/^[~&@%+]+(?=#)/, ""); // STATUSMSG (NOTICE @#chan): goes to the channel's tab
+      var target = isChan(to0) ? to0 : server ? "*" : mine ? p[0] : m.nick; // our own echoed DM belongs in the recipient's tab
       var txt = p[1] || "", act = /^\x01ACTION (.*?)\x01?$/.exec(txt), cq = !act && /^\x01([^\s\x01]+) ?([^\x01]*)\x01?$/.exec(txt);
       if (cq) { // CTCP: never answered from history, never to ourselves
         if (!bt && !mine && !server) (c === "PRIVMSG" ? ctcp : ctcpAnswer)(m.nick, cq[1].toUpperCase(), cq[2]);
@@ -944,12 +1002,13 @@
       say(target, act ? act[1] : mine ? masked(target, txt) : txt, cls, meta);
       return;
     }
+    if (c === "INVITE" && !isMe(p[0])) return bufs[key(p[1])] && say(p[1], m.nick + " invited " + p[0] + " to " + p[1], "evt invite", meta); // invite-notify
     if (c === "INVITE" && isMe(p[0]) && !ignored[key(m.nick)]) {
       say(active, m.nick + " invites you to " + p[1] + ". Type /join " + p[1] + " to accept.", "evt hl invite", meta);
       notify(m.nick + " invited you", p[1], "*");
       return chime();
     }
-    if (c === "ERROR") return say("*", "Server error: " + p[0], "err");
+    if (c === "ERROR") { if (/taken over/i.test(p[0])) taken = true; return say("*", "Server error: " + p[0], "err"); }
     if (/^(276|30[17]|31[1-46-9]|320|330|335|338|378|379|671)$/.test(c)) return say(active, whois(c, p), c === "301" ? "evt whois away" : "evt whois", meta); // WHOIS: where you asked
     if (/^\d+$/.test(c)) say(+c >= 400 ? active : reply(), numeric(c, p), +c >= 400 ? "err" : c === "305" || c === "306" ? "evt away" : "", meta); // errors where you are, replies where you asked
   }
@@ -1156,6 +1215,7 @@
         return;
       }
       if (!opened && !registered && tries === 0) return fail();
+      if (taken) return say("*", "You connected from another tab or device, so this one was closed. Send any message here to take the session back.", "err"); // reconnecting on its own would steal it back, forever
       if (document.hidden) return say("*", "Connection lost while the page was in the background. Reconnecting when you come back ...", "err");
       if (++tries > 5) return say("*", "Disconnected. Send any message or come back to this tab to try again.", "err");
       var wait = tries * 3000;
@@ -1167,7 +1227,7 @@
     wantChan = Object.keys(bufs).filter(isChan).map(function (k) { return bufs[k].name; }).join(",") || wantChan;
     connect();
   }
-  function dead() { return !closing && !app.hidden && (!ws || ws.readyState > 1); }
+  function dead() { return !closing && !taken && !app.hidden && (!ws || ws.readyState > 1); }
   // Phones drop the socket when the tab is backgrounded or the screen locks: reconnect as soon as it is visible again.
   document.addEventListener("visibilitychange", function () {
     if (document.hidden) return;
@@ -1203,7 +1263,7 @@
     auth = user ? { user: user, pass: pass } : null; // kept in memory only, so an automatic reconnect can log in again
     passIn.value = "";
     try { localStorage.setItem("chat-chan", cs.join(" ")); localStorage.setItem("chat-acct", user); } catch (x) {}
-    nick = n; wantChan = cs.join(","); closing = false; tries = 0; bufs = dict(); active = "*"; draw();
+    nick = n; wantChan = cs.join(","); closing = false; taken = false; tries = 0; bufs = dict(); active = "*"; draw();
     form.hidden = true; app.hidden = false; showUsers(false); input.focus();
     unlockAudio(); connect();
   });
@@ -1211,6 +1271,7 @@
     e.preventDefault(); var t = input.value.trim(); input.value = ""; unlockAudio();
     clearTimeout(typingOff); typing.sent = false; // sending the message ends "typing ..." for everyone else on its own
     if (t && !SECRET.test(t)) { sent.push(t); if (sent.length > 50) sent.shift(); spos = sent.length; }
+    if (taken && ws && ws.readyState > 1) { taken = false; tries = 0; return reconnect(); }
     if (dead() && tries > 5) { tries = 0; return reconnect(); } // gave up earlier: sending is the "try again" button
     if (t) command(t);
   });
