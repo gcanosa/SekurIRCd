@@ -714,14 +714,21 @@ void server_send_isupport(server_t *srv, client_t *cl) {
     snprintf(denytok, sizeof denytok, "CLIENTTAGDENY=%s", srv->cfg.messages.client_tag_deny);
     char histtok[32];
     snprintf(histtok, sizeof histtok, "CHATHISTORY=%d", srv->cfg.messages.history_size > 100 ? 100 : srv->cfg.messages.history_size);
+    /* Alphabetical (draft/ICON filed under ICON); keep it that way when adding a token. NULL = feature off. */
     const char *tokens[] = {
-        netbuf, "CHANTYPES=#", "CHANMODES=beI,k,lfjL,imnprstzCNPQSTVROMcDuGK", "PREFIX=(qaohv)~&@%+",
-        nicklen, chanlen, topiclen, "CASEMAPPING=ascii", "MODES=6",
-        "STATUSMSG=~&@%+", "AWAYLEN=399", "KICKLEN=300",
-        "MAXLIST=b:100,e:100,I:100", "EXCEPTS=e", "INVEX=I", "MONITOR=100", "WATCH=128", "SILENCE=15",
-        "EXTBAN=~,amnrzjtSf", "ELIST=MNU", "WHOX", "CHANLIMIT=#:200", "BOT=B", "CALLERID=g", "LINELEN=512",
-        "TARGMAX=PRIVMSG:4,NOTICE:4,KICK:1,JOIN:,PART:,WHOIS:", /* JOIN/PART/WHOIS: blank = no limit, they take lists */ srv->cfg.messages.history_size > 0 ? histtok : NULL, srv->cfg.messages.history_size > 0 ? "MSGREFTYPES=msgid,timestamp" : NULL,
-        srv->cfg.messages.utf8_only ? "UTF8ONLY" : NULL, srv->cfg.server.icon[0] ? icontok : NULL, srv->cfg.messages.client_tag_deny[0] ? denytok : NULL,
+        "AWAYLEN=399", "BOT=B", "CALLERID=g", "CASEMAPPING=ascii", "CHANLIMIT=#:200",
+        "CHANMODES=beI,k,lfjL,imnprstzCNPQSTVROMcDuGK", chanlen, "CHANTYPES=#",
+        srv->cfg.messages.history_size > 0 ? histtok : NULL,
+        srv->cfg.messages.client_tag_deny[0] ? denytok : NULL,
+        "ELIST=MNU", "EXCEPTS=e", "EXTBAN=~,amnrzjtSf",
+        srv->cfg.server.icon[0] ? icontok : NULL,
+        "INVEX=I", "KICKLEN=300", "LINELEN=512", "MAXLIST=b:100,e:100,I:100", "MODES=6", "MONITOR=100",
+        srv->cfg.messages.history_size > 0 ? "MSGREFTYPES=msgid,timestamp" : NULL,
+        netbuf, nicklen, "PREFIX=(qaohv)~&@%+", "SILENCE=15", "STATUSMSG=~&@%+",
+        "TARGMAX=PRIVMSG:4,NOTICE:4,KICK:1,JOIN:,PART:,WHOIS:", /* JOIN/PART/WHOIS: blank = no limit, they take lists */
+        topiclen,
+        srv->cfg.messages.utf8_only ? "UTF8ONLY" : NULL,
+        "WATCH=128", "WHOX",
     };
     int total = 0;
     for (size_t i = 0; i < sizeof tokens / sizeof tokens[0]; i++) if (tokens[i]) tokens[total++] = tokens[i]; /* drop the NULLs of disabled features */
