@@ -3,7 +3,7 @@
  * rewrite-on-mutation, no locking (single-threaded poll loop, same
  * reasoning as every other in-memory registry in this daemon).
  *
- * `path == NULL` (accounts disabled, see config_accounts_path) means a
+ * `path == NULL` means a
  * purely in-memory, never-persisted store -- no file is ever created or
  * read while the feature is off.
  */
@@ -27,11 +27,6 @@ typedef struct {
     int dirty;        /* changes not yet written to `path` -- see accounts_flush */
     char path[512];   /* "" = in-memory only */
     int n_grouped;    /* total grouped nicks across all accounts (0 = skip the owner scan) */
-    /* Replication hook: called after a change worth sending to linked servers (deleted=1 for DROP). `ts` is the record's
-     * new updated_at (milliseconds); the last writer wins everywhere. NULL = not replicated. */
-    void (*on_change)(void *ud, const char *name, long long ts, int deleted);
-    void *ud;
-    int applying;     /* set while applying a change that came from another server (it must not be echoed back) */
     int backup_count; /* rotating <path>.bak1..N kept by accounts_flush (0 = none) */
     long last_backup; /* when the last rotation ran */
 } account_store_t;
@@ -103,7 +98,6 @@ const char *accounts_email(account_store_t *st, const char *name);
 int accounts_email_verified(account_store_t *st, const char *name);
 void accounts_set_email(account_store_t *st, const char *name, const char *email, int verified);
 void accounts_set_pending_email(account_store_t *st, const char *name, const char *email, const char *code, long expires_at);
-const char *accounts_pending_email(account_store_t *st, const char *name);
 /* 1 and the email is promoted to verified if `code` matches and hasn't expired. */
 int accounts_check_verify(account_store_t *st, const char *name, const char *code);
 
@@ -127,13 +121,5 @@ const char *accounts_group_nick(account_store_t *st, const char *name, int i);
 /* The account (display name) that owns `nick` -- either an account of that name or a grouped nick -- or NULL. */
 const char *accounts_owner_of_nick(account_store_t *st, const char *nick);
 
-/* --- replication between linked servers (see netsync.h) -------------------------------------------------------- */
-long long accounts_updated_at(account_store_t *st, const char *name);       /* 0 = unknown account */
-char *accounts_record_json(account_store_t *st, const char *name);          /* malloc'd compact JSON of the record, or NULL */
-/* Apply a record / deletion that came from another server if it is newer than what we have. 1 if applied. */
-int accounts_apply_remote(account_store_t *st, const char *name, long long ts, const char *json);
-int accounts_apply_remote_delete(account_store_t *st, const char *name, long long ts);
-/* Every account name (for the burst); caller frees the array (not the strings). */
-const char **accounts_all_names(account_store_t *st, int *n);
 
 #endif /* SEKURIRCD_ACCOUNTS_H */

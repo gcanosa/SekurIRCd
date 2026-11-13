@@ -48,6 +48,5 @@ void log_write(log_level_t level, const char *tag, const char *fmt, ...)
  * for an unrecognized name (config.c validates the string itself, this is
  * just the enum conversion). */
 log_level_t log_level_from_name(const char *name);
-const char *log_level_name(log_level_t level);
 
 #endif /* SEKURIRCD_LOG_H */

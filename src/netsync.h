@@ -129,6 +129,14 @@ void cmd_ml_part(struct server *srv, struct client *from, const char *msgid, int
 void netsync_message(struct server *srv, struct client *from, const char *verb, const char *target,
                      struct client *remote_target, const char *text, const irc_tag_t *tags, int ntags);
 void netsync_kill(struct server *srv, struct client *oper, struct client *target, const char *reason);
+/* Always-on across servers: tell the network a local user detached/reattached (":uid DETACH 1|0"), and ask a remote
+ * detached user's server to drop it because the account resumed it here. */
+void netsync_user_detach(struct server *srv, struct client *cl);
+void netsync_resume_kill(struct server *srv, struct client *target);
+/* Channel state straight from a "+modes args..." string (no broadcast; replace=1 clears first), and ":source MODE"
+ * lines giving/taking ranks shown to the channel's local members. */
+void netsync_set_state_modes(struct channel *chan, const char *modes, const char **args, int nargs, int replace);
+void netsync_broadcast_rank_modes(struct channel *chan, const char *source, char sign, const char letters[], const char *args[], int n);
 void netsync_wallops(struct server *srv, struct client *from, const char *verb, const char *text); /* WALLOPS / GLOBOPS */
 void netsync_gline(struct server *srv, const char *mask, const char *setter, long expires, const char *reason);
 void netsync_ungline(struct server *srv, const char *mask);

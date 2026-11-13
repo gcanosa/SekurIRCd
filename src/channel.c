@@ -57,24 +57,9 @@ void channel_remove_member(channel_t *chan, struct client *cl) {
 
 int channel_member_count(channel_t *chan) { return HASH_COUNT(chan->members); }
 
-int channel_is_op(channel_t *chan, struct client *cl) {
-    member_t *m = channel_find_member(chan, cl);
-    return m && (m->rank & RANK_OP);
-}
-
-int channel_is_halfop(channel_t *chan, struct client *cl) {
-    member_t *m = channel_find_member(chan, cl);
-    return m && (m->rank & RANK_HALFOP);
-}
-
 int channel_has_ops(channel_t *chan, struct client *cl) {
     member_t *m = channel_find_member(chan, cl);
     return m && (m->rank & (RANK_OP | RANK_HALFOP));
-}
-
-int channel_is_voice(channel_t *chan, struct client *cl) {
-    member_t *m = channel_find_member(chan, cl);
-    return m && (m->rank & RANK_VOICE);
 }
 
 static const ban_extra_t *g_extra;

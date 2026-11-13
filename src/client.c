@@ -67,6 +67,7 @@ void client_free(client_t *cl) {
     if (cl->auth_tmp) { OPENSSL_cleanse(cl->auth_tmp, sizeof *cl->auth_tmp); free(cl->auth_tmp); } /* e.g. a PASS never tried (gone before registering) */
     free(cl->ws_in);
     free(cl->ws_out);
+    free(cl->resume_chans);
     free(cl);
 }
 

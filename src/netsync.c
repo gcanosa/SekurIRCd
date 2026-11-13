@@ -172,6 +172,10 @@ static void send_uid_line(server_t *srv, link_conn_t *to, const client_t *u) {
         irc_build(line, sizeof line, NULL, 0, u->uid, "AWAY", NULL, 0, u->away);
         send_link(to, line);
     }
+    if (u->detached_at || u->remote_detached) { /* an always-on session with no connection: resumable from anywhere */
+        irc_build(line, sizeof line, NULL, 0, u->uid, "DETACH", (const char *[]){"1"}, 1, NULL);
+        send_link(to, line);
+    }
 }
 
 static int server_hop_cmp(const void *a, const void *b) {
@@ -626,6 +630,16 @@ static void handle_away(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     flood(srv, lc, fl);
 }
 
+/* ":uid DETACH 1|0": that server's always-on user lost (1) or regained (0) its connection. */
+static void handle_detach(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
+    client_t *u = src_user(srv, lc, msg->prefix);
+    if (!u || !u->remote || msg->nparams < 1) return;
+    u->remote_detached = strcmp(msg->params[0], "1") == 0;
+    char fl[100];
+    irc_build(fl, sizeof fl, NULL, 0, u->uid, "DETACH", (const char *[]){u->remote_detached ? "1" : "0"}, 1, NULL);
+    flood(srv, lc, fl);
+}
+
 static void handle_chghost(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     netserver_t *s = src_server(srv, lc, msg->prefix);
     if (!s || msg->nparams < 3) return;
@@ -692,7 +706,9 @@ static void handle_kill(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
         if (killer) client_prefix(killer, prefix, sizeof prefix); else snprintf(prefix, sizeof prefix, "%s", by);
         irc_build(kl, sizeof kl, NULL, 0, prefix, "KILL", (const char *[]){target->nick}, 1, reason); /* as for a local KILL */
         client_send(target, kl);
-        snprintf(target->quit_reason, sizeof target->quit_reason, "Killed (%s (%s))", by, reason);
+        if (ks && target->detached_at && !strncmp(reason, "Session resumed on ", 19)) /* not a kill: the user moved */
+            snprintf(target->quit_reason, sizeof target->quit_reason, "%s", reason);
+        else snprintf(target->quit_reason, sizeof target->quit_reason, "Killed (%s (%s))", by, reason);
         client_mark_quit(target);
         snprintf(snote, sizeof snote, "Received KILL message for %s. From %s: %s", target->nick, by, reason);
         server_notify_opers(srv, snote);
@@ -709,7 +725,7 @@ static void handle_kill(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
 
 /* Sends ":source MODE #chan <modes> <args...>" to the channel's local members, 6 changes per line. `ops` is an
  * array of (letter, argument) pairs sharing one sign. */
-static void broadcast_rank_modes(channel_t *chan, const char *source, char sign, const char letters[], const char *args[], int n) {
+void netsync_broadcast_rank_modes(channel_t *chan, const char *source, char sign, const char letters[], const char *args[], int n) {
     for (int i = 0; i < n; i += 6) {
         int chunk = n - i < 6 ? n - i : 6;
         char modes[16], line[600];
@@ -724,7 +740,7 @@ static void broadcast_rank_modes(channel_t *chan, const char *source, char sign,
 }
 
 /* Sets channel state from a "+modes args..." string directly (no broadcast). replace=1 clears the flags first. */
-static void set_state_modes(channel_t *chan, const char *modes, const char **args, int nargs, int replace) {
+void netsync_set_state_modes(channel_t *chan, const char *modes, const char **args, int nargs, int replace) {
     if (replace) {
         chan->modes = 0;
         chan->key[0] = '\0';
@@ -762,7 +778,7 @@ static void reset_channel_for_ts(server_t *srv, channel_t *chan) {
         HASH_ITER(hh, chan->members, m, tmp) {
             if ((m->rank & bits[pass]) && n < 64) { letters[n] = ltr[pass]; args[n] = m->client->nick; n++; }
         }
-        if (n) broadcast_rank_modes(chan, srv->self_srv->name, '-', letters, args, n);
+        if (n) netsync_broadcast_rank_modes(chan, srv->self_srv->name, '-', letters, args, n);
     }
     HASH_ITER(hh, chan->members, m, tmp) m->rank = 0;
     char flagsoff[40] = "-";
@@ -813,15 +829,15 @@ static void handle_sjoin(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
         if (!chan) return;
         chan->modes = 0; /* a remote channel: its modes, not our defaults */
         chan->created = ts;
-        set_state_modes(chan, modes, margs, nm, 1);
+        netsync_set_state_modes(chan, modes, margs, nm, 1);
         vet = 1;
     } else if (ts < chan->created) { /* theirs is older: it wins everything */
         reset_channel_for_ts(srv, chan);
         chan->created = ts;
-        set_state_modes(chan, modes, margs, nm, 1); /* may have lost +r/MLOCK: SVCNEW puts them back */
+        netsync_set_state_modes(chan, modes, margs, nm, 1); /* may have lost +r/MLOCK: SVCNEW puts them back */
         vet = 1;
     } else if (ts == chan->created) { /* same age: merge */
-        set_state_modes(chan, modes, margs, nm, 0);
+        netsync_set_state_modes(chan, modes, margs, nm, 0);
         vet = 2;
     } else { /* ours is older: their modes are ignored and their members arrive without ranks */
         keep_ranks = 0;
@@ -855,7 +871,7 @@ static void handle_sjoin(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
         int n = 0;
         for (int i = 0; i < nj; i++)
             if ((joined[i].rank & bits[pass]) && !(pass == 2 && (joined[i].rank & (RANK_OWNER | RANK_ADMIN)))) { letters[n] = ltr[pass]; args[n] = joined[i].c->nick; n++; }
-        if (n) broadcast_rank_modes(chan, from->name, '+', letters, args, n);
+        if (n) netsync_broadcast_rank_modes(chan, from->name, '+', letters, args, n);
     }
     /* Only now that the members (and their ranks) are in: notifying before the loop sent ChanServ an empty channel, so
      * whoever created a registered channel on another server -- or recreated it there during a split -- kept ops. */
@@ -1427,6 +1443,7 @@ void netsync_handle(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     else if (!strcmp(c, "QUIT")) handle_quit(srv, lc, msg);
     else if (!strcmp(c, "UMODE")) handle_umode(srv, lc, msg);
     else if (!strcmp(c, "AWAY")) handle_away(srv, lc, msg);
+    else if (!strcmp(c, "DETACH")) handle_detach(srv, lc, msg);
     else if (!strcmp(c, "CHGHOST")) handle_chghost(srv, lc, msg);
     else if (!strcmp(c, "SETNAME")) handle_setname(srv, lc, msg);
     else if (!strcmp(c, "ACCOUNT")) handle_account(srv, lc, msg);
@@ -1499,6 +1516,21 @@ void netsync_user_modes(server_t *srv, client_t *cl) {
     umodes_to_string(cl, modes, sizeof modes);
     irc_build(line, sizeof line, NULL, 0, cl->uid, "UMODE", (const char *[]){modes}, 1, NULL);
     flood(srv, NULL, line);
+}
+
+void netsync_user_detach(server_t *srv, client_t *cl) {
+    if (!cl->uid[0] || !netsync_has_links(srv)) return;
+    char line[100];
+    irc_build(line, sizeof line, NULL, 0, cl->uid, "DETACH", (const char *[]){cl->detached_at ? "1" : "0"}, 1, NULL);
+    flood(srv, NULL, line);
+}
+
+void netsync_resume_kill(server_t *srv, client_t *target) {
+    if (!target->remote || !target->nserver) return;
+    char line[300], reason[200];
+    snprintf(reason, sizeof reason, "Session resumed on %s", srv->cfg.server.name);
+    irc_build(line, sizeof line, NULL, 0, self_sid(srv), "KILL", (const char *[]){target->uid}, 1, reason);
+    route_to(srv, target->nserver, line);
 }
 
 void netsync_user_away(server_t *srv, client_t *cl) {

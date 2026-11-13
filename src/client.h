@@ -175,6 +175,14 @@ typedef struct client {
     int soft_quit;          /* this quit is the connection's own doing (closed, timed out, /QUIT): may detach */
     time_t detached_at;     /* nonzero = detached (no connection) since then */
     int auto_away;          /* is_away was set by the detach, not by the user */
+    int remote_detached;    /* a remote user its server says is detached (DETACH on the link): resumable from here */
+    /* Resuming an always-on session detached on another server: that server was asked to drop the ghost (resume_uid);
+     * registration waits until it is gone (or resume_until passes), then takes its nick and these channels and ranks. */
+    char resume_uid[16];
+    char resume_nick[NICKLEN];
+    time_t resume_until;
+    struct resume_chan { char name[64]; int rank; } *resume_chans;
+    int n_resume_chans;
 
     time_t signon_time;
     time_t last_activity;   /* last line received */

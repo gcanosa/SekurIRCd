@@ -97,6 +97,20 @@ def test_websocket_ircv3_subprotocols():
             sock.close()
 
 
+def test_websocket_frames_split_across_reads():
+    # more frames in one read than the 4 KiB line buffer holds: the frame left for the next read must not come out garbled
+    s = Server(cfg={"websocket": {"enabled": True, "port": 0}})
+    s.cfg["websocket"]["port"] = s.ws_port
+    with s:
+        sock = ws_connect(s.ws_port)
+        assert any(" 001 " in t for o, t in ws_session(sock, "wsbig"))
+        tokens = [f"t{i:02d}" + "x" * 330 for i in range(14)]  # ~4.7 KB, each PONG still under 512 bytes
+        sock.sendall(b"".join(ws_frame(f"PING :{t}") for t in tokens))
+        frames, _ = ws_parse(ws_read(sock, 1.5))
+        got = [t.rsplit(":", 1)[-1].strip() for o, t in frames if " PONG " in t]
+        assert got == tokens, [(g[:4], len(g)) for g in got]
+
+
 def make_cert(d):
     crt, key = os.path.join(d, "t.crt"), os.path.join(d, "t.key")
     subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", key, "-out", crt, "-days", "1",

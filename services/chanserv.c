@@ -626,9 +626,13 @@ static void wire_unban(const char *chan, const char *nick) {
  * that's ever seen in practice. */
 #define FAIL_SLOTS 64
 #define FAIL_COOLDOWN 3
-static struct { char nick[64]; time_t until; } g_fails[FAIL_SLOTS];
+typedef struct { char nick[64]; time_t until; } fail_t;
+static fail_t g_fails[FAIL_SLOTS];
+/* Trailing-word password guesses by users already on the access list (see authorize): a cooldown of their own, so a
+ * missed guess -- usually just the command's last word -- never trips the "too many failed attempts" of a real one. */
+static fail_t g_guesses[FAIL_SLOTS];
 
-static int fail_slot(const char *nick, int create) {
+static int fail_slot_in(fail_t *g_fails, const char *nick, int create) {
     char cf[64];
     irc_casefold(cf, sizeof cf, nick);
     time_t now = time(NULL);
@@ -642,6 +646,7 @@ static int fail_slot(const char *nick, int create) {
     snprintf(g_fails[free_slot].nick, sizeof g_fails[0].nick, "%s", cf);
     return free_slot;
 }
+static int fail_slot(const char *nick, int create) { return fail_slot_in(g_fails, nick, create); }
 
 static void touch_last_used(cJSON *rec);
 /* `fail_msg`: the reply on a wrong password (NULL = "Password incorrect."). */
@@ -955,9 +960,14 @@ static cJSON *authorize(const char *from_nick, const char *chan, char *tail, cha
     char lvl = sender_level(rec, from_nick);
     if (lvl_rank(lvl) >= lvl_rank(need)) {
         const char *hash = rec_str(rec, "pw_hash");
-        /* ponytail: one scrypt check per command that has a last word, the same cost every command paid before */
-        if (*word && (strcmp(word, "*") == 0 || (hash[0] && crypto_verify_password(word, hash)))) {
-            if (strcmp(word, "*") != 0) lvl = 'F';
+        /* The last word may be the password (raising this command to founder) or just text. A miss isn't reported,
+         * but it starts a cooldown (g_guesses): without it, anyone on the access list could guess the founder
+         * password as fast as they could send commands. Within the cooldown no guess is tried. */
+        int is_star = *word && strcmp(word, "*") == 0, verified = 0;
+        if (!is_star && *word && hash[0] && fail_slot_in(g_guesses, from_nick, 0) < 0 && !(verified = crypto_verify_password(word, hash)))
+            g_guesses[fail_slot_in(g_guesses, from_nick, 1)].until = time(NULL) + FAIL_COOLDOWN;
+        if (is_star || verified) {
+            if (verified) lvl = 'F';
             *word = '\0';
             if (sp) *sp = '\0';
         }

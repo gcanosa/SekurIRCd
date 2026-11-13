@@ -74,9 +74,9 @@ LDLIBS   := $(OPENSSL_LIBS) -lpthread
 
 CORE_SRCS := $(SRC_DIR)/ev.c $(SRC_DIR)/proto.c $(SRC_DIR)/crypto.c $(SRC_DIR)/log.c $(SRC_DIR)/config.c \
              $(SRC_DIR)/channel.c $(SRC_DIR)/client.c $(SRC_DIR)/server.c $(SRC_DIR)/net.c \
-             $(SRC_DIR)/link.c $(SRC_DIR)/accounts.c $(SRC_DIR)/worker.c \
+             $(SRC_DIR)/link.c $(SRC_DIR)/worker.c \
              $(SRC_DIR)/cmd.c $(SRC_DIR)/cmd_reg.c $(SRC_DIR)/cmd_chan.c $(SRC_DIR)/cmd_user.c \
-             $(SRC_DIR)/cmd_oper.c $(SRC_DIR)/cmd_info.c $(SRC_DIR)/spam.c $(SRC_DIR)/protection.c $(SRC_DIR)/ws.c $(SRC_DIR)/scram.c $(SRC_DIR)/history.c $(SRC_DIR)/netsync.c $(SRC_DIR)/build.c
+             $(SRC_DIR)/cmd_oper.c $(SRC_DIR)/cmd_info.c $(SRC_DIR)/spam.c $(SRC_DIR)/protection.c $(SRC_DIR)/ws.c $(SRC_DIR)/history.c $(SRC_DIR)/netsync.c $(SRC_DIR)/build.c
 VEND_SRCS := $(VEND_DIR)/tomlc17.c $(VEND_DIR)/cJSON.c
 MAIN_SRC  := $(SRC_DIR)/main.c
 
@@ -131,7 +131,7 @@ build-debug/%.o: %.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
 HEADERS := $(wildcard $(SRC_DIR)/*.h $(VEND_DIR)/*.h)
-UNIT_SRCS := tests/unit.c $(CORE_SRCS) $(VEND_SRCS)
+UNIT_SRCS := tests/unit.c $(CORE_SRCS) $(SRC_DIR)/accounts.c $(SRC_DIR)/scram.c $(VEND_SRCS) # accounts/SCRAM: services-only code, unit-tested here
 check: $(BIN_DIR)/unit
 	./$(BIN_DIR)/unit
 

@@ -34,7 +34,6 @@ log_level_t log_level_from_name(const char *name) {
     return LOG_INFO;
 }
 
-const char *log_level_name(log_level_t level) { return LEVEL_NAME[level]; }
 
 static int use_color(void) {
     return getenv("NO_COLOR") == NULL && isatty(fileno(stderr));

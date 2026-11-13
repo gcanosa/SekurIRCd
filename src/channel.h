@@ -131,10 +131,7 @@ member_t *channel_add_member(channel_t *chan, struct client *cl); /* NULL on all
 void channel_remove_member(channel_t *chan, struct client *cl);
 int channel_member_count(channel_t *chan);
 
-int channel_is_op(channel_t *chan, struct client *cl);
-int channel_is_halfop(channel_t *chan, struct client *cl);
 int channel_has_ops(channel_t *chan, struct client *cl); /* op OR halfop */
-int channel_is_voice(channel_t *chan, struct client *cl);
 
 /* Mask matcher shared by ban/exception/invex/VHOST-style checks: a mask
  * starting with "a:" matches by SASL account (empty account never matches);

@@ -281,12 +281,6 @@ int config_history_path(const config_t *cfg, char *out, size_t outsz) {
     return 1;
 }
 
-int config_accounts_path(const config_t *cfg, char *out, size_t outsz) {
-    if (!cfg->accounts.enabled) return 0;
-    resolve_against_config_dir(cfg, cfg->accounts.store_file, out, outsz);
-    return 1;
-}
-
 void config_tls_cert_path(const config_t *cfg, char *out, size_t outsz) {
     resolve_against_config_dir(cfg, cfg->tls.cert_file, out, outsz);
 }

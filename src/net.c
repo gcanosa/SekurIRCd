@@ -442,7 +442,11 @@ static ssize_t ws_read(client_t *cl, void *buf, size_t len) {
         }
         if (opcode == 9) ws_send_frame(cl, 10, payload, plen); /* ping -> pong */
         else if (opcode == 0 || opcode == 1 || opcode == 2) {
-            if (out + plen + 1 > len) break; /* not enough room: leave this frame for the next call */
+            if (out + plen + 1 > len) { /* not enough room: leave this frame for the next call -- masked again, since the
+                                          * decode unmasked it in place and the next call will unmask it once more */
+                for (size_t i = 0; i < plen; i++) payload[i] ^= payload[(ptrdiff_t)(i & 3) - 4];
+                break;
+            }
             memcpy(dst + out, payload, plen);
             out += plen;
             if (fin && (out == 0 || dst[out - 1] != '\n')) dst[out++] = '\n'; /* one IRC line per message, CRLF optional */
@@ -867,7 +871,12 @@ void net_detach_client(server_t *srv, client_t *cl, const char *why, int quiet) 
     cl->ws_in_len = cl->ws_in_cap = cl->ws_out_len = cl->ws_out_cap = 0;
     cl->rbuf_len = 0;
     cl->sbuf_off = cl->sbuf_len = 0;
+    /* a ghost can live for days: don't let it pin a big send/receive buffer from its last moments online */
+    cl->sbuf = client_buf_shrink(cl->sbuf, 0, &cl->sbuf_cap, SBUF_KEEP, SBUF_KEEP);
+    cl->rbuf = client_buf_shrink(cl->rbuf, 0, &cl->rbuf_cap, RBUF_START, RBUF_START);
     cl->label_capture = cl->label_defer = 0;
+    cl->label_len = cl->label_lines = 0;
+    free(cl->label_buf); cl->label_buf = NULL; cl->label_cap = 0;
     cl->label_pending[0] = '\0';
     free(cl->ml); cl->ml = NULL;
     cl->conn_id = 0;
@@ -891,6 +900,7 @@ void net_detach_client(server_t *srv, client_t *cl, const char *why, int quiet) 
     }
     if (cl->umodes != before) netsync_user_modes(srv, cl);
     if (quiet) return;
+    netsync_user_detach(srv, cl); /* other servers may now resume it too */
     if (!cl->is_away) {
         cl->is_away = cl->auto_away = 1;
         snprintf(cl->away, sizeof cl->away, "Detached (always-on)");
@@ -912,13 +922,101 @@ static client_t *takeover_target(server_t *srv, client_t *cl) {
     return NULL;
 }
 
+/* --- resuming a session detached on another server ---
+ * Its server is asked to drop the ghost (it quits there with "Session resumed on <us>"); meanwhile cl's registration
+ * waits. Once the ghost is gone cl registers normally under its nick, and net_resume_rejoin puts it back in the
+ * ghost's channels with the same ranks. Unlike a local takeover the channels see a QUIT and a JOIN: the uid can't
+ * move between servers. Gives up after RESUME_WAIT seconds (that server unreachable) and just registers. */
+#define RESUME_WAIT 10
+
+static client_t *remote_ghost(server_t *srv, const client_t *cl) {
+    client_t *u, *tmp;
+    HASH_ITER(hh, srv->users, u, tmp)
+        if (u->remote && u->remote_detached && u->account[0] && !strcasecmp(u->account, cl->account)) return u;
+    return NULL;
+}
+
+static int resume_remote_start(server_t *srv, client_t *cl) {
+    client_t *r = remote_ghost(srv, cl);
+    if (!r) return 0;
+    int n = 0;
+    for (chan_node_t *c = r->channels; c; c = c->next) n++;
+    free(cl->resume_chans);
+    cl->resume_chans = n ? calloc((size_t)n, sizeof *cl->resume_chans) : NULL;
+    cl->n_resume_chans = 0;
+    for (chan_node_t *c = r->channels; c && cl->resume_chans; c = c->next) {
+        member_t *m = channel_find_member(c->chan, r);
+        snprintf(cl->resume_chans[cl->n_resume_chans].name, sizeof cl->resume_chans[0].name, "%s", c->chan->name);
+        cl->resume_chans[cl->n_resume_chans++].rank = m ? m->rank : 0;
+    }
+    snprintf(cl->resume_uid, sizeof cl->resume_uid, "%s", r->uid);
+    snprintf(cl->resume_nick, sizeof cl->resume_nick, "%s", r->nick);
+    cl->resume_until = time(NULL) + RESUME_WAIT;
+    log_info("conn", "%s (%s) resuming %s's always-on session from %s", cl->nick, cl->ip, r->nick,
+             r->nserver ? r->nserver->name : "?");
+    netsync_resume_kill(srv, r);
+    return 1;
+}
+
+static int resume_remote_wait(server_t *srv, client_t *cl) {
+    int gone = !netsync_find_uid(srv, cl->resume_uid);
+    if (!gone && time(NULL) < cl->resume_until) return 1; /* tick() asks again every second */
+    cl->resume_uid[0] = '\0';
+    if (!gone) { /* never answered: a normal login, no channels */
+        log_warn("conn", "%s: the always-on session to resume never went away -- registering without it", cl->ip);
+        free(cl->resume_chans); cl->resume_chans = NULL; cl->n_resume_chans = 0;
+        return 0;
+    }
+    client_t *holder = server_find_user(srv, cl->resume_nick);
+    if (!holder || holder == cl) { /* the ghost's nick, unless someone grabbed it in the meantime */
+        client_t *mine;
+        HASH_FIND_STR(srv->users, cl->casefold_nick, mine); /* out from under its pre-registration nick first */
+        if (mine == cl) HASH_DEL(srv->users, cl);
+        snprintf(cl->nick, sizeof cl->nick, "%s", cl->resume_nick);
+        irc_casefold(cl->casefold_nick, sizeof cl->casefold_nick, cl->nick);
+        server_add_user(srv, cl);
+    }
+    return 0; /* registration goes on; cmd_send_welcome_if_ready calls net_resume_rejoin at its end */
+}
+
+void net_resume_rejoin(server_t *srv, client_t *cl) {
+    if (!cl->resume_chans) return;
+    static const int bits[5] = {RANK_OWNER, RANK_ADMIN, RANK_OP, RANK_HALFOP, RANK_VOICE};
+    static const char ltr[5] = {'q', 'a', 'o', 'h', 'v'};
+    int n = cl->n_resume_chans;
+    for (int i = 0; i < n; i++) {
+        const struct resume_chan *rc = &cl->resume_chans[i];
+        cmd_force_join(srv, cl, rc->name);
+        channel_t *chan = server_find_channel(srv, rc->name);
+        member_t *m = chan ? channel_find_member(chan, cl) : NULL;
+        if (!m) continue;
+        char letters[6] = "+";
+        const char *args[5];
+        int k = 0;
+        for (int b = 0; b < 5; b++)
+            if ((rc->rank & bits[b]) && !(m->rank & bits[b])) { letters[1 + k] = ltr[b]; args[k++] = cl->nick; }
+        if (!k) continue;
+        letters[1 + k] = '\0';
+        m->rank |= rc->rank;
+        netsync_broadcast_rank_modes(chan, srv->cfg.server.name, '+', letters + 1, args, k);
+        netsync_chan_mode(srv, chan, NULL, letters, args, k);
+    }
+    free(cl->resume_chans);
+    cl->resume_chans = NULL;
+    cl->n_resume_chans = 0;
+    char msg[200];
+    snprintf(msg, sizeof msg, "Resumed your always-on session (%d channel%s)", n, n == 1 ? "" : "s");
+    notice_self(srv, cl, msg);
+}
+
 /* `cl` finished registering (SASL'd in) and the account has a session here to resume: cl becomes that client -- its
  * nick, uid, channels, modes and visible user@host -- and the old client_t goes away without a QUIT. Only cl's own
  * connection state (socket, TLS, caps, IP) stays. 1 if it happened (cl is then registered and welcomed). */
 int net_takeover(server_t *srv, client_t *cl) {
     if (!cl->account[0]) return 0;
+    if (cl->resume_uid[0]) return resume_remote_wait(srv, cl);
     client_t *g = takeover_target(srv, cl);
-    if (!g) return 0;
+    if (!g) return resume_remote_start(srv, cl);
     if (g->fd >= 0) { /* live: its connection is closed, as if it had dropped */
         client_send(g, "ERROR :Closing Link: Session taken over by a new connection");
         if (!g->tls_handshaking) write_client(g);
@@ -927,7 +1025,7 @@ int net_takeover(server_t *srv, client_t *cl) {
         net_detach_client(srv, g, "Session taken over", 1);
     }
     unsigned old_modes = g->umodes;
-    int was_away = g->is_away;
+    int was_away = g->is_away, was_detached = g->detached_at != 0;
 
     client_t *found;
     if (cl->casefold_nick[0]) { HASH_FIND_STR(srv->users, cl->casefold_nick, found); if (found == cl) HASH_DEL(srv->users, cl); }
@@ -978,6 +1076,7 @@ int net_takeover(server_t *srv, client_t *cl) {
     server_send_welcome(srv, cl);
     if (cl->umodes != old_modes) netsync_user_modes(srv, cl);
     if (was_away != cl->is_away) cmd_away_changed(srv, cl);
+    if (was_detached) netsync_user_detach(srv, cl);
     for (chan_node_t *n = cl->channels; n; n = n->next) cmd_replay_join(cl, n->chan);
     char msg[200];
     snprintf(msg, sizeof msg, "Resumed your always-on session (%d channel%s)", nchan, nchan == 1 ? "" : "s");
@@ -1049,11 +1148,46 @@ static void alwayson_save(server_t *srv, int force) {
         cJSON_AddItemToArray(arr, o);
         n++;
     }
+    /* The channels those users are in keep their modes, topic and lists too (a registered one gets them back from
+     * ChanServ anyway; an unregistered one would come back bare). So does a +P channel, users or not. */
+    cJSON *chans = cJSON_CreateArray();
+    channel_t *ch, *ctmp;
+    HASH_ITER(hh, srv->channels, ch, ctmp) {
+        int keep = (ch->modes & CMODE_PERM) != 0;
+        member_t *m, *mt;
+        HASH_ITER(hh, ch->members, m, mt) if (!keep && alwayson_wanted(m->client)) keep = 1;
+        if (!keep) continue;
+        cJSON *o = cJSON_CreateObject();
+        char modes[400];
+        channel_modes_string(ch, modes, sizeof modes);
+        str_item(o, "name", ch->name); str_item(o, "modes", modes);
+        str_item(o, "topic", ch->topic); str_item(o, "topic_setter", ch->topic_setter);
+        cJSON_AddNumberToObject(o, "topic_time", (double)ch->topic_time);
+        cJSON_AddNumberToObject(o, "created", (double)ch->created);
+        const masklist_t *lists[3] = {&ch->bans, &ch->exceptions, &ch->invex};
+        static const char *const keys[3] = {"b", "e", "I"};
+        for (int li = 0; li < 3; li++) {
+            if (!lists[li]->n) continue;
+            cJSON *a = cJSON_AddArrayToObject(o, keys[li]);
+            for (int i = 0; i < lists[li]->n; i++) {
+                cJSON *e = cJSON_CreateArray();
+                cJSON_AddItemToArray(e, cJSON_CreateString(lists[li]->masks[i]));
+                cJSON_AddItemToArray(e, cJSON_CreateString(lists[li]->set_by[i]));
+                cJSON_AddItemToArray(e, cJSON_CreateNumber((double)lists[li]->set_at[i]));
+                cJSON_AddItemToArray(a, e);
+            }
+        }
+        cJSON_AddItemToArray(chans, o);
+        n++;
+    }
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddItemToObject(root, "users", arr);
+    cJSON_AddItemToObject(root, "channels", chans);
     if (n || had || force) {
         char path[CFG_PATH], tmpath[CFG_PATH + 8];
         config_alwayson_path(&srv->cfg, path, sizeof path);
         snprintf(tmpath, sizeof tmpath, "%s.tmp", path);
-        char *txt = cJSON_PrintUnformatted(arr);
+        char *txt = cJSON_PrintUnformatted(root);
         int fd = open(tmpath, O_WRONLY | O_CREAT | O_TRUNC, 0600); /* IPs and real hosts */
         int ok = fd >= 0 && txt && write(fd, txt, strlen(txt)) == (ssize_t)strlen(txt) && fsync(fd) == 0;
         if (fd >= 0 && close(fd) != 0) ok = 0;
@@ -1061,7 +1195,38 @@ static void alwayson_save(server_t *srv, int force) {
         else { unlink(tmpath); log_error("conn", "could not write %s -- always-on sessions may not survive a restart", path); }
         free(txt);
     }
-    cJSON_Delete(arr);
+    cJSON_Delete(root);
+}
+
+static void restore_channel(server_t *srv, const cJSON *o) {
+    const char *name = get_str(o, "name"), *modes = get_str(o, "modes");
+    if (!irc_valid_channel(name, 50)) return;
+    channel_t *chan = server_find_channel(srv, name);
+    if (!chan && !strchr(modes, 'P')) return; /* nobody came back to it, and it isn't permanent */
+    if (!chan && !(chan = server_get_or_create_channel(srv, name))) return;
+    char copy[400];
+    snprintf(copy, sizeof copy, "%s", modes);
+    const char *args[16];
+    int na = 0;
+    char *save = NULL, *flags = strtok_r(copy, " ", &save);
+    for (char *t; na < 16 && (t = strtok_r(NULL, " ", &save));) args[na++] = t;
+    if (flags) netsync_set_state_modes(chan, flags, args, na, 1);
+    if (get_num(o, "created") > 0) chan->created = (time_t)get_num(o, "created");
+    snprintf(chan->topic, sizeof chan->topic, "%s", get_str(o, "topic"));
+    snprintf(chan->topic_setter, sizeof chan->topic_setter, "%s", get_str(o, "topic_setter"));
+    chan->topic_time = (time_t)get_num(o, "topic_time");
+    masklist_t *lists[3] = {&chan->bans, &chan->exceptions, &chan->invex};
+    static const char *const keys[3] = {"b", "e", "I"};
+    for (int li = 0; li < 3; li++) {
+        const cJSON *e;
+        cJSON_ArrayForEach(e, cJSON_GetObjectItemCaseSensitive(o, keys[li])) {
+            const cJSON *mk = cJSON_GetArrayItem(e, 0), *by = cJSON_GetArrayItem(e, 1), *at = cJSON_GetArrayItem(e, 2);
+            if (!cJSON_IsString(mk) || masklist_add(lists[li], mk->valuestring) != 0) continue;
+            int i = lists[li]->n - 1;
+            if (cJSON_IsString(by)) snprintf(lists[li]->set_by[i], sizeof lists[li]->set_by[0], "%s", by->valuestring);
+            if (cJSON_IsNumber(at)) lists[li]->set_at[i] = (time_t)at->valuedouble;
+        }
+    }
 }
 
 static void alwayson_restore(server_t *srv) {
@@ -1073,8 +1238,10 @@ static void alwayson_restore(server_t *srv) {
     long len = fseek(fp, 0, SEEK_END) == 0 ? ftell(fp) : -1;
     if (len > 0 && len < (16L << 20) && fseek(fp, 0, SEEK_SET) == 0 && (buf = malloc((size_t)len + 1))) buf[fread(buf, 1, (size_t)len, fp)] = '\0';
     fclose(fp);
-    cJSON *arr = buf ? cJSON_Parse(buf) : NULL;
+    cJSON *root = buf ? cJSON_Parse(buf) : NULL;
     free(buf);
+    /* the first version of the file was just the users array */
+    cJSON *arr = cJSON_IsArray(root) ? root : cJSON_GetObjectItemCaseSensitive(root, "users");
     time_t now = time(NULL);
     int restored = 0, expired = 0;
     cJSON *o;
@@ -1122,7 +1289,9 @@ static void alwayson_restore(server_t *srv) {
         }
         restored++;
     }
-    cJSON_Delete(arr);
+    cJSON *ch;
+    cJSON_ArrayForEach(ch, cJSON_GetObjectItemCaseSensitive(root, "channels")) restore_channel(srv, ch);
+    cJSON_Delete(root);
     if (restored || expired) log_info("conn", "always-on: restored %d detached session(s) from %s%s", restored, path,
                                       expired ? " (some had expired while the server was down)" : "");
 }
@@ -1426,6 +1595,7 @@ static void tick(server_t *srv) {
         if (cl->fd >= 0 && cl->quitting && !cl->dead_q) client_mark_quit(cl);
         if (cl->fd >= 0 && !cl->quitting && (client_sendq_len(cl) > 0 || cl->ws_out_len > 0)) client_mark_dirty(cl);
         if (cl->fd < 0 || cl->quitting) continue; /* service pseudo-clients have no timeout of their own */
+        if (cl->resume_uid[0] && !cl->registered) cmd_send_welcome_if_ready(srv, cl); /* waiting on a remote resume */
         double age = difftime(now, cl->signon_time);
         /* Worker results can be lost (full result ring) or stuck on a hung
          * resolver: never let a pending lookup gate a client forever. */

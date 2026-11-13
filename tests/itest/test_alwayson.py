@@ -1,5 +1,5 @@
 """Always-on (NickServ SET ALWAYS-ON): the nick stays on the network after its connection drops, and a SASL login to
-the same account takes the session over -- nobody else sees a QUIT or JOIN."""
+the same account takes the session over -- nobody else sees a QUIT or JOIN (on another server: a QUIT and JOIN)."""
 import base64
 import time
 from harness import Server, Client
@@ -8,7 +8,7 @@ from test_accounts2 import ns, ACC
 OPS = {**ACC, "operators": [{"name": "boss", "password": "bosspw", "hosts": ["*@*"]}]}
 
 
-def sasl_connect(s, nick, account, pw, caps=()):
+def sasl_connect(s, nick, account, pw, caps=(), wait=1.5):
     """A new connection that SASLs in and finishes registering; returns it with its welcome burst still buffered."""
     c = Client(s.port, nick, register=False, extra=["CAP LS 302", "CAP REQ :" + " ".join(("sasl",) + tuple(caps)),
                                                     f"NICK {nick}", f"USER {nick} 0 * :new realname"])
@@ -17,7 +17,7 @@ def sasl_connect(s, nick, account, pw, caps=()):
     c.send("AUTHENTICATE " + base64.b64encode(f"\0{account}\0{pw}".encode()).decode())
     c.expect(r" 903 ", 3)
     c.send("CAP END")
-    c.lines = c.drain(1.5)  # the welcome burst stays readable through c.drain()
+    c.lines = c.drain(wait)  # the welcome burst stays readable through c.drain()
     assert any(" 001 " in l for l in c.lines), c.lines[-5:]
     return c
 
@@ -172,6 +172,59 @@ def test_survives_ircd_restart():
         assert any("Resumed your always-on session (1 channel)" in l for l in burst), burst
 
 
+def test_channel_state_survives_restart():
+    """An unregistered channel an always-on user is in comes back with its modes, key, topic and bans."""
+    with Server(cfg=ACC) as s:
+        a, _ = setup(s, "aochan", "aochanacct", watcher=False)
+        a.say("MODE #ao +mk sekrit", 0.3)
+        a.say("MODE #ao +b bad!*@*", 0.3)
+        a.say("TOPIC #ao :kept across restarts", 0.3)
+        a.close()
+        time.sleep(0.5)
+        s.restart()
+        b = s.client("aochanw")
+        modes = " ".join(l for l in b.say("MODE #ao", 0.6) if " 324 " in l)
+        assert "m" in modes.split()[4] and "k" in modes.split()[4], modes
+        assert any("bad!*@*" in l for l in b.say("MODE #ao b", 0.6) if " 367 " in l), "the ban is back"
+        assert any(" 475 " in l for l in b.say("JOIN #ao", 0.6)), "and so is the key"
+        assert any("kept across restarts" in l for l in b.say("JOIN #ao sekrit", 0.6) if " 332 " in l), "and the topic"
+
+
+def test_resume_from_another_server():
+    """A session detached on server a, resumed by logging in on server b: same nick, same channels, same rank."""
+    from harness import Network
+    from test_netsync import OPERS
+    n = Network(cfg={**OPERS, "accounts": {"enabled": True, "store_file": "acc.json"}})
+    n.add("a")
+    n.add("b", parent="a")
+    n.start()
+    try:
+        a = n.client("a", "aomove")
+        ns(a, "REGISTER movepass1")
+        assert any("Always-on enabled" in l for l in ns(a, "SET ALWAYS-ON ON"))
+        a.say("JOIN #aomove", 0.5)  # created it: opped
+        far = n.client("b", "aomovew")
+        far.say("JOIN #aomove", 1.0)
+        a.close()
+        time.sleep(1.0)
+        far.drain(0.5)
+        c = sasl_connect(n.servers["b"], "aomovenew", "aomove", "movepass1", wait=4)  # waits for server a to drop it
+        burst = c.drain(1.5) + c.lines
+        assert any(" 001 aomove " in l for l in burst), "registered under the kept nick on the other server: %r" % burst[:3]
+        assert any(l.startswith(":aomove!") and " JOIN #aomove" in l for l in burst), burst
+        assert any("Resumed your always-on session (1 channel)" in l for l in burst), burst
+        seen = far.drain(1.0)
+        assert any("QUIT :Session resumed on" in l for l in seen), seen
+        names = " ".join(l for l in far.say("NAMES #aomove", 0.8) if " 353 " in l)
+        assert "@aomove" in names, "back with its op: %r" % names
+        c.say("PRIVMSG #aomove :moved", 0.3)
+        assert far.saw(r":aomove!\S+ PRIVMSG #aomove :moved", 3)
+        aw = n.client("a", "aomovea")
+        assert any(" 311 aomovea aomove " in l for l in aw.say("WHOIS aomove", 1.0)), "server a sees the new session"
+    finally:
+        n.stop()
+
+
 def test_expiry_counts_through_restarts():
     """The detach time is saved, not reset by a restart: a session past its expiry doesn't come back."""
     import json, os
@@ -183,8 +236,9 @@ def test_expiry_counts_through_restarts():
         s.proc.wait(8)
         path = os.path.join(s.dir, "alwayson.json")
         saved = json.load(open(path))
-        assert [e["nick"] for e in saved] == ["aoold"] and saved[0]["always_on"] == 86400, saved
-        saved[0]["detached_at"] -= 86400 + 60  # pretend it detached over a day ago
+        users = saved["users"]
+        assert [e["nick"] for e in users] == ["aoold"] and users[0]["always_on"] == 86400, saved
+        users[0]["detached_at"] -= 86400 + 60  # pretend it detached over a day ago
         json.dump(saved, open(path, "w"))
         s.start()
         b = s.client("aooldw")

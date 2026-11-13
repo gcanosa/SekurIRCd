@@ -407,11 +407,6 @@ static void test_accounts_indexes(void) {
     accounts_set_fingerprint(&st, "alice", "feed");
     assert(accounts_group_del(&st, "alice", "ally") == 0 && accounts_owner_of_nick(&st, "ally") == NULL);
     assert(accounts_drop(&st, "ALICE") == 1 && !accounts_exists(&st, "alice") && accounts_find_by_fingerprint(&st, "feed") == NULL);
-    assert(accounts_apply_remote(&st, "Carol", 5, "{\"name\":\"Carol\",\"pw_hash\":\"x\",\"nicks\":[\"cc\"],\"cert_fp\":\"AA11\"}") == 1);
-    assert(strcmp(accounts_owner_of_nick(&st, "cc"), "Carol") == 0 && strcmp(accounts_find_by_fingerprint(&st, "aa11"), "Carol") == 0);
-    assert(accounts_apply_remote(&st, "carol", 9, "{\"name\":\"Carol\",\"pw_hash\":\"y\"}") == 1);
-    assert(accounts_owner_of_nick(&st, "cc") == NULL && strcmp(accounts_hash(&st, "carol"), "y") == 0);
-    assert(accounts_apply_remote_delete(&st, "carol", 20) == 1 && !accounts_exists(&st, "carol") && accounts_count(&st) == 1);
     accounts_free(&st);
 }
 

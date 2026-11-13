@@ -213,6 +213,7 @@ void cmd_send_welcome_if_ready(server_t *srv, client_t *cl) {
 
     for (int i = 0; i < srv->cfg.channels.n_auto_join; i++)
         cmd_force_join(srv, cl, srv->cfg.channels.auto_join[i]);
+    net_resume_rejoin(srv, cl); /* always-on resumed from another server: its channels and ranks */
 }
 
 /* DISPATCH indices sorted by command name, so lookup is a bsearch instead of ~90 strcasecmps per line. */

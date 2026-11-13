@@ -157,3 +157,10 @@ def test_account_levels_need_no_password():
         assert any("at or above yours" in l for l in cs(h, "KICK #cs adm bye")), "halfop can't kick an admin"
         assert any("Kicked hop" in l for l in cs(a, "KICK #cs hop bye")), "admin can kick a halfop"
         assert "fnd" in " ".join(f.say("NAMES #cs"))
+        # someone on the access list can't brute-force the password through the last word: a miss starts a cooldown
+        time.sleep(3)
+        cs(f, "ACCESS #cs ADD =vceacct h")
+        cs(v, "TOPIC #cs first wrongpw")
+        cs(v, "TOPIC #cs second chanpass1")  # the right password straight after the miss isn't tried: it stays text
+        t = " ".join(l for l in f.say("TOPIC #cs") if " 332 " in l)
+        assert t.endswith(":second chanpass1"), t
