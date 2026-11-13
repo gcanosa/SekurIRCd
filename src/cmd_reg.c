@@ -13,6 +13,7 @@
 #include <openssl/x509.h>
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <time.h>
@@ -317,7 +318,15 @@ static int supported_cap_tokens(server_t *srv, client_t *cl, char tok[][CAP_TOKE
 /* Sends "CAP <nick> <sub> [*] :tokens", splitting across lines so none can
  * overflow 512 bytes; every line but the last carries the "*" continuation
  * marker (IRCv3 multi-line LS/LIST). */
+static int cap_cmp(const void *a, const void *b) { /* alphabetical, "draft/" ignored so a cap keeps its slot once ratified */
+    const char *x = a, *y = b;
+    if (!strncmp(x, "draft/", 6)) x += 6;
+    if (!strncmp(y, "draft/", 6)) y += 6;
+    return strcmp(x, y);
+}
+
 static void send_cap_lines(server_t *srv, client_t *cl, const char *sub, char tok[][CAP_TOKEN_LEN], int n) {
+    qsort(tok, (size_t)n, sizeof tok[0], cap_cmp); /* LS and LIST go out sorted, whatever order the table or config adds them in */
     const char *target = cl->nick[0] ? cl->nick : "*";
     int i = 0;
     do {
