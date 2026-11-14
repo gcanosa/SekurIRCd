@@ -16,6 +16,7 @@ password (scrypt hash on the accepting side), and the steps to bring the link up
   tools/linkmgmt.py test HOST PORT [--tls]   the same against any host (run it on the other server too); with
                                     --tls it also prints the certificate fingerprint to pin
   tools/linkmgmt.py fingerprint     this server's own certificate fingerprint (what the other side pins)
+  tools/linkmgmt.py certs           how to get a certificate for TLS links (self-signed or Let's Encrypt)
   tools/linkmgmt.py -c my.toml ...  another sekurircd config
   tools/linkmgmt.py --dry-run ...   change nothing: print this server's side to paste too
 """
@@ -31,6 +32,24 @@ except ImportError:
     tomllib = None
 
 DEFAULT_PORT = 7000
+
+CERT_HELP = """\
+Certificates for TLS links
+  The ACCEPTING server needs one: its link listener reuses the client [tls] certificate, so set [tls] enabled = true
+  with cert_file/key_file. The DIALING server needs one only if the other side pins it (it presents its [tls]
+  cert_file/key_file on links even with [tls] enabled = false).
+
+  Self-signed -- fine for links, and pin it. In the config directory (config/):
+    mkdir -p tls && openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \\
+      -keyout tls/key.pem -out tls/cert.pem -subj "/CN=<this server's name>"
+    chmod 600 tls/key.pem
+  then in [tls]:  cert_file = "tls/cert.pem"   key_file = "tls/key.pem"   (relative to the config file)
+  and give the other side what  tools/linkmgmt.py fingerprint  prints.
+
+  Trusted (Let's Encrypt):  tools/mkcert.sh --domain irc.example.net
+    It installs the certificate where [tls] points and renews it by itself. Every renewal is a NEW certificate
+    (new fingerprint), so don't pin it: the dialing side then checks it against the CA and the hostname it
+    dials -- use that name as host (not an IP) and keep tls_insecure_skip_verify = false."""
 
 
 def read_config(path):
@@ -66,10 +85,17 @@ def cert_fingerprint(pem_path):
         return "sha256:" + hashlib.sha256(ssl.PEM_cert_to_DER_cert(f.read())).hexdigest()
 
 
+def tls_paths(cfg, path):
+    """[tls] cert_file and key_file, absolute ('' when unset)."""
+    d, t = os.path.dirname(os.path.abspath(path)), cfg.get("tls", {})
+    return tuple(os.path.join(d, t[k]) if t.get(k) else "" for k in ("cert_file", "key_file"))
+
+
 def own_fingerprint(cfg, path):
     """(fingerprint or None, why not): this server's [tls] certificate, which it presents on links."""
-    cert = cfg.get("tls", {}).get("cert_file", "tls/cert.pem")
-    cert = os.path.join(os.path.dirname(os.path.abspath(path)), cert)
+    cert, key = tls_paths(cfg, path)
+    if not cert or not key: return None, "[tls] cert_file / key_file are not set"
+    if not os.access(key, os.R_OK): return None, f"{key}: no readable key"
     try:
         return cert_fingerprint(cert), None
     except (OSError, ValueError) as e:
@@ -137,13 +163,13 @@ def peer_spans(lines):
     return out
 
 
-def set_links_keys(lines, kv):
-    """Set [links] key = value for each item (an existing line is replaced, a new one goes after the last setting)."""
+def set_keys(lines, sec, kv):
+    """Set [sec] key = value for each item (an existing line is replaced, a new one goes after the last setting)."""
     hs = headers(lines)
-    at = next((n for n, (_, h) in enumerate(hs) if h == "[links]"), None)
+    at = next((n for n, (_, h) in enumerate(hs) if h == f"[{sec}]"), None)
     if at is None:
-        pos = peer_spans(lines)[0][0] if peer_spans(lines) else len(lines)  # [links] before its peers
-        lines[pos:pos] = ["[links]", *[f"{k} = {v}" for k, v in kv.items()], ""]
+        pos = peer_spans(lines)[0][0] if sec == "links" and peer_spans(lines) else len(lines)  # [links] before its peers
+        lines[pos:pos] = [f"[{sec}]", *[f"{k} = {v}" for k, v in kv.items()], ""]
         return
     start = hs[at][0]
     stop = hs[at + 1][0] if at + 1 < len(hs) else len(lines)
@@ -233,14 +259,15 @@ def apply_local(path, edit, restart):
         return False
     print(green(f"Written.") + dim(f"  Backup: {rel(bak)} (delete it once the link works: it may hold the old password)"))
     pidfile = os.path.join(ROOT, "sekurircd.pid")
+    default = os.path.abspath(path) == os.path.join(ROOT, "config/sekurircd.toml")  # what ./sekurircd and the pidfile run
     if restart:
-        print(yellow("This change needs an ircd restart (the link listener / TLS / enabling links): ./sekurircd restart\n"))
-    elif os.path.abspath(path) == os.path.join(ROOT, "config/sekurircd.toml") and os.path.exists(pidfile) and \
-            yes("Rehash the running ircd now?"):
+        how = "./sekurircd restart" if default else f"restart the ircd started with -c {rel(path)}"
+        print(yellow(f"This change needs an ircd restart (the link listener / TLS / enabling links): {how}\n"))
+    elif default and os.path.exists(pidfile) and yes("Rehash the running ircd now?"):
         r = subprocess.run([os.path.join(ROOT, "bin/sekurircd"), "--rehash", "--pidfile", pidfile], capture_output=True, text=True)
         print(green("Rehashed.\n") if r.returncode == 0 else red(f"Rehash failed: {(r.stdout + r.stderr).strip()} -- /REHASH by hand.\n"))
     else:
-        print(dim("Then /REHASH (or bin/sekurircd --rehash).\n"))
+        print(dim("Then /REHASH (or bin/sekurircd --rehash" + ("" if default else " --pidfile <its pidfile>") + ").\n"))
     return True
 
 
@@ -365,8 +392,8 @@ def wizard(cfg, path, old=None, dry_run=False):
                    "if it shows the certificate you pinned)", bool(old and old.get("fingerprint"))):
         my_fp, why = own_fingerprint(cfg, path)
         if not my_fp:
-            print(yellow(f"  This server has no certificate to present ({why}) -- set [tls] cert_file/key_file first. "
-                         f"{name} won't pin this side."))
+            print(yellow(f"  This server has no certificate to present ({why}) -- {name} won't pin this side. "
+                         "To get one: tools/linkmgmt.py certs"))
         print(dim(f"  {name}'s fingerprint: run tools/linkmgmt.py fingerprint on it"
                   + (f", or tools/linkmgmt.py test {rhost} {rport} --tls from here once it listens" if we_dial else "")))
         their_fp = ask(f"{name}'s certificate fingerprint (empty = don't pin it)", (old or {}).get("fingerprint"), chk_fp) or None
@@ -391,9 +418,17 @@ def wizard(cfg, path, old=None, dry_run=False):
         kv["tls"] = "true" if tls else "false"
         print(yellow(f"[links] tls = {kv['tls']} applies to ALL links of this server."))
     if need_mode != "leaf" and "port" not in lk: kv["port"] = str(lport)
-    if tls and need_mode != "leaf" and not cfg.get("tls", {}).get("enabled"):
-        print(yellow("A TLS link listener reuses the client [tls] certificate: set [tls] enabled = true with cert_file/key_file "
-                     "first, or the ircd will refuse this config."))
+    tls_kv, blocked = {}, False
+    if tls and need_mode != "leaf" and not cfg.get("tls", {}).get("enabled"):  # the TLS link listener reuses [tls]
+        fp, why = own_fingerprint(cfg, path)
+        if fp:
+            tls_kv["enabled"] = "true"
+            print(yellow("The TLS link listener reuses the client [tls] certificate, so [tls] enabled = true is set too "
+                         f"-- that also opens the client TLS port ({cfg.get('tls', {}).get('port', 6697)})."))
+        else:
+            blocked = True
+            print(yellow(f"A TLS link listener needs this server's [tls] certificate, and there is none ({why}).\n"))
+            print(CERT_HELP + "\n")
     changes = [f"{k} = {v}" for k, v in kv.items()]
     if we_dial:
         mine = peer_block(name, pw=pw, host=rhost, port=rport, fp=their_fp)
@@ -401,14 +436,17 @@ def wizard(cfg, path, old=None, dry_run=False):
         mine = peer_block(name, pw_hash=scrypt_hash(pw), ips=ips, fp=their_fp)
     else:  # edit, password kept: keep whatever it has (hash, plain, or only a fingerprint)
         mine = peer_block(name, pw_hash=old.get("password_hash"), pw=old.get("password"), ips=ips, fp=their_fp)
-    restart = (not lk.get("enabled")) or "tls" in kv or (lk.get("mode", "hub") == "leaf" and need_mode != "leaf")
+    restart = (not lk.get("enabled")) or "tls" in kv or bool(tls_kv) or (lk.get("mode", "hub") == "leaf" and need_mode != "leaf")
 
     def edit(lines):
-        if kv: set_links_keys(lines, kv)
+        if kv: set_keys(lines, "links", kv)
+        if tls_kv: set_keys(lines, "tls", tls_kv)
         put_peer(lines, mine.splitlines(), old["name"] if old else None)
 
-    if dry_run or not apply_local(path, edit, restart):
-        print("Not written. To do it by hand:" if not dry_run else "")
+    if dry_run or blocked or not apply_local(path, edit, restart):
+        print("Not written. To do it by hand (once [tls] has a certificate):" if blocked else
+              "Not written. To do it by hand:" if not dry_run else "")
+        if tls_kv: snippet("In [tls], set:\nenabled = true")
         if changes:
             print("In [links], set:")
             snippet("\n".join(changes))
@@ -430,8 +468,9 @@ def wizard(cfg, path, old=None, dry_run=False):
         theirs = peer_block(me, pw=pw or "<the current password>", host=rhost, port=rport, fp=my_fp)
         snippet(theirs)
     if my_fp or their_fp:
-        print(dim("Pinned: the link is refused unless the certificate matches. After renewing a certificate (e.g. a new "
-                  "Let's Encrypt cert with a new key), update the other side's fingerprint, then /REHASH.\n"))
+        print(dim("Pinned: the link is refused unless the certificate matches. The fingerprint is of the certificate "
+                  "itself, so ANY renewal changes it (Let's Encrypt: every 60-90 days): update the other side's "
+                  "fingerprint then, and /REHASH. A long-lived self-signed cert avoids that: tools/linkmgmt.py certs\n"))
 
     save_remote(name, f"# for {name}, from tools/linkmgmt.py on {me}: merge into its config/sekurircd.toml\n"
                       f"# [server] name must be exactly \"{name}\"\n{theirs_links}\n\n{theirs}")
@@ -575,7 +614,7 @@ def delete(cfg, path, dry_run=False):
 
     def edit(lines):
         drop_peer(lines, name)
-        if kv: set_links_keys(lines, kv)
+        if kv: set_keys(lines, "links", kv)
 
     if dry_run or not apply_local(path, edit, restart=False):
         print(f"Delete the [[links.peers]] block with name = \"{name}\".")
@@ -616,6 +655,9 @@ def selftest():
         f.write("-----BEGIN CERTIFICATE-----\n" + base64.b64encode(der).decode() + "\n-----END CERTIFICATE-----\n")
     assert cert_fingerprint(f.name) == "sha256:" + hashlib.sha256(der).hexdigest(); os.unlink(f.name)
     assert chk_fp("SHA256:" + ":".join(["AB"] * 32)) is None and chk_fp("abc") and chk_fp("") is None
+    assert own_fingerprint({"tls": {"cert_file": ""}}, "/x/s.toml") == (None, "[tls] cert_file / key_file are not set")
+    lines = ['[server]', 'name = "a.b"', '[tls]', 'enabled = false # off', '[links]', 'tls = true']
+    set_keys(lines, "tls", {"enabled": "true"}); assert lines[3] == "enabled = true" and len(lines) == 6
 
     # editing: add, re-key [links], edit, delete -- the commented example, the services peer, a multi-line value and
     # the comment documenting the next section survive; every step parses and (when built) passes the ircd's --check
@@ -627,13 +669,13 @@ def selftest():
     assert [n for *_, n in peer_spans(lines)] == ["services.x", "b.test.net"]
     t = "\n".join(lines)
     assert t.index('name = "b.test.net"') < t.index("# --- channels") and '#[[links.peers]]\n#name = "leaf1"' in t
-    set_links_keys(lines, {"mode": '"both"', "tls": "false"})
+    set_keys(lines, "links", {"mode": '"both"', "tls": "false"})
     t = "\n".join(lines)
     assert 'mode = "both"' in t and "# was" not in t and t.index("tls = false") < t.index("#[[links.peers]]")
     put_peer(lines, peer_block("b.test.net", pw="p2", host="b.example", port=7000).splitlines(), "b.test.net")
     assert len(peer_spans(lines)) == 2 and 'host = "b.example"' in "\n".join(lines) and "1.2.3.4" not in "\n".join(lines)
     if tomllib: tomllib.loads("\n".join(lines))
-    drop_peer(lines, "b.test.net"); set_links_keys(lines, {"mode": '"hub"'})
+    drop_peer(lines, "b.test.net"); set_keys(lines, "links", {"mode": '"hub"'})
     assert [n for *_, n in peer_spans(lines)] == ["services.x"] and "\n\n\n" not in "\n".join(lines)
     tail = '[server]\nname = "a.test.net"\n[links]\nenabled = true\n[[links.peers]]\nname = "services.x"\npassword = "p"'
     lines = tail.splitlines(); put_peer(lines, peer_block("b.c", pw="q", host="h", port=1).splitlines()); drop_peer(lines, "b.c")
@@ -658,7 +700,7 @@ def selftest():
 
 def main():
     ap = argparse.ArgumentParser(description="Server-link wizard: writes this server's side, prints the other server's.")
-    ap.add_argument("action", nargs="?", choices=["list", "add", "edit", "del", "test", "fingerprint"])
+    ap.add_argument("action", nargs="?", choices=["list", "add", "edit", "del", "test", "fingerprint", "certs"])
     ap.add_argument("target", nargs="*", help="test only: HOST PORT")
     ap.add_argument("--tls", action="store_true", help="test HOST PORT: also try a TLS handshake")
     ap.add_argument("-c", "--config", default=os.path.join(ROOT, "config/sekurircd.toml"))
@@ -668,16 +710,18 @@ def main():
     a = ap.parse_args()
     if a.selftest: return selftest()
     if not a.no_banner: subprocess.run(["bash", "-c", f'source "{ROOT}/tools/lib.sh"; banner'])
+    if a.action == "certs": return print("\n" + CERT_HELP + "\n")
     if not os.path.exists(a.config): sys.exit(red(f"{a.config} not found (use -c)"))
     cfg = read_config(a.config)
     if a.action == "fingerprint":
         fp, why = own_fingerprint(cfg, a.config)
-        if not fp: sys.exit(red(f"No certificate to fingerprint: {why}"))
+        if not fp: sys.exit(red(f"No certificate to fingerprint: {why}") + "\n\n" + CERT_HELP)
         print(f"\nThis server's certificate: {bold(fp)}\nOn the other server, put fingerprint = \"{fp}\" in its "
               f"[[links.peers]] block for {cfg.get('server', {}).get('name', 'this server')}.\n")
         return
     show(cfg)
-    act = a.action or ["add", "edit", "del", "test", None][pick("What now?", ["Link a new server", "Edit a link", "Remove a link", "Test a link (network)", "Quit"])]
+    act = a.action or ["add", "edit", "del", "test", "certs", None][pick("What now?", ["Link a new server", "Edit a link", "Remove a link", "Test a link (network)", "Certificates for TLS links (how to get one)", "Quit"])]
+    if act == "certs": return print("\n" + CERT_HELP + "\n")
     if act == "add": wizard(cfg, a.config, dry_run=a.dry_run)
     elif act == "edit": wizard(cfg, a.config, choose(cfg, "edit"), dry_run=a.dry_run)
     elif act == "del": delete(cfg, a.config, dry_run=a.dry_run)

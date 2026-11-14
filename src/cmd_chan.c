@@ -529,7 +529,8 @@ void cmd_topic(server_t *srv, client_t *cl, irc_message_t *msg) {
     channel_t *chan = server_find_channel(srv, chan_name);
     if (!chan) { err_no_such_channel(cl, chan_name); return; }
     member_t *m = channel_find_member(chan, cl);
-    if (!m) {
+    /* anyone may read a public channel's topic (as LIST shows it); +s/+p ones and changing it need membership */
+    if (!m && (msg->nparams >= 2 || (chan->modes & (CMODE_S | CMODE_P)))) {
         const char *p[] = {chan->name};
         client_reply(cl, N_NOTONCHANNEL, p, 1, "You're not on that channel");
         return;
