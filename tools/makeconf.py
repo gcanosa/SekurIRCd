@@ -237,6 +237,8 @@ def interview():
     a["loglevel"] = LEVELS[pick("Log level", LEVELS, 1)]
 
     section("services (NickServ + ChanServ)")
+    print(dim("  One services daemon per network, normally next to the hub. On a leaf whose hub already runs them, answer n:\n"
+              "  the leaf reaches the hub's NickServ/ChanServ (and SASL) over the link. Two would collide."))
     a["svc"] = yes("Run services (accounts, SASL, nick and channel registration)?", True)
     if a["svc"]:
         a["link_port"] = int(ask("Link port (the ircd's link listener)", "7000", chk_port))

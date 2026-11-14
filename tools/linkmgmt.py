@@ -351,6 +351,16 @@ def choose(cfg, verb):
     return peers[pick("Link", [p.get("name", "?") for p in peers])]
 
 
+def runs_services(cfg, path):
+    """This server's own services daemon: a services.* peer in its config, or services/services.toml next to it."""
+    return any(p.get("name", "").startswith("services.") for p in cfg["peers"]) or \
+        (os.path.abspath(path) == os.path.join(ROOT, "config/sekurircd.toml") and os.path.exists(os.path.join(ROOT, "services/services.toml")))
+
+
+SERVICES_ONE = ("A network runs ONE services daemon (NickServ + ChanServ), normally next to the hub; the other servers reach "
+                "it over the links. Two would fight over the same nicks and keep separate accounts.")
+
+
 def heading(t):
     print("\n" + bold(cyan("=" * 72)) + "\n" + bold(cyan(t)) + "\n" + bold(cyan("=" * 72)))
 
@@ -374,6 +384,10 @@ def wizard(cfg, path, old=None, dry_run=False):
     we_dial = pick("Choice", [f"{name} dials {me}  (this server accepts -- usual for a new leaf)",
                               f"{me} dials {name}  ({name} accepts)"], 2 if old and old.get("host") else 1) == 1
 
+    if we_dial and runs_services(cfg, path):  # dialing out to a hub that most likely has the network's services
+        print(yellow(f"{SERVICES_ONE} This server runs its own: if {name} already runs services, stop them HERE -- "
+                     "./sekurircd stop, move services/services.toml aside, delete the [[links.peers]] \"services.*\" "
+                     "block, ./sekurircd start.\n"))
     lport = lk.get("port", DEFAULT_PORT)
     if we_dial:
         rhost = ask(f"Public hostname or IP of {name} that this server will connect to", (old or {}).get("host"), lambda a: None if a and " " not in a else "required")
@@ -467,6 +481,10 @@ def wizard(cfg, path, old=None, dry_run=False):
     # --- the other server
     heading(f"2) On the OTHER server ({name}) -- its config/sekurircd.toml (this tool can't reach it: paste these there)")
     print(f"[server] name must be exactly \"{name}\".\n")
+    if not we_dial and runs_services(cfg, path):  # (dialing out: the warning above, at the start)
+        print(yellow(f"{SERVICES_ONE} {me} runs them, so {name} must NOT: no services/services.toml there (makeconf: answer n "
+                     "to 'Run services'), no [[links.peers]] \"services.*\" block. If it has them: ./sekurircd stop, move "
+                     "services/services.toml aside, delete that block, ./sekurircd start.\n"))
     theirs_sec = f'[security]\nhost_masking_secret = "{secret or new_secret}"'
     print("Its [security] host_masking_secret must be the same as this server's (the key behind cloaked hosts; the ircds "
           "warn opers when linked servers differ):")

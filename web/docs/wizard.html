@@ -143,6 +143,7 @@
 
 <fieldset><legend>services (NickServ + ChanServ)</legend>
   <label class="chk"><input type="checkbox" name="svc" checked> Run services: accounts, SASL, nick and channel registration</label>
+  <p class="note">One services daemon per network, normally next to the hub. On a leaf whose hub already runs them, untick this: the leaf reaches the hub's NickServ, ChanServ and SASL over the link, and a second services daemon would collide with the first.</p>
   <div data-if="svc">
     <div class="row">
       <label>Link port <small>ircd link listener</small><input name="link_port" type="number" min="1" max="65535" value="7000"></label>
