@@ -438,15 +438,26 @@ def wizard(cfg, path, old=None, dry_run=False):
         mine = peer_block(name, pw_hash=old.get("password_hash"), pw=old.get("password"), ips=ips, fp=their_fp)
     restart = (not lk.get("enabled")) or "tls" in kv or bool(tls_kv) or (lk.get("mode", "hub") == "leaf" and need_mode != "leaf")
 
+    # cloaks are made by each user's own server: every server needs the same key, or a user's cloak (and a ban on it)
+    # changes with the server they connect to
+    secret = cfg.get("security", {}).get("host_masking_secret") or None
+    new_secret = None if secret else secrets.token_hex(32)
+    if new_secret:
+        print(yellow("[security] host_masking_secret is empty here (a random cloak key each start, different on every "
+                     "server): setting one, to be copied to the other server. If the other server already has one, "
+                     "use ITS value on both instead."))
+
     def edit(lines):
         if kv: set_keys(lines, "links", kv)
         if tls_kv: set_keys(lines, "tls", tls_kv)
+        if new_secret: set_keys(lines, "security", {"host_masking_secret": f'"{new_secret}"'})
         put_peer(lines, mine.splitlines(), old["name"] if old else None)
 
     if dry_run or blocked or not apply_local(path, edit, restart):
         print("Not written. To do it by hand (once [tls] has a certificate):" if blocked else
               "Not written. To do it by hand:" if not dry_run else "")
         if tls_kv: snippet("In [tls], set:\nenabled = true")
+        if new_secret: snippet(f'In [security], set:\nhost_masking_secret = "{new_secret}"')
         if changes:
             print("In [links], set:")
             snippet("\n".join(changes))
@@ -456,6 +467,10 @@ def wizard(cfg, path, old=None, dry_run=False):
     # --- the other server
     heading(f"2) On the OTHER server ({name}) -- its config/sekurircd.toml (this tool can't reach it: paste these there)")
     print(f"[server] name must be exactly \"{name}\".\n")
+    theirs_sec = f'[security]\nhost_masking_secret = "{secret or new_secret}"'
+    print("Its [security] host_masking_secret must be the same as this server's (the key behind cloaked hosts; the ircds "
+          "warn opers when linked servers differ):")
+    snippet(theirs_sec)
     print("Its [links] section (if it already links elsewhere, keep its mode compatible: one dial-out + accepts = \"both\"):")
     theirs_links = links_block("hub" if we_dial else "leaf", rport, tls, pinned=bool(my_fp))
     snippet(theirs_links)
@@ -473,7 +488,7 @@ def wizard(cfg, path, old=None, dry_run=False):
                   "fingerprint then, and /REHASH. A long-lived self-signed cert avoids that: tools/linkmgmt.py certs\n"))
 
     save_remote(name, f"# for {name}, from tools/linkmgmt.py on {me}: merge into its config/sekurircd.toml\n"
-                      f"# [server] name must be exactly \"{name}\"\n{theirs_links}\n\n{theirs}")
+                      f"# [server] name must be exactly \"{name}\"\n{theirs_sec}\n\n{theirs_links}\n\n{theirs}")
 
     # --- next steps
     heading("3) Then")

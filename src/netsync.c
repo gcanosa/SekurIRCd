@@ -4,6 +4,7 @@
 #include "client.h"
 #include "cmd.h"
 #include "config.h"
+#include "crypto.h"
 #include "link.h"
 #include "log.h"
 #include "proto.h"
@@ -286,10 +287,37 @@ static void send_burst(server_t *srv, link_conn_t *lc) {
     send_link(lc, line);
 }
 
+/* CLOAK=: a keyed hash of host_masking_secret (never the secret), so two servers can tell whether they cloak alike;
+ * "none" when it is unset (a random key per run). */
+static void cloak_check_token(server_t *srv, char *out, size_t outsz) {
+    if (!srv->cfg.security.host_masking_secret[0]) { snprintf(out, outsz, "none"); return; }
+    crypto_hmac_hex(srv->cloak_secret, "sekurircd-link-cloak-check", out, outsz, 8);
+}
+
 void netsync_capab_line(server_t *srv, char *out, size_t outsz) {
-    char ver[96];
+    char ver[96], cloak[24];
     server_software_version(srv, ver, sizeof ver);
-    snprintf(out, outsz, "CAPAB :SEKURNET PROTO=%d MINPROTO=%d VERSION=%s", NETSYNC_PROTO, NETSYNC_PROTO_MIN, ver);
+    cloak_check_token(srv, cloak, sizeof cloak);
+    snprintf(out, outsz, "CAPAB :SEKURNET PROTO=%d MINPROTO=%d VERSION=%s CLOAK=%s", NETSYNC_PROTO, NETSYNC_PROTO_MIN, ver, cloak);
+}
+
+/* Warn (never refuse: the link itself works) when cloaks won't match across this link. Older peers send no CLOAK=. */
+static void cloak_check_peer(server_t *srv, link_conn_t *lc, const char *name) {
+    const char *c = strstr(lc->peer_capab, "CLOAK=");
+    if (!c || !srv->cfg.security.host_masking) return;
+    char theirs[24] = "", ours[24], m[400];
+    sscanf(c + 6, "%23s", theirs);
+    cloak_check_token(srv, ours, sizeof ours);
+    if (strcmp(ours, "none") == 0 || strcmp(theirs, "none") == 0)
+        snprintf(m, sizeof m, "Link with %s: %s has no [security] host_masking_secret, so its cloaks change on every restart "
+                 "and differ from the other servers' -- set the same secret on every server", name,
+                 strcmp(ours, "none") == 0 ? "this server" : name);
+    else if (strcmp(ours, theirs) != 0)
+        snprintf(m, sizeof m, "Link with %s: its [security] host_masking_secret differs from ours, so the same user gets a "
+                 "different cloak on each server (and can dodge a cloak ban by switching) -- set the same secret on both", name);
+    else return;
+    log_warn("netsync", "%s", m);
+    server_notify_opers(srv, m);
 }
 
 static int capab_int(const char *capab, const char *key, int dflt) {
@@ -310,6 +338,7 @@ int netsync_check_peer(server_t *srv, link_conn_t *lc, const char *name) {
         server_notify_opers(srv, m);
         return -1;
     }
+    cloak_check_peer(srv, lc, name);
     if (v && strcmp(theirs, ours) == 0) {
         log_info("netsync", "%s runs the same version (%s)", name, ours);
         return 0;

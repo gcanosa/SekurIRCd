@@ -7,9 +7,9 @@ OPERS = {"operators": [{"name": "boss", "password": "bosspw", "hosts": ["*@*"]}]
 PW = "hubleafpw"
 
 
-def pair():
-    hub = Server("hub.test.net", cfg=dict(OPERS), sid="1HB")
-    leaf = Server("leaf.test.net", cfg=dict(OPERS), sid="2LF")
+def pair(hub_sec=None, leaf_sec=None):
+    hub = Server("hub.test.net", cfg=dict(OPERS, security=hub_sec or {}), sid="1HB")
+    leaf = Server("leaf.test.net", cfg=dict(OPERS, security=leaf_sec or {}), sid="2LF")
     hub.cfg["links"] = {"enabled": True, "mode": "hub", "bind": "127.0.0.1", "port": hub.link_port, "reconnect_delay": 1.0}
     hub.cfg["links.peers"] = [{"name": leaf.name, "password": PW, "allowed_ips": ["127.0.0.1"]}]
     leaf.cfg["links"] = {"enabled": True, "mode": "leaf", "reconnect_delay": 1.0, "reconnect_delay_max": 2.0}
@@ -169,3 +169,24 @@ def test_topic_readable_by_non_members_unless_secret():
             assert any(" 442 o #pub " in l for l in o.say("TOPIC #pub", 0.5)), m
     finally:
         leaf.stop(); hub.stop()
+
+
+def test_link_warns_when_cloak_secrets_differ():
+    on = {"host_masking": True}
+    differ, unset = "differs from ours", "has no [security] host_masking_secret"
+    for hs, ls, want in ((dict(on, host_masking_secret="same"), dict(on, host_masking_secret="same"), None),
+                         (dict(on, host_masking_secret="one"), dict(on, host_masking_secret="two"), differ),
+                         (dict(on, host_masking_secret="one"), dict(on), unset)):
+        hub, leaf = pair(hs, ls)
+        try:
+            time.sleep(1.5)
+            assert "linked with server" in hub.output(), hub.output()[-1500:]  # a warning, never a refusal
+            for s in (hub, leaf):
+                out = s.output()
+                assert (want in out) if want else (differ not in out and unset not in out), (want, out[-1500:])
+            a, b = Client(hub.port, "ca"), Client(leaf.port, "cb")
+            time.sleep(0.5)
+            whois = [l for l in b.say("WHOIS ca", 0.5) if " 311 " in l]
+            assert whois and "127.0.0.1" not in whois[0], whois  # cloaked, as its own server made it
+        finally:
+            leaf.stop(); hub.stop()
