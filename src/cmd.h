@@ -25,6 +25,8 @@ typedef struct {
  * (only NICK/USER/PASS/CAP/PING/QUIT/PONG before registration completes),
  * min_params, and oper_only, then calls the handler. */
 void cmd_dispatch(server_t *srv, client_t *cl, irc_message_t *msg);
+/* STATS m's remote column: a command a user on another server had this server run (RQUERY). */
+void cmd_count_remote(server_t *srv, const char *name);
 
 /* Shared helpers used across cmd_*.c */
 void cmd_send_welcome_if_ready(server_t *srv, client_t *cl);
@@ -177,6 +179,7 @@ void cmd_rules(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_opermotd(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_lusers(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_uptime(server_t *srv, client_t *cl, irc_message_t *msg);
+void cmd_uptime_str(server_t *srv, char *out, size_t outsz); /* "Server Up 3 days 01:02:03" */
 void cmd_admin(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_stats(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_trace(server_t *srv, client_t *cl, irc_message_t *msg);

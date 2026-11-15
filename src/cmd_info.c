@@ -1,5 +1,5 @@
 /* Informational commands: VERSION, TIME, MOTD, LUSERS, ADMIN, UPTIME, STATS,
- * TRACE, SERVLIST, SQUERY. Ported from commands.py's cmd_version/etc. */
+ * TRACE, SERVLIST, SQUERY (STATS is cmd_stats.c). Ported from commands.py's cmd_version/etc. */
 #include "cmd.h"
 #include "link.h"
 
@@ -69,7 +69,7 @@ void cmd_admin(server_t *srv, client_t *cl, irc_message_t *msg) {
     client_reply(cl, N_ADMINEMAIL, NULL, 0, srv->cfg.admin.email[0] ? srv->cfg.admin.email : "Not configured");
 }
 
-static void uptime_str(server_t *srv, char *out, size_t outsz) {
+void cmd_uptime_str(server_t *srv, char *out, size_t outsz) {
     long up = (long)difftime(time(NULL), srv->start_time);
     long d = up / 86400; up %= 86400;
     long h = up / 3600; up %= 3600;
@@ -81,49 +81,8 @@ static void uptime_str(server_t *srv, char *out, size_t outsz) {
 void cmd_uptime(server_t *srv, client_t *cl, irc_message_t *msg) {
     (void)msg;
     char buf[64];
-    uptime_str(srv, buf, sizeof buf);
+    cmd_uptime_str(srv, buf, sizeof buf);
     client_reply(cl, N_STATSUPTIME, NULL, 0, buf);
-}
-
-void cmd_stats(server_t *srv, client_t *cl, irc_message_t *msg) {
-    const char *letter = msg->nparams > 0 ? msg->params[0] : "";
-    if (strcmp(letter, "m") == 0) {
-        for (int i = 0; i < srv->n_command_counts; i++) {
-            char cnt[16]; snprintf(cnt, sizeof cnt, "%d", srv->command_counts[i].count);
-            const char *p[] = {srv->command_counts[i].name, cnt};
-            client_reply(cl, N_STATSCOMMANDS, p, 2, NULL);
-        }
-    } else if (strcmp(letter, "u") == 0) {
-        char buf[64];
-        uptime_str(srv, buf, sizeof buf);
-        client_reply(cl, N_STATSUPTIME, NULL, 0, buf);
-    } else if (strcmp(letter, "o") == 0) {
-        if (!(cl->umodes & UMODE_O)) { err_no_privileges(cl); return; }
-        for (int i = 0; i < srv->cfg.n_operators; i++) {
-            const char *p[] = {"O", "*", srv->cfg.operators[i].name};
-            client_reply(cl, N_STATSOLINE, p, 3, "0");
-        }
-    } else if (strcasecmp(letter, "k") == 0 || strcasecmp(letter, "g") == 0 || strcasecmp(letter, "z") == 0) {
-        if (!(cl->umodes & UMODE_O)) { err_no_privileges(cl); return; }
-        char want = (char)toupper((unsigned char)letter[0]);
-        for (kline_entry_t *k = srv->klines; k; k = k->next) {
-            if (k->line_type[0] != want) continue;
-            const char *p[] = {k->line_type, k->mask};
-            client_reply(cl, N_STATSKLINE, p, 2, k->reason);
-        }
-    } else if (strcmp(letter, "l") == 0) {
-        if (!(cl->umodes & UMODE_O)) { err_no_privileges(cl); return; }
-        for (link_conn_t *lc = srv->links; lc; lc = lc->next) {
-            long idle = (long)difftime(time(NULL), lc->last_activity);
-            char idlebuf[16]; snprintf(idlebuf, sizeof idlebuf, "%ld", idle);
-            char sq[16]; snprintf(sq, sizeof sq, "%zu", lc->sbuf_len - lc->sbuf_off);
-            const char *name = lc->peer_name[0] ? lc->peer_name : lc->ip;
-            const char *p[] = {name, sq, idlebuf};
-            client_reply(cl, N_STATSLINKINFO, p, 3, NULL);
-        }
-    }
-    const char *pe[] = {letter[0] ? letter : "*"};
-    client_reply(cl, N_ENDOFSTATS, pe, 1, "End of /STATS report");
 }
 
 void cmd_trace(server_t *srv, client_t *cl, irc_message_t *msg) {
@@ -259,7 +218,8 @@ static const help_entry_t HELP_TABLE[] = {
     {"REHASH", {"REHASH", "Reload the config file live. Server-oper only."}},
     {"DIE", {"DIE [password]", "Shut the server down. Server-oper only."}},
     {"RESTART", {"RESTART [password]", "Shut the server down and restart it in place. Server-oper only."}},
-    {"STATS", {"STATS <letter>", "m = command usage, u = uptime, o = operators, k/g/z = K/G/Z-lines, l = links (all oper-only except m/u)."}},
+    {"STATS", {"STATS [<letter> [<server>|<nick>]]", "Anyone: m commands, u uptime, p opers online, v servers, l <your nick>. Opers also: b c d e f g h i k l L o P q s t y z Z ?.",
+               "STATS with no letter lists what you may ask. A server name, or a nick on another server, makes that server answer."}},
     {"LUSERS", {"LUSERS", "Re-send the user/server counts sent at registration."}},
     {"UPTIME", {"UPTIME", "Non-standard: show server uptime."}},
     {"ADMIN", {"ADMIN [<server>]", "Show administrative contact info from [admin] (of another linked server, if named)."}},

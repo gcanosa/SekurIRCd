@@ -62,7 +62,9 @@ Website & docs: <https://gcanosa.github.io/SekurIRCd/> (source in [`web/`](web/)
 - `GLOB` -- a custom (non-RFC) server-wide glob nick search
 - `USERHOST`, `ISON`, `LUSERS` (251-255/265/266, plus `250` peak-connections
   -- standard ircd wording, e.g. `There are N users and M invisible on 1
-  servers`), `WHOWAS`, `ADMIN` (configured in `[admin]`), `STATS` (`m`/`u`/`o`)
+  servers`), `WHOWAS`, `ADMIN` (configured in `[admin]`), `STATS` (every RFC letter plus the
+  usual modern ones: bans, links with traffic, classes, ports, opers online,
+  memory; `STATS` alone lists them; `STATS <letter> <server>` asks another server)
 - Host cloaking (`[security] host_masking`): masks every client's real
   IP/host behind a random `<token>.users.<network>` cloak; `/VHOST` lets a
   client switch to a named vhost from `[[vhosts]]` instead, if their real

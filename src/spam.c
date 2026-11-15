@@ -150,6 +150,20 @@ static void format_rule(const spam_filter_t *f, char *out, size_t outsz) {
     snprintf(out, outsz, "%s %s %s \"%s\" %s", tg, action_name(f->action), dur, f->reason, f->pattern);
 }
 
+void spam_stats(server_t *srv, client_t *cl) {
+    int n = 0;
+    for (const spam_filter_t *f = srv->spam_filters; f; f = f->next) {
+        char rule[600], line[620];
+        format_rule(f, rule, sizeof rule);
+        snprintf(line, sizeof line, "#%d %s", ++n, rule);
+        client_reply(cl, N_STATSDEBUG, (const char *[]){"f"}, 1, line);
+    }
+    char sum[160];
+    snprintf(sum, sizeof sum, "%d filter%s loaded (%s), %ld message%s acted on since start", n, n == 1 ? "" : "s",
+             srv->cfg.spam.enabled && srv->cfg.spam.filters_enabled ? "active" : "not active", srv->spam_hits, srv->spam_hits == 1 ? "" : "s");
+    client_reply(cl, N_STATSDEBUG, (const char *[]){"f"}, 1, sum);
+}
+
 /* --- rule list --------------------------------------------------------------- */
 
 void spam_free(server_t *srv) {

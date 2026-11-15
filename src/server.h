@@ -101,6 +101,9 @@ typedef struct server {
     int max_users_seen;     /* peak of HASH_COUNT(users), for LOCALUSERS/GLOBALUSERS/STATSCONN */
     long total_connections; /* every accept(), regardless of whether it registered */
     time_t accept_paused_until; /* fd exhaustion: stop polling the listeners until then (see net.c) */
+    long refused_connections; /* accept()ed then turned away before registering (full, banned, flood, class/IP caps) */
+    /* STATS t: totals since start, kept here so closed connections still count. */
+    struct { unsigned long long cl_in, cl_out, ln_in, ln_out; unsigned long cl_min, cl_mout, ln_min, ln_mout; } traffic;
     long dnsbl_hits;        /* every connection a configured DNSBL zone listed, kline'd or just rejected */
     protection_state_t prot; /* active proxy scanner + its caches (protection.c) */
 
@@ -125,7 +128,7 @@ typedef struct server {
 
     /* STATS m: per-command invocation counts. Linear array, fine at this
      * daemon's scale (a few dozen distinct command names). */
-    struct { char name[32]; int count; } command_counts[128]; /* >= the number of DISPATCH entries in cmd.c */
+    struct cmd_count { char name[32]; int count, remote; unsigned long long bytes; } command_counts[128]; /* >= the number of DISPATCH entries in cmd.c */
     int n_command_counts;
 
     uint64_t fanout_gen;   /* see server_send_common_channels */

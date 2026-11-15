@@ -53,6 +53,9 @@ typedef struct link_conn {
                               * peer can otherwise hold the slot forever just by
                               * sending junk, since that keeps last_activity fresh */
     time_t last_activity;
+    time_t connected_at;    /* accept()/dial time -- STATS l's "open since" */
+    unsigned long long bytes_in, bytes_out; /* STATS l / ?: traffic over this link */
+    unsigned long msgs_in, msgs_out;
     struct client *service; /* the first pseudo-client this link introduced (ChanServ), or NULL -- the default actor */
     struct client *bots[LINK_MAX_BOTS]; /* every one it introduced (a services daemon hosts ChanServ + NickServ) */
     int n_bots;

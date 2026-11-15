@@ -325,7 +325,7 @@ static int dial_peer(server_t *srv, int peer_idx) {
     net_set_nonblocking(fd);
     lc->authenticated = 1;
     snprintf(lc->peer_name, sizeof lc->peer_name, "%s", up->name);
-    lc->created = lc->last_activity = time(NULL);
+    lc->created = lc->last_activity = lc->connected_at = time(NULL);
     lc->next = srv->links;
     srv->links = lc;
     log_info("link", "connected to '%s'%s%s", up->name, lc->ssl ? " (TLS)" : "", server_link ? " [state sync]" : "");
@@ -519,7 +519,7 @@ void link_accept(server_t *srv, int listen_fd) {
     if (!lc) { close(fd); return; }
     lc->fd = fd;
     snprintf(lc->ip, sizeof lc->ip, "%s", ipbuf);
-    lc->created = lc->last_activity = time(NULL);
+    lc->created = lc->last_activity = lc->connected_at = time(NULL);
     if (srv->cfg.links.tls) {
         lc->ssl = SSL_new(srv->tls_ctx);
         SSL_set_mode(lc->ssl, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER | SSL_MODE_ENABLE_PARTIAL_WRITE);
@@ -558,6 +558,7 @@ void link_forward_line(link_conn_t *lc, const char *line) {
         }
     }
     memcpy(lc->sbuf + lc->sbuf_len, line, len);
+    lc->msgs_out++;
     lc->sbuf_len += len;
     lc->sbuf[lc->sbuf_len++] = '\r';
     lc->sbuf[lc->sbuf_len++] = '\n';
@@ -567,6 +568,7 @@ void link_handle_writable(server_t *srv, link_conn_t *lc) {
     if (lc->sbuf_len == lc->sbuf_off || lc->closing) return;
     ssize_t n = link_io_write(lc, lc->sbuf + lc->sbuf_off, lc->sbuf_len - lc->sbuf_off);
     if (n > 0) {
+        lc->bytes_out += (size_t)n;
         lc->sbuf_off += (size_t)n;
         if (lc->sbuf_off == lc->sbuf_len) { /* drained: give a burst-sized buffer back */
             lc->sbuf_off = lc->sbuf_len = 0;
@@ -588,6 +590,8 @@ void link_reap(server_t *srv) {
         link_conn_t *lc = *pp;
         if (!lc->closing) { pp = &lc->next; continue; }
         *pp = lc->next;
+        srv->traffic.ln_in += lc->bytes_in; srv->traffic.ln_out += lc->bytes_out; /* STATS t keeps counting closed links */
+        srv->traffic.ln_min += lc->msgs_in; srv->traffic.ln_mout += lc->msgs_out;
         if (lc->is_server) netsync_link_down(srv, lc, "Link closed");
         if (lc->service) { srv->svc_gone_at = time(NULL); srv->svc_back_at = 0; } /* channels made from now on go unwatched */
         for (int b = 0; b < lc->n_bots; b++) {
@@ -644,6 +648,7 @@ void link_svc_user(server_t *srv, client_t *cl, int ev) {
 static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
     irc_message_t msg;
     if (irc_parse_line(line, &msg) != 0) return 0;
+    lc->msgs_in++;
 
     if (!lc->authenticated) {
         if (strcasecmp(msg.command, "PASS") == 0) {
@@ -1177,6 +1182,7 @@ static int link_handle_readable_once(server_t *srv, link_conn_t *lc) {
     if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) return 0;
     if (n <= 0) { link_close(srv, lc); return 0; }
     lc->last_activity = time(NULL);
+    lc->bytes_in += (size_t)n;
     /* Enforces the *configured* links.max_line_length (validated at load
      * time to be <= LINK_BUF, see config.c), not just the raw buffer
      * capacity -- a smaller configured value now actually cuts lines

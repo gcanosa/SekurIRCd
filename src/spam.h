@@ -51,5 +51,7 @@ void spam_track(client_t *cl, const char *target, const char *text, time_t now,
 /* SPAMFILTER [LIST] | ADD <targets> <action> <duration|-> <reason> :<regex>
  *          | DEL <n> (server-oper only). */
 void cmd_spamfilter(server_t *srv, client_t *cl, irc_message_t *msg);
+/* STATS f: one 249 line per loaded filter rule. */
+void spam_stats(server_t *srv, client_t *cl);
 
 #endif

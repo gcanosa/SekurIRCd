@@ -288,11 +288,14 @@ static void tls_try_handshake(client_t *cl) {
 /* Read/write that transparently go through OpenSSL for a TLS client, with
  * the same "-1 + errno=EAGAIN means try later" contract callers already
  * expect from a plain read(2)/write(2). */
+static void count_in(client_t *cl, ssize_t n) { if (n > 0) { cl->bytes_in += (size_t)n; cl->srv->traffic.cl_in += (size_t)n; } }
+static void count_out(client_t *cl, ssize_t n) { if (n > 0) { cl->bytes_out += (size_t)n; cl->srv->traffic.cl_out += (size_t)n; } }
+
 static ssize_t io_read(client_t *cl, void *buf, size_t len) {
-    if (!cl->ssl) return read(cl->fd, buf, len);
+    if (!cl->ssl) { ssize_t r = read(cl->fd, buf, len); count_in(cl, r); return r; }
     ERR_clear_error();
     int n = SSL_read(cl->ssl, buf, (int)len);
-    if (n > 0) return n;
+    if (n > 0) { count_in(cl, n); return n; }
     int err = SSL_get_error(cl->ssl, n);
     if (err == SSL_ERROR_ZERO_RETURN) return 0;
     if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) { errno = EAGAIN; return -1; }
@@ -301,10 +304,10 @@ static ssize_t io_read(client_t *cl, void *buf, size_t len) {
 }
 
 static ssize_t io_write(client_t *cl, const void *buf, size_t len) {
-    if (!cl->ssl) return write(cl->fd, buf, len);
+    if (!cl->ssl) { ssize_t w = write(cl->fd, buf, len); count_out(cl, w); return w; }
     ERR_clear_error();
     int n = SSL_write(cl->ssl, buf, (int)len);
-    if (n > 0) return n;
+    if (n > 0) { count_out(cl, n); return n; }
     int err = SSL_get_error(cl->ssl, n);
     if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) { errno = EAGAIN; return -1; }
     errno = EIO;
@@ -619,6 +622,7 @@ static client_t *accept_common(server_t *srv, int listen_fd) {
         const char *msg = "ERROR :Too many connections\r\n";
         if (write(fd, msg, strlen(msg)) < 0) { /* best effort; peer may already be gone */ }
         close(fd);
+        srv->refused_connections++;
         char snote[200];
         snprintf(snote, sizeof snote, "Rejected connection from %s: Server is full", ipbuf);
         server_notify_opers(srv, snote);
@@ -635,6 +639,7 @@ static client_t *accept_common(server_t *srv, int listen_fd) {
         snprintf(err, sizeof err, "ERROR :Closing Link: %s (%s)\r\n", ipbuf, kline_reason);
         if (write(fd, err, strlen(err)) < 0) { /* best effort; peer may already be gone */ }
         close(fd);
+        srv->refused_connections++;
         log_warn("net", "refused %s: %s", ipbuf, kline_reason);
         char snote[400];
         snprintf(snote, sizeof snote, "Rejected connection from %s: %s", ipbuf, kline_reason);
@@ -658,6 +663,7 @@ static client_t *accept_common(server_t *srv, int listen_fd) {
         const char *msg = "ERROR :Closing Link: reconnecting too fast\r\n";
         if (write(fd, msg, strlen(msg)) < 0) { /* best effort; peer may already be gone */ }
         close(fd);
+        srv->refused_connections++;
         return NULL;
     }
 
@@ -672,6 +678,7 @@ static client_t *accept_common(server_t *srv, int listen_fd) {
         const char *msg = "ERROR :Too many connections in your class\r\n";
         if (write(fd, msg, strlen(msg)) < 0) { /* best effort; peer may already be gone */ }
         close(fd);
+        srv->refused_connections++;
         client_free(cl);
         char snote[200];
         snprintf(snote, sizeof snote, "Rejected connection from %s: its connection class is full", ipbuf);
@@ -689,6 +696,7 @@ static client_t *accept_common(server_t *srv, int listen_fd) {
             const char *msg = "ERROR :Too many connections from your host\r\n";
             if (write(fd, msg, strlen(msg)) < 0) { /* best effort; peer may already be gone */ }
             close(fd);
+            srv->refused_connections++;
             client_free(cl);
             char snote[200];
             snprintf(snote, sizeof snote, "Rejected connection from %s: Too many connections from your host", ipbuf);
@@ -1405,6 +1413,8 @@ static int read_client_once(server_t *srv, client_t *cl) {
             client_send(cl, fl);
             continue;
         }
+        cl->msgs_in++;
+        srv->traffic.cl_min++;
         cmd_dispatch(srv, cl, &msg);
     }
     if (start > 0) {

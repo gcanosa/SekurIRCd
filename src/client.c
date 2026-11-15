@@ -221,6 +221,8 @@ void client_send(client_t *cl, const char *line) {
         snprintf(cl->quit_reason, sizeof cl->quit_reason, "SendQ exceeded");
         return;
     }
+    cl->msgs_out++;
+    if (cl->srv) cl->srv->traffic.cl_mout++;
     if (cl->sbuf_len + total > cl->sbuf_cap) {
         if (cl->sbuf_off) { /* reclaim what the socket already took before growing */
             memmove(cl->sbuf, cl->sbuf + cl->sbuf_off, pending);

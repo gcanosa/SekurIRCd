@@ -170,7 +170,7 @@ window = 1.0       # ...within this many seconds is disconnected</pre>
 <pre>/ZLINE 198.51.100.7 1d :abuse from this host    # add: mask, optional duration, reason
 /ZLINE                                          # no arguments: list active lines
 /UNZLINE 198.51.100.7                           # remove
-/STATS z                                        # also /STATS k, /STATS g, /STATS l</pre>
+/STATS z                                        # also /STATS k, g, s (SHUN), e (ELINE), b (DNSBL + scanner)</pre>
 <p><code>KLINE</code>/<code>UNKLINE</code> and <code>GLINE</code>/<code>UNGLINE</code> take the same arguments. Durations are <code>30m</code>, <code>12h</code>, <code>1d</code>,
   or omit for permanent. Set <code>[security] klines_file</code> so bans survive <code>REHASH</code> and restarts; without it they live in memory only.</p>
 <p><strong>What each letter matches.</strong> <code>ZLINE</code> is enforced at <code>accept()</code>, before the client has sent anything, so it can only ever match the

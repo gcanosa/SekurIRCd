@@ -1387,6 +1387,7 @@ static void handle_rename(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
 static void handle_rquery(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     static const struct { const char *name; void (*fn)(server_t *, client_t *, irc_message_t *); } CMDS[] = {
         {"WHOIS", cmd_whois}, {"VERSION", cmd_version}, {"TIME", cmd_time}, {"ADMIN", cmd_admin}, {"MOTD", cmd_motd}, {"INFO", cmd_info},
+        {"STATS", cmd_stats},
     };
     client_t *u = src_user(srv, lc, msg->prefix);
     if (!u || msg->nparams < 2) return;
@@ -1405,6 +1406,7 @@ static void handle_rquery(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
         m.command = msg->params[1];
         for (int k = 2; k < msg->nparams && m.nparams < IRC_MAX_PARAMS; k++) m.params[m.nparams++] = msg->params[k];
         if (CMDS[i].fn == cmd_whois && m.nparams != 1) return; /* exactly the nick: no further forwarding */
+        cmd_count_remote(srv, CMDS[i].name);
         CMDS[i].fn(srv, u, &m);
         return;
     }

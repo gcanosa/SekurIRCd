@@ -2,6 +2,7 @@
 #include "net.h"
 #include "protection.h"
 
+#include <ctype.h>
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
@@ -240,6 +241,17 @@ static int find_dispatch(const char *cmd) {
 
 static void dispatch_inner(server_t *srv, client_t *cl, irc_message_t *msg);
 
+void cmd_count_remote(server_t *srv, const char *name) {
+    int n = srv->n_command_counts;
+    for (int c = 0; c < n; c++)
+        if (strcasecmp(srv->command_counts[c].name, name) == 0) { srv->command_counts[c].remote++; return; }
+    if (n >= (int)(sizeof srv->command_counts / sizeof srv->command_counts[0])) return;
+    snprintf(srv->command_counts[n].name, sizeof srv->command_counts[n].name, "%s", name);
+    for (char *p = srv->command_counts[n].name; *p; p++) *p = (char)toupper((unsigned char)*p);
+    srv->command_counts[n].count = 0; srv->command_counts[n].bytes = 0; srv->command_counts[n].remote = 1;
+    srv->n_command_counts++;
+}
+
 /* labeled-response wrapper: a message carrying @label=... from a client that negotiated labeled-response
  * (+batch) gets its replies labeled -- see client_label_begin/end. */
 void cmd_dispatch(server_t *srv, client_t *cl, irc_message_t *msg) {
@@ -295,7 +307,12 @@ static void dispatch_inner(server_t *srv, client_t *cl, irc_message_t *msg) {
             }
             count_slot[i] = cs;
         }
-        if (cs >= 0) srv->command_counts[cs].count++;
+        if (cs >= 0) {
+            srv->command_counts[cs].count++;
+            size_t b = strlen(msg->command) + 2; /* the line as sent, less tags: command, " param"s, CRLF */
+            for (int k = 0; k < msg->nparams; k++) b += strlen(msg->params[k]) + 1;
+            srv->command_counts[cs].bytes += b;
+        }
         DISPATCH[i].handler(srv, cl, msg);
         return;
     }

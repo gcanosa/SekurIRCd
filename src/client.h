@@ -185,6 +185,9 @@ typedef struct client {
     int n_resume_chans;
 
     time_t signon_time;
+    /* STATS l <nick> / t: what this connection moved (bytes as the IRC layer saw them, lines queued/dispatched). */
+    unsigned long long bytes_in, bytes_out;
+    unsigned long msgs_in, msgs_out;
     time_t last_activity;   /* last line received */
     int ping_sent;          /* a PING is outstanding, awaiting PONG */
 
