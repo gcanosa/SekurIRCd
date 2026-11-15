@@ -777,8 +777,12 @@ def upgrade(cur, st, tgt):
 
     step("Updating source")
     # rewritten upstream history: the local branch is the same code under old hashes, so it is reset, not merged
-    ff = ["reset", "--hard", f"origin/{tgt['branch']}"] if tgt.get("rewritten_base") else ["merge", "--ff-only", f"origin/{tgt['branch']}"]
-    steps = ([["checkout", tgt["branch"]], ff] if tgt["kind"] == "main" else [["checkout", "--detach", tgt["sha"]]])
+    # only "main" has a branch to follow; a release or a tag/commit is checked out detached
+    if tgt["kind"] == "main":
+        ff = ["reset", "--hard", f"origin/{tgt['branch']}"] if tgt.get("rewritten_base") else ["merge", "--ff-only", f"origin/{tgt['branch']}"]
+        steps = [["checkout", tgt["branch"]], ff]
+    else:
+        steps = [["checkout", "--detach", tgt["sha"]]]
     if tgt["kind"] == "main" and run(["git", "rev-parse", "--verify", "--quiet", tgt["branch"]], check=False).returncode:
         steps[0] = ["checkout", "-b", tgt["branch"], "--track", f"origin/{tgt['branch']}"]
     if tgt["sha"] == cur["sha"]: steps = []  # rebuild in place
