@@ -355,6 +355,11 @@ auto_join = []
 # -----------------------------------------------------------------------------
 # Only opers can join it (others are told it doesn't exist). Set
 # [security] oper_auto_join to the same name to put opers in automatically.
+# On a network, enable it with the same name on every server (a server
+# without it lets anyone join), and set /MODE #server-debug +OsP once:
+# +O opers only everywhere, +s hidden from LIST/WHOIS, +P keeps the modes
+# when the last oper leaves. Each server's log lines stay on that server;
+# the stats line reaches every server's channel.
 [debug_channel]
 
 enabled = false

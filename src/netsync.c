@@ -1459,10 +1459,12 @@ static void handle_rename(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
 
 /* :<uid> RQUERY <sid> <VERB> [args] -- a user elsewhere asked this server (WHOIS of one of ours, VERSION <us>...); client_reply
  * sends the answers back to them as PUSH lines. */
+static void handle_snote(server_t *srv, link_conn_t *lc, irc_message_t *msg);
+
 static void handle_rquery(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     static const struct { const char *name; void (*fn)(server_t *, client_t *, irc_message_t *); } CMDS[] = {
         {"WHOIS", cmd_whois}, {"VERSION", cmd_version}, {"TIME", cmd_time}, {"ADMIN", cmd_admin}, {"MOTD", cmd_motd}, {"INFO", cmd_info},
-        {"STATS", cmd_stats},
+        {"STATS", cmd_stats}, {"REHASH", cmd_rehash}, /* REHASH: the oper's own server checked the rehash privilege */
     };
     client_t *u = src_user(srv, lc, msg->prefix);
     if (!u || msg->nparams < 2) return;
@@ -1481,6 +1483,7 @@ static void handle_rquery(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
         m.command = msg->params[1];
         for (int k = 2; k < msg->nparams && m.nparams < IRC_MAX_PARAMS; k++) m.params[m.nparams++] = msg->params[k];
         if (CMDS[i].fn == cmd_whois && m.nparams != 1) return; /* exactly the nick: no further forwarding */
+        if (CMDS[i].fn == cmd_rehash && (m.nparams || !(u->umodes & UMODE_O))) return; /* opers only, no further hop */
         cmd_count_remote(srv, CMDS[i].name);
         CMDS[i].fn(srv, u, &m);
         return;
@@ -1574,6 +1577,7 @@ void netsync_handle(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     else if (!strcmp(c, "GLINE") || !strcmp(c, "SHUN")) handle_gline(srv, lc, msg);
     else if (!strcmp(c, "UNGLINE") || !strcmp(c, "UNSHUN")) handle_ungline(srv, lc, msg);
     else if (!strcmp(c, "RQUERY")) handle_rquery(srv, lc, msg);
+    else if (!strcmp(c, "SNOTE")) handle_snote(srv, lc, msg);
     else if (!strcmp(c, "RENAME")) handle_rename(srv, lc, msg);
     else if (!strcmp(c, "REDACT")) handle_redact(srv, lc, msg);
     else if (!strcmp(c, "MLINE")) handle_mline(srv, lc, msg);
@@ -1828,6 +1832,28 @@ void netsync_unshun(server_t *srv, const char *mask) {
     char line[300];
     irc_build(line, sizeof line, NULL, 0, self_sid(srv), "UNSHUN", (const char *[]){mask}, 1, NULL);
     flood(srv, NULL, line);
+}
+
+/* :<sid> SNOTE <kind> :<text> -- an oper notice ('s': +s opers) or a debug-channel line ('d') for every server, each
+ * showing it with the origin's name. Older servers ignore the verb. */
+void netsync_snote(server_t *srv, char kind, const char *text) {
+    if (!netsync_has_links(srv)) return;
+    char line[700], k[2] = {kind, '\0'};
+    irc_build(line, sizeof line, NULL, 0, self_sid(srv), "SNOTE", (const char *[]){k}, 1, text);
+    flood(srv, NULL, line);
+}
+
+static void handle_snote(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
+    netserver_t *from = src_server(srv, lc, msg->prefix);
+    if (!from || msg->nparams < 2) return;
+    const char *kind = msg->params[0], *text = msg->params[msg->nparams - 1];
+    char m[700];
+    snprintf(m, sizeof m, "[%s] %s", from->name, text);
+    if (!strcmp(kind, "s")) server_notify_opers(srv, m);
+    else if (!strcmp(kind, "d")) server_debug_line(srv, "stats", m);
+    char fl[700];
+    irc_build(fl, sizeof fl, NULL, 0, from->sid, "SNOTE", (const char *[]){kind}, 1, text);
+    flood(srv, lc, fl);
 }
 
 void netsync_push(server_t *srv, client_t *target, const char *rawline) {

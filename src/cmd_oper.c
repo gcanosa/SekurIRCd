@@ -339,26 +339,53 @@ void cmd_sanick(server_t *srv, client_t *cl, irc_message_t *msg) {
     server_notify_opers(srv, snote);
 }
 
+/* A NOTICE to the oper, wherever they are (a remote REHASH answers over the link). */
+static void oper_notice(server_t *srv, client_t *cl, const char *text) {
+    if (!cl->remote) { notice_self(srv, cl, text); return; }
+    char line[600];
+    irc_build(line, sizeof line, NULL, 0, srv->cfg.server.name, "NOTICE", (const char *[]){cl->nick}, 1, text);
+    netsync_push(srv, cl, line);
+}
+
+/* REHASH [<server>|*]: this server, another one (it answers over the link), or every server. */
 void cmd_rehash(server_t *srv, client_t *cl, irc_message_t *msg) {
-    (void)msg;
-    char err[256];
+    const char *target = !cl->remote && msg->nparams > 0 && msg->params[0][0] ? msg->params[0] : NULL;
+    if (target) {
+        int all = strcmp(target, "*") == 0, sent = 0;
+        netserver_t *s, *tmp;
+        HASH_ITER(hh, srv->servers, s, tmp) {
+            if (s == srv->self_srv || !(all || strcasecmp(s->name, target) == 0)) continue;
+            netsync_rquery(srv, cl, s, "REHASH", NULL, 0);
+            char m[300];
+            snprintf(m, sizeof m, "Rehash request sent to %s", s->name);
+            notice_self(srv, cl, m);
+            sent++;
+        }
+        if (!all && strcasecmp(target, srv->cfg.server.name) != 0) {
+            if (!sent) client_reply(cl, N_NOSUCHSERVER, (const char *[]){target}, 1, "No such server");
+            return;
+        }
+    }
+    char err[256], who[NICKLEN + 140];
+    snprintf(who, sizeof who, "%s%s%s", cl->nick, cl->remote ? " on " : "", cl->remote ? netsync_server_name_of(srv, cl) : "");
     if (server_rehash(srv, err, sizeof err) == 0) {
         const char *p[] = {srv->cfg.path};
         client_reply(cl, N_REHASHING, p, 1, "Rehashing");
-        log_info("oper", "%s rehashed config from %s", cl->nick, srv->cfg.path);
-        char m[400];
-        snprintf(m, sizeof m, "%s is rehashing server config file", cl->nick);
-        server_notify_opers(srv, m);
+        log_info("oper", "%s rehashed config from %s", who, srv->cfg.path);
         /* What was re-read and what changed, one NOTICE per line (as Unreal/InspIRCd report their rehash). */
+        char m[400];
         for (char *line = srv->rehash_report, *nl; *line; line = nl + 1) {
             if (!(nl = strchr(line, '\n'))) break;
-            snprintf(m, sizeof m, "*** Rehash: %.*s", (int)(nl - line), line);
-            notice_self(srv, cl, m);
+            snprintf(m, sizeof m, "*** Rehash%s%s: %.*s", cl->remote ? " " : "", cl->remote ? srv->cfg.server.name : "", (int)(nl - line), line);
+            oper_notice(srv, cl, m);
         }
+        server_rehash_announce(srv, who, 1, NULL);
     } else {
         char m[400];
-        snprintf(m, sizeof m, "Rehash failed: %s", err);
-        notice_self(srv, cl, m);
+        snprintf(m, sizeof m, "Rehash%s%s failed: %s", cl->remote ? " of " : "", cl->remote ? srv->cfg.server.name : "", err);
+        oper_notice(srv, cl, m);
+        log_warn("oper", "%s: rehash failed: %s", who, err);
+        server_rehash_announce(srv, who, 0, err);
     }
 }
 

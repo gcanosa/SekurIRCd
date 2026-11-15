@@ -152,6 +152,7 @@ void netsync_rquery(struct server *srv, struct client *cl, const netserver_t *de
 void netsync_svcrelay(struct server *srv, const char *dest, const char *line);
 /* Reply/notice for a user on another server. */
 void netsync_push(struct server *srv, struct client *target, const char *line);
+void netsync_snote(struct server *srv, char kind, const char *text); /* 's' oper notice / 'd' debug channel, network-wide */
 /* An oper override (SAJOIN/SAPART/SANICK/CHGHOST/CHGIDENT) on a user of another server: routed there and run by it.
  * `args` are the command's parameters after the target nick. */
 void netsync_encap(struct server *srv, struct client *oper, struct client *target, const char *cmd, char **args, int nargs);

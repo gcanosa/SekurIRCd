@@ -252,6 +252,9 @@ void server_login(server_t *srv, client_t *cl, const char *account);
 void server_notify_opers(server_t *srv, const char *message);
 /* "Client connecting/exiting at <server>" notices: to +o users with +F, under their own flood guard. */
 void server_notify_far(server_t *srv, const char *message);
+void server_notify_network(server_t *srv, const char *message);           /* here and on every other server */
+void server_debug_line(server_t *srv, const char *tag, const char *text); /* one line into the debug channel */
+void server_rehash_announce(server_t *srv, const char *who, int ok, const char *err);
 
 /* Link `cl`'s channels list to include `chan` (does NOT touch chan->members
  * -- pair with channel_add_member). Shared by cmd_chan.c's JOIN paths and

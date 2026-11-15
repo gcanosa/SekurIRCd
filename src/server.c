@@ -571,6 +571,42 @@ static void debug_log_hook(log_level_t level, const char *tag, const char *msg) 
     busy = 0;
 }
 
+/* One line into the debug channel, as the log hook formats an INFO line (grey tag). For lines from other servers. */
+void server_debug_line(server_t *srv, const char *tag, const char *text) {
+    if (!srv->cfg.debug_channel.enabled || log_level_from_name(srv->cfg.debug_channel.min_level) > LOG_INFO) return;
+    channel_t *chan = server_find_channel(srv, srv->cfg.debug_channel.name);
+    if (!chan) return;
+    char t[560], line[700];
+    snprintf(t, sizeof t, "\00314%s\017 %s", tag, text);
+    irc_build(line, sizeof line, NULL, 0, srv->cfg.server.name, "NOTICE", (const char *[]){chan->name}, 1, t);
+    server_broadcast_channel(chan, line, NULL);
+}
+
+/* An oper notice here and, as "[<this server>] ...", on every other server. */
+void server_notify_network(server_t *srv, const char *message) {
+    server_notify_opers(srv, message);
+    netsync_snote(srv, 's', message);
+}
+
+/* After a rehash (by an oper here or remotely, or SIGHUP): who did it, then what changed or why it failed --
+ * two lines for every oper on the network, as UnrealIRCd and InspIRCd announce theirs. */
+void server_rehash_announce(server_t *srv, const char *who, int ok, const char *err) {
+    char m[480];
+    snprintf(m, sizeof m, "%s is rehashing server config file", who);
+    server_notify_network(srv, m);
+    if (!ok) {
+        snprintf(m, sizeof m, "Rehash failed: %s -- still running the previous config", err);
+    } else {
+        size_t n = (size_t)snprintf(m, sizeof m, "Rehash done:");
+        for (const char *line = srv->rehash_report, *nl; *line && n < sizeof m - 4; line = nl + 1) {
+            if (!(nl = strchr(line, '\n'))) break;
+            n += (size_t)snprintf(m + n, sizeof m - n, "%s %.*s", line == srv->rehash_report ? "" : ";", (int)(nl - line), line);
+        }
+        if (!srv->rehash_report[0]) snprintf(m + n, sizeof m - n, " no changes");
+    }
+    server_notify_network(srv, m);
+}
+
 void server_install_debug_log_hook(server_t *srv) {
     g_log_srv = srv;
     log_set_hook(debug_log_hook);
@@ -611,7 +647,7 @@ void server_notify_opers(server_t *srv, const char *message) {
     }
     client_t *u, *tmp;
     HASH_ITER(hh, srv->users, u, tmp) {
-        if ((u->umodes & UMODE_O) && (u->umodes & UMODE_S)) notice_self(srv, u, text);
+        if (!u->remote && (u->umodes & UMODE_O) && (u->umodes & UMODE_S)) notice_self(srv, u, text);
     }
 }
 

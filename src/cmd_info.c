@@ -215,7 +215,7 @@ static const help_entry_t HELP_TABLE[] = {
                     "Server-oper only: manage the [spam] regex content filters (targets: p c n N a q P t)."}},
     {"PROTECT", {"PROTECT [SCAN <ipv4>]",
                  "Server-oper only: show the Protection bundle status (blacklists, proxy scanner, limits), or SCAN an address now."}},
-    {"REHASH", {"REHASH", "Reload the config file live. Server-oper only."}},
+    {"REHASH", {"REHASH [<server>|*]", "Reload the config file live: this server, another one, or every server (*). Opers on every server are told. Server-oper only."}},
     {"DIE", {"DIE [password]", "Shut the server down. Server-oper only."}},
     {"RESTART", {"RESTART [password]", "Shut the server down and restart it in place. Server-oper only."}},
     {"STATS", {"STATS [<letter> [<server>|<nick>]]", "Anyone: m commands, u uptime, p opers online, v servers, l <your nick>. Opers also: b c d e f g h i k l L o P q s t y z Z ?.",

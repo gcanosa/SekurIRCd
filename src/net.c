@@ -132,11 +132,22 @@ static void emit_stats_snote(server_t *srv) {
     if (srv->cfg.protection.scan_enabled)
         snprintf(scan_part, sizeof scan_part, " | scanner %ld scanned, %ld proxies, %d in flight, %d cached",
                  srv->prot.scanned, srv->prot.hits, srv->prot.n_scans, protection_negcache_count(srv));
-    log_info("stats", "users %d (peak %d) | channels %d (%d registered) | connections %ld | "
-              "bans K%d G%d Z%d (%d DNSBL, %d scanner) | DNSBL hits %ld%s | ircd %.1f%% cpu %ldMB%s",
-              HASH_COUNT(srv->users), srv->max_users_seen, n_chans, n_reg_chans, srv->total_connections,
-              n_klines, n_glines, n_zlines, n_dnsbl_active, n_scan_active, srv->dnsbl_hits, scan_part,
-              ircd_cpu, ircd_rss / 1024, chanserv_part);
+    int n_local = 0, n_net = 0;
+    client_t *u, *utmp;
+    HASH_ITER(hh, srv->users, u, utmp) {
+        if (u->is_service) continue;
+        n_net++;
+        if (!u->remote) n_local++;
+    }
+    /* users: here / network-wide (peak counts every nick we know, services included); the rest is this server's own */
+    char line[900];
+    snprintf(line, sizeof line, "users %d local, %d network (peak %d) | channels %d (%d registered) | connections %ld | "
+             "bans K%d G%d Z%d (%d DNSBL, %d scanner) | DNSBL hits %ld%s | ircd %.1f%% cpu %ldMB%s",
+             n_local, n_net, srv->max_users_seen, n_chans, n_reg_chans, srv->total_connections,
+             n_klines, n_glines, n_zlines, n_dnsbl_active, n_scan_active, srv->dnsbl_hits, scan_part,
+             ircd_cpu, ircd_rss / 1024, chanserv_part);
+    log_info("stats", "%s", line);
+    netsync_snote(srv, 'd', line); /* every server's debug channel shows it as "[<this server>] ..." */
 }
 
 static void install_signal_handlers(void) {
@@ -1785,8 +1796,10 @@ int net_run(server_t *srv) {
         if (g_hup) {
             g_hup = 0;
             char err[256];
-            if (server_rehash(srv, err, sizeof err) == 0) log_info("net", "rehashed config");
+            int ok = server_rehash(srv, err, sizeof err) == 0;
+            if (ok) log_info("net", "rehashed config");
             else log_error("net", "rehash failed: %s", err);
+            server_rehash_announce(srv, "The server (SIGHUP)", ok, err); /* e.g. acme.sh's reload after a renewal */
         }
 
         /* Listeners + the worker wake fd: a rehash can reopen a listener, and an EMFILE pause (see accept_clients)
