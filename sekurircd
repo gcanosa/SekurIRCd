@@ -40,6 +40,25 @@ say_ok()   { echo " ${C_OK}${M_OK}${C_OFF}  $1 ${C_OK}OK${C_OFF} -- $2"; }      
 say_fail() { echo " ${C_BAD}${M_BAD}${C_OFF}  $1 ${C_BAD}FAILED${C_OFF} -- $2" >&2; }
 
 services_configured() { [ -f "$SERVICES_CONFIG" ]; }
+SERVICES_DISABLED="$SERVICES_CONFIG.disabled" # what disable-services renames the config to
+
+# [links] mode from the ircd config ("hub", "leaf", "both"), empty if unset. Plain awk: no TOML parser in a shell.
+links_mode() {
+    [ -f "$IRCD_CONFIG" ] || return 0
+    awk '/^[[:space:]]*\[/ { s = ($0 ~ /^[[:space:]]*\[links\][[:space:]]*(#.*)?$/) }
+         s && /^[[:space:]]*mode[[:space:]]*=/ { if (match($0, /"[^"]*"/)) print substr($0, RSTART + 1, RLENGTH - 2); exit }' "$IRCD_CONFIG"
+}
+
+# Why services don't run here, in one line.
+services_off_reason() {
+    if [ -f "$SERVICES_DISABLED" ]; then
+        echo "disabled on this server ($SERVICES_DISABLED) -- '$0 enable-services' turns them back on"
+    elif [ "$(links_mode)" = leaf ]; then
+        echo "not run here: this server is a leaf, NickServ/ChanServ and SASL come from the hub over the link"
+    else
+        echo "not configured ($SERVICES_CONFIG missing) -- no NickServ/ChanServ, no SASL unless a linked server runs them"
+    fi
+}
 
 pid_running() {
     local pidfile="$1" pid
@@ -114,6 +133,7 @@ cmd_start() {
     }
     confirm_up "sekurircd:" "$IRCD_PIDFILE" logs/sekurircd.log || return 1
     if services_configured; then
+        [ "$(links_mode)" = leaf ] && say_bad "services:  this server is a leaf (links.mode = \"leaf\") but $SERVICES_CONFIG exists -- a network runs ONE services daemon, next to the hub; if the hub runs them, this one is refused. '$0 disable-services' turns them off here"
         require_bin "$SERVICES_BIN"
         stop_old_chanserv || return 1
         "$SERVICES_BIN" --config "$SERVICES_CONFIG" --daemon --pidfile "$SERVICES_PIDFILE" || {
@@ -122,7 +142,7 @@ cmd_start() {
         }
         confirm_up "services: " "$SERVICES_PIDFILE" services/services.log || return 1
     else
-        say_info "services:  not configured ($SERVICES_CONFIG missing) -- skipping (no NickServ/ChanServ, no SASL)"
+        say_info "services:  $(services_off_reason)"
     fi
 }
 
@@ -155,7 +175,7 @@ cmd_restart() {
 
 # Services only: users stay connected; NickServ/ChanServ leave and re-link (a few seconds without SASL/IDENTIFY).
 cmd_restart_services() {
-    services_configured || { say_fail restart-services: "services are not configured ($SERVICES_CONFIG missing)"; return 1; }
+    services_configured || { say_fail restart-services: "services are $(services_off_reason)"; return 1; }
     pid_running "$IRCD_PIDFILE" || { say_fail restart-services: "sekurircd is not running, nothing was changed -- start everything with '$0 start'"; return 1; }
     require_bin "$SERVICES_BIN"
     local old_svc
@@ -194,8 +214,39 @@ cmd_status() {
             echo "chanserv:  the OLD standalone ChanServ is still running (pid $(cat "$OLD_CHANSERV_PIDFILE")) -- '$0 restart' replaces it with bin/services"
         fi
     else
-        echo "services:  not configured ($SERVICES_CONFIG missing)"
+        echo "services:  $(services_off_reason)"
     fi
+    [ -n "$(links_mode)" ] && echo "role:      links.mode = \"$(links_mode)\" in $IRCD_CONFIG"
+    true
+}
+
+# Turn this server's services daemon off for good (a leaf whose hub runs them): stop it, rename its config so start and
+# restart skip it. Reversible, and the account/channel files are left alone.
+cmd_disable_services() {
+    if ! services_configured; then
+        if [ -f "$SERVICES_DISABLED" ]; then say_info "services:  already disabled ($SERVICES_DISABLED)"
+        else say_info "services:  nothing to disable ($SERVICES_CONFIG missing) -- they don't run on this server"; fi
+        return 0
+    fi
+    [ -e "$SERVICES_DISABLED" ] && { say_fail disable-services: "$SERVICES_DISABLED already exists -- move it away first"; return 1; }
+    if pid_running "$SERVICES_PIDFILE"; then
+        require_bin "$SERVICES_BIN"
+        stop_one "services: " "$SERVICES_BIN" "$SERVICES_PIDFILE" || return 1
+    fi
+    mv "$SERVICES_CONFIG" "$SERVICES_DISABLED" || { say_fail disable-services: "could not rename $SERVICES_CONFIG"; return 1; }
+    say_ok disable-services: "services are off on this server ($SERVICES_CONFIG -> $SERVICES_DISABLED)"
+    say_info "start/restart skip them from now on; nobody was disconnected. Undo: $0 enable-services"
+    say_info "on a leaf, NickServ/ChanServ and SASL come from the hub over the link"
+}
+
+cmd_enable_services() {
+    services_configured && { say_info "services:  already enabled ($SERVICES_CONFIG)"; return 0; }
+    [ -f "$SERVICES_DISABLED" ] || { say_fail enable-services: "no $SERVICES_DISABLED to restore -- write a services config with tools/makeconf.py"; return 1; }
+    mv "$SERVICES_DISABLED" "$SERVICES_CONFIG" || { say_fail enable-services: "could not rename $SERVICES_DISABLED"; return 1; }
+    say_ok enable-services: "services are on again ($SERVICES_CONFIG restored)"
+    [ "$(links_mode)" = leaf ] && say_bad "this server is a leaf: if its hub runs services, this second daemon will be refused -- one per network"
+    if pid_running "$IRCD_PIDFILE"; then say_info "start them now (users stay connected): $0 restart-services"
+    else say_info "they start with: $0 start"; fi
 }
 
 case "${1:-}" in
@@ -204,5 +255,7 @@ case "${1:-}" in
     restart) cmd_restart ;;
     restart-services) cmd_restart_services ;;
     status)  cmd_status ;;
-    *) echo "usage: $0 {start|stop|restart|restart-services|status}" >&2; exit 1 ;;
+    disable-services) cmd_disable_services ;;
+    enable-services)  cmd_enable_services ;;
+    *) echo "usage: $0 {start|stop|restart|restart-services|status|disable-services|enable-services}" >&2; exit 1 ;;
 esac

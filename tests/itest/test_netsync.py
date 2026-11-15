@@ -227,7 +227,8 @@ def test_squit_of_a_far_server_and_relink():
         boss.say("OPER boss bosspw", 0.8)
         c = n.client("c", "carol")
         boss.send("SQUIT c.test.net :remote squit")
-        assert boss.saw(r"Client exiting: carol .*\[b\.test\.net c\.test\.net\]", 3), "the split removed carol network-wide"
+        assert boss.saw(r"Netsplit: b\.test\.net c\.test\.net", 3)
+        assert any(" 401 boss carol " in l for l in boss.say("WHOIS carol", 0.6)), "the split removed carol network-wide"
         # c redials b on its own (reconnect backoff) and the network re-forms
         n.wait_converged(timeout=15)
         assert any(" 311 boss carol " in l for l in boss.say("WHOIS carol", 0.8)) or any(" 311 " in l for l in n.client("a", "p3").say("WHOIS carol", 0.8))
@@ -637,3 +638,55 @@ def test_topic_changed_during_a_split_survives_the_relink():
             assert any(":changed during the split" in l for l in c.say("TOPIC #t", 0.5) if " 332 " in l), c.nick
     finally:
         n.stop()
+
+
+def test_far_connect_and_exit_notices():
+    with chain() as n:
+        boss = n.client("a", "boss")
+        boss.say("OPER boss bosspw", 0.8)
+        plain = n.client("a", "plain")
+        assert not any(" MODE plain " in l for l in plain.say("MODE plain +F", 0.3)), "+F is oper-only"
+        assert any("+F" in l for l in boss.say("MODE boss +F", 0.3))
+        assert any(" 221 " in l and "F" in l.split()[-1] for l in boss.say("MODE boss", 0.3))
+        boss.drain()
+        c = n.client("c", "carol")
+        assert boss.saw(r"Client connecting at c\.test\.net: carol \(", 2)
+        c.send("QUIT :bye now")
+        assert boss.saw(r"Client exiting at c\.test\.net: carol \(.*\[Quit: bye now\]", 2)
+        boss.drain()
+        # -F: nothing; and a remote quit is never a local "Client exiting" (+s) notice
+        boss.say("MODE boss -F", 0.3)
+        d = n.client("c", "dave")
+        d.send("QUIT")
+        assert not boss.saw(r"Client (connecting|exiting)", 1.0), "no far notices without +F, no local ones for remote users"
+
+
+def test_far_notices_skip_bursts_and_netsplits():
+    with chain() as n:
+        boss = n.client("a", "boss")
+        boss.say("OPER boss bosspw", 0.8)
+        boss.say("MODE boss +F", 0.3)
+        n.client("c", "carol")
+        boss.drain()
+        boss.send("SQUIT c.test.net :remote squit")
+        assert boss.saw(r"Netsplit: b\.test\.net c\.test\.net", 3)
+        n.wait_converged(timeout=15)  # c redials b; its burst reaches a through b
+        time.sleep(0.5)
+        lines = boss.drain(0.5) or []
+        far = [l for l in lines if "Client connecting at" in l or "Client exiting at" in l]
+        assert not any("carol" in l for l in far), far
+        # after the burst, c is synced again: a real connect there is announced
+        n.client("c", "erin")
+        assert boss.saw(r"Client connecting at c\.test\.net: erin ", 2)
+
+
+def test_oper_modes_accept_F_and_default_modes_accept_pIRD():
+    cfg = {"operators": [{"name": "boss", "password": "bosspw", "hosts": ["*@*"], "modes": "+osF"}],
+           "security": {"default_user_modes": "ip"}}
+    with Server(cfg=cfg) as n:
+        u = n.client("someone")
+        assert any(" 221 " in l and "p" in l.split()[-1] for l in u.say("MODE someone", 0.3))
+        boss = n.client("boss")
+        assert any("F" in l for l in boss.say("OPER boss bosspw", 0.8) if " MODE boss " in l)
+        r = boss.say("MODE boss -o", 0.3)
+        assert not any("F" in l.split()[-1] for l in boss.say("MODE boss", 0.3) if " 221 " in l), "de-oper drops +F"

@@ -269,7 +269,7 @@ static void dispatch_inner(server_t *srv, client_t *cl, irc_message_t *msg) {
         err_not_registered(cl);
         return;
     }
-    if (cl->registered && !(cl->umodes & UMODE_O) && server_is_shunned(srv, cl)) {
+    if (cl->registered && !OPER_CAN(cl, OPER_PRIV_IMMUNE) && server_is_shunned(srv, cl)) {
         /* SHUN: only harmless/informational commands still work; everything else is silently dropped. */
         static const char *ALLOWED[] = {"PING", "PONG", "QUIT", "PART", "MOTD", "VERSION", "TIME", "LUSERS", "HELP", "ADMIN", "INFO", "CAP", "RULES"};
         int ok = 0;

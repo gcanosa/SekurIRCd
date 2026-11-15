@@ -103,7 +103,10 @@ hosts = ["*@*"]                                       # or restrict, e.g. ["*@20
 <p>An optional <code>privileges</code> list limits which oper commands a login may use (without it, everything is allowed):
   <code>kill</code>, <code>kline</code> (KLINE/GLINE/ZLINE, SPAMFILTER, PROTECT), <code>sa</code> (SAJOIN/SAPART/SAMODE/SANICK),
   <code>host</code> (CHGHOST/SETHOST/CHGIDENT/USERIP), <code>wallops</code>, <code>rehash</code>, <code>die</code>,
-  <code>link</code> (SQUIT/CONNECT) and <code>all</code>. NickServ SUSPEND/UNSUSPEND/FDROP/SASET are for services admins
+  <code>link</code> (SQUIT/CONNECT), <code>override</code> (act past channel rules: join through +i/+k/+l/bans, talk through +m/+n/bans,
+  kick anyone, MODE and TOPIC without ops, message users past +D/+R/+g/+Z), <code>auspex</code> (see what is hidden: real hosts and IPs,
+  +i users, +p channels, +H opers, idle times, channel keys, TRACE), <code>immune</code> (exempt from SHUN, spam filters and channel
+  +f/+j limits) and <code>all</code>. NickServ SUSPEND/UNSUSPEND/FDROP/SASET are for services admins
   (<code>[nickserv] admins</code>, by account), not an oper privilege. <code>privileges = []</code> makes a helper oper with none of them.</p>
 
 <h2 id="ipv6">IPv6</h2>
@@ -132,6 +135,24 @@ ipv6 = true
 <p>Servers link into a tree. One server listens (<code>[links] port</code>, a single port for every server that dials in: each one is told apart by the name
   it sends, not by port); the others dial it with <code>host</code>/<code>port</code> in their peer entry. You rarely edit these blocks by hand:
   the link wizard below does it.</p>
+
+<h3 id="leaf">adding a leaf server</h3>
+<p>A network has <strong>one</strong> services daemon (NickServ + ChanServ), next to the hub. A leaf runs only the ircd and reaches the hub's
+  NickServ, ChanServ and SASL over the link. If a second services daemon links anyway, the network refuses it (or, when two halves that each run one
+  link up, keeps the older one) and tells opers.</p>
+<ol>
+  <li>On the new server: <code>tools/makeconf.py</code>, answer <strong>y</strong> to <em>"Is this a leaf of an existing network?"</em>. It skips the
+    services questions, writes no <code>services.toml</code>, and asks for the hub's <code>host_masking_secret</code> so cloaks match.</li>
+  <li>Still on the leaf: <code>tools/linkmgmt.py add</code>, name the hub, choose <em>"this server dials the hub"</em>. It writes the leaf's side
+    (<code>[links] mode = "leaf"</code>) and prints the hub's side.</li>
+  <li>On the hub: paste that block into <code>config/sekurircd.toml</code> and <code>/REHASH</code> (or run <code>tools/linkmgmt.py add</code> there too).</li>
+  <li>On the leaf: <code>./sekurircd start</code>. <code>./sekurircd status</code> shows <em>"services: not run here: this server is a leaf"</em>,
+    and <code>/MAP</code> or <code>/LINKS</code> shows it linked.</li>
+</ol>
+<p>Turning an existing server into a leaf, or one that has an old <code>services/services.toml</code>:</p>
+<pre>./sekurircd disable-services   # stops them and renames services.toml to services.toml.disabled; users stay connected
+./sekurircd enable-services    # undo (then ./sekurircd restart-services)</pre>
+<p>The accounts and channel databases are left where they are. When a leaf is merged into a network, its own accounts are not copied to the hub.</p>
 
 <h3 id="linkmgmt">the link wizard: add, edit and remove links</h3>
 <p><code>tools/linkmgmt.py</code> manages this server's links and tells you exactly what to put on the other one. It asks a few questions (the other

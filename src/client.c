@@ -122,6 +122,7 @@ unsigned client_umode_bit(char c) {
         case 'p': return UMODE_P;        case 'I': return UMODE_HIDEIDLE;   case 'R': return UMODE_REGONLY;
         case 'D': return UMODE_NOPM;     case 'B': return UMODE_B;          case 'g': return UMODE_G;
         case 'H': return UMODE_H;        case 'q': return UMODE_Q;          case 'W': return UMODE_WHOISNOTE;
+        case 'F': return UMODE_FARCONN;
         default:  return 0;
     }
 }
@@ -139,6 +140,7 @@ void client_mode_string(const client_t *cl, char *out, size_t outsz) {
     if (cl->umodes & UMODE_SECUREONLY) modestr[p++] = 'Z';
     if (cl->umodes & UMODE_X) modestr[p++] = 'x';
     if (cl->umodes & UMODE_WHOISNOTE) modestr[p++] = 'W';
+    if (cl->umodes & UMODE_FARCONN) modestr[p++] = 'F';
     if (cl->umodes & UMODE_R) modestr[p++] = 'r';
     if (cl->umodes & UMODE_P) modestr[p++] = 'p';
     if (cl->umodes & UMODE_HIDEIDLE) modestr[p++] = 'I';

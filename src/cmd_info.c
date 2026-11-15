@@ -87,7 +87,7 @@ void cmd_uptime(server_t *srv, client_t *cl, irc_message_t *msg) {
 
 void cmd_trace(server_t *srv, client_t *cl, irc_message_t *msg) {
     (void)msg;
-    if (cl->umodes & UMODE_O) {
+    if (OPER_CAN(cl, OPER_PRIV_AUSPEX)) {
         for (client_t *c = srv->all_clients; c; c = c->all_next) {
             if (!c->registered) continue;
             const char *numeric = (c->umodes & UMODE_O) ? N_TRACEOPERATOR : N_TRACEUSER;

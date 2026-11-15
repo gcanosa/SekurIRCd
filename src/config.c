@@ -31,9 +31,9 @@ static int is_valid_level(const char *s) {
 }
 
 /* self-togglable user modes (client.USER_MODE_SELF) */
-#define USER_MODE_SELF "iwdTsBgZ"
-/* what /OPER may add: the self modes plus p I R D and the oper-only H q W (never x, r, z, S) */
-#define OPER_MODE_OK USER_MODE_SELF "pIRDHqW"
+#define USER_MODE_SELF "iwdTsBgZpIRD"
+/* what /OPER may add: the self modes plus the oper-only H q W F (never x, r, z, S) */
+#define OPER_MODE_OK USER_MODE_SELF "HqWF"
 
 /* "+swW" -> "swW" in place: drops '+' and 'o' (always given); 0, or -1 with errbuf set on a letter /OPER can't grant. */
 static int norm_oper_modes(char *m, const char *field, char *errbuf, size_t errbufsz) {
@@ -630,7 +630,7 @@ static int build_config(toml_node_t *raw, const char *path, config_t *out,
     }
     for (const char *c = out->security.default_user_modes; *c; c++) {
         if (!strchr(USER_MODE_SELF, *c)) {
-            snprintf(errbuf, errbufsz, "security.default_user_modes: '%c' is not a valid default user mode (allowed: iwdTsBgZ)", *c);
+            snprintf(errbuf, errbufsz, "security.default_user_modes: '%c' is not a valid default user mode (allowed: " USER_MODE_SELF ")", *c);
             return -1;
         }
     }
@@ -749,7 +749,8 @@ static int build_config(toml_node_t *raw, const char *path, config_t *out,
                 static const struct { const char *name; unsigned bit; } OPER_PRIV_NAMES[] = {
                     {"kill", OPER_PRIV_KILL}, {"kline", OPER_PRIV_KLINE}, {"sa", OPER_PRIV_SA}, {"host", OPER_PRIV_HOST},
                     {"wallops", OPER_PRIV_WALLOPS}, {"rehash", OPER_PRIV_REHASH}, {"die", OPER_PRIV_DIE}, {"link", OPER_PRIV_LINK},
-                    {"accounts", OPER_PRIV_ACCOUNT}, {"all", OPER_PRIV_ALL},
+                    {"override", OPER_PRIV_OVERRIDE}, {"auspex", OPER_PRIV_AUSPEX}, {"immune", OPER_PRIV_IMMUNE},
+                    {"accounts", 0}, {"all", OPER_PRIV_ALL}, /* accounts: accepted so old configs load, but it never did anything */
                 };
                 char pv[16][CFG_STR];
                 int npv = 0;
@@ -760,8 +761,10 @@ static int build_config(toml_node_t *raw, const char *path, config_t *out,
                     int found = 0;
                     for (size_t k = 0; k < sizeof OPER_PRIV_NAMES / sizeof OPER_PRIV_NAMES[0]; k++)
                         if (strcasecmp(pv[j], OPER_PRIV_NAMES[k].name) == 0) { op->privs |= OPER_PRIV_NAMES[k].bit; found = 1; }
+                    if (found && strcasecmp(pv[j], "accounts") == 0)
+                        log_warn("config", "operators[%d].privileges: \"accounts\" is ignored -- NickServ admin commands are for [nickserv] admins in services.toml", i);
                     if (!found) {
-                        snprintf(errbuf, errbufsz, "operators[%d].privileges: unknown privilege '%s' (kill, kline, sa, host, wallops, rehash, die, link, accounts, all)", i, pv[j]);
+                        snprintf(errbuf, errbufsz, "operators[%d].privileges: unknown privilege '%s' (kill, kline, sa, host, wallops, rehash, die, link, override, auspex, immune, all)", i, pv[j]);
                         return -1;
                     }
                 }

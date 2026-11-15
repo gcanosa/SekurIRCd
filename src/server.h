@@ -41,6 +41,8 @@ typedef struct kline_entry {
     struct kline_entry *next;
 } kline_entry_t;
 
+typedef struct { double times[21]; int head, count, suppressed; } snote_guard_t; /* ring sized SNOTE_MAX + 1 */
+
 typedef struct server {
     config_t cfg;
     /* HMAC key behind every deterministic host-cloak token (net.c's
@@ -146,6 +148,7 @@ typedef struct server {
      * matches exactly. */
     double snote_times[21];
     int snote_head, snote_count, snote_suppressed;
+    snote_guard_t far_guard; /* server_notify_far's: a connect storm elsewhere must not mute our own notices */
 
     volatile sig_atomic_t shutdown_requested;
     volatile sig_atomic_t rehash_requested;
@@ -247,6 +250,8 @@ void server_login(server_t *srv, client_t *cl, const char *account);
  * silently dropped with a one-line log warning and folded into the next
  * delivered notice's "(+N more notice(s) were suppressed)" suffix). */
 void server_notify_opers(server_t *srv, const char *message);
+/* "Client connecting/exiting at <server>" notices: to +o users with +F, under their own flood guard. */
+void server_notify_far(server_t *srv, const char *message);
 
 /* Link `cl`'s channels list to include `chan` (does NOT touch chan->members
  * -- pair with channel_add_member). Shared by cmd_chan.c's JOIN paths and

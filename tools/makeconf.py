@@ -170,6 +170,8 @@ def interview():
     a["bind"] = ask("Bind address (0.0.0.0 = all interfaces)", "0.0.0.0")
     a["port"] = int(ask("Plaintext port", "6667", chk_port))
     a["ipv6"] = yes("Also listen on IPv6?", False)
+    print(dim("  A leaf joins an existing network through its hub, and uses the hub's NickServ/ChanServ (and SASL)."))
+    a["leaf"] = yes("Is this a leaf of an existing network (its hub runs services)?", False)
 
     section("tls")
     a["tls"] = yes("Enable TLS (port 6697)?", True)
@@ -188,6 +190,9 @@ def interview():
     section("privacy & security")
     a["cloak"] = yes("Hide user IPs behind a cloak?", True)
     a["cloak_secret"] = secrets.token_urlsafe(24)
+    if a["cloak"] and a["leaf"]:  # cloaks must match across the network: a leaf takes the hub's secret
+        theirs = ask("The hub's [security] host_masking_secret (tools/linkmgmt.py prints it; empty = make one, copy it to the hub)", "")
+        a["cloak_secret"] = theirs or a["cloak_secret"]
     a["protect"] = yes("Use the Protection bundle (DNSBL, proxy scanner, limits)?", True)
     a["klines"] = yes("Keep K/G/Z-lines across restarts (klines.json)?", True)
     a["umodes"] = ask("Default user modes", "iw", chk_modes)
@@ -237,6 +242,11 @@ def interview():
     a["loglevel"] = LEVELS[pick("Log level", LEVELS, 1)]
 
     section("services (NickServ + ChanServ)")
+    if a["leaf"]:
+        print(dim("  Skipped: a leaf uses its hub's NickServ/ChanServ (and SASL) over the link. A second services daemon\n"
+                  "  would be refused by the network."))
+        a["svc"] = False
+        return a
     print(dim("  One services daemon per network, normally next to the hub. On a leaf whose hub already runs them, answer n:\n"
               "  the leaf reaches the hub's NickServ/ChanServ (and SASL) over the link. Two would collide."))
     a["svc"] = yes("Run services (accounts, SASL, nick and channel registration)?", True)
@@ -394,6 +404,9 @@ def main():
     print("\n" + bold("Next:"))
     if not a["opers"]: print(yellow("  ! no operators: nobody can /OPER until you add one ([[operators]])"))
     print(f"  edit the MOTD: {os.path.join(os.path.dirname(o.config), 'ircd.motd')} (made from the template on first start)")
+    if a.get("leaf") or not svc:
+        print(f"  link it:       tools/linkmgmt.py add   {dim('(choose: this server dials the hub; paste what it prints on the hub)')}")
+        print(f"                 {dim('services stay off here: ./sekurircd status says so; an old services.toml? ./sekurircd disable-services')}")
     if os.path.abspath(o.config) == os.path.join(ROOT, "config", "sekurircd.toml"):
         print(f"  start:         ./sekurircd start   {dim('(both daemons, from ' + ROOT + ')')}")
     else:

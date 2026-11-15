@@ -54,6 +54,7 @@ void netsync_init(server_t *srv) {
     if (srv->cfg.server.sid[0]) snprintf(me->sid, sizeof me->sid, "%s", srv->cfg.server.sid);
     else netsync_default_sid(me->name, me->sid);
     snprintf(me->desc, sizeof me->desc, "%s", srv->cfg.server.network);
+    me->synced = 1;
     HASH_ADD_STR(srv->servers, sid, me);
     srv->self_srv = me;
 }
@@ -129,7 +130,7 @@ static int rank_from_prefix(const char **p) {
 
 static const struct { char letter; unsigned bit; } UMODE_MAP[] = {
     {'i', UMODE_I}, {'w', UMODE_W}, {'d', UMODE_DEAF}, {'T', UMODE_D}, {'s', UMODE_S}, {'o', UMODE_O}, {'Z', UMODE_Z}, {'X', UMODE_SECUREONLY}, /* wire letters: older servers know Z as TLS (users see z) */ {'r', UMODE_R}, {'p', UMODE_P},
-    {'I', UMODE_HIDEIDLE}, {'H', UMODE_H}, {'q', UMODE_Q}, {'R', UMODE_REGONLY}, {'D', UMODE_NOPM}, {'B', UMODE_B}, {'g', UMODE_G}, {'x', UMODE_X}, {'W', UMODE_WHOISNOTE},
+    {'I', UMODE_HIDEIDLE}, {'H', UMODE_H}, {'q', UMODE_Q}, {'R', UMODE_REGONLY}, {'D', UMODE_NOPM}, {'B', UMODE_B}, {'g', UMODE_G}, {'x', UMODE_X}, {'W', UMODE_WHOISNOTE}, {'F', UMODE_FARCONN},
 };
 
 /* "+iw" (plus 'S' for a service pseudo-client) <-> bits. */
@@ -294,11 +295,35 @@ static void cloak_check_token(server_t *srv, char *out, size_t outsz) {
     crypto_hmac_hex(srv->cloak_secret, "sekurircd-link-cloak-check", out, outsz, 8);
 }
 
+/* SERVICES=: where this side of the network runs its services daemon ("none"), so two halves that each have one find
+ * out at CAPAB, before the burst makes their bots collide. */
+static const char *services_home(server_t *srv) {
+    client_t *u, *tmp;
+    HASH_ITER(hh, srv->users, u, tmp)
+        if (u->is_service) return u->remote ? netsync_server_name_of(srv, u) : srv->cfg.server.name;
+    return "none";
+}
+
 void netsync_capab_line(server_t *srv, char *out, size_t outsz) {
     char ver[96], cloak[24];
     server_software_version(srv, ver, sizeof ver);
     cloak_check_token(srv, cloak, sizeof cloak);
-    snprintf(out, outsz, "CAPAB :SEKURNET PROTO=%d MINPROTO=%d VERSION=%s CLOAK=%s", NETSYNC_PROTO, NETSYNC_PROTO_MIN, ver, cloak);
+    snprintf(out, outsz, "CAPAB :SEKURNET PROTO=%d MINPROTO=%d VERSION=%s CLOAK=%s SERVICES=%s", NETSYNC_PROTO, NETSYNC_PROTO_MIN, ver,
+             cloak, services_home(srv));
+}
+
+/* Never refuses: the burst's collision rules keep the older daemon and drop the other one; this names both early. */
+static void services_check_peer(server_t *srv, link_conn_t *lc, const char *name) {
+    const char *c = strstr(lc->peer_capab, "SERVICES=");
+    char theirs[130] = "";
+    if (c) sscanf(c + 9, "%129s", theirs);
+    const char *ours = services_home(srv);
+    if (!theirs[0] || !strcmp(theirs, "none") || !strcmp(ours, "none")) return;
+    char m[500];
+    snprintf(m, sizeof m, "Link with %s: both sides run a services daemon (ours on %s, theirs on %s) -- a network needs exactly one, "
+             "next to the hub; the newer one will be disconnected", name, ours, theirs);
+    log_error("netsync", "%s", m);
+    server_notify_opers(srv, m);
 }
 
 /* Warn (never refuse: the link itself works) when cloaks won't match across this link. Older peers send no CLOAK=. */
@@ -339,6 +364,7 @@ int netsync_check_peer(server_t *srv, link_conn_t *lc, const char *name) {
         return -1;
     }
     cloak_check_peer(srv, lc, name);
+    services_check_peer(srv, lc, name);
     if (v && strcmp(theirs, ours) == 0) {
         log_info("netsync", "%s runs the same version (%s)", name, ours);
         return 0;
@@ -364,6 +390,7 @@ int netsync_link_up(server_t *srv, link_conn_t *lc, const char *name, const char
     s->hop = 1;
     s->uplink = srv->self_srv;
     s->route = lc;
+    s->linked_at = time(NULL);
     HASH_ADD_STR(srv->servers, sid, s);
     lc->is_server = 1;
     lc->nserver = s;
@@ -465,6 +492,7 @@ static void handle_server(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     s->hop = hop > 0 ? hop : from->hop + 1;
     s->uplink = from;
     s->route = lc;
+    s->linked_at = time(NULL);
     HASH_ADD_STR(srv->servers, sid, s);
     char line[300], hopb[8];
     snprintf(hopb, sizeof hopb, "%d", s->hop + 1);
@@ -485,7 +513,10 @@ static void handle_squit(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     const char *reason = msg->nparams > 1 ? msg->params[msg->nparams - 1] : "SQUIT";
     char sid[SID_LEN + 1];
     snprintf(sid, sizeof sid, "%s", s->sid);
+    char snote[400]; /* a split elsewhere: only the server that dropped the link used to say so */
+    snprintf(snote, sizeof snote, "Netsplit: %s %s (%s)", s->uplink ? s->uplink->name : "?", s->name, reason);
     remove_server_tree(srv, s);
+    server_notify_opers(srv, snote);
     char line[300];
     const char *p[] = {sid};
     irc_build(line, sizeof line, NULL, 0, self_sid(srv), "SQUIT", p, 1, reason);
@@ -505,11 +536,32 @@ static void evict_local_for_collision(server_t *srv, client_t *old) {
     client_mark_quit(old);
 }
 
-/* Settles a nick that is already in use when `ts`/`from` wants it. Returns 1 if the newcomer may proceed. */
-static int resolve_collision(server_t *srv, link_conn_t *lc, const char *nick, long ts, const char *newcomer_uid) {
+/* A local nick-collision loser. A service bot has no socket, so marking it quitting would leave a ghost that nothing
+ * tears down: its whole services link goes instead (that daemon is the second one on the network). */
+static void drop_local(server_t *srv, client_t *cl) {
+    if (cl->is_service && cl->link_conn) {
+        char why[300];
+        snprintf(why, sizeof why, "Services already running elsewhere on the network (%s collided)", cl->nick);
+        link_drop_services(srv, cl->link_conn, why);
+    } else evict_local_for_collision(srv, cl);
+}
+
+/* Settles a nick that is already in use when `ts`/`from` wants it. Returns 1 if the newcomer may proceed.
+ * A service always beats a user; between two services (two daemons) the older wins, a tie goes to the lower UID --
+ * every server decides the same way, so exactly one services daemon survives. */
+static int resolve_collision(server_t *srv, link_conn_t *lc, const char *nick, long ts, const char *newcomer_uid, int newcomer_svc) {
     client_t *old = server_find_user(srv, nick);
     if (!old) return 1;
     int newcomer_wins = ts < old->nick_ts, tie = ts == old->nick_ts;
+    if (old->is_service != newcomer_svc) { newcomer_wins = newcomer_svc; tie = 0; }
+    else if (old->is_service && tie) { newcomer_wins = strcmp(newcomer_uid, old->uid) < 0; tie = 0; }
+    if (old->is_service && newcomer_svc) {
+        char m[400];
+        snprintf(m, sizeof m, "Nick collision on service %s: two services daemons on the network (%s and %s)", nick,
+                 old->remote ? netsync_server_name_of(srv, old) : srv->cfg.server.name, lc->nserver ? lc->nserver->name : lc->peer_name);
+        log_error("netsync", "%s", m);
+        server_notify_opers(srv, m);
+    }
     if (tie || !newcomer_wins) kill_back(srv, lc, newcomer_uid, "Nick collision"); /* newcomer loses (or both do) */
     if (tie || newcomer_wins) {
         if (old->remote) {
@@ -519,10 +571,24 @@ static int resolve_collision(server_t *srv, link_conn_t *lc, const char *nick, l
             flood(srv, NULL, line);
             server_remove_client(srv, old, "Nick collision");
         } else {
-            evict_local_for_collision(srv, old);
+            drop_local(srv, old);
         }
     }
     return newcomer_wins && !tie;
+}
+
+/* Past its burst? EOB marks it; 60s covers an older server on the path that doesn't forward EOBs. */
+static int server_synced(const netserver_t *s) {
+    return s->synced || time(NULL) - s->linked_at > 60;
+}
+
+/* +F: "Client connecting/exiting at <server>", UnrealIRCd's far-connect wording plus our local fields. */
+static void far_notice(server_t *srv, const client_t *u, const char *what, const char *reason) {
+    if (u->is_service || !u->nserver) return;
+    char m[600];
+    if (reason) snprintf(m, sizeof m, "Client exiting at %s: %s (%s@%s) [%s] [%s]", u->nserver->name, u->nick, u->user, u->realhost, reason, u->ip);
+    else snprintf(m, sizeof m, "Client %s at %s: %s (%s@%s) [%s]", what, u->nserver->name, u->nick, u->user, u->realhost, u->ip);
+    server_notify_far(srv, m);
 }
 
 static void handle_uid(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
@@ -534,7 +600,9 @@ static void handle_uid(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     long ts = atol(msg->params[2]);
     if (!irc_valid_nick(nick, NICKLEN - 1) || strlen(uid) != UID_LEN || netsync_find_uid(srv, uid)) return;
     if (strncmp(uid, from->sid, SID_LEN) != 0) return; /* a server may only create users with its own SID */
-    if (!resolve_collision(srv, lc, nick, ts, uid)) return;
+    int svc = 0;
+    unsigned umodes = umodes_from_string(modes, &svc);
+    if (!resolve_collision(srv, lc, nick, ts, uid, svc)) return;
     client_t *cl = client_new(-1, srv);
     if (!cl) return;
     cl->remote = 1;
@@ -549,8 +617,7 @@ static void handle_uid(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     snprintf(cl->realname, sizeof cl->realname, "%s", msg->params[11]);
     if (strcmp(account, "*") != 0) snprintf(cl->account, sizeof cl->account, "%s", account);
     cl->ident_confirmed = msg->params[10][0] == '1';
-    int svc = 0;
-    cl->umodes = umodes_from_string(modes, &svc);
+    cl->umodes = umodes;
     cl->is_service = svc;
     cl->nick_ts = ts;
     cl->signon_time = ts;
@@ -562,6 +629,7 @@ static void handle_uid(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     server_monitor_notify(srv, cl, 1);
     server_watch_notify(srv, cl, 1);
     link_svc_user(srv, cl, SVC_EV_USER);
+    if (server_synced(from)) far_notice(srv, cl, "connecting", NULL); /* burst users aren't new connections */
     /* forward with hop + 1 */
     char line[1100], hopb[8];
     snprintf(hopb, sizeof hopb, "%d", atoi(msg->params[1]) + 1);
@@ -587,14 +655,14 @@ static void handle_nick(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     if (!irc_valid_nick(newnick, NICKLEN - 1)) return;
     client_t *clash = server_find_user(srv, newnick);
     if (clash && clash != u) {
-        if (ts < clash->nick_ts) { /* the renamer is older: the holder loses */
+        if (ts < clash->nick_ts && !clash->is_service) { /* the renamer is older: the holder loses (never a service) */
             if (clash->remote) {
                 char kl[300];
                 const char *kp[] = {clash->uid};
                 irc_build(kl, sizeof kl, NULL, 0, self_sid(srv), "KILL", kp, 1, "Nick collision");
                 flood(srv, NULL, kl);
                 server_remove_client(srv, clash, "Nick collision");
-            } else evict_local_for_collision(srv, clash);
+            } else drop_local(srv, clash);
         } else { /* the renamer loses (or ties): kill it everywhere */
             kill_back(srv, lc, u->uid, "Nick collision");
             char kl[300];
@@ -627,6 +695,7 @@ static void handle_quit(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     const char *reason = msg->nparams > 0 ? msg->params[msg->nparams - 1] : "";
     char fl[400], uid[UID_LEN + 1];
     snprintf(uid, sizeof uid, "%s", u->uid);
+    far_notice(srv, u, "exiting", reason);
     server_remove_client(srv, u, reason);
     irc_build(fl, sizeof fl, NULL, 0, uid, "QUIT", NULL, 0, reason);
     flood(srv, lc, fl);
@@ -727,6 +796,12 @@ static void handle_kill(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     client_t *target = netsync_find_uid(srv, msg->params[0]);
     if (!target) return;
     const char *reason = msg->nparams > 1 ? msg->params[msg->nparams - 1] : "Killed";
+    if (!target->remote && target->is_service && target->link_conn) { /* a bot can't just be marked quitting (no socket) */
+        char why[300];
+        snprintf(why, sizeof why, "Service %s killed by the network (%s)", target->nick, reason);
+        link_drop_services(srv, target->link_conn, why);
+        return;
+    }
     if (!target->remote) { /* ours: disconnect it (its QUIT then floods out through server_remove_client) */
         client_t *killer = msg->prefix ? netsync_find_uid(srv, msg->prefix) : NULL;
         netserver_t *ks = killer ? NULL : msg->prefix ? netsync_find_sid(srv, msg->prefix) : NULL;
@@ -1507,8 +1582,19 @@ void netsync_handle(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     else if (!strcmp(c, "CERTFP")) handle_certfp(srv, lc, msg);
     else if (!strcmp(c, "ENCAP")) handle_encap(srv, lc, msg);
     else if (!strcmp(c, "EOB")) {
-        log_info("netsync", "end of burst from %s", lc->peer_name);
-        if (srv->netjoin_lc == lc) { server_fbatch_end(srv, FB_NETJOIN); srv->netjoin_lc = NULL; }
+        netserver_t *from = src_server(srv, lc, msg->prefix);
+        if (!from) from = lc->nserver;
+        if (from) { /* it and everything it burst to us are synced; pass it on so servers further away know too */
+            netserver_t *s, *tmp;
+            HASH_ITER(hh, srv->servers, s, tmp) if (netsync_is_behind(s, from)) s->synced = 1;
+            char line[64];
+            irc_build(line, sizeof line, NULL, 0, from->sid, "EOB", NULL, 0, NULL);
+            flood(srv, lc, line);
+        }
+        if (from == lc->nserver) {
+            log_info("netsync", "end of burst from %s", lc->peer_name);
+            if (srv->netjoin_lc == lc) { server_fbatch_end(srv, FB_NETJOIN); srv->netjoin_lc = NULL; }
+        }
     }
     /* PING/PONG are answered in link.c; anything unknown is ignored (forward compatibility). */
 }

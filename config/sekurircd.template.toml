@@ -220,13 +220,14 @@ reserved_nicks = ["nickserv", "chanserv", "operserv", "memoserv", "hostserv", "b
 # --- user modes ---
 
 # Set on every client after it connects. Self modes only: i (invisible),
-# w (wallops), d (deaf), T (no CTCP), s (server notices), B (bot), g, Z.
+# w (wallops), d (deaf), T (no CTCP), s (server notices), B (bot), g, Z,
+# p, I, R, D.
 # +o can never be given this way.
 default_user_modes = "iw"
 
 # Modes every /OPER gets. o is always included; others allowed: the ones
-# above, plus p, I, R, D and the oper-only H, q, W. An [[operators]] login's
-# own `modes` replaces this for that login.
+# above plus the oper-only H, q, W and F (connects/exits on other servers).
+# An [[operators]] login's own `modes` replaces this for that login.
 oper_modes = "+osw"
 
 # Channel opers are joined to after /OPER. Not locked down automatically: use
@@ -324,6 +325,11 @@ auto_join = []
 #                    host     CHGHOST/SETHOST/CHGIDENT/USERIP
 #                    wallops  WALLOPS/GLOBOPS  rehash   REHASH
 #                    die      DIE/RESTART      link     SQUIT/CONNECT
+#                    override past channel rules: +i/+k/+l/+b/+m/+n/+t,
+#                             kick anyone, MODE without ops, PM past +D/+R/+g/+Z
+#                    auspex   see hidden info: real hosts/IPs, +i users,
+#                             +p channels, +H opers, idle, keys, TRACE
+#                    immune   exempt from SHUN, spam filters, +f/+j limits
 #                    all      everything;  [] = none of these (a helper)
 #   modes          replaces [security] oper_modes for this login
 # Add or change one, then /REHASH. Services admins are set in services.toml.

@@ -158,8 +158,11 @@ typedef struct {
 #define OPER_PRIV_REHASH  0x20u /* REHASH */
 #define OPER_PRIV_DIE     0x40u /* DIE/RESTART */
 #define OPER_PRIV_LINK    0x80u /* SQUIT/CONNECT */
-#define OPER_PRIV_ACCOUNT 0x200u /* NickServ SUSPEND/UNSUSPEND/FDROP/SASET (0x100 is config.c's "privileges = []" marker) */
-#define OPER_PRIV_ALL     (0xFFu | OPER_PRIV_ACCOUNT)
+/* 0x100 is config.c's "privileges = []" marker; 0x200 was "accounts" (services decide that now: [nickserv] admins) */
+#define OPER_PRIV_OVERRIDE 0x400u /* act past channel rules: +i/+k/+l/+b/+m/+n/+t, kick anyone, MODE without ops, PM past +D/+R/+g/+Z */
+#define OPER_PRIV_AUSPEX   0x800u /* see what is hidden: real hosts/IPs, +i users, +p channels, +H opers, idle, keys, TRACE */
+#define OPER_PRIV_IMMUNE   0x1000u /* exempt from SHUN, spam filters and channel +f/+j limits */
+#define OPER_PRIV_ALL     (0xFFu | OPER_PRIV_OVERRIDE | OPER_PRIV_AUSPEX | OPER_PRIV_IMMUNE)
 
 typedef struct {
     char location1[CFG_STR];

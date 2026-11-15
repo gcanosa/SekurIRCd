@@ -902,7 +902,7 @@ void net_detach_client(server_t *srv, client_t *cl, const char *why, int quiet) 
     srv->n_ghosts++;
     unsigned before = cl->umodes;
     if (cl->umodes & UMODE_O) {
-        cl->umodes &= ~(UMODE_O | UMODE_Q | UMODE_H | UMODE_WHOISNOTE);
+        cl->umodes &= ~(UMODE_O | UMODE_OPERONLY);
         cl->oper_name[0] = '\0';
         cl->oper_privs = 0;
     }
@@ -1141,7 +1141,7 @@ static void alwayson_save(server_t *srv, int force) {
         if (u->is_away && !u->auto_away) str_item(o, "away", u->away);
         cJSON_AddNumberToObject(o, "acct_created", (double)u->acct_created);
         cJSON_AddNumberToObject(o, "nick_ts", (double)u->nick_ts);
-        cJSON_AddNumberToObject(o, "umodes", (double)(u->umodes & ~(UMODE_O | UMODE_Q | UMODE_H | UMODE_WHOISNOTE)));
+        cJSON_AddNumberToObject(o, "umodes", (double)(u->umodes & ~(UMODE_O | UMODE_OPERONLY)));
         cJSON_AddNumberToObject(o, "ident_confirmed", u->ident_confirmed);
         cJSON_AddNumberToObject(o, "always_on", (double)u->always_on);
         cJSON_AddNumberToObject(o, "detached_at", (double)(u->detached_at ? u->detached_at : now));

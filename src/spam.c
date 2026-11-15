@@ -261,7 +261,7 @@ void spam_track(client_t *cl, const char *target, const char *text, time_t now,
 
 static int is_exempt(const cfg_spam_t *sp, const client_t *cl) {
     if (cl->fd < 0 || cl->is_service) return 1;
-    if (sp->exempt_opers && (cl->umodes & UMODE_O)) return 1;
+    if (sp->exempt_opers && OPER_CAN(cl, OPER_PRIV_IMMUNE)) return 1;
     if (sp->exempt_identified && cl->account[0]) return 1;
     return 0;
 }
@@ -317,7 +317,7 @@ static int apply_action(server_t *srv, client_t *cl, spam_action_t act, long dur
                 snprintf(zr, sizeof zr, "Spam: %s", reason);
                 server_kline_add(srv, cl->ip, zr, "spam", "Z", dur);
                 for (client_t *c = srv->all_clients; c; c = c->all_next) {
-                    if (c == cl || c->fd < 0 || c->quitting || (c->umodes & UMODE_O)) continue;
+                    if (c == cl || c->fd < 0 || c->quitting || OPER_CAN(c, OPER_PRIV_IMMUNE)) continue;
                     if (strcmp(c->ip, cl->ip) != 0) continue;
                     snprintf(c->quit_reason, sizeof c->quit_reason, "%s", cl->quit_reason);
                     client_mark_quit(c);
@@ -369,7 +369,7 @@ int spam_check_text(server_t *srv, client_t *cl, unsigned kind, const char *text
 int spam_check_message(server_t *srv, client_t *cl, const char *target, const char *text, int is_notice) {
     const cfg_spam_t *sp = &srv->cfg.spam;
     if (!sp->enabled) return 0;
-    if (cl->fd < 0 || cl->is_service || (sp->exempt_opers && (cl->umodes & UMODE_O))) return 0;
+    if (cl->fd < 0 || cl->is_service || (sp->exempt_opers && OPER_CAN(cl, OPER_PRIV_IMMUNE))) return 0;
 
     const char *t = target;
     if (t[0] && strchr("~&@%+", t[0]) && t[1] == '#') t++; /* STATUSMSG (the same prefixes send_msg accepts) */

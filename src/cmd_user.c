@@ -29,7 +29,7 @@ int client_is_silencing(client_t *cl, client_t *from) {
  * same way WHOIS does -- shown only to opers and to the user themself. */
 static int visible_oper(const client_t *u, const client_t *viewer) {
     if (!(u->umodes & UMODE_O)) return 0;
-    return !(u->umodes & UMODE_H) || u == viewer || (viewer->umodes & UMODE_O);
+    return !(u->umodes & UMODE_H) || u == viewer || OPER_CAN(viewer, OPER_PRIV_AUSPEX);
 }
 
 /* Tags a PRIVMSG/NOTICE/TAGMSG carries to a message-tags recipient: bot,
@@ -324,7 +324,7 @@ static int pm_target_ok(client_t *cl, client_t *dst, const char *textbuf, int is
     if ((dst->umodes & UMODE_D) && is_blocked_ctcp(textbuf)) return 0; /* +T: suppress CTCP */
     if (cl != dst && !cl->is_service && !dst->is_service) { /* +Z: private messages only between TLS users */
         const char *pe[] = {dst->nick};
-        if ((dst->umodes & UMODE_SECUREONLY) && !(cl->umodes & UMODE_Z) && !(cl->umodes & UMODE_O)) {
+        if ((dst->umodes & UMODE_SECUREONLY) && !(cl->umodes & UMODE_Z) && !OPER_CAN(cl, OPER_PRIV_OVERRIDE)) {
             if (!is_notice) sender_reply(cl, N_CANTSENDTOUSER, pe, 1, "You must be connected via SSL/TLS to message this user");
             return 0;
         }
@@ -333,17 +333,17 @@ static int pm_target_ok(client_t *cl, client_t *dst, const char *textbuf, int is
             return 0;
         }
     }
-    if ((dst->umodes & UMODE_NOPM) && !(cl->umodes & UMODE_O) && cl != dst) {
+    if ((dst->umodes & UMODE_NOPM) && !OPER_CAN(cl, OPER_PRIV_OVERRIDE) && cl != dst) {
         const char *pe[] = {dst->nick};
         if (!is_notice) sender_reply(cl, N_NONONREG, pe, 1, "is not accepting private messages");
         return 0;
     }
-    if ((dst->umodes & UMODE_REGONLY) && !cl->account[0] && !(cl->umodes & UMODE_O) && cl != dst) {
+    if ((dst->umodes & UMODE_REGONLY) && !cl->account[0] && !OPER_CAN(cl, OPER_PRIV_OVERRIDE) && cl != dst) {
         const char *pe[] = {dst->nick};
         if (!is_notice) sender_reply(cl, N_NONONREG, pe, 1, "is only accepting messages from registered users");
         return 0;
     }
-    if ((dst->umodes & UMODE_G) && cl != dst && !(cl->umodes & UMODE_O) && !cl->is_service) {
+    if ((dst->umodes & UMODE_G) && cl != dst && !OPER_CAN(cl, OPER_PRIV_OVERRIDE) && !cl->is_service) {
         char scf[NICKLEN];
         irc_casefold(scf, sizeof scf, cl->nick);
         int allowed = 0;
@@ -477,7 +477,7 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
             return;
         }
         member_t *m = channel_find_member(chan, cl);
-        int privileged = (m && (m->rank & (RANK_OP | RANK_HALFOP | RANK_VOICE))) || (cl->umodes & UMODE_O);
+        int privileged = (m && (m->rank & (RANK_OP | RANK_HALFOP | RANK_VOICE))) || OPER_CAN(cl, OPER_PRIV_OVERRIDE);
 
         if ((chan->modes & CMODE_NOCTCP) && is_blocked_ctcp(textbuf) && !privileged) {
             if (!is_notice) { const char *pe[] = {target}; client_reply(cl, N_CANNOTSENDTOCHAN, pe, 1, "Cannot send to channel (+C)"); }
@@ -485,7 +485,7 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
         }
         if (is_notice && (chan->modes & CMODE_NONOTICE) && !privileged) return;
 
-        if (!m && (chan->modes & CMODE_N) && !(cl->umodes & UMODE_O)) {
+        if (!m && (chan->modes & CMODE_N) && !OPER_CAN(cl, OPER_PRIV_OVERRIDE)) {
             if (!is_notice) { const char *pe[] = {target}; client_reply(cl, N_CANNOTSENDTOCHAN, pe, 1, "Cannot send to channel"); }
             return;
         }
@@ -507,7 +507,7 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
         if (chan->bans.n > 0)
             channel_ban_state(chan, m, cl->nick, cl->user, cl->host, cl->realhost, cl->ip, cl->account, cl->ident_confirmed,
                               &is_banned, &is_quieted);
-        if (!(m && (m->rank & RANK_OP)) && !(cl->umodes & UMODE_O) && is_banned) {
+        if (!(m && (m->rank & RANK_OP)) && !OPER_CAN(cl, OPER_PRIV_OVERRIDE) && is_banned) {
             if (!is_notice) { const char *pe[] = {target}; client_reply(cl, N_CANNOTSENDTOCHAN, pe, 1, "Cannot send to channel (+b)"); }
             return;
         }
@@ -780,7 +780,7 @@ static void whois_one(server_t *srv, client_t *cl, const char *nick) {
     const char *p2[] = {target->nick, netsync_server_name_of(srv, target)};
     client_reply(cl, N_WHOISSERVER, p2, 2, target->remote && target->nserver ? target->nserver->desc : srv->cfg.server.network);
 
-    int self_or_oper = (cl == target) || (cl->umodes & UMODE_O);
+    int self_or_oper = (cl == target) || OPER_CAN(cl, OPER_PRIV_AUSPEX);
     if (target->is_service) {
         const char *p3[] = {target->nick};
         client_reply(cl, N_WHOISOPERATOR, p3, 1, "is a Network Service");
@@ -806,7 +806,7 @@ static void whois_one(server_t *srv, client_t *cl, const char *nick) {
         const char *pa[] = {target->nick};
         client_reply(cl, N_AWAY, pa, 1, target->away);
     }
-    if ((strcmp(target->host, target->realhost) != 0 || strcmp(target->realhost, target->ip) != 0) && ((cl->umodes & UMODE_O) || cl == target)) {
+    if ((strcmp(target->host, target->realhost) != 0 || strcmp(target->realhost, target->ip) != 0) && (OPER_CAN(cl, OPER_PRIV_AUSPEX) || cl == target)) {
         char m[300];
         if (strcmp(target->realhost, target->ip) != 0)
             snprintf(m, sizeof m, "is actually connecting from %s [%s]", target->realhost, target->ip);
@@ -873,7 +873,7 @@ static const char *whox_value(char letter, client_t *u, channel_t *chan, client_
     case 't': return token;
     case 'c': return chan ? chan->name : "*";
     case 'u': return client_ident(u);
-    case 'i': return ((cl->umodes & UMODE_O) || u == cl) ? u->ip : "255.255.255.255";
+    case 'i': return (OPER_CAN(cl, OPER_PRIV_AUSPEX) || u == cl) ? u->ip : "255.255.255.255";
     case 'h': return u->host;
     case 's': return netsync_server_name_of(cl->srv, u);
     case 'n': return u->nick;
@@ -936,7 +936,7 @@ static int shares_channel(const client_t *a, const client_t *b) {
 
 /* +i: hidden from anyone who isn't the user, an oper, or sharing a channel with them. */
 static int invisible_to(const client_t *u, const client_t *viewer) {
-    return (u->umodes & UMODE_I) && u != viewer && !(viewer->umodes & UMODE_O) && !shares_channel(u, viewer);
+    return (u->umodes & UMODE_I) && u != viewer && !OPER_CAN(viewer, OPER_PRIV_AUSPEX) && !shares_channel(u, viewer);
 }
 
 /* The channel a WHO reply shows for `u`: the first one the asker may see, else NULL ("*"). */
@@ -955,7 +955,7 @@ static int who_mask_hit(server_t *srv, client_t *cl, client_t *u, const char *ma
     char full[400];
     client_prefix(u, full, sizeof full);
     if (irc_glob_match(mask, full)) return 1;
-    return (cl->umodes & UMODE_O) && (irc_glob_match(mask, u->realhost) || irc_ip_mask_match(mask, u->ip));
+    return OPER_CAN(cl, OPER_PRIV_AUSPEX) && (irc_glob_match(mask, u->realhost) || irc_ip_mask_match(mask, u->ip));
 }
 
 void cmd_who(server_t *srv, client_t *cl, irc_message_t *msg) {
@@ -1576,7 +1576,7 @@ void cmd_chathistory(server_t *srv, client_t *cl, irc_message_t *msg) {
     const char *shown = target;
     if (target[0] == '#') {
         channel_t *chan = server_find_channel(srv, target);
-        if (!chan || !(channel_find_member(chan, cl) || (cl->umodes & UMODE_O))) {
+        if (!chan || !(channel_find_member(chan, cl) || OPER_CAN(cl, OPER_PRIV_AUSPEX))) {
             chathistory_fail(srv, cl, "INVALID_TARGET", target, "Messages could not be retrieved"); /* same answer for "no such" and "not on it" */
             return;
         }
@@ -1840,7 +1840,7 @@ void cmd_redact(server_t *srv, client_t *cl, irc_message_t *msg) {
     int own = (e->account[0] && cl->account[0] && strcasecmp(e->account, cl->account) == 0) || strcmp(e->sender, prefix) == 0;
     if (!own) {
         member_t *m = chan ? channel_find_member(chan, cl) : NULL;
-        int may = chan && ((cl->umodes & UMODE_O) || (m && channel_rank_level(m->rank) >= 3));
+        int may = chan && (OPER_CAN(cl, OPER_PRIV_OVERRIDE) || (m && channel_rank_level(m->rank) >= 3));
         if (!may) { redact_fail(srv, cl, "REDACT_FORBIDDEN", target, msgid, "You may only redact your own messages"); return; }
     }
     char id[80];

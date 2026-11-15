@@ -111,7 +111,8 @@
 <tr><td><code>+W</code></td><td>Opers only: a notice whenever someone does a <code>/WHOIS</code> on you.</td></tr>
 <tr><td><code>+H</code></td><td>Opers only: hide your oper status from non-opers.</td></tr>
 <tr><td><code>+q</code></td><td>Opers only: no one but an IRC operator can kick you.</td></tr>
-<tr><td><code>+s</code></td><td>Server notices (opers): bans, connects, kills, failed <code>OPER</code>, links.</td></tr>
+<tr><td><code>+s</code></td><td>Server notices (opers): bans, connects and exits on this server, kills, failed <code>OPER</code>, links and netsplits.</td></tr>
+<tr><td><code>+F</code></td><td>Opers only: far connects. <code>Client connecting at &lt;server&gt;</code> / <code>Client exiting at &lt;server&gt;</code> for users on other servers (UnrealIRCd's <code>+F</code> snomask). Bursts and netsplits are not announced user by user.</td></tr>
 <tr><td><code>+o</code></td><td>Operator. Granted by <code>/OPER</code>.</td></tr>
 <tr><td><code>+z</code></td><td>Connected over TLS. Set by the server (was <code>+Z</code> before 1.3.3).</td></tr>
 <tr><td><code>+Z</code></td><td>Private messages only to and from TLS users (<code>531</code> otherwise). IRC operators and services can still reach you.</td></tr>

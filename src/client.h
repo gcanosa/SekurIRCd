@@ -44,9 +44,13 @@ struct link_conn;
 #define UMODE_G        0x4000 /* g: caller-ID -- only accept PMs from users on your /ACCEPT list (and opers) */
 #define UMODE_B        0x2000 /* B: marks the user as a bot -- self-settable; WHOIS 335, WHO flag B, @bot tag */
 #define UMODE_SECUREONLY 0x10000 /* Z: PMs only to and from TLS users (UnrealIRCd +Z) */
-#define UMODE_DEAF     0x8000
+#define UMODE_DEAF     0x8000 /* d: deaf -- channel PRIVMSG/NOTICE/TAGMSG are not delivered (UnrealIRCd/InspIRCd +d) */
 #define UMODE_X        0x20000 /* x: cloaked host shown (on by default under host_masking); -x shows the real host */
-#define UMODE_WHOISNOTE 0x40000 /* W: oper-only -- told when someone does a /WHOIS on you */ /* d: deaf -- channel PRIVMSG/NOTICE/TAGMSG are not delivered (UnrealIRCd/InspIRCd +d) */
+#define UMODE_WHOISNOTE 0x40000 /* W: oper-only -- told when someone does a /WHOIS on you */
+#define UMODE_FARCONN  0x80000 /* F: oper-only -- connect/exit notices for clients on other servers (UnrealIRCd snomask +F) */
+/* An oper power from [[operators]] privileges (OPER_PRIV_*). A remote oper's own server already checked it. */
+#define OPER_CAN(cl, priv) (((cl)->umodes & UMODE_O) && ((cl)->remote || ((cl)->oper_privs & (priv))))
+#define UMODE_OPERONLY (UMODE_Q | UMODE_H | UMODE_WHOISNOTE | UMODE_FARCONN) /* dropped with +o */
 
 struct accept_entry { char nick[NICKLEN]; char account[64]; uint64_t conn_id; };
 #define MAX_ACCEPT 20

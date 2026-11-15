@@ -350,7 +350,10 @@
     steps.push("chmod 600 config/sekurircd.toml" + (c("protect") ? " config/protection.toml" : "") + (svc ? " services/services.toml" : ""));
     steps.push("", "# 3. check, then start", "bin/sekurircd --config config/sekurircd.toml --check");
     if (svc) steps.push("bin/services --config services/services.toml --check");
+    if (!svc) steps.push("", "# a leaf: link it to the hub (run it here, paste what it prints on the hub), then start",
+                         "tools/linkmgmt.py add    # choose: this server dials the hub");
     steps.push("./sekurircd start");
+    if (!svc) steps.push("./sekurircd status    # services: \"not run here: this server is a leaf\" once it is linked as one");
     if (!nops) steps.push("", "# note: no operators configured, so nobody can /OPER");
 
     document.getElementById("out-ircd").textContent = L.join("\n") + "\n";

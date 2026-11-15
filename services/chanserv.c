@@ -476,6 +476,7 @@ static const char *akick_matches(cJSON *rec, const char *nick, const char *user,
 /* --- link connection to the ircd hub -------------------------------------- */
 
 static int g_fd = -1;
+static int g_refused; /* this session ended with "Services already running" */
 static char g_rbuf[RBUF_SZ];
 static size_t g_rbuf_len = 0;
 static char g_sbuf[SBUF_SZ];
@@ -2207,6 +2208,12 @@ static void process_line(char *line) {
     if (irc_parse_line(line, &msg) != 0) return;
     if (strcasecmp(msg.command, "PING") == 0) { queue_line("PONG"); return; }
     if (strcasecmp(msg.command, "PONG") == 0) return;
+    if (strcasecmp(msg.command, "ERROR") == 0) {
+        const char *why = msg.nparams ? msg.params[msg.nparams - 1] : "";
+        log_error("services", "the ircd closed the link: %s", why);
+        if (strstr(why, "Services already running")) g_refused = 1; /* another daemon is the network's: retry slowly */
+        return;
+    }
 
     /* QUIT/NICK for a shared-channel member reach us like any other channel
      * event (see link.c's client_send/server_send_common_channels fan-out --
@@ -2365,6 +2372,7 @@ static void process_line(char *line) {
 }
 
 static int run_session(void) {
+    g_refused = 0;
     g_fd = connect_hub();
     if (g_fd < 0) return -1;
     if (do_handshake() != 0) { close(g_fd); g_fd = -1; return -1; }
@@ -2396,7 +2404,7 @@ static int run_session(void) {
         int rc = poll(&pfd, 1, 1000);
         if (rc < 0) { if (errno == EINTR) continue; break; }
         if (rc > 0) {
-            if (pfd.revents & (POLLHUP | POLLERR)) break;
+            if ((pfd.revents & (POLLHUP | POLLERR)) && !(pfd.revents & POLLIN)) break; /* read a parting ERROR first */
             if (pfd.revents & POLLIN) {
                 char tmp[4096];
                 ssize_t n = read(g_fd, tmp, sizeof tmp);
@@ -2436,7 +2444,7 @@ static int run_session(void) {
         if (difftime(time(NULL), g_last_activity) > 240) break; /* link keepalive timeout */
     }
     if (g_fd >= 0) { close(g_fd); g_fd = -1; }
-    return 0;
+    return g_refused ? 2 : 0;
 }
 
 /* --- CLI: -d/--daemon, --pidfile, --stop (mirrors sekurircd's own main.c) --- */
@@ -2575,7 +2583,11 @@ int main(int argc, char **argv) {
     while (!g_term) {
         int rc = run_session();
         store_flush(); /* the link is down; don't sit on unwritten changes */
-        if (rc != 0) {
+        if (rc == 2) {
+            backoff = 60;
+            log_error("services", "refused: another services daemon already serves this network -- stop this one "
+                                  "(only the hub should run services); retrying in %ds", backoff);
+        } else if (rc != 0) {
             log_warn("chanserv", "could not reach hub %s:%d -- retrying in %ds",
                       g_cfg.link_host, g_cfg.link_port, backoff);
         } else {
@@ -2589,7 +2601,7 @@ int main(int argc, char **argv) {
         if (g_term) break;
         struct timespec ts = {backoff, 0};
         nanosleep(&ts, NULL);
-        if (rc != 0) backoff = backoff < 60 ? backoff * 2 : 60;
+        if (rc < 0) backoff = backoff < 60 ? backoff * 2 : 60;
     }
 
     log_info("services", "shutting down");

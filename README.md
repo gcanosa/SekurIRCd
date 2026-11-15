@@ -83,7 +83,8 @@ Website & docs: <https://gcanosa.github.io/SekurIRCd/> (source in [`web/`](web/)
   (connection stays, messaging is silently dropped) and `/ELINE` (exempts a
   mask from K/G-lines), plus `UN`-forms. Each `[[operators]]` login may carry
   `privileges = ["kill", "kline", "sa", "host", "wallops", "rehash", "die",
-  "link"]` to restrict which of those it can use (no key = everything).
+  "link", "override", "auspex", "immune"]` to restrict which of those it can
+  use and which oper powers it has (no key = everything).
 - Channel modes `+f <lines>:<secs>` (kicks a non-privileged flooder; UnrealIRCd's
   `+f [10j#R5,30m,4n,7t#b]:15` form works too) and
   `+j <joins>:<secs>` (refuses joins once the rate is exceeded).
@@ -238,7 +239,10 @@ Website & docs: <https://gcanosa.github.io/SekurIRCd/> (source in [`web/`](web/)
   for redundancy: nicks/channels/messages mirror network-wide, plus remote
   `KILL`, `WALLOPS`, K/G-line, and oper-notice propagation; `/SQUIT` and
   `/CONNECT` for manual control, with exponential-backoff auto-reconnect on
-  a leaf
+  a leaf. One services daemon per network, next to the hub: a leaf runs only
+  the ircd (`tools/makeconf.py` asks; `./sekurircd disable-services` turns an
+  existing one off), and a second services daemon is refused when it links.
+  Steps: web/docs/configuration.html#leaf
 - Services (`bin/services`) -- a separate process (not part of the ircd)
   that connects in over `[links]` and hosts `NickServ` (accounts, above) and
   a `ChanServ` bot: `REGISTER`/`IDENTIFY`/`DROP` a channel behind a

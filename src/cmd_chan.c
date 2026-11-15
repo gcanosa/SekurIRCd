@@ -215,7 +215,7 @@ static void do_join_one(server_t *srv, client_t *cl, const char *chan_name, cons
         client_reply(cl, N_USERONCHANNEL, p, 1, "You're already on that channel");
         return;
     }
-    if (n_channels_of(cl) >= MAX_CHANNELS_PER_CLIENT && !(cl->umodes & UMODE_O)) {
+    if (n_channels_of(cl) >= MAX_CHANNELS_PER_CLIENT && !OPER_CAN(cl, OPER_PRIV_OVERRIDE)) {
         const char *p[] = {chan_name};
         client_reply(cl, N_TOOMANYCHANNELS, p, 1, "You have joined too many channels");
         return;
@@ -223,7 +223,7 @@ static void do_join_one(server_t *srv, client_t *cl, const char *chan_name, cons
     int is_new = (chan == NULL);
 
     if (is_new) {
-        if (srv->cfg.channels.restrict_creation && !(cl->umodes & UMODE_O)) {
+        if (srv->cfg.channels.restrict_creation && !OPER_CAN(cl, OPER_PRIV_OVERRIDE)) {
             int allowed = 0;
             for (int i = 0; i < srv->cfg.channels.n_allowed_channels; i++) {
                 if (strcasecmp(srv->cfg.channels.allowed_channels[i], chan_name) == 0) { allowed = 1; break; }
@@ -232,7 +232,7 @@ static void do_join_one(server_t *srv, client_t *cl, const char *chan_name, cons
         }
         chan = server_get_or_create_channel(srv, chan_name);
         if (!chan) { err_no_such_channel(cl, chan_name); return; }
-    } else if (!(cl->umodes & UMODE_O)) {
+    } else if (!OPER_CAN(cl, OPER_PRIV_OVERRIDE)) {
         ban_extra_t bx = {cl->realname, (cl->umodes & UMODE_Z) != 0, cl};
         channel_set_ban_extra(&bx); /* for ~r/~z/~j in +b/+e/+I */
         if ((chan->modes & CMODE_I) && !channel_is_invited(chan, invite_key_of(cl), cl->nick, cl->user, cl->host, cl->account, cl->ident_confirmed)) {
@@ -270,7 +270,7 @@ static void do_join_one(server_t *srv, client_t *cl, const char *chan_name, cons
             client_reply(cl, N_NEEDREGGEDNICK, p, 1, "Cannot join channel (+R, requires a registered account)");
             return;
         }
-        if (chan->modes & CMODE_OPERONLY) { /* already past the UMODE_O bypass above, so this branch means not-oper */
+        if ((chan->modes & CMODE_OPERONLY) && !(cl->umodes & UMODE_O)) { /* any oper; override skips this whole block */
             const char *p[] = {chan->name};
             client_reply(cl, N_NEEDREGGEDNICK, p, 1, "Cannot join channel (+O, IRC operators only)");
             return;
@@ -299,7 +299,7 @@ static void do_join_one(server_t *srv, client_t *cl, const char *chan_name, cons
     }
     cmd_announce_join(chan, cl);
     netsync_chan_join(srv, chan, cl, is_new);
-    if (!is_new && !(cl->umodes & UMODE_O)) channel_flood_event(srv, chan, 'j');
+    if (!is_new && !OPER_CAN(cl, OPER_PRIV_IMMUNE)) channel_flood_event(srv, chan, 'j');
 }
 
 /* SVSJOIN from services (the account's NickServ SET AJOIN list, comma-separated): each channel goes through the normal
@@ -389,8 +389,8 @@ void cmd_rename(server_t *srv, client_t *cl, irc_message_t *msg) {
     channel_t *chan = server_find_channel(srv, oldname);
     if (!chan) { err_no_such_channel(cl, oldname); return; }
     member_t *me = channel_find_member(chan, cl);
-    if (!me && !(cl->umodes & UMODE_O)) { const char *p[] = {chan->name}; client_reply(cl, N_NOTONCHANNEL, p, 1, "You're not on that channel"); return; }
-    if (!(cl->umodes & UMODE_O) && !(me->rank & (RANK_OP | RANK_HALFOP))) { err_not_channel_op(cl, chan->name); return; }
+    if (!me && !OPER_CAN(cl, OPER_PRIV_OVERRIDE)) { const char *p[] = {chan->name}; client_reply(cl, N_NOTONCHANNEL, p, 1, "You're not on that channel"); return; }
+    if (!OPER_CAN(cl, OPER_PRIV_OVERRIDE) && !(me->rank & (RANK_OP | RANK_HALFOP))) { err_not_channel_op(cl, chan->name); return; }
     char fail[300];
     const char *fp[] = {"RENAME", NULL, chan->name, newname};
     const char *code = NULL, *desc = NULL;
@@ -551,7 +551,7 @@ void cmd_topic(server_t *srv, client_t *cl, irc_message_t *msg) {
         return;
     }
 
-    if ((chan->modes & CMODE_T) && !channel_has_ops(chan, cl) && !(cl->umodes & UMODE_O)) {
+    if ((chan->modes & CMODE_T) && !channel_has_ops(chan, cl) && !OPER_CAN(cl, OPER_PRIV_OVERRIDE)) {
         err_not_channel_op(cl, chan->name);
         return;
     }
@@ -716,12 +716,12 @@ void cmd_invite(server_t *srv, client_t *cl, irc_message_t *msg) {
      * the same three checks. */
     if (!irc_valid_channel(chan_name, 50)) { err_no_such_channel(cl, chan_name); return; }
     if (client_is_silencing(target, cl)) return; /* dropped without telling the sender, as PRIVMSG does */
-    if ((target->umodes & UMODE_NOPM) && !(cl->umodes & UMODE_O) && cl != target) {
+    if ((target->umodes & UMODE_NOPM) && !OPER_CAN(cl, OPER_PRIV_OVERRIDE) && cl != target) {
         const char *pe[] = {target->nick};
         client_reply(cl, N_NONONREG, pe, 1, "is not accepting private messages");
         return;
     }
-    if ((target->umodes & UMODE_REGONLY) && !cl->account[0] && !(cl->umodes & UMODE_O) && cl != target) {
+    if ((target->umodes & UMODE_REGONLY) && !cl->account[0] && !OPER_CAN(cl, OPER_PRIV_OVERRIDE) && cl != target) {
         const char *pe[] = {target->nick};
         client_reply(cl, N_NONONREG, pe, 1, "is only accepting messages from registered users");
         return;
@@ -739,11 +739,11 @@ void cmd_invite(server_t *srv, client_t *cl, irc_message_t *msg) {
             client_reply(cl, N_USERONCHANNEL, p, 2, "is already on channel");
             return;
         }
-        if ((chan->modes & CMODE_I) && !channel_has_ops(chan, cl) && !(cl->umodes & UMODE_O)) {
+        if ((chan->modes & CMODE_I) && !channel_has_ops(chan, cl) && !OPER_CAN(cl, OPER_PRIV_OVERRIDE)) {
             err_not_channel_op(cl, chan->name);
             return;
         }
-        if ((chan->modes & CMODE_NOINVITE) && !channel_has_ops(chan, cl) && !(cl->umodes & UMODE_O)) {
+        if ((chan->modes & CMODE_NOINVITE) && !channel_has_ops(chan, cl) && !OPER_CAN(cl, OPER_PRIV_OVERRIDE)) {
             err_not_channel_op(cl, chan->name);
             return;
         }
@@ -897,8 +897,8 @@ void cmd_kick(server_t *srv, client_t *cl, irc_message_t *msg) {
         client_reply(cl, N_NOTONCHANNEL, p, 1, "You're not on that channel");
         return;
     }
-    if (!(me->rank & (RANK_OP | RANK_HALFOP)) && !(cl->umodes & UMODE_O)) { err_not_channel_op(cl, chan->name); return; }
-    if ((chan->modes & CMODE_NOKICK) && !(cl->umodes & UMODE_O)) { err_not_channel_op(cl, chan->name); return; }
+    if (!(me->rank & (RANK_OP | RANK_HALFOP)) && !OPER_CAN(cl, OPER_PRIV_OVERRIDE)) { err_not_channel_op(cl, chan->name); return; }
+    if ((chan->modes & CMODE_NOKICK) && !OPER_CAN(cl, OPER_PRIV_OVERRIDE)) { err_not_channel_op(cl, chan->name); return; }
 
     client_t *target = server_find_user(srv, target_nick);
     member_t *tm = target ? channel_find_member(chan, target) : NULL;
@@ -907,19 +907,19 @@ void cmd_kick(server_t *srv, client_t *cl, irc_message_t *msg) {
         client_reply(cl, N_USERNOTINCHANNEL, p, 2, "They aren't on that channel");
         return;
     }
-    if ((target->umodes & UMODE_Q) && !(cl->umodes & UMODE_O)) { err_not_channel_op(cl, chan->name); return; }
+    if ((target->umodes & UMODE_Q) && !OPER_CAN(cl, OPER_PRIV_OVERRIDE)) { err_not_channel_op(cl, chan->name); return; }
     if (target->is_service && !cl->is_service) { /* kicking ChanServ out would switch off everything GUARD enforces */
         const char *p[] = {target->nick, chan->name};
         client_reply(cl, N_ISCHANSERVICE, p, 2, "Cannot kick or deop a network service");
         return;
     }
     /* a halfop (not full op/oper) may only kick "downward" */
-    if ((me->rank & RANK_HALFOP) && !(me->rank & RANK_OP) && !(cl->umodes & UMODE_O) && (tm->rank & (RANK_OP | RANK_HALFOP))) {
+    if ((me->rank & RANK_HALFOP) && !(me->rank & RANK_OP) && !OPER_CAN(cl, OPER_PRIV_OVERRIDE) && (tm->rank & (RANK_OP | RANK_HALFOP))) {
         err_not_channel_op(cl, chan->name);
         return;
     }
     /* owners and admins can't be kicked by someone more junior */
-    if (!(cl->umodes & UMODE_O) && channel_rank_level(tm->rank) > channel_rank_level(me->rank)) {
+    if (!OPER_CAN(cl, OPER_PRIV_OVERRIDE) && channel_rank_level(tm->rank) > channel_rank_level(me->rank)) {
         err_not_channel_op(cl, chan->name);
         return;
     }
@@ -982,6 +982,7 @@ static void cmd_mode_user(server_t *srv, client_t *cl, irc_message_t *msg, const
         else if (c == 'Z') bit = UMODE_SECUREONLY;
         else if (c == 'x') bit = UMODE_X;
         else if (c == 'W') { if (cl->umodes & UMODE_O) bit = UMODE_WHOISNOTE; else continue; } /* oper-only, like H */
+        else if (c == 'F') { if (cl->umodes & UMODE_O) bit = UMODE_FARCONN; else continue; }
         else if (c == 's') bit = UMODE_S;
         else if (c == 'p') bit = UMODE_P;
         else if (c == 'I') bit = UMODE_HIDEIDLE;
@@ -995,7 +996,7 @@ static void cmd_mode_user(server_t *srv, client_t *cl, irc_message_t *msg, const
         if ((sign == '+') == ((cl->umodes & bit) != 0)) continue; /* already so: not echoed */
         if (sign == '+') cl->umodes |= bit; else cl->umodes &= ~bit;
         if (c == 'o' && sign == '-') { /* de-opered: drop the oper-only modes too */
-            cl->umodes &= ~(UMODE_Q | UMODE_H | UMODE_WHOISNOTE);
+            cl->umodes &= ~UMODE_OPERONLY;
             cl->oper_name[0] = '\0';
             cl->oper_privs = 0;
         }
@@ -1063,7 +1064,7 @@ void cmd_apply_channel_mode(server_t *srv, client_t *cl, channel_t *chan,
             client_reply(cl, N_NOTCHANNELOP, p, 1, "Mode +r is set by services only");
             continue;
         }
-        if (c == 'P' && sign == '+' && !cl->is_service && !(cl->umodes & UMODE_O)) {
+        if (c == 'P' && sign == '+' && !cl->is_service && !(is_full_op == 2 || OPER_CAN(cl, OPER_PRIV_OVERRIDE))) {
             /* +P keeps an empty channel alive forever; for anyone who can create
              * a channel that is an unbounded memory sink. */
             const char *p[] = {chan->name};
@@ -1222,7 +1223,7 @@ void cmd_apply_channel_mode(server_t *srv, client_t *cl, channel_t *chan,
                 argi++; continue;
             }
             member_t *setter = channel_find_member(chan, cl);
-            int setter_lvl = ((cl->umodes & UMODE_O) || cl->is_service) ? 99 : setter ? channel_rank_level(setter->rank) : 0;
+            int setter_lvl = (is_full_op == 2 || OPER_CAN(cl, OPER_PRIV_OVERRIDE) || cl->is_service) ? 99 : setter ? channel_rank_level(setter->rank) : 0;
             int need = (c == 'q') ? 5 : (c == 'a') ? 4 : 0;
             int target_lvl = channel_rank_level(tm->rank);
             int self_drop = (target == cl && sign == '-');
@@ -1323,7 +1324,7 @@ static void cmd_mode_channel(server_t *srv, client_t *cl, irc_message_t *msg, co
         for (char *t = strtok_r(modestr, " ", &save); t && np < 10; t = strtok_r(NULL, " ", &save)) p[np++] = t;
         /* redact the key from a non-member query; it is always the first
          * argument, and the ones after it (+l limit, +L target...) stay */
-        if (np > 2 && strchr(p[1], 'k') && !(channel_find_member(chan, cl) || (cl->umodes & UMODE_O)))
+        if (np > 2 && strchr(p[1], 'k') && !(channel_find_member(chan, cl) || OPER_CAN(cl, OPER_PRIV_AUSPEX)))
             p[2] = "*";
         client_reply(cl, N_CHANNELMODEIS, p, np, NULL);
         char tbuf[32];
@@ -1344,9 +1345,9 @@ static void cmd_mode_channel(server_t *srv, client_t *cl, irc_message_t *msg, co
 
     member_t *me = channel_find_member(chan, cl);
     int has_rank = me && (me->rank & (RANK_OP | RANK_HALFOP));
-    if (!has_rank && !(cl->umodes & UMODE_O)) { err_not_channel_op(cl, chan->name); return; }
+    if (!has_rank && !OPER_CAN(cl, OPER_PRIV_OVERRIDE)) { err_not_channel_op(cl, chan->name); return; }
 
-    int is_full_op = (cl->umodes & UMODE_O) || (me && (me->rank & RANK_OP));
+    int is_full_op = OPER_CAN(cl, OPER_PRIV_OVERRIDE) || (me && (me->rank & RANK_OP));
     const char *args[16];
     int nargs = 0;
     for (int i = 2; i < msg->nparams && nargs < 16; i++) args[nargs++] = msg->params[i];
@@ -1367,7 +1368,7 @@ void cmd_samode(server_t *srv, client_t *cl, irc_message_t *msg) {
     const char *args[16];
     int nargs = 0;
     for (int i = 2; i < msg->nparams && nargs < 16; i++) args[nargs++] = msg->params[i];
-    cmd_apply_channel_mode(srv, cl, chan, msg->params[1], args, nargs, 1);
+    cmd_apply_channel_mode(srv, cl, chan, msg->params[1], args, nargs, 2); /* 2: SAMODE acts as override too */
     log_info("chan", "%s SAMODEd %s: %s", cl->nick, chan->name, msg->params[1]);
     char snote[400];
     snprintf(snote, sizeof snote, "%s used SAMODE on %s: %s", cl->nick, chan->name, msg->params[1]);

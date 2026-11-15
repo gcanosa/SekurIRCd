@@ -88,7 +88,7 @@ void cmd_nick(server_t *srv, client_t *cl, irc_message_t *msg) {
         return;
     }
 
-    if (!(cl->umodes & UMODE_O)) {
+    if (!OPER_CAN(cl, OPER_PRIV_OVERRIDE)) {
         for (chan_node_t *n = cl->channels; n; n = n->next) {
             channel_t *chan = n->chan;
             member_t *me = channel_find_member(chan, cl);

@@ -96,6 +96,7 @@ void link_handle_writable(struct server *srv, link_conn_t *lc);
  * caller still holding `lc` (net.c's poll array, a handler) never touches
  * freed memory. */
 void link_close(struct server *srv, link_conn_t *lc);
+void link_drop_services(struct server *srv, link_conn_t *lc, const char *why); /* ERROR + bots removed now + close */
 /* net.c, end of each loop iteration: free every closing link, removing its
  * service pseudo-client (if any) from the users registry and channels. */
 void link_reap(struct server *srv);

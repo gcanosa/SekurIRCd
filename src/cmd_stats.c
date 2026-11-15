@@ -88,11 +88,11 @@ static void st_opers_online(server_t *srv, client_t *cl, char letter, const char
     time_t now = time(NULL);
     for (client_t *u = srv->users; u; u = u->hh.next) {
         if (u->remote || u->is_service || !is_oper(u) || u->fd < 0) continue;
-        if ((u->umodes & UMODE_H) && !is_oper(cl)) continue; /* +H hides oper status from non-opers */
+        if ((u->umodes & UMODE_H) && !OPER_CAN(cl, OPER_PRIV_AUSPEX)) continue; /* +H hides oper status from non-opers */
         char idle[24];
-        if ((u->umodes & UMODE_HIDEIDLE) && !is_oper(cl) && u != cl) snprintf(idle, sizeof idle, "hidden");
+        if ((u->umodes & UMODE_HIDEIDLE) && !OPER_CAN(cl, OPER_PRIV_AUSPEX) && u != cl) snprintf(idle, sizeof idle, "hidden");
         else dur((long)difftime(now, u->last_activity), idle, sizeof idle);
-        dbg(cl, letter, "[O] %s (%s@%s) Idle: %s%s", u->nick, u->user, is_oper(cl) ? u->realhost : u->host, idle,
+        dbg(cl, letter, "[O] %s (%s@%s) Idle: %s%s", u->nick, u->user, OPER_CAN(cl, OPER_PRIV_AUSPEX) ? u->realhost : u->host, idle,
             u->is_away ? " (away)" : "");
         n++;
     }
@@ -137,7 +137,7 @@ static void st_opers(server_t *srv, client_t *cl, char letter, const char *arg) 
     static const struct { unsigned bit; const char *name; } P[] = {
         {OPER_PRIV_KILL, "kill"}, {OPER_PRIV_KLINE, "kline"}, {OPER_PRIV_SA, "sa"}, {OPER_PRIV_HOST, "host"},
         {OPER_PRIV_WALLOPS, "wallops"}, {OPER_PRIV_REHASH, "rehash"}, {OPER_PRIV_DIE, "die"}, {OPER_PRIV_LINK, "link"},
-        {OPER_PRIV_ACCOUNT, "accounts"},
+        {OPER_PRIV_OVERRIDE, "override"}, {OPER_PRIV_AUSPEX, "auspex"}, {OPER_PRIV_IMMUNE, "immune"},
     };
     for (int i = 0; i < srv->cfg.n_operators; i++) {
         const cfg_operator_t *o = &srv->cfg.operators[i];

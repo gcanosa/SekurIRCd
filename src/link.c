@@ -584,6 +584,21 @@ void link_close(server_t *srv, link_conn_t *lc) {
     lc->closing = 1;
 }
 
+/* Close a services link now, its bots included: they're removed at once (so their nicks are free right away, e.g. for
+ * the collision winner), and the ERROR tells the services daemon why. */
+void link_drop_services(server_t *srv, link_conn_t *lc, const char *why) {
+    char line[320], m[420];
+    snprintf(line, sizeof line, "ERROR :%s", why);
+    link_forward_line(lc, line);
+    snprintf(m, sizeof m, "Services link %s dropped: %s -- run one services daemon per network, next to the hub", lc->peer_name, why);
+    log_error("link", "%s", m);
+    server_notify_opers(srv, m);
+    for (int b = 0; b < lc->n_bots; b++) server_remove_client(srv, lc->bots[b], "Service disconnected");
+    lc->n_bots = 0;
+    if (lc->service) { srv->svc_gone_at = time(NULL); srv->svc_back_at = 0; lc->service = NULL; }
+    link_close(srv, lc);
+}
+
 void link_reap(server_t *srv) {
     link_conn_t **pp = &srv->links;
     while (*pp) {
@@ -602,7 +617,17 @@ void link_reap(server_t *srv) {
             (void)link_io_write(lc, lc->sbuf + lc->sbuf_off, lc->sbuf_len - lc->sbuf_off);
         free(lc->sbuf);
         if (lc->ssl) SSL_free(lc->ssl); /* abrupt close, no SSL_shutdown close_notify -- fine for a teardown path */
-        if (lc->fd >= 0) { ev_forget(lc->fd, &lc->ev_mask); close(lc->fd); }
+        if (lc->fd >= 0) {
+            ev_forget(lc->fd, &lc->ev_mask);
+            /* Unread input at close() makes the kernel send RST, which can destroy the parting ERROR before the peer
+             * reads it: finish our side, then drain what it already sent (the fd is non-blocking; bounded). */
+            if (!lc->ssl) {
+                shutdown(lc->fd, SHUT_WR);
+                char junk[4096];
+                for (int i = 0; i < 16 && recv(lc->fd, junk, sizeof junk, 0) > 0; i++) {}
+            }
+            close(lc->fd);
+        }
         if (lc->peer_name[0]) {
             log_info("link", "link '%s' closed", lc->peer_name);
             char snote[200];
@@ -745,6 +770,7 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
         return 0; /* ignore anything else pre-auth */
     }
 
+    if (lc->closing) return 0; /* e.g. a services link just refused: the rest of this read is moot */
     if (lc->is_server) { /* state-sync link: keepalives here, everything else is netsync's (its NICK is a nick change, not a service intro) */
         if (strcasecmp(msg.command, "PING") == 0) { link_forward_line(lc, "PONG"); return 0; }
         if (strcasecmp(msg.command, "PONG") == 0) return 0;
@@ -757,9 +783,16 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
         if (lc->n_bots >= LINK_MAX_BOTS) { log_warn("link", "link '%s' introduced too many service nicks -- ignored", lc->peer_name); return 0; }
         const char *nick = msg.params[0], *user = msg.params[1], *host = msg.params[2];
         const char *realname = msg.params[msg.nparams - 1];
-        if (server_find_user(srv, nick)) {
-            log_warn("link", "link '%s' introduced nick '%s' which already exists locally -- ignored",
-                      lc->peer_name, nick);
+        client_t *have = server_find_user(srv, nick);
+        if (have && have->is_service && have->link_conn != lc) { /* one services daemon per network: refuse a second */
+            char why[300];
+            snprintf(why, sizeof why, "Services already running on %s", have->remote ? netsync_server_name_of(srv, have) : srv->cfg.server.name);
+            link_drop_services(srv, lc, why);
+            return 0;
+        }
+        if (have) {
+            log_warn("link", "link '%s' introduced nick '%s' which already exists %s -- ignored",
+                      lc->peer_name, nick, have->remote ? "on the network" : "locally");
             return 0;
         }
         client_t *svc = client_new(-1, srv);
@@ -768,7 +801,7 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
         svc->is_service = 1;
         svc->ident_confirmed = 1; /* a service's user part is its own, never "~"-marked */
         svc->caps |= CAP_ACCOUNT_TAG; /* PRIVMSGs forwarded to the service carry the sender's account (@account=...) */
-        svc->nick_ts = (long)time(NULL);
+        svc->nick_ts = lc->n_bots ? lc->bots[0]->nick_ts : (long)time(NULL); /* one daemon, one TS: collisions keep or drop it whole */
         svc->registered = 1;
         svc->got_nick = svc->got_user = 1;
         svc->signon_time = svc->last_activity = time(NULL);

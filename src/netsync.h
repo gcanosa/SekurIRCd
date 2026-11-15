@@ -67,6 +67,8 @@ typedef struct netserver {
     struct netserver *uplink;      /* next server toward us; NULL for ourselves */
     struct link_conn *route;       /* the local link that leads there; NULL for ourselves */
     int n_users;
+    int synced;                    /* its burst is over (EOB): new UIDs from it are real connects, not burst */
+    time_t linked_at;              /* fallback for a path through servers that don't forward EOB */
     UT_hash_handle hh;             /* srv->servers, keyed by sid */
 } netserver_t;
 

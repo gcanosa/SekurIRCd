@@ -615,6 +615,23 @@ void server_notify_opers(server_t *srv, const char *message) {
     }
 }
 
+void server_notify_far(server_t *srv, const char *message) {
+    snote_guard_t *g = &srv->far_guard;
+    double now = monotonic_now();
+    int ringsz = (int)(sizeof g->times / sizeof g->times[0]);
+    if (g->count < ringsz) g->times[(g->head + g->count++) % ringsz] = now;
+    else { g->times[g->head] = now; g->head = (g->head + 1) % ringsz; }
+    while (g->count > 0 && g->times[g->head] < now - SNOTE_WINDOW) { g->head = (g->head + 1) % ringsz; g->count--; }
+    if (g->count > SNOTE_MAX) { g->suppressed++; return; }
+    char text[500];
+    if (g->suppressed) snprintf(text, sizeof text, "*** Notice -- %s (+%d more far notice(s) were suppressed)", message, g->suppressed);
+    else snprintf(text, sizeof text, "*** Notice -- %s", message);
+    g->suppressed = 0;
+    client_t *u, *tmp;
+    HASH_ITER(hh, srv->users, u, tmp)
+        if (!u->remote && (u->umodes & UMODE_O) && (u->umodes & UMODE_FARCONN)) notice_self(srv, u, text);
+}
+
 void server_logout(server_t *srv, client_t *cl) {
     if (!cl->account[0]) return;
     char prefix[320];
@@ -677,7 +694,7 @@ void server_remove_client(server_t *srv, client_t *cl, const char *quit_reason) 
         char snote[400];
         snprintf(snote, sizeof snote, "Client exiting: %s (%s@%s) [%s] [%s]", cl->nick, cl->user, cl->realhost[0] ? cl->realhost : cl->host,
                  quit_reason ? quit_reason : "", cl->ip);
-        server_notify_opers(srv, snote);
+        if (!cl->remote) server_notify_opers(srv, snote); /* a remote one is a far exit (netsync handle_quit), +F */
     }
 
     server_send_common_channels(srv, cl, line, 0);
@@ -882,7 +899,7 @@ void server_send_welcome(server_t *srv, client_t *cl) {
 
     char swver[CFG_STR + 16];
     server_software_version(srv, swver, sizeof swver);
-    const char *myinfo[] = {srv->cfg.server.name, swver, "diwsozrpIHqRDBgTZxW", "beIklfjLnimpstzrovhqaPCTSVQNROMcDuGK"};
+    const char *myinfo[] = {srv->cfg.server.name, swver, "diwsozrpIHqRDBgTZxWF", "beIklfjLnimpstzrovhqaPCTSVQNROMcDuGK"};
     client_reply(cl, N_MYINFO, myinfo, 4, NULL);
 
     if (cl->ssl) {
