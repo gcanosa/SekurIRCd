@@ -40,13 +40,16 @@
 <h2>sections</h2>
 <div class="tablewrap"><table>
 <tr><th>Section</th><th>What it controls</th></tr>
-<tr><td><code>[server]</code></td><td><code>name</code>, <code>network</code>, <code>bind</code> (default <code>0.0.0.0</code>), <code>port</code> (default <code>6667</code>).</td></tr>
+<tr><td><code>[server]</code></td><td><code>name</code>, <code>network</code>, <code>bind</code> (default <code>0.0.0.0</code>), <code>port</code> (default <code>6667</code>), <a href="#ipv6">IPv6</a>, and <code>proxy_protocol_hosts</code> (load balancers that pass the real client IP with a PROXY protocol v1 line; ignored from anyone else).</td></tr>
 <tr><td><code>[security]</code></td><td>Line/param/nick length limits, keepalive (<code>ping_interval</code> 120s, <code>ping_timeout</code> 300s),
   <code>host_masking</code> and its format, <code>klines_file</code>, <code>default_user_modes</code> (e.g. <code>"iw"</code>), <code>protection_file</code>,
-  <code>reserved_nicks</code>, ident and reverse-DNS lookups, <code>DIE</code>/<code>RESTART</code> passwords, <code>oper_auto_join</code>. The flood guard, connection caps and
+  <code>reserved_nicks</code>, ident and reverse-DNS lookups, <code>DIE</code>/<code>RESTART</code> passwords, <code>oper_modes</code> (modes every <code>/OPER</code> gets, default <code>"+osw"</code>), <code>oper_auto_join</code>. The flood guard, connection caps and
   connect-flood keys still work here but now live in the Protection bundle.</td></tr>
-<tr><td><code>[tls]</code></td><td><code>enabled</code> (default false), <code>port</code> (default 6697), <code>cert_file</code>, <code>key_file</code>, <code>request_client_cert</code> (needed for SASL EXTERNAL).
+<tr><td><code>[tls]</code></td><td><code>enabled</code> (default false), <code>port</code> (default 6697), <code>cert_file</code>, <code>key_file</code>, <code>request_client_cert</code> (needed for SASL EXTERNAL), <code>sts_duration</code> (IRCv3 STS: tell clients to always use TLS here).
   Runs alongside the plaintext listener, never instead of it.</td></tr>
+<tr><td><code>[websocket]</code></td><td>IRC over WebSocket for browser clients (the <a href="webchat.html">web chat</a>, Kiwi IRC, The Lounge): <code>enabled</code>, <code>port</code> (default 8080), <code>tls</code> (<code>wss://</code> with the <code>[tls]</code> certificate), <code>trusted_proxies</code> (whose X-Forwarded-For / X-Real-IP is believed) and <code>allowed_origins</code>.</td></tr>
+<tr><td><code>[[classes]]</code></td><td>Different limits for some hosts: the first class whose <code>hosts</code> (IP globs) match applies its <code>max_clients</code>, <code>max_per_ip</code>, <code>sendq_max</code> and <code>flood_max_msgs</code>/<code>flood_window</code>. Unset keys use the global setting. <code>STATS y</code> lists them.</td></tr>
+<tr><td><code>[[webirc]]</code></td><td>Trusted web gateways (Kiwi IRC, The Lounge, ...): <code>name</code>, <code>password</code> and <code>hosts</code> (the gateway's IPs, required). Both must match before a <code>WEBIRC</code> line's real user IP is accepted, so bans and limits hit that user, not the whole gateway.</td></tr>
 <tr><td>accounts</td><td>Not an ircd section any more: accounts, NickServ and SASL are the services daemon's, configured in <code>[nickserv]</code> of <code>services/services.toml</code>
   (see <a href="chanserv.html">services</a>). An <code>[accounts]</code> section left from an older release is ignored with a warning, and its <code>accounts.json</code> is used in place.</td></tr>
 <tr><td><code>[messages]</code></td><td><code>motd</code>, <code>oper_motd</code> (shown to opers) and <code>rules</code> (for <code>/RULES</code>) files, and max message length.</td></tr>
@@ -84,7 +87,7 @@ tools/mkcert.sh --domain irc.example.org --dry-run    # show what would happen</
   or use <code>--webroot DIR</code> for HTTP-01 instead. Old certificate files are kept as <code>*.bak</code>. Other options: <code>--domain</code> (repeatable),
   <code>--config</code>, <code>--pidfile</code>. For web chat it also reminds you to set <code>[websocket]</code> with <code>tls = true</code> if it isn't.</p>
 
-<h2>operators</h2>
+<h2 id="operators">operators</h2>
 <p>An <code>[[operators]]</code> entry is a <code>/OPER</code> login: <code>name</code>, <code>hosts</code> (ident@IP masks it may log in from)
   and exactly one of <code>password_hash</code> (scrypt, recommended) or a legacy plain <code>password</code>.</p>
 <pre>./bin/sekurircd --hash-password
@@ -108,6 +111,7 @@ hosts = ["*@*"]                                       # or restrict, e.g. ["*@20
   +i users, +p channels, +H opers, idle times, channel keys, TRACE), <code>immune</code> (exempt from SHUN, spam filters and channel
   +f/+j limits) and <code>all</code>. NickServ SUSPEND/UNSUSPEND/FDROP/SASET are for services admins
   (<code>[nickserv] admins</code>, by account), not an oper privilege. <code>privileges = []</code> makes a helper oper with none of them.</p>
+<p>An optional <code>modes</code> string (e.g. <code>"+oswH"</code>) replaces <code>[security] oper_modes</code> for that login. <code>o</code> is always included; the oper-only <code>H</code>, <code>q</code>, <code>W</code> and <code>F</code> are allowed too.</p>
 
 <h2 id="ipv6">IPv6</h2>
 <p>Off by default, so an upgrade changes nothing: without it the server listens and resolves exactly as before, over IPv4 only. Turn it on in

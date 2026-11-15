@@ -51,13 +51,17 @@
 <p>All require <code>/OPER</code> with a configured <code>[[operators]]</code> login.</p>
 <div class="tablewrap"><table>
 <tr><th>Command</th><th>Purpose</th></tr>
-<tr><td><code>OPER</code></td><td><code>OPER &lt;name&gt; &lt;password&gt;</code>. Grants <code>+o</code>, and also <code>+s</code> and <code>+w</code>.</td></tr>
+<tr><td><code>OPER</code></td><td><code>OPER &lt;name&gt; &lt;password&gt;</code>. Grants <code>[security] oper_modes</code> (default <code>+osw</code>), or the login's own <code>modes</code>. See <a href="configuration.html#operators">operators</a>.</td></tr>
 <tr><td><code>KILL</code></td><td>Disconnect a user from the network.</td></tr>
 <tr><td><code>KLINE</code> <code>GLINE</code> <code>ZLINE</code></td><td><code>&lt;mask&gt; [duration] [:reason]</code>. With no arguments, list active lines. K and Z-lines apply to this server only; G-lines (and <code>SHUN</code>) reach every linked server.</td></tr>
 <tr><td><code>UNKLINE</code> <code>UNGLINE</code> <code>UNZLINE</code></td><td>Remove a line.</td></tr>
+<tr><td><code>SHUN</code> <code>UNSHUN</code></td><td><code>[&lt;mask&gt; [duration] [reason]]</code>. Silently drop a connected user's messages without disconnecting them, on every linked server. With no arguments, list active SHUNs.</td></tr>
+<tr><td><code>ELINE</code> <code>UNELINE</code></td><td><code>[&lt;mask&gt; [duration] [reason]]</code>. Exempt a mask from K/G-lines.</td></tr>
+<tr><td><code>TESTLINE</code></td><td><code>&lt;nick|user@host|ip&gt;</code>. Show which K/G/Z-lines, SHUNs and ELINEs match that address.</td></tr>
 <tr><td><code>SPAMFILTER</code></td><td><code>[LIST] | ADD &lt;targets&gt; &lt;action&gt; &lt;duration|-&gt; &lt;reason&gt; &lt;regex&gt; | DEL &lt;n&gt;</code>. Manage the <code>[spam]</code> content filters. See the <a href="protection.html">protection bundle</a> page.</td></tr>
 <tr><td><code>PROTECT</code></td><td><code>[SCAN &lt;ipv4&gt;]</code>. Server opers: show the Protection bundle status (blacklists, proxy scanner, limits), or scan an address now. See the <a href="protection.html">protection bundle</a> page.</td></tr>
 <tr><td><code>WALLOPS</code></td><td>Message every user with <code>+w</code>.</td></tr>
+<tr><td><code>GLOBOPS</code> <code>OPERWALL</code> <code>LOCOPS</code></td><td>Message every online operator on the network (<code>GLOBOPS</code>, <code>OPERWALL</code>), or only the operators on this server (<code>LOCOPS</code>).</td></tr>
 <tr><td><code>REHASH [&lt;server&gt;|*]</code></td><td>Reload the config, Protection bundle, MOTD, oper MOTD, rules and spam filters live, then list what was re-read and which config sections changed. With a server name that server rehashes and answers over the link; <code>*</code> rehashes every server. Every rehash (also a SIGHUP, e.g. after a certificate renewal) is announced to opers on all servers in two lines: who, then what changed or why it failed.</td></tr>
 <tr><td><code>OPERMOTD</code></td><td>Show <code>oper.motd</code>. It is also sent automatically when you <code>/OPER</code> up.</td></tr>
 <tr><td><code>DIE</code> <code>RESTART</code></td><td>Shut down, or re-exec in place. Can require an extra password.</td></tr>
