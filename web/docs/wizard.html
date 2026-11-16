@@ -174,6 +174,7 @@
         <label>Panel port<input name="st_port" type="number" min="1" max="65535" value="8089"></label>
         <label>Bind address <small>127.0.0.1 = behind a reverse proxy</small><input name="st_bind" value="127.0.0.1"></label>
       </div>
+      <label>Hostname <small>optional, e.g. stats.example.net: the next steps get the Caddy config for https://hostname/</small><input name="st_host" placeholder="stats.example.net"></label>
       <label class="chk"><input type="checkbox" name="st_tls"> Serve it over HTTPS with the ircd's TLS certificate (when it's not behind a proxy)</label>
       <label class="chk"><input type="checkbox" name="st_public"> Anyone can see the viewer page without logging in (no IPs, no security data)</label>
       <p class="hint">Logins are added on the server, as scrypt hashes: <code>stats/netstats.py --user --admin --add yourname</code> (see next steps).</p>
@@ -244,6 +245,10 @@
   var v = function (n) { return f[n].value.trim(); };
   var c = function (n) { return f[n].checked; };
   var tf = function (b) { return b ? "true" : "false"; };
+  var stHost = function () {  // only a valid host name, else "" (netstats check refuses anything else)
+    var h = v("st_host").toLowerCase().replace(/\.$/, "");
+    return /^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9-]{2,63}$/.test(h) ? h : "";
+  };
 
   function build() {
     var err = [], L = [], S = [];
@@ -384,7 +389,7 @@
         "[storage]", 'database = "stats.db"', "retention_days = 365", "",
         "[http]", "enabled = true", "network_name = " + q(v("network")), "bind = " + q(v("st_bind") || "127.0.0.1"),
         "port = " + +v("st_port"), "tls_cert = " + q(https ? rel(v("cert")) : ""), "tls_key = " + q(https ? rel(v("key")) : ""),
-        "public = " + tf(c("st_public")), "",
+        "public = " + tf(c("st_public")), "hostname = " + q(stHost()), "",
         "[export]", 'public_html = ""', 'admin_html = ""', "",
         "[geoip]", 'file = "dbip-city-lite.csv.gz"', "",
         "[health]", "ports = [" + +v("port") + (c("tls") ? ", " + +v("tls_port") : "") + "]",
@@ -408,7 +413,12 @@
     if (!svc) steps.push("./sekurircd status    # services: \"not run here: this server is a leaf\" once it is linked as one");
     if (stats) steps.push("# the panel starts with ./sekurircd start: " + (c("st_tls") && c("tls") ? "https" : "http") + "://" + (v("st_bind") || "127.0.0.1") + ":" + +v("st_port") + "/admin/",
                           "# map positions: stats/netstats.py geoip-update (or lat/lon per server in stats.toml)");
-    const stBind = v("st_bind") || "127.0.0.1", stPort = +v("st_port");
+    const stBind = v("st_bind") || "127.0.0.1", stPort = +v("st_port"), host = stHost();
+    if (stats && host && ["127.0.0.1", "::1", "localhost"].includes(stBind))
+      steps.push("# HTTPS at https://" + host + "/ with Caddy (it gets the certificate) -- add to /etc/caddy/Caddyfile:",
+                 "#   " + host + " {", "#       reverse_proxy 127.0.0.1:" + stPort, "#   }",
+                 "sudo systemctl reload caddy",
+                 "# DNS: an A/AAAA record for " + host + " pointing at this server; TCP 80 and 443 open in the firewall");
     if (stats && !["127.0.0.1", "::1", "localhost"].includes(stBind)) {
       steps.push("# reachable from outside only once TCP " + stPort + " is open in the firewall (one of these):",
                  "sudo ufw allow " + stPort + "/tcp",

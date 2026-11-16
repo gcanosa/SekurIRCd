@@ -98,11 +98,31 @@ stats/netstats.py --mkpasswd                     # just print a hash, for a [[us
 <h2>putting it online</h2>
 <p>By default the panel listens on <code>127.0.0.1:8089</code> only. To reach it from outside, either:</p>
 <ul>
-  <li><strong>use a reverse proxy</strong> (recommended) that already serves your website with HTTPS:
-<pre># nginx
-location /stats/ {
-    proxy_pass http://127.0.0.1:8089/;
-    proxy_set_header Authorization $http_authorization;
+  <li><strong>put it behind Caddy</strong> (recommended): Caddy gets and renews a Let's Encrypt certificate by itself, so the panel is on
+    <code>https://stats.example.net/</code> with no certificate to manage and nothing but ports 80 and 443 open. Set the name in
+    <code>stats/stats.toml</code> (makeconf and the wizard ask for it):
+<pre>[http]
+bind = "127.0.0.1"
+port = 8089
+hostname = "stats.example.net"</pre>
+    and <code>netstats.py check</code> prints the block for <code>/etc/caddy/Caddyfile</code>:
+<pre>stats.example.net {
+    reverse_proxy 127.0.0.1:8089
+}</pre>
+    Then <code>sudo systemctl reload caddy</code>, an A/AAAA record for <code>stats.example.net</code> pointing at the hub, and TCP 80 and 443 open.
+    Caddy passes the login through and tells the panel who the visitor is (<code>X-Forwarded-For</code>, believed only from
+    <code>trusted_proxies</code>, which is <code>127.0.0.1</code> and <code>::1</code> once <code>hostname</code> is set), so a wrong password
+    only locks out the address that typed it.</li>
+  <li><strong>or behind nginx</strong>, if it already serves your website with HTTPS (set <code>hostname</code> too, for <code>trusted_proxies</code>):
+<pre>server {
+    listen 443 ssl;
+    server_name stats.example.net;          # its own name: the panel's links start at /
+    ssl_certificate     /etc/letsencrypt/live/stats.example.net/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/stats.example.net/privkey.pem;
+    location / {
+        proxy_pass http://127.0.0.1:8089;
+        proxy_set_header X-Forwarded-For $remote_addr;
+    }
 }</pre></li>
   <li><strong>or let it serve HTTPS itself</strong>: set <code>bind = "0.0.0.0"</code> and point <code>tls_cert</code>/<code>tls_key</code> at a certificate
     (the ircd's works, for example <code>"../config/tls/cert.pem"</code>), and open the port in your firewall (below).</li>
@@ -155,7 +175,8 @@ lon = 4.90</pre></li>
 <tr><th>Section</th><th>What it sets</th></tr>
 <tr><td><code>[collector]</code></td><td><code>enabled</code> (services collect), <code>sample_seconds</code> (snapshot interval, 60), <code>log</code>.</td></tr>
 <tr><td><code>[storage]</code></td><td><code>database</code>, <code>retention_days</code> (7 to 3650).</td></tr>
-<tr><td><code>[http]</code></td><td><code>enabled</code>, <code>network_name</code>, <code>bind</code>, <code>port</code>, <code>tls_cert</code>, <code>tls_key</code>, <code>public</code>.</td></tr>
+<tr><td><code>[http]</code></td><td><code>enabled</code>, <code>network_name</code>, <code>bind</code>, <code>port</code>, <code>tls_cert</code>, <code>tls_key</code>, <code>public</code>,
+  <code>hostname</code>, <code>trusted_proxies</code>.</td></tr>
 <tr><td><code>[export]</code></td><td><code>public_html</code>, <code>admin_html</code>: what <code>render</code> writes.</td></tr>
 <tr><td><code>[geoip]</code></td><td><code>file</code>: the DB-IP database <code>geoip-update</code> downloads.</td></tr>
 <tr><td><code>[health]</code></td><td><code>ports</code>, <code>tls_ports</code>, <code>interval</code>, <code>timeout</code>.</td></tr>

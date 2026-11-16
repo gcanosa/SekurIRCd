@@ -161,7 +161,7 @@ def render_stats(a):
          "[storage]", 'database = "stats.db"', "retention_days = 365", "",
          "[http]", "enabled = true", f"network_name = {q(a['network'])}", f"bind = {q(a['stats_bind'])}",
          f"port = {a['stats_port']}", f"tls_cert = {q(a.get('stats_cert', ''))}", f"tls_key = {q(a.get('stats_key', ''))}",
-         f"public = {str(a['stats_public']).lower()}", "",
+         f"public = {str(a['stats_public']).lower()}", f"hostname = {q(a.get('stats_host', ''))}", "",
          "[export]", 'public_html = ""', 'admin_html = ""', "",
          "[geoip]", 'file = "dbip-city-lite.csv.gz"', "",
          "[health]", f"ports = [{a['port']}{', ' + str(a['tls_port']) if a['tls'] else ''}]",
@@ -304,6 +304,10 @@ def interview():
                 cfgdir = os.path.join(ROOT, "config")  # stats.toml paths are relative to stats/
                 rel = lambda p: os.path.relpath(p if os.path.isabs(p) else os.path.join(cfgdir, p), os.path.join(ROOT, "stats"))
                 a["stats_cert"], a["stats_key"] = rel(a["cert"]), rel(a["key"])
+            if a["stats_bind"] in ("127.0.0.1", "::1", "localhost"):
+                print(dim("  A hostname (e.g. stats.example.net) gets you the Caddy config for https://hostname/ (Caddy fetches the certificate)."))
+                a["stats_host"] = ask("Panel hostname, through a reverse proxy (empty = none)", "",
+                                      lambda s: None if not s or re.fullmatch(r"([A-Za-z0-9-]+\.)+[A-Za-z0-9-]{2,63}", s) else "a host name like stats.example.net").lower()
             if a["stats_bind"] not in ("127.0.0.1", "::1", "localhost") and not a.get("stats_cert"):
                 print(yellow("  ! without HTTPS the panel's logins cross the network in clear text: prefer 127.0.0.1 behind an\n"
                              "    HTTPS reverse proxy, or set tls_cert/tls_key in stats/stats.toml"))
@@ -439,6 +443,8 @@ def selftest():
         c = netstats.load_config(p)
         assert c["users"][0]["role"] == "admin" and c["http"]["public"] and c["network"] == "TestNet"
         assert c["health"]["ports"] == [6667] and c["http"]["tls_cert"].endswith("config/tls/cert.pem")
+        open(p, "w").write(render_stats(dict(a, stats_bind="127.0.0.1", stats_host="stats.test.org")))
+        assert netstats.load_config(p)["http"]["hostname"] == "stats.test.org"
     if "tomllib" in sys.modules:
         assert tomllib.loads(ircd)["debug_channel"]["stats_interval"] == 300
         assert tomllib.loads(render(dict(a, dbg="", statsline=False))[0]).get("debug_channel") is None
@@ -486,11 +492,13 @@ def main():
         print(f"                 {dim('services stay off here: ./sekurircd status says so; an old services.toml? ./sekurircd disable-services')}")
     if stats:
         scheme = "https" if a.get("stats_cert") else "http"
-        print(f"  stats panel:   {scheme}://{a['stats_bind']}:{a['stats_port']}/admin/   {dim('(./sekurircd start runs it; on/off: ./sekurircd enable-stats|disable-stats)')}")
+        url = f"https://{a['stats_host']}/admin/" if a.get("stats_host") else f"{scheme}://{a['stats_bind']}:{a['stats_port']}/admin/"
+        print(f"  stats panel:   {url}   {dim('(./sekurircd start runs it; on/off: ./sekurircd enable-stats|disable-stats)')}")
         print(f"                 {dim('map positions: stats/netstats.py geoip-update, or lat/lon per server in ' + o.stats)}")
         sys.path.insert(0, os.path.join(ROOT, "stats"))
         import netstats
-        for n in netstats.exposure_notes({"bind": a["stats_bind"], "port": a["stats_port"], "tls_cert": a.get("stats_cert", "")}):
+        for n in netstats.exposure_notes({"bind": a["stats_bind"], "port": a["stats_port"], "tls_cert": a.get("stats_cert", ""),
+                                          "hostname": a.get("stats_host", "")}):
             print("                 " + (yellow(n) if n.startswith("WARNING") else n))
     if os.path.abspath(o.config) == os.path.join(ROOT, "config", "sekurircd.toml"):
         print(f"  start:         ./sekurircd start   {dim('(the daemons, from ' + ROOT + ')')}")

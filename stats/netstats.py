@@ -61,7 +61,10 @@ def load_config(path):
         "retention": int(sto.get("retention_days", 365)),
         "http": {"enabled": bool(web.get("enabled", True)), "bind": str(web.get("bind", "127.0.0.1")),
                  "port": int(web.get("port", 8089)), "tls_cert": rel(web.get("tls_cert", "")),
-                 "tls_key": rel(web.get("tls_key", "")), "public": bool(web.get("public", False))},
+                 "tls_key": rel(web.get("tls_key", "")), "public": bool(web.get("public", False)),
+                 "hostname": str(web.get("hostname", "")).strip().lower().rstrip("."),
+                 "trusted_proxies": [str(x) for x in web.get("trusted_proxies",
+                                                              ["127.0.0.1", "::1"] if web.get("hostname") else [])]},
         "export": {"public_html": rel(exp.get("public_html", "")), "admin_html": rel(exp.get("admin_html", ""))},
         "geoip": rel(geo.get("file", "dbip-city-lite.csv.gz")),
         "health": {"ports": [int(p) for p in hea.get("ports", [6667, 6697])],
@@ -73,6 +76,14 @@ def load_config(path):
         raise ConfigError("[storage] retention_days must be 7..3650")
     if not 1 <= c["http"]["port"] <= 65535:
         raise ConfigError("[http] port must be 1..65535")
+    host = c["http"]["hostname"]
+    if host and not re.fullmatch(r"(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9-]{2,63}", host):
+        raise ConfigError(f"[http] hostname {host!r} is not a host name like stats.example.net")
+    for x in c["http"]["trusted_proxies"]:
+        try:
+            ipaddress.ip_address(x)
+        except ValueError:
+            raise ConfigError(f"[http] trusted_proxies: {x!r} is not an IP address")
     if bool(c["http"]["tls_cert"]) != bool(c["http"]["tls_key"]):
         raise ConfigError("[http] tls_cert and tls_key go together")
     for u in raw.get("users", []):
@@ -702,6 +713,17 @@ class Panel:
         self.log(f"failed login for '{user[:40]}' from {ip}")
         return False
 
+    def client_ip(self, peer, xff):
+        """The visitor's address: the proxy's X-Forwarded-For entry when the request comes from a trusted proxy (Caddy,
+        nginx), else the socket peer -- so failed logins behind a proxy count per visitor, not for everyone at once."""
+        if xff and peer in self.c["http"]["trusted_proxies"]:
+            last = xff.split(",")[-1].strip()  # what our proxy saw; earlier entries are the client's to forge
+            try:
+                return str(ipaddress.ip_address(last))
+            except ValueError:
+                pass
+        return peer
+
     def throttled(self, ip):
         recent = [t for t in self.fails.get(ip, []) if t > time.time() - 600]
         self.fails[ip] = recent
@@ -738,7 +760,7 @@ class Panel:
                 self.do_GET()
 
             def do_GET(self):
-                ip = self.client_address[0]
+                ip = panel.client_ip(self.client_address[0], self.headers.get("X-Forwarded-For"))
                 path = self.path.split("?", 1)[0]
                 if path == "/healthz":
                     return self.send(200, b"ok\n")
@@ -784,6 +806,8 @@ class Panel:
             httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
         self.log(f"serving on {'https' if h['tls_cert'] else 'http'}://{h['bind']}:{h['port']}/ "
                  f"({len(self.c['users'])} logins, public={h['public']})")
+        if h["hostname"]:
+            self.log(f"public address: https://{h['hostname']}/admin/ (through your reverse proxy)")
         for n in exposure_notes(h):
             self.log(n)
         httpd.serve_forever()
@@ -794,7 +818,7 @@ class Panel:
 def exposure_notes(h):
     """What to tell an admin about a panel bound beyond localhost: the firewall, and Basic auth without TLS."""
     if h["bind"] in ("127.0.0.1", "::1", "localhost"):
-        return []
+        return caddy_notes(h)
     port = h["port"]
     notes = [f"bound to {h['bind']}: reachable from outside only if TCP {port} is open in the firewall:",
              f"  ufw:        sudo ufw allow {port}/tcp",
@@ -806,6 +830,19 @@ def exposure_notes(h):
         notes.append("WARNING: no tls_cert: logins cross the network in clear text (HTTP Basic auth) -- set tls_cert/tls_key, "
                      "or bind 127.0.0.1 behind an HTTPS reverse proxy")
     return notes
+
+
+def caddy_notes(h):
+    """With [http] hostname set: the Caddyfile block that puts the panel on https://hostname/ (Caddy gets the cert)."""
+    if not h.get("hostname"):
+        return []
+    host, port = h["hostname"], h["port"]
+    return [f"to serve it at https://{host}/ with Caddy (automatic HTTPS), add to /etc/caddy/Caddyfile:",
+            f"    {host} {{",
+            f"        reverse_proxy 127.0.0.1:{port}",
+            "    }",
+            "  then: sudo systemctl reload caddy",
+            f"  DNS: an A/AAAA record for {host} pointing at this server; TCP 80 and 443 open in the firewall"]
 
 
 def pid_alive(pidfile):
@@ -1021,6 +1058,21 @@ def selftest():
     n = exposure_notes(dict(h, bind="0.0.0.0", port=9443))
     assert "ufw allow 9443/tcp" in n[1] and n[-1].startswith("WARNING")
     assert not exposure_notes(dict(h, bind="0.0.0.0", tls_cert="c.pem"))[-1].startswith("WARNING")
+    assert not caddy_notes(h) and "reverse_proxy 127.0.0.1:8089" in exposure_notes(dict(h, hostname="stats.ex.net"))[2]
+    p = Panel.__new__(Panel)
+    p.c = {"http": {"trusted_proxies": ["127.0.0.1"]}}
+    assert p.client_ip("127.0.0.1", "6.6.6.6, 198.51.100.7") == "198.51.100.7"  # rightmost = what our proxy saw
+    assert p.client_ip("203.0.113.9", "198.51.100.7") == "203.0.113.9"           # not a proxy: header ignored
+    assert p.client_ip("127.0.0.1", "junk") == "127.0.0.1"
+    with tempfile.TemporaryDirectory() as d:
+        f = os.path.join(d, "s.toml")
+        open(f, "w").write('[http]\nhostname = "Stats.Example.NET"\npublic = true\n')
+        assert load_config(f)["http"]["trusted_proxies"] == ["127.0.0.1", "::1"]
+        open(f, "w").write('[http]\nhostname = "not a host"\n')
+        try:
+            load_config(f); assert False
+        except ConfigError:
+            pass
     print("netstats selftest: ok")
     return 0
 

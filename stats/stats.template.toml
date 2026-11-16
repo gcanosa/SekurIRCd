@@ -35,6 +35,12 @@ tls_cert = ""
 tls_key = ""
 # true: anyone gets the viewer page without logging in ("Admin login" link for the rest).
 public = false
+# The name people open the panel by, through a reverse proxy that does HTTPS (e.g. "stats.example.net"; "" = none).
+# With it set, "netstats.py check" prints the Caddyfile block for it, and the panel logs https://hostname/admin/.
+hostname = ""
+# Reverse proxies whose X-Forwarded-For is believed, so failed logins are counted per visitor rather than for
+# everyone behind the proxy. Default: ["127.0.0.1", "::1"] when hostname is set, else none.
+# trusted_proxies = ["127.0.0.1", "::1"]
 
 # Logins: managed with  netstats.py --user --admin|--viewer --add|--del NAME  and  --user --status.
 # admin = everything; viewer = no Security section, no server IPs.
