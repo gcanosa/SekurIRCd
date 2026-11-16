@@ -304,6 +304,9 @@ def interview():
                 cfgdir = os.path.join(ROOT, "config")  # stats.toml paths are relative to stats/
                 rel = lambda p: os.path.relpath(p if os.path.isabs(p) else os.path.join(cfgdir, p), os.path.join(ROOT, "stats"))
                 a["stats_cert"], a["stats_key"] = rel(a["cert"]), rel(a["key"])
+            if a["stats_bind"] not in ("127.0.0.1", "::1", "localhost") and not a.get("stats_cert"):
+                print(yellow("  ! without HTTPS the panel's logins cross the network in clear text: prefer 127.0.0.1 behind an\n"
+                             "    HTTPS reverse proxy, or set tls_cert/tls_key in stats/stats.toml"))
             a["stats_public"] = yes("Let anyone see the viewer page without logging in (no IPs, no security data)?", False)
             a["stats_users"] = []
             name = ask("  Admin login name for the panel", "admin", lambda s: None if re.fullmatch(r"[A-Za-z0-9_.@-]{1,40}", s) else "letters, digits, _ . @ -")
@@ -485,6 +488,10 @@ def main():
         scheme = "https" if a.get("stats_cert") else "http"
         print(f"  stats panel:   {scheme}://{a['stats_bind']}:{a['stats_port']}/admin/   {dim('(./sekurircd start runs it; on/off: ./sekurircd enable-stats|disable-stats)')}")
         print(f"                 {dim('map positions: stats/netstats.py geoip-update, or lat/lon per server in ' + o.stats)}")
+        sys.path.insert(0, os.path.join(ROOT, "stats"))
+        import netstats
+        for n in netstats.exposure_notes({"bind": a["stats_bind"], "port": a["stats_port"], "tls_cert": a.get("stats_cert", "")}):
+            print("                 " + (yellow(n) if n.startswith("WARNING") else n))
     if os.path.abspath(o.config) == os.path.join(ROOT, "config", "sekurircd.toml"):
         print(f"  start:         ./sekurircd start   {dim('(the daemons, from ' + ROOT + ')')}")
     else:

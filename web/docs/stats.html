@@ -105,9 +105,28 @@ location /stats/ {
     proxy_set_header Authorization $http_authorization;
 }</pre></li>
   <li><strong>or let it serve HTTPS itself</strong>: set <code>bind = "0.0.0.0"</code> and point <code>tls_cert</code>/<code>tls_key</code> at a certificate
-    (the ircd's works, for example <code>"../config/tls/cert.pem"</code>), and open the port in your firewall.</li>
+    (the ircd's works, for example <code>"../config/tls/cert.pem"</code>), and open the port in your firewall (below).</li>
   <li><strong>or just look at it over SSH</strong>: <code>ssh -L 8089:127.0.0.1:8089 yourhub</code>, then open <code>http://127.0.0.1:8089/admin/</code>.</li>
 </ul>
+
+<h3>the port and the firewall</h3>
+<p>The port is <code>port</code> under <code>[http]</code> in <code>stats/stats.toml</code> (8089 by default; <code>makeconf</code> and the wizard ask for it).
+  After changing it, <code>./sekurircd restart-stats</code>.</p>
+<p>With <code>bind = "127.0.0.1"</code> (the default) the firewall needs nothing: only the reverse proxy or your SSH tunnel talk to the panel.
+  With any other address, nobody can reach the panel until the port is open in the server's firewall. Use the one your system runs
+  (replace 8089 with your port):</p>
+<pre>sudo ufw allow 8089/tcp                                   # Ubuntu, Debian with ufw
+sudo firewall-cmd --permanent --add-port=8089/tcp         # Fedora, RHEL, Rocky, Alma
+sudo firewall-cmd --reload
+sudo iptables -I INPUT -p tcp --dport 8089 -j ACCEPT      # plain iptables
+sudo netfilter-persistent save                            #   ...kept across reboots
+# pf (FreeBSD, OpenBSD, macOS): add to /etc/pf.conf, then: sudo pfctl -f /etc/pf.conf
+pass in proto tcp to port 8089</pre>
+<p>Cloud servers (AWS, Hetzner, OVH, DigitalOcean, ...) often have a second firewall in the provider's control panel (a "security group"
+  or "cloud firewall"): open the port there too. When the panel starts bound publicly, <code>./sekurircd start-stats</code>,
+  <code>netstats.py check</code> and <code>logs/netstats.log</code> print these same commands with your port.</p>
+<p>Without <code>tls_cert</code>, a public panel sends its logins in clear text (HTTP Basic auth), and netstats warns about it. Use HTTPS, or keep
+  <code>127.0.0.1</code> behind a reverse proxy that has it.</p>
 
 <h3>static pages for a website</h3>
 <p>If you'd rather not run a web server at all, set <code>[http] enabled = false</code> and the paths under <code>[export]</code>, and run

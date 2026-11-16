@@ -27,7 +27,8 @@ retention_days = 365
 enabled = true
 # Shown in the page title.
 network_name = "MyNetwork"
-# 127.0.0.1 + a reverse proxy (nginx/caddy) for the internet; or bind publicly with tls_cert/tls_key.
+# 127.0.0.1 + a reverse proxy (nginx/caddy) for the internet; or bind publicly with tls_cert/tls_key and open `port`
+# in the firewall (e.g. sudo ufw allow 8089/tcp -- "netstats.py check" prints the commands for ufw/firewalld/iptables/pf).
 bind = "127.0.0.1"
 port = 8089
 tls_cert = ""

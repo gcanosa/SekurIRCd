@@ -784,10 +784,29 @@ class Panel:
             httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
         self.log(f"serving on {'https' if h['tls_cert'] else 'http'}://{h['bind']}:{h['port']}/ "
                  f"({len(self.c['users'])} logins, public={h['public']})")
+        for n in exposure_notes(h):
+            self.log(n)
         httpd.serve_forever()
 
 
 # --- daemon plumbing (mirrors the ircd's --daemon/--stop/--pidfile) ---------------------------------------------------
+
+def exposure_notes(h):
+    """What to tell an admin about a panel bound beyond localhost: the firewall, and Basic auth without TLS."""
+    if h["bind"] in ("127.0.0.1", "::1", "localhost"):
+        return []
+    port = h["port"]
+    notes = [f"bound to {h['bind']}: reachable from outside only if TCP {port} is open in the firewall:",
+             f"  ufw:        sudo ufw allow {port}/tcp",
+             f"  firewalld:  sudo firewall-cmd --permanent --add-port={port}/tcp && sudo firewall-cmd --reload",
+             f"  iptables:   sudo iptables -I INPUT -p tcp --dport {port} -j ACCEPT   (persist: netfilter-persistent save)",
+             f"  pf (BSD/macOS): add 'pass in proto tcp to port {port}' to /etc/pf.conf, then sudo pfctl -f /etc/pf.conf",
+             "  and in your provider's firewall / security group, if it has one"]
+    if not h["tls_cert"]:
+        notes.append("WARNING: no tls_cert: logins cross the network in clear text (HTTP Basic auth) -- set tls_cert/tls_key, "
+                     "or bind 127.0.0.1 behind an HTTPS reverse proxy")
+    return notes
+
 
 def pid_alive(pidfile):
     try:
@@ -997,6 +1016,11 @@ def selftest():
     user_del(conf, "alice", "admin")
     left = open(conf).read()
     assert [u["name"] for u in load_config(conf)["users"]] == ["bob"] and "[[servers]]" in left and "alice" not in left
+    h = {"bind": "127.0.0.1", "port": 8089, "tls_cert": ""}
+    assert exposure_notes(h) == []
+    n = exposure_notes(dict(h, bind="0.0.0.0", port=9443))
+    assert "ufw allow 9443/tcp" in n[1] and n[-1].startswith("WARNING")
+    assert not exposure_notes(dict(h, bind="0.0.0.0", tls_cert="c.pem"))[-1].startswith("WARNING")
     print("netstats selftest: ok")
     return 0
 
@@ -1061,6 +1085,8 @@ def main():
                       "add one: netstats.py --user --admin --add NAME", file=sys.stderr)
                 return 3
             print(f"netstats: configuration OK ({a.config})")
+            for n in exposure_notes(c["http"]):
+                print("netstats: " + n)
             return 0
         if a.command == "geoip-update":
             geoip_update(c)
@@ -1083,6 +1109,8 @@ def main():
                 if pid_alive(a.pidfile):
                     print(f"netstats: already running (pid {pid_alive(a.pidfile)})", file=sys.stderr)
                     return 2
+                for n in exposure_notes(c["http"]):  # before the fork, so ./sekurircd start-stats shows it
+                    print("netstats: " + n, file=sys.stderr)
                 daemonize(a.pidfile, a.logfile)
             Panel(c, log).serve()
     except ConfigError as e:

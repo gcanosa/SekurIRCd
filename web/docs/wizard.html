@@ -408,6 +408,17 @@
     if (!svc) steps.push("./sekurircd status    # services: \"not run here: this server is a leaf\" once it is linked as one");
     if (stats) steps.push("# the panel starts with ./sekurircd start: " + (c("st_tls") && c("tls") ? "https" : "http") + "://" + (v("st_bind") || "127.0.0.1") + ":" + +v("st_port") + "/admin/",
                           "# map positions: stats/netstats.py geoip-update (or lat/lon per server in stats.toml)");
+    const stBind = v("st_bind") || "127.0.0.1", stPort = +v("st_port");
+    if (stats && !["127.0.0.1", "::1", "localhost"].includes(stBind)) {
+      steps.push("# reachable from outside only once TCP " + stPort + " is open in the firewall (one of these):",
+                 "sudo ufw allow " + stPort + "/tcp",
+                 "sudo firewall-cmd --permanent --add-port=" + stPort + "/tcp && sudo firewall-cmd --reload",
+                 "sudo iptables -I INPUT -p tcp --dport " + stPort + " -j ACCEPT    # persist: netfilter-persistent save",
+                 "# pf (BSD/macOS): 'pass in proto tcp to port " + stPort + "' in /etc/pf.conf, then sudo pfctl -f /etc/pf.conf",
+                 "# and in your provider's firewall / security group, if it has one");
+      if (!(c("st_tls") && c("tls")))
+        steps.push("# WARNING: no HTTPS: panel logins cross the network in clear text -- tick HTTPS, or bind 127.0.0.1 behind an HTTPS reverse proxy");
+    }
     if (!nops) steps.push("", "# note: no operators configured, so nobody can /OPER");
 
     document.getElementById("out-ircd").textContent = L.join("\n") + "\n";

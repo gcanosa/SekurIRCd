@@ -100,7 +100,10 @@ def check_daemon(path, binary):
     if binary.endswith(".py"):  # the stats panel: Python, `-c FILE check`; exit 3 = valid but no login can open it
         p = subprocess.run([sys.executable, binary, "-c", path, "check"], capture_output=True, text=True)
         msg = (p.stdout + p.stderr).strip().splitlines()
-        if p.returncode == 0: ok(f"{os.path.basename(binary)} check")
+        if p.returncode == 0:
+            ok(f"{os.path.basename(binary)} check")
+            for m in msg:
+                if m.startswith("netstats: WARNING: "): warn(m.removeprefix("netstats: WARNING: "))
         elif p.returncode == 3: warn(msg[-1].removeprefix("netstats: ") if msg else "the panel has no logins")
         else: err(msg[-1] if msg else f"{binary} check exited {p.returncode}")
         return
