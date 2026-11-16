@@ -434,7 +434,7 @@
     tabNav();
   }
   function closeBuf(name) {
-    if (isChan(name)) return send("PART " + name); // the PART echo closes the tab
+    if (isChan(name) && ws && ws.readyState === 1) return send("PART " + name); // the PART echo closes the tab; offline, it just closes
     delete bufs[key(name)]; if (key(active) === key(name)) active = "*"; draw();
   }
   function draw() {
@@ -638,8 +638,9 @@
   function history(name) {
     if (!caps["draft/chathistory"] || !caps.batch || !registered) return;
     if (!isChan(name) && !account) return; // private history is kept only between logged-in accounts
-    var b = buf(name);
-    send(b.last ? "CHATHISTORY AFTER " + name + " timestamp=" + b.last + " 100" : "CHATHISTORY LATEST " + name + " * " + HISTORY_ON_JOIN);
+    var b = buf(name), from = b.since || b.last; // since: the last message before a reconnect; lines that arrive before the rejoin must not move it
+    b.since = "";
+    send(from ? "CHATHISTORY AFTER " + name + " timestamp=" + from + " 100" : "CHATHISTORY LATEST " + name + " * " + HISTORY_ON_JOIN);
   }
 
   // Private chats with recent messages reopen after a reload (an always-on account may have received some while you were away).
@@ -931,7 +932,7 @@
       if (bufs[key(p[1])]) bufs[key(p[1])].topicBy = "Set by " + p[2].split("!")[0] + (+p[3] ? " on " + new Date(p[3] * 1000).toLocaleString() : "");
       return key(p[1]) === key(active) && drawTopic();
     }
-    if (c === "329") return; // channel creation time: not worth a line
+    if (c === "329" || (c === "331" && bufs[key(p[1])])) return; // channel creation time, and "no topic" on join: not worth a line
     if (c === "TOPIC") { buf(p[0]).topic = p[1]; buf(p[0]).topicBy = "Set by " + m.nick + " on " + new Date().toLocaleString(); say(p[0], m.nick + " set the topic: " + p[1], "evt topic", meta); return key(p[0]) === key(active) && drawTopic(); }
     if (m.prefix.indexOf("@") > 0) hosts[key(m.nick)] = m.prefix.split("@")[1]; // keep the latest host of everyone we hear from
     if (c === "AWAY") { person(m.nick).away = p[0] || ""; return usersSoon(); } // away-notify: no text means they are back
@@ -1041,6 +1042,7 @@
         (p[3] ? " (set by " + p[3].split("!")[0] + (+p[4] ? " on " + new Date(p[4] * 1000).toLocaleString() : "") + ")" : "");
     if (c === "324") return "Modes of " + p[1] + ": " + p.slice(2).join(" ");
     if (c === "221") return "Your user modes: " + p[1];
+    if (c === "265" || c === "266") return p[p.length - 1]; // "Current local users: 3  Max: 3", without the bare numbers before it
     return p.slice(1).join(" ");
   }
 
@@ -1201,6 +1203,7 @@
     clearTimeout(timer); registered = false; away = false; // a new connection starts un-away
     avail = dict(); caps = dict(); sasl = null; account = ""; batches = dict();
     listing = null; whox = false; autoWho = dict(); people = dict(); typers = dict(); // per-connection state; the join sync refills people
+    Object.keys(bufs).forEach(function (k) { bufs[k].since = bufs[k].last; }); // where each tab's history resumes after a reconnect
     say("*", "Connecting to irc.sekurnet.org ...");
     var sock;
     try { sock = ws = new WebSocket(WS_URL); } catch (e) { return fail(); }
