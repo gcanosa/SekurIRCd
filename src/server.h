@@ -109,7 +109,7 @@ typedef struct server {
     long dnsbl_hits;        /* every connection a configured DNSBL zone listed, kline'd or just rejected */
     protection_state_t prot; /* active proxy scanner + its caches (protection.c) */
 
-    textfile_t motd, oper_motd, rules;
+    textfile_t motd, smotd, bot_motd, oper_motd, rules;
     char rehash_report[2048]; /* what the last server_rehash re-read/changed, '\n'-separated (server_rehash_note) */
 
     whowas_entry_t whowas[WHOWAS_MAX]; /* ring buffer */
@@ -212,8 +212,9 @@ void server_unlink_connection(server_t *srv, client_t *cl);
 
 /* Send 001-005 + LUSERS + MOTD, matching server._send_welcome's order. */
 void server_send_welcome(server_t *srv, client_t *cl);
-void server_send_motd(server_t *srv, client_t *cl);
+void server_send_motd(server_t *srv, client_t *cl, int on_connect);
 /* /OPERMOTD (also sent on successful /OPER) and /RULES. */
+void server_send_bot_motd(server_t *srv, client_t *cl);
 void server_send_oper_motd(server_t *srv, client_t *cl);
 void server_send_rules(server_t *srv, client_t *cl);
 void server_send_lusers(server_t *srv, client_t *cl);

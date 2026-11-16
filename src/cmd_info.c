@@ -54,7 +54,7 @@ void cmd_time(server_t *srv, client_t *cl, irc_message_t *msg) {
     client_reply(cl, N_TIME, p, 1, buf);
 }
 
-void cmd_motd(server_t *srv, client_t *cl, irc_message_t *msg) { if (!asked_elsewhere(srv, cl, msg)) server_send_motd(srv, cl); }
+void cmd_motd(server_t *srv, client_t *cl, irc_message_t *msg) { if (!asked_elsewhere(srv, cl, msg)) server_send_motd(srv, cl, 0); }
 void cmd_rules(server_t *srv, client_t *cl, irc_message_t *msg) { (void)msg; server_send_rules(srv, cl); }
 void cmd_opermotd(server_t *srv, client_t *cl, irc_message_t *msg) { (void)msg; server_send_oper_motd(srv, cl); }
 void cmd_lusers(server_t *srv, client_t *cl, irc_message_t *msg) { (void)msg; server_send_lusers(srv, cl); }

@@ -52,7 +52,7 @@
 <tr><td><code>[[webirc]]</code></td><td>Trusted web gateways (Kiwi IRC, The Lounge, ...): <code>name</code>, <code>password</code> and <code>hosts</code> (the gateway's IPs, required). Both must match before a <code>WEBIRC</code> line's real user IP is accepted, so bans and limits hit that user, not the whole gateway.</td></tr>
 <tr><td>accounts</td><td>Not an ircd section any more: accounts, NickServ and SASL are the services daemon's, configured in <code>[nickserv]</code> of <code>services/services.toml</code>
   (see <a href="chanserv.html">services</a>). An <code>[accounts]</code> section left from an older release is ignored with a warning, and its <code>accounts.json</code> is used in place.</td></tr>
-<tr><td><code>[messages]</code></td><td><code>motd</code>, <code>oper_motd</code> (shown to opers) and <code>rules</code> (for <code>/RULES</code>) files, and max message length.</td></tr>
+<tr><td><code>[messages]</code></td><td><code>motd</code> (an optional <code>.smotd</code> next to it, e.g. <code>ircd.smotd</code>, is shown on connect instead and <code>/MOTD</code> still shows the full one; an optional <code>bot.motd</code> in the same directory is shown on <code>MODE +B</code>), <code>oper_motd</code> (shown to opers) and <code>rules</code> (for <code>/RULES</code>) files, and max message length.</td></tr>
 <tr><td><code>[logging]</code></td><td><code>enabled</code>, <code>directory</code>, <code>level</code>, <code>debug</code> (protocol trace), <code>file</code>, rotation (<code>max_bytes</code>, <code>backup_count</code>).</td></tr>
 <tr><td><code>[[operators]]</code></td><td>One table per <code>/OPER</code> login. See below.</td></tr>
 <tr><td><code>[admin]</code></td><td>Location and email reported by <code>/ADMIN</code>.</td></tr>

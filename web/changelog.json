@@ -1,5 +1,13 @@
 [
   {
+    "tag": "Unreleased",
+    "date": "",
+    "changes": [
+      "Short MOTD: put an ircd.smotd next to ircd.motd (same name, .smotd) and it is shown on connect, while /MOTD shows the full ircd.motd. If only one of the two exists, it is used for both. REHASH reloads it",
+      "Bot MOTD: an optional bot.motd next to the config file is shown to a user when they set user mode +B (bot)"
+    ]
+  },
+  {
     "tag": "v1.3.4",
     "date": "2026-11-16",
     "changes": [

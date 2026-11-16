@@ -132,3 +132,22 @@ def test_live_motd_is_made_from_its_template_and_never_overwritten():
         c.say("REHASH", 1.0)
         assert open(live).read() == "edited by the admin\n", "an existing live file is never replaced"
         assert any("edited by the admin" in l for l in c.say("MOTD", 0.4))
+
+
+def test_short_motd_on_connect_full_on_request():
+    import os
+    s = Server(cfg={"messages": {"motd": "m.motd"}, "operators": [{"name": "op", "password": "oppw", "hosts": ["*@*"]}]})
+    open(os.path.join(s.dir, "m.motd"), "w").write("the full motd\n")
+    open(os.path.join(s.dir, "m.smotd"), "w").write("the short motd\n")
+    open(os.path.join(s.dir, "bot.motd"), "w").write("hello bot\n")
+    with s:
+        c = s.client("sm")
+        reg = c.drain(0.4)
+        assert any("the short motd" in l for l in reg) and not any("the full motd" in l for l in reg), reg
+        assert any("the full motd" in l for l in c.say("MOTD", 0.4))
+        assert any("hello bot" in l for l in c.say("MODE sm +B", 0.4)), "+B shows bot.motd"
+        assert not any("hello bot" in l for l in c.say("MODE sm +B", 0.4)), "already +B: not again"
+        os.remove(os.path.join(s.dir, "m.motd"))
+        c.say("OPER op oppw", 0.5)
+        c.say("REHASH", 1.0)
+        assert any("the short motd" in l for l in c.say("MOTD", 0.4)), "only the short one left: /MOTD shows it"

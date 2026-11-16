@@ -961,7 +961,7 @@ static void cmd_mode_user(server_t *srv, client_t *cl, irc_message_t *msg, const
 
     char old_prefix[320];
     client_prefix(cl, old_prefix, sizeof old_prefix);
-    unsigned had_x = cl->umodes & UMODE_X;
+    unsigned had_x = cl->umodes & UMODE_X, had_b = cl->umodes & UMODE_B;
     char sign = '+';
     char applied[32] = "+";
     size_t ap = 1;
@@ -1019,6 +1019,7 @@ static void cmd_mode_user(server_t *srv, client_t *cl, irc_message_t *msg, const
         const char *ph[] = {cl->host};
         client_reply(cl, N_HOSTHIDDEN, ph, 1, "is now your displayed host");
     }
+    if ((cl->umodes & UMODE_B) && !had_b) server_send_bot_motd(srv, cl);
 }
 
 /* Shared by /MODE (is_full_op reflects the caller's real rank) and /SAMODE

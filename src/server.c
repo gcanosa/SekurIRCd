@@ -178,6 +178,10 @@ void server_load_motd(server_t *srv) {
     char path[CFG_PATH];
     config_motd_path(&srv->cfg, path, sizeof path);
     load_textfile(&srv->motd, path);
+    config_smotd_path(&srv->cfg, path, sizeof path);
+    load_textfile(&srv->smotd, path);
+    config_bot_motd_path(&srv->cfg, path, sizeof path);
+    load_textfile(&srv->bot_motd, path);
     config_oper_motd_path(&srv->cfg, path, sizeof path);
     load_textfile(&srv->oper_motd, path);
     config_rules_path(&srv->cfg, path, sizeof path);
@@ -249,6 +253,10 @@ int server_rehash(server_t *srv, char *errbuf, size_t errbufsz) {
     server_load_motd(srv);
     config_motd_path(&srv->cfg, path, sizeof path);
     note_textfile(srv, "MOTD", &srv->motd, path);
+    config_smotd_path(&srv->cfg, path, sizeof path);
+    if (srv->smotd.n) note_textfile(srv, "short MOTD", &srv->smotd, path);
+    config_bot_motd_path(&srv->cfg, path, sizeof path);
+    if (srv->bot_motd.n) note_textfile(srv, "bot MOTD", &srv->bot_motd, path);
     config_oper_motd_path(&srv->cfg, path, sizeof path);
     note_textfile(srv, "oper MOTD", &srv->oper_motd, path);
     config_rules_path(&srv->cfg, path, sizeof path);
@@ -895,11 +903,21 @@ static void send_textfile(client_t *cl, const textfile_t *tf, const char *start,
     client_reply(cl, end, NULL, 0, endtxt);
 }
 
-void server_send_motd(server_t *srv, client_t *cl) {
+/* on_connect prefers the short MOTD, /MOTD the full one; whichever exists stands in for the other */
+void server_send_motd(server_t *srv, client_t *cl, int on_connect) {
+    const textfile_t *a = on_connect ? &srv->smotd : &srv->motd, *b = on_connect ? &srv->motd : &srv->smotd;
     char title[CFG_STR + 32];
     snprintf(title, sizeof title, "- %s Message of the day - ", srv->cfg.server.name);
-    send_textfile(cl, &srv->motd, N_MOTDSTART, N_MOTD, N_ENDOFMOTD, N_NOMOTD, "MOTD File is missing",
+    send_textfile(cl, a->n ? a : b, N_MOTDSTART, N_MOTD, N_ENDOFMOTD, N_NOMOTD, "MOTD File is missing",
                   title, "End of /MOTD command.");
+}
+
+/* on MODE +B; bot.motd is optional, so no file means no reply at all (not 422) */
+void server_send_bot_motd(server_t *srv, client_t *cl) {
+    if (!srv->bot_motd.n) return;
+    char title[CFG_STR + 32];
+    snprintf(title, sizeof title, "- %s Bot message of the day - ", srv->cfg.server.name);
+    send_textfile(cl, &srv->bot_motd, N_MOTDSTART, N_MOTD, N_ENDOFMOTD, N_NOMOTD, "", title, "End of /MOTD command.");
 }
 
 void server_send_oper_motd(server_t *srv, client_t *cl) {
@@ -952,7 +970,7 @@ void server_send_welcome(server_t *srv, client_t *cl) {
 
     server_send_isupport(srv, cl);
     server_send_lusers(srv, cl);
-    server_send_motd(srv, cl);
+    server_send_motd(srv, cl, 1);
 
     char modestr[32];
     client_mode_string(cl, modestr, sizeof modestr);
@@ -1198,6 +1216,8 @@ void server_free_tables(server_t *srv) {
     history_free(srv);
     server_watch_index_free(srv);
     textfile_free(&srv->motd);
+    textfile_free(&srv->smotd);
+    textfile_free(&srv->bot_motd);
     textfile_free(&srv->oper_motd);
     textfile_free(&srv->rules);
     for (int i = 0; i < WHOWAS_MAX; i++) free((void *)srv->whowas[i].nick);

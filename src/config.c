@@ -227,6 +227,19 @@ void config_motd_path(const config_t *cfg, char *out, size_t outsz) {
     seed_from_template(out);
 }
 
+/* Short MOTD: "ircd.motd" -> "ircd.smotd" next to it. Optional, so never seeded from a template. */
+void config_smotd_path(const config_t *cfg, char *out, size_t outsz) {
+    char motd[CFG_PATH];
+    resolve_against_config_dir(cfg, cfg->messages.motd, motd, sizeof motd);
+    const char *base = strrchr(motd, '/'), *dot = strrchr(base ? base + 1 : motd, '.');
+    if (dot && !strcmp(dot, ".motd")) snprintf(out, outsz, "%.*s.smotd", (int)(dot - motd), motd);
+    else snprintf(out, outsz, "%s.smotd", motd);
+}
+
+void config_bot_motd_path(const config_t *cfg, char *out, size_t outsz) {
+    resolve_against_config_dir(cfg, "bot.motd", out, outsz); /* ponytail: optional, fixed name next to the config; a key if anyone needs another */
+}
+
 void config_oper_motd_path(const config_t *cfg, char *out, size_t outsz) {
     resolve_against_config_dir(cfg, cfg->messages.oper_motd, out, outsz);
     seed_from_template(out);

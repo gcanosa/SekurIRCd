@@ -251,7 +251,7 @@ oper_modes = "+osw"
 [messages]
 
 # Text files, relative to this file (made from their templates on first start).
-motd = "ircd.motd"
+motd = "ircd.motd"     # optional ircd.smotd next to it: shown on connect, ircd.motd on /MOTD
 oper_motd = "oper.motd"
 rules = "ircd.rules"
 

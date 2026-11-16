@@ -376,6 +376,8 @@ int config_load(const char *path, config_t *out, char *errbuf, size_t errbufsz);
 
 /* Path helpers -- apply the resolution rules documented above. */
 void config_motd_path(const config_t *cfg, char *out, size_t outsz);
+void config_bot_motd_path(const config_t *cfg, char *out, size_t outsz);
+void config_smotd_path(const config_t *cfg, char *out, size_t outsz);
 void config_oper_motd_path(const config_t *cfg, char *out, size_t outsz);
 void config_rules_path(const config_t *cfg, char *out, size_t outsz);
 /* Returns 1 and fills `out`, or 0 (out untouched) if klines_file is empty. */
