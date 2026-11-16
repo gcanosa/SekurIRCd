@@ -1083,6 +1083,9 @@ void server_kline_add(server_t *srv, const char *mask, const char *reason,
     srv->klines = k;
     srv->klines_dirty = 1;
     srv->kline_gen++;
+    char dur[24];
+    snprintf(dur, sizeof dur, "%ld", duration_secs > 0 ? duration_secs : 0L);
+    link_svc_statev(srv, "SVCSTATEV", (const char *[]){"BAN", line_type, set_by[0] ? set_by : "-", dur, mask}, 5, reason);
 
     char snote[400];
     snprintf(snote, sizeof snote, "%s added %s-Line '%s' (%s)", set_by, line_type, mask, reason);

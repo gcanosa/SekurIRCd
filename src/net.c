@@ -14,6 +14,8 @@
 #include "ev.h"
 #include "history.h"
 #include "link.h"
+#include "version.h"
+#include "spam.h"
 #include "log.h"
 #include "server.h"
 #include "worker.h"
@@ -132,6 +134,7 @@ static void emit_stats_snote(server_t *srv) {
     if (srv->cfg.protection.scan_enabled)
         snprintf(scan_part, sizeof scan_part, " | scanner %ld scanned, %ld proxies, %d in flight, %d cached",
                  srv->prot.scanned, srv->prot.hits, srv->prot.n_scans, protection_negcache_count(srv));
+    int n_rules = spam_filter_count(srv);
     int n_local = 0, n_net = 0;
     client_t *u, *utmp;
     HASH_ITER(hh, srv->users, u, utmp) {
@@ -142,11 +145,13 @@ static void emit_stats_snote(server_t *srv) {
     /* users: here / network-wide (peak counts every nick we know, services included); the rest is this server's own */
     char line[900];
     snprintf(line, sizeof line, "users %d local, %d network (peak %d) | channels %d (%d registered) | connections %ld | "
-             "bans K%d G%d Z%d (%d DNSBL, %d scanner) | DNSBL hits %ld%s | ircd %.1f%% cpu %ldMB%s",
+             "bans K%d G%d Z%d (%d DNSBL, %d scanner) | DNSBL hits %ld%s | spam filter %ld actions, %d rules%s | ircd %.1f%% cpu %ldMB%s | sekurircd %s",
              n_local, n_net, srv->max_users_seen, n_chans, n_reg_chans, srv->total_connections,
              n_klines, n_glines, n_zlines, n_dnsbl_active, n_scan_active, srv->dnsbl_hits, scan_part,
-             ircd_cpu, ircd_rss / 1024, chanserv_part);
+             srv->spam_hits, n_rules, srv->cfg.spam.filters_enabled ? "" : " (filters off)",
+             ircd_cpu, ircd_rss / 1024, chanserv_part, sekurircd_version);
     log_info("stats", "%s", line);
+    link_svc_statev(srv, "SVCSTATLINE", (const char *[]){srv->cfg.server.name}, 1, line);
     netsync_snote(srv, 'd', line); /* every server's debug channel shows it as "[<this server>] ..." */
 }
 

@@ -9,6 +9,7 @@
     ["wizard", "Config wizard", "docs/wizard.html"],
     ["commands", "Commands & modes", "docs/commands.html"],
     ["protection", "Protection bundle", "docs/protection.html"],
+    ["stats", "Stats panel", "docs/stats.html"],
     ["ircv3", "IRCv3 & SASL", "docs/ircv3.html"],
     ["chanserv", "Services", "docs/chanserv.html"],
     ["webchat", "Web chat", "docs/webchat.html"]

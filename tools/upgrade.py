@@ -26,6 +26,7 @@ TEMPLATES = {  # template -> the live file an admin copied it to
     "config/sekurircd.template.toml": "config/sekurircd.toml",
     "config/protection.template.toml": "config/protection.toml",
     "services/services.template.toml": "services/services.toml",
+    "stats/stats.template.toml": "stats/stats.toml",
 }
 # bin/services is the services daemon (NickServ + ChanServ); bin/chanserv is the same program under its old name, kept so
 # an install upgraded by an older upgrade.py keeps working (see the Makefile).
@@ -332,7 +333,7 @@ def show_config_news(news, limit=25):
 def daemon_status():
     p = run(["./sekurircd", "status"], check=False)
     return {m[1]: m[2] == "running" for ln in p.stdout.splitlines()
-            if (m := re.match(r"(sekurircd|services|chanserv):\s+(\w+)", ln))}
+            if (m := re.match(r"(sekurircd|services|chanserv|netstats):\s+(\w+)", ln))}
 
 
 def restart_daemons(services_only=False):
@@ -361,8 +362,9 @@ def restart_daemons(services_only=False):
             os.remove(f"{ud}/chanserv.service")
             run(["systemctl", "--user", "daemon-reload"], check=False)
             ok("stopped and removed the old chanserv.service")
-        units = [u for u in (("services",) if services_only else ("sekurircd", "services", "chanserv"))
-                 if os.path.exists(f"{ud}/{u}.service")]
+        units = [u for u in (("services", "netstats") if services_only else ("sekurircd", "services", "chanserv", "netstats"))
+                 if os.path.exists(f"{ud}/{u}.service")
+                 and (u != "netstats" or run(["systemctl", "--user", "is-active", "--quiet", u], check=False).returncode == 0)]
         run(["systemctl", "--user", "restart", *units], check=False)
         time.sleep(2)
         st = daemon_status()
@@ -370,6 +372,8 @@ def restart_daemons(services_only=False):
         return True if st.get("services" if services_only else "sekurircd") else None
     if services_only:
         r = run(["./sekurircd", "restart-services"], check=False)
+        if daemon_status().get("netstats"):  # the panel (stats/netstats.py) may have changed too; restarting it drops nobody
+            run(["./sekurircd", "restart-stats"], check=False)
         time.sleep(2)
         st = daemon_status()
         for name, up in st.items(): (ok if up else fail)(f"{name}: {'running' if up else 'NOT running'}")
@@ -537,7 +541,7 @@ def install_binaries():
 # driven by ./sekurircd (config/sekurircd.toml, services/services.toml, pidfiles
 # sekurircd.pid + services/services.pid), so render the templates for that layout.
 # services.service replaced chanserv.service (bin/services hosts NickServ + ChanServ); the old unit is retired below.
-UNITS = {"sekurircd": None, "services": "services/services.toml"}  # unit -> config it needs
+UNITS = {"sekurircd": None, "services": "services/services.toml", "netstats": "stats/stats.toml"}  # unit -> config it needs
 
 
 def unit_dir():
@@ -546,7 +550,9 @@ def unit_dir():
 
 def render_unit(name):
     t = open(f"systemd/{name}.service").read()
-    for a, b in (("/etc/sekurircd/sekurircd.toml", f"{ROOT}/config/sekurircd.toml"),
+    for a, b in (("/etc/sekurircd/stats.toml", f"{ROOT}/stats/stats.toml"),  # the stats panel lives in stats/ here
+                 ("/usr/local/lib/sekurircd/stats", f"{ROOT}/stats"), ("/var/lib/sekurircd/stats", f"{ROOT}/stats"),
+                 ("/etc/sekurircd/sekurircd.toml", f"{ROOT}/config/sekurircd.toml"),
                  ("/etc/sekurircd/services.toml", f"{ROOT}/services/services.toml"),
                  ("/var/lib/sekurircd/chanserv/chanserv.pid", f"{ROOT}/services/chanserv.pid"),
                  ("/var/lib/sekurircd/services/services.pid", f"{ROOT}/services/services.pid"),

@@ -346,6 +346,12 @@ static void strip_codes(char *dst, size_t dstsz, const char *src) {
 }
 
 /* Runs the regex rules for `kind`; first match wins. Returns apply_action's verdict. */
+int spam_filter_count(server_t *srv) {
+    int n = 0;
+    for (spam_filter_t *f = srv->spam_filters; f; f = f->next) n++;
+    return n;
+}
+
 static int run_filters(server_t *srv, client_t *cl, unsigned kind, const char *what,
                        const char *text, int quiet) {
     if (!srv->cfg.spam.filters_enabled || !srv->spam_filters) return 0;

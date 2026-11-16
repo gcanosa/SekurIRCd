@@ -22,6 +22,11 @@ SERVICES_CONFIG=services/services.toml
 SERVICES_PIDFILE=services/services.pid
 OLD_CHANSERV_PIDFILE=services/chanserv.pid # the standalone bin/chanserv that bin/services replaced
 
+STATS_BIN=stats/netstats.py
+STATS_CONFIG=stats/stats.toml
+STATS_PIDFILE=stats/netstats.pid
+STATS_DISABLED="$STATS_CONFIG.disabled" # what disable-stats renames the config to
+
 # Like an IRC join/part: "-->" a daemon came up (green), "<--" a daemon was stopped as asked (cyan -- not red, a
 # requested stop is not a problem). Green ✔ for a finished job, red ✘ only for real failures. Colour only on a terminal, and never with NO_COLOR.
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
@@ -40,6 +45,8 @@ say_ok()   { echo " ${C_OK}${M_OK}${C_OFF}  $1 ${C_OK}OK${C_OFF} -- $2"; }      
 say_fail() { echo " ${C_BAD}${M_BAD}${C_OFF}  $1 ${C_BAD}FAILED${C_OFF} -- $2" >&2; }
 
 services_configured() { [ -f "$SERVICES_CONFIG" ]; }
+# The stats panel runs when stats/stats.toml exists with [http] enabled (the default); see stats/stats.template.toml.
+stats_configured() { [ -f "$STATS_CONFIG" ] && ! awk '/^[[:space:]]*\[/ { s = ($0 ~ /^[[:space:]]*\[http\]/) } s && /^[[:space:]]*enabled[[:space:]]*=[[:space:]]*false/ { f = 1 } END { exit !f }' "$STATS_CONFIG"; }
 SERVICES_DISABLED="$SERVICES_CONFIG.disabled" # what disable-services renames the config to
 
 # [links] mode from the ircd config ("hub", "leaf", "both"), empty if unset. Plain awk: no TOML parser in a shell.
@@ -144,9 +151,72 @@ cmd_start() {
     else
         say_info "services:  $(services_off_reason)"
     fi
+    start_stats || true # the panel is optional: never fail the ircd start over it
+}
+
+start_stats() {
+    stats_configured || return 0
+    pid_running "$STATS_PIDFILE" && { say_info "netstats:  already running (pid $(cat "$STATS_PIDFILE"))"; return 0; }
+    command -v python3 >/dev/null || { say_bad "netstats:  python3 not found"; return 1; }
+    python3 "$STATS_BIN" -c "$STATS_CONFIG" check >/dev/null 2>&1 || { python3 "$STATS_BIN" -c "$STATS_CONFIG" check; return 1; }
+    python3 "$STATS_BIN" -c "$STATS_CONFIG" serve --daemon --pidfile "$STATS_PIDFILE" --logfile logs/netstats.log || {
+        say_bad "netstats:  failed to start -- see logs/netstats.log"; return 1; }
+    confirm_up "netstats: " "$STATS_PIDFILE" logs/netstats.log
+}
+
+# Turn the whole stats feature off: stop the panel, rename stats.toml so start skips it and services stops collecting
+# (it notices within 30s, no restart). Reversible; the database, logins and history are left alone.
+cmd_disable_stats() {
+    if [ ! -f "$STATS_CONFIG" ]; then
+        if [ -f "$STATS_DISABLED" ]; then say_info "netstats:  already disabled ($STATS_DISABLED)"
+        else say_info "netstats:  nothing to disable ($STATS_CONFIG missing) -- the stats panel was never set up"; fi
+        return 0
+    fi
+    [ -e "$STATS_DISABLED" ] && { say_fail disable-stats: "$STATS_DISABLED already exists -- move it away first"; return 1; }
+    stop_stats || return 1
+    mv "$STATS_CONFIG" "$STATS_DISABLED" || { say_fail disable-stats: "could not rename $STATS_CONFIG"; return 1; }
+    say_ok disable-stats: "stats are off ($STATS_CONFIG -> $STATS_DISABLED)"
+    say_info "the panel is stopped and services stop collecting within 30s; nobody was disconnected. Undo: $0 enable-stats"
+}
+
+# Turn it back on, or set it up the first time: restore the disabled config, or start from the template with the
+# collector on. Then start the panel if there's a login (or public = true) to open it with.
+cmd_enable_stats() {
+    if [ -f "$STATS_CONFIG" ]; then
+        say_info "netstats:  already enabled ($STATS_CONFIG)"
+    elif [ -f "$STATS_DISABLED" ]; then
+        mv "$STATS_DISABLED" "$STATS_CONFIG" || { say_fail enable-stats: "could not rename $STATS_DISABLED"; return 1; }
+        say_ok enable-stats: "stats are on again ($STATS_CONFIG restored)"
+    else
+        [ -f stats/stats.template.toml ] || { say_fail enable-stats: "stats/stats.template.toml not found"; return 1; }
+        # the template with [collector] enabled = true -- plain awk, only that section's key
+        awk '/^[[:space:]]*\[/ { s = ($0 ~ /^[[:space:]]*\[collector\]/) }
+             s && /^[[:space:]]*enabled[[:space:]]*=/ { sub(/=.*/, "= true") } { print }' stats/stats.template.toml > "$STATS_CONFIG.tmp" &&
+            chmod 600 "$STATS_CONFIG.tmp" && mv "$STATS_CONFIG.tmp" "$STATS_CONFIG" ||
+            { rm -f "$STATS_CONFIG.tmp"; say_fail enable-stats: "could not write $STATS_CONFIG"; return 1; }
+        say_ok enable-stats: "stats are on: wrote $STATS_CONFIG from the template, collector enabled"
+        say_info "set network_name and the rest in $STATS_CONFIG; per-server CPU/memory/protection need [debug_channel] stats_interval = 300 on every server"
+    fi
+    services_configured && pid_running "$SERVICES_PIDFILE" && say_info "services start collecting within 30s (no restart needed)"
+    stats_configured || { say_info "netstats:  [http] enabled = false -- no panel; use 'python3 $STATS_BIN render' from cron"; return 0; }
+    if ! python3 "$STATS_BIN" -c "$STATS_CONFIG" check >/dev/null 2>&1; then
+        python3 "$STATS_BIN" -c "$STATS_CONFIG" check 2>&1 | sed 's/^/    /'
+        say_info "add a login, then start the panel:"
+        say_info "  python3 $STATS_BIN --user --admin --add <name>"
+        say_info "  $0 start-stats"
+        return 0
+    fi
+    pid_running "$IRCD_PIDFILE" && start_stats || say_info "the panel starts with: $0 start  (or now: $0 start-stats)"
+}
+
+stop_stats() {
+    pid_running "$STATS_PIDFILE" || { stats_configured && say_info "netstats:  was not running"; return 0; }
+    local out
+    if out=$(python3 "$STATS_BIN" --stop --pidfile "$STATS_PIDFILE" 2>&1); then say_down "$out"; else say_bad "$out"; return 1; fi
 }
 
 cmd_stop() {
+    stop_stats
     if services_configured; then
         stop_one "services: " "$SERVICES_BIN" "$SERVICES_PIDFILE"
         stop_old_chanserv
@@ -216,6 +286,9 @@ cmd_status() {
     else
         echo "services:  $(services_off_reason)"
     fi
+    if pid_running "$STATS_PIDFILE"; then echo "netstats:  running (pid $(cat "$STATS_PIDFILE")) -- stats panel"
+    elif stats_configured; then echo "netstats:  stopped ('$0 start-stats')"
+    elif [ -f "$STATS_DISABLED" ]; then echo "netstats:  disabled ($STATS_DISABLED) -- '$0 enable-stats' turns it back on"; fi
     [ -n "$(links_mode)" ] && echo "role:      links.mode = \"$(links_mode)\" in $IRCD_CONFIG"
     true
 }
@@ -257,5 +330,10 @@ case "${1:-}" in
     status)  cmd_status ;;
     disable-services) cmd_disable_services ;;
     enable-services)  cmd_enable_services ;;
-    *) echo "usage: $0 {start|stop|restart|restart-services|status|disable-services|enable-services}" >&2; exit 1 ;;
+    start-stats)   stats_configured || { say_fail start-stats: "no $STATS_CONFIG (or [http] enabled = false) -- '$0 enable-stats' sets it up"; exit 1; }; start_stats ;;
+    stop-stats)    stop_stats ;;
+    restart-stats) stop_stats && start_stats ;;
+    disable-stats) cmd_disable_stats ;;
+    enable-stats)  cmd_enable_stats ;;
+    *) echo "usage: $0 {start|stop|restart|restart-services|status|disable-services|enable-services|start-stats|stop-stats|restart-stats|disable-stats|enable-stats}" >&2; exit 1 ;;
 esac

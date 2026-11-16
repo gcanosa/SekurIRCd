@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Back up everything you need to carry over to a new SekurIRCd version:
-# live configs, accounts (and their rotating backups), K-lines, MOTDs, TLS keys and ChanServ registrations.
+# live configs, accounts (and their rotating backups), K-lines, MOTDs, TLS keys, ChanServ registrations and the
+# stats panel (stats.toml, its history database).
 # Usage: tools/backup-config.sh [DEST_DIR]               back up (prompts if omitted)
 #        tools/backup-config.sh --restore [ARCHIVE|DIR]  restore a backup (picks from DIR, default /tmp)
 # A restore first backs up the current files, then validates the result with tools/confcheck.py
@@ -41,11 +42,17 @@ backup() {
 
   # collect files (relative to repo root; templates ship with the release, so skipped)
   cd "$ROOT" || die "cd failed"
+  # the stats panel's database runs in WAL mode: fold pending writes into stats.db so the copy is whole
+  if [ -f stats/stats.db ] && command -v python3 >/dev/null; then
+    python3 -c 'import sqlite3; sqlite3.connect("stats/stats.db", timeout=10).execute("PRAGMA wal_checkpoint(TRUNCATE)")' 2>/dev/null ||
+      warn "could not checkpoint stats/stats.db -- the copy may miss the last minute"
+  fi
   local patterns=(
     'config/*.toml' 'config/*.json' 'config/*.motd' 'config/*.rules' 'config/*.conf'
     'config/tls/*.pem'
     'services/*.toml' 'services/*.json'
     'config/*.json.bak*' 'services/*.json.bak*'
+    'stats/stats.toml' 'stats/stats.toml.disabled' 'stats/stats.db'
   )
   local files=() p f
   for p in "${patterns[@]}"; do
@@ -65,7 +72,7 @@ backup() {
     filled=$((i*20/total)); bar="$(printf '%*s' "$filled" '' | tr ' ' '#')$(printf '%*s' "$((20-filled))" '' | tr ' ' '-')"
     printf '  %s[%s]%s %2d/%d %s%s%s %s(%s bytes)%s\n' "$C" "$bar" "$N" "$i" "$total" "$B" "$f" "$N" "$D" "$size" "$N"
     printf '%s\n' "$f" >>"$listfile"
-    case "$f" in config/tls/*|config/accounts.json) warn "contains secrets: keep the archive private";; esac
+    case "$f" in config/tls/*|config/accounts.json|stats/stats.toml) warn "contains secrets: keep the archive private";; esac
   done
 
   out="$dest/sekurircd-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
@@ -104,9 +111,9 @@ arc="$(cd "$(dirname "$arc")" && pwd)/$(basename "$arc")"
 members=(); while IFS= read -r f; do members+=("$f"); done < <(tar -tzf "$arc") || die "can't read $arc"
 [ ${#members[@]} -gt 0 ] || die "$arc is empty"
 
-# Only what backup() writes: refuse absolute paths, .. and anything outside config/ and services/.
+# Only what backup() writes: refuse absolute paths, .. and anything outside config/, services/ and stats/.
 for f in "${members[@]}"; do
-  case "$f" in /*|*..*) die "unsafe path in archive: $f";; config/*|services/*) ;; *) die "unexpected path in archive: $f";; esac
+  case "$f" in /*|*..*) die "unsafe path in archive: $f";; config/*|services/*|stats/*) ;; *) die "unexpected path in archive: $f";; esac
 done
 
 cd "$ROOT" || die "cd failed"

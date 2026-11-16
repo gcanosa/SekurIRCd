@@ -1,0 +1,71 @@
+# SekurIRCd network stats (stats/netstats.py). Live copy: stats/stats.toml; without that file nothing runs and
+# bin/services collects nothing. Only the server running services (the hub) needs this.
+#
+#   ./sekurircd enable-stats                            # writes stats/stats.toml from this file, collector on
+#   stats/netstats.py --user --admin --add yourname     # a login for the panel (asks for the password)
+#   ./sekurircd start-stats                             # the web panel, http://127.0.0.1:8089/admin/
+#   ./sekurircd disable-stats                           # all off again (stats.toml -> stats.toml.disabled)
+#
+# For per-server CPU, memory, version and the connections heatmap, set on EVERY server (sekurircd.toml):
+#   [debug_channel]
+#   stats_interval = 300
+
+[collector]
+# bin/services asks the hub for a network snapshot this often and logs link splits, bans and stats lines as they
+# happen, to `log` (relative to this file), which netstats loads and empties every minute.
+enabled = false
+sample_seconds = 60
+log = "events.log"
+
+[storage]
+database = "stats.db"
+# Daily history is kept this long (7..3650). Fixed: per-minute samples 7 days, hourly 90 days.
+retention_days = 365
+
+[http]
+# The live panel (./sekurircd start-stats). Off: use "netstats.py render" from cron and [export] instead.
+enabled = true
+# Shown in the page title.
+network_name = "MyNetwork"
+# 127.0.0.1 + a reverse proxy (nginx/caddy) for the internet; or bind publicly with tls_cert/tls_key.
+bind = "127.0.0.1"
+port = 8089
+tls_cert = ""
+tls_key = ""
+# true: anyone gets the viewer page without logging in ("Admin login" link for the rest).
+public = false
+
+# Logins: managed with  netstats.py --user --admin|--viewer --add|--del NAME  and  --user --status.
+# admin = everything; viewer = no Security section, no server IPs.
+# [[users]]
+# name = "yourname"
+# password = "scrypt$..."        # netstats.py --mkpasswd
+# role = "admin"
+
+[export]
+# Written by "netstats.py render" (run it from cron, e.g. every 5 minutes) -- static files for a website.
+# public_html gets the viewer page, admin_html the admin one: protect that one with your web server.
+public_html = ""
+admin_html = ""
+
+[geoip]
+# Free DB-IP Lite city database (CC BY 4.0), downloaded by "netstats.py geoip-update" (monthly is plenty). Without it,
+# only servers with lat/lon below are on the map. Lookups are local; no server IP is ever sent anywhere.
+file = "dbip-city-lite.csv.gz"
+
+[health]
+# netstats connects to every server from here: these ports, TLS on tls_ports (certificate days left).
+ports = [6667, 6697]
+tls_ports = [6697]
+interval = 300
+timeout = 5
+
+# Per-server overrides (name = the server's name as in /LINKS):
+# [[servers]]
+# name = "irc.example.net"
+# host = "203.0.113.10"           # what to probe and geolocate (default: the server name)
+# location = "Amsterdam, NL"      # label
+# lat = 52.37                     # map position (overrides GeoIP)
+# lon = 4.90
+# ports = [6667, 6697, 8097]
+# hide = false                    # true: leave it off the page

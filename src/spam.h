@@ -54,4 +54,7 @@ void cmd_spamfilter(server_t *srv, client_t *cl, irc_message_t *msg);
 /* STATS f: one 249 line per loaded filter rule. */
 void spam_stats(server_t *srv, client_t *cl);
 
+/* Loaded spam filter rules (the stats line's "rules"). */
+int spam_filter_count(struct server *srv);
+
 #endif

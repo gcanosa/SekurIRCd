@@ -145,7 +145,7 @@ $(BIN_DIR)/unit: $(UNIT_SRCS) $(HEADERS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(UNIT_SRCS) $(LDLIBS)
 
 # The services daemon (NickServ + ChanServ). Shares the ircd's account store, SCRAM and crypto code, nothing else.
-SERVICES_SRCS := services/chanserv.c services/nickserv.c $(SRC_DIR)/proto.c $(SRC_DIR)/crypto.c $(SRC_DIR)/log.c \
+SERVICES_SRCS := services/chanserv.c services/nickserv.c services/stats.c $(SRC_DIR)/proto.c $(SRC_DIR)/crypto.c $(SRC_DIR)/log.c \
                  $(SRC_DIR)/accounts.c $(SRC_DIR)/scram.c $(VEND_SRCS)
 $(BIN_DIR)/services: $(SERVICES_SRCS) $(HEADERS) services/svc.h
 	@mkdir -p $(BIN_DIR)
@@ -173,8 +173,10 @@ clean:
 #                                             [accounts] writes accounts.json here)
 #   $(STATEDIR)/ircd/                     -- ircd WorkingDirectory (pidfile, logs/)
 #   $(STATEDIR)/services/                 -- services WorkingDirectory (pidfile)
+#   $(STATEDIR)/stats/                    -- the stats panel's database and the collector's log
+#   $(PREFIX)/lib/sekurircd/stats/        -- netstats.py + its page template (Python 3.11+, run by netstats.service)
 #                                             (default state dir ~/.local/state/sekurircd)
-#   $(UNITDIR)/{sekurircd,services}.service (default ~/.config/systemd/user)
+#   $(UNITDIR)/{sekurircd,services,netstats}.service (default ~/.config/systemd/user)
 #
 # Only ships templates (config/*.template.*), never a live file: sekurircd.toml/services.toml
 # need operator-chosen operators/secrets (the "cp *.template.toml" quick-start flow), and the ircd
@@ -199,16 +201,28 @@ install: all
 	chmod 644 $(SYSCONFDIR)/sekurircd.template.toml
 	install -m644 config/protection.template.toml config/spamfilters.template.conf $(SYSCONFDIR)/
 	install -m644 services/services.template.toml $(SYSCONFDIR)/
+	@# the stats panel: its template keeps data out of the config dir (absolute paths into $(STATEDIR)/stats)
+	install -d $(PREFIX)/lib/sekurircd/stats/assets $(STATEDIR)/stats
+	install -m755 stats/netstats.py $(PREFIX)/lib/sekurircd/stats/
+	install -m644 stats/assets/page.html stats/assets/world-110m.json $(PREFIX)/lib/sekurircd/stats/assets/
+	sed -e 's|^log = "events.log"|log = "$(STATEDIR)/stats/events.log"|' -e 's|^database = "stats.db"|database = "$(STATEDIR)/stats/stats.db"|' \
+	    -e 's|^file = "dbip-city-lite.csv.gz"|file = "$(STATEDIR)/stats/dbip-city-lite.csv.gz"|' \
+	    stats/stats.template.toml > $(SYSCONFDIR)/stats.template.toml
+	chmod 644 $(SYSCONFDIR)/stats.template.toml
 	install -m644 config/ircd.template.motd config/oper.template.motd config/ircd.template.rules $(SYSCONFDIR)/
 	sed -e 's|/usr/local/bin|$(PREFIX)/bin|g' -e 's|/etc/sekurircd|$(SYSCONFDIR)|g' -e 's|/var/lib/sekurircd|$(STATEDIR)|g' \
 	    systemd/sekurircd.service > $(UNITDIR)/sekurircd.service
 	sed -e 's|/usr/local/bin|$(PREFIX)/bin|g' -e 's|/etc/sekurircd|$(SYSCONFDIR)|g' -e 's|/var/lib/sekurircd|$(STATEDIR)|g' \
 	    systemd/services.service > $(UNITDIR)/services.service
+	sed -e 's|/usr/local/lib|$(PREFIX)/lib|g' -e 's|/etc/sekurircd|$(SYSCONFDIR)|g' -e 's|/var/lib/sekurircd|$(STATEDIR)|g' \
+	    systemd/netstats.service > $(UNITDIR)/netstats.service
 	systemctl --user daemon-reload
 	@echo "installed under $(PREFIX), $(SYSCONFDIR), $(STATEDIR)."
 	@echo "next: cp $(SYSCONFDIR)/sekurircd.template.toml $(SYSCONFDIR)/sekurircd.toml (edit it), then:"
 	@echo "  optional Protection bundle (DNSBL, proxy scanner, limits, spam): cp $(SYSCONFDIR)/protection.template.toml $(SYSCONFDIR)/protection.toml"
 	@echo "  systemctl --user enable --now sekurircd services"
+	@echo "  optional stats panel (on the hub): cp $(SYSCONFDIR)/stats.template.toml $(SYSCONFDIR)/stats.toml, set [collector] enabled = true,"
+	@echo "    python3 $(PREFIX)/lib/sekurircd/stats/netstats.py -c $(SYSCONFDIR)/stats.toml --user --admin --add NAME, then systemctl --user enable --now netstats"
 	@echo "firewall: allow the ports you enable in sekurircd.toml (plain 6667, TLS 6697, WebSocket 8080, server-link 7000 only for remote servers;"
 	@echo "  services link over loopback so they need none). ufw: sudo ufw allow 6667,6697/tcp | firewalld: sudo firewall-cmd --permanent --add-port=6697/tcp && sudo firewall-cmd --reload"
 	@echo "  BSD pf: add 'pass in proto tcp to port { 6667 6697 }' to /etc/pf.conf, then 'pfctl -f /etc/pf.conf' | cloud hosts: also open them in the provider's security group"
@@ -216,8 +230,10 @@ install: all
 
 uninstall:
 	@[ "$$(uname -s)" = Linux ] || { echo "make uninstall: Linux + systemd only" >&2; exit 1; }
+	-systemctl --user disable --now netstats 2>/dev/null
 	rm -f $(PREFIX)/bin/sekurircd $(PREFIX)/bin/services $(PREFIX)/bin/chanserv
-	rm -f $(UNITDIR)/sekurircd.service $(UNITDIR)/services.service $(UNITDIR)/chanserv.service
+	rm -rf $(PREFIX)/lib/sekurircd
+	rm -f $(UNITDIR)/sekurircd.service $(UNITDIR)/services.service $(UNITDIR)/chanserv.service $(UNITDIR)/netstats.service
 	systemctl --user daemon-reload
 	@echo "uninstalled binaries + unit files. left in place (remove by hand if you want):" \
 	      "$(SYSCONFDIR), $(STATEDIR)"

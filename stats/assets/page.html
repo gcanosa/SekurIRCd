@@ -1,0 +1,459 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Network Stats</title>
+<!-- netstats page template: stats/netstats.py fills in the two placeholders below (data, map). Map: Natural Earth 1:110m,
+     public domain, via world-atlas 2.0.2, projected (Natural Earth I) at build time. No external requests. -->
+<style>
+:root{
+  color-scheme:light;
+  --page:#f9f9f7; --surface:#fcfcfb; --surface-2:#f3f2ee;
+  --ink:#0b0b0b; --ink-2:#52514e; --muted:#898781;
+  --grid:#e1e0d9; --axis:#c3c2b7; --ring:rgba(11,11,11,.10);
+  --s1:#2a78d6; --s2:#eb6834; --s3:#1baf7a; --s4:#eda100; --s5:#e87ba4;
+  --good:#0ca30c; --warn:#fab219; --serious:#ec835a; --crit:#d03b3b; --good-text:#006300;
+  --q1:#cde2fb; --q2:#9ec5f4; --q3:#6da7ec; --q4:#3987e5; --q5:#256abf; --q6:#184f95;
+  --accent:#2a78d6; --land:#e8e7e1; --land-edge:#d6d5cd; --ocean:#f4f3ef;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    color-scheme:dark;
+    --page:#0d0d0d; --surface:#1a1a19; --surface-2:#232321;
+    --ink:#f0efec; --ink-2:#c3c2b7; --muted:#898781;
+    --grid:#2c2c2a; --axis:#383835; --ring:rgba(255,255,255,.10);
+    --s1:#3987e5; --s2:#d95926; --s3:#199e70; --s4:#c98500; --s5:#d55181; --good-text:#0ca30c;
+    --q1:#16304f; --q2:#184f95; --q3:#1c5cab; --q4:#2a78d6; --q5:#5598e7; --q6:#9ec5f4;
+    --accent:#3987e5; --land:#2a2a28; --land-edge:#3a3a37; --ocean:#151514;
+  }
+}
+:root[data-theme="dark"]{
+  color-scheme:dark;
+  --page:#0d0d0d; --surface:#1a1a19; --surface-2:#232321;
+  --ink:#f0efec; --ink-2:#c3c2b7; --muted:#898781;
+  --grid:#2c2c2a; --axis:#383835; --ring:rgba(255,255,255,.10);
+  --s1:#3987e5; --s2:#d95926; --s3:#199e70; --s4:#c98500; --s5:#d55181; --good-text:#0ca30c;
+  --q1:#16304f; --q2:#184f95; --q3:#1c5cab; --q4:#2a78d6; --q5:#5598e7; --q6:#9ec5f4;
+  --accent:#3987e5; --land:#2a2a28; --land-edge:#3a3a37; --ocean:#151514;
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--page);color:var(--ink);font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;-webkit-font-smoothing:antialiased}
+a{color:var(--accent)}
+.wrap{max-width:1240px;margin:0 auto;padding:0 16px}
+header.top{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--page) 88%,transparent);backdrop-filter:blur(10px);border-bottom:1px solid var(--ring)}
+.bar{display:flex;align-items:center;gap:12px 16px;flex-wrap:wrap;padding:12px 0}
+.brand{display:flex;align-items:center;gap:10px;font-weight:650;font-size:16px}
+.brand svg{width:26px;height:26px;flex:none}
+.brand small{display:block;font-weight:400;color:var(--muted);font-size:12px}
+.badge{font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--ink-2);border:1px solid var(--axis);padding:2px 8px;border-radius:99px;text-decoration:none}
+.spacer{flex:1}
+.seg{display:inline-flex;background:var(--surface-2);border-radius:8px;padding:2px;box-shadow:inset 0 0 0 1px var(--ring)}
+.seg button{all:unset;cursor:pointer;padding:5px 11px;border-radius:6px;font-size:13px;color:var(--ink-2)}
+.seg button[aria-pressed="true"]{background:var(--surface);color:var(--ink);box-shadow:0 1px 2px rgba(0,0,0,.08),0 0 0 1px var(--ring);font-weight:600}
+.seg button:focus-visible{outline:2px solid var(--accent)}
+nav.sec{display:flex;gap:4px;overflow-x:auto;padding:0 0 10px;scrollbar-width:none}
+nav.sec a{color:var(--ink-2);text-decoration:none;font-size:13px;padding:5px 10px;border-radius:6px;white-space:nowrap}
+nav.sec a:hover{background:var(--surface-2);color:var(--ink)}
+section{padding:28px 0 4px;scroll-margin-top:110px}
+h2{font-size:18px;margin:0 0 4px;font-weight:650}
+.sub{color:var(--muted);font-size:13px;margin:0 0 16px}
+.grid{display:grid;gap:14px}
+.g6{grid-template-columns:repeat(6,1fr)}
+.g11{grid-template-columns:1fr 1fr}
+@media (max-width:1000px){.g6{grid-template-columns:repeat(3,1fr)}.g11{grid-template-columns:1fr}}
+@media (max-width:560px){.g6{grid-template-columns:1fr 1fr}}
+.card{background:var(--surface);border-radius:12px;box-shadow:0 0 0 1px var(--ring);padding:16px;min-width:0}
+.card h3{font-size:13px;font-weight:600;margin:0 0 2px}
+.note{color:var(--muted);font-size:12px;margin:0 0 10px}
+.empty{color:var(--muted);font-size:13px;padding:24px 8px;text-align:center}
+.tile .k{color:var(--ink-2);font-size:12px}
+.tile .v{font-size:26px;font-weight:650;letter-spacing:-.01em;margin:2px 0}
+.tile .d{font-size:12px;color:var(--muted)}
+.down{color:var(--crit)}
+.pill{display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:600;padding:2px 8px 2px 6px;border-radius:99px;background:var(--surface-2);box-shadow:inset 0 0 0 1px var(--ring);white-space:nowrap}
+.dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex:none}
+.dot.good{background:var(--good)} .dot.warn{background:var(--warn)} .dot.crit{background:var(--crit)} .dot.serious{background:var(--serious)} .dot.none{background:var(--axis)}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{font-weight:600;color:var(--muted);font-size:12px;text-align:left;padding:6px 8px;border-bottom:1px solid var(--grid);white-space:nowrap}
+td{padding:7px 8px;border-bottom:1px solid var(--grid);vertical-align:middle}
+tr:last-child td{border-bottom:0}
+td.n,th.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
+.tablewrap{overflow-x:auto}
+.hbar{height:8px;border-radius:0 4px 4px 0;background:var(--s1);min-width:2px}
+.chart{width:100%;position:relative}
+.chart svg{display:block;width:100%;overflow:visible}
+.legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--ink-2);margin:0 0 8px}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.legend i{width:10px;height:10px;border-radius:3px;display:inline-block}
+#tip{position:fixed;pointer-events:none;z-index:50;background:var(--surface);color:var(--ink);box-shadow:0 0 0 1px var(--ring),0 6px 24px rgba(0,0,0,.14);border-radius:8px;padding:7px 10px;font-size:12px;line-height:1.4;max-width:320px;opacity:0;transition:opacity .08s}
+#tip .row{display:flex;align-items:center;gap:6px}
+.tag{font-size:11px;font-weight:600;padding:1px 6px;border-radius:4px;background:var(--surface-2);box-shadow:inset 0 0 0 1px var(--ring)}
+footer{color:var(--muted);font-size:12px;padding:32px 0 40px;text-align:center}
+.lock{font-size:11px;color:var(--muted);font-weight:500;margin-left:6px}
+</style>
+</head>
+<body>
+<div id="tip"></div>
+<header class="top">
+  <div class="wrap">
+    <div class="bar">
+      <div class="brand">
+        <svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" fill="var(--accent)"/><path d="M9 21V11m7 10V7m7 14v-6" stroke="#fff" stroke-width="3" stroke-linecap="round"/></svg>
+        <div><span id="netname"></span> network stats<small id="gen"></small></div>
+      </div>
+      <span id="rolebadge"></span>
+      <div class="spacer"></div>
+      <div class="seg" role="group" aria-label="Time range">
+        <button data-range="1" aria-pressed="false">24h</button><button data-range="7" aria-pressed="true">7d</button><button data-range="30" aria-pressed="false">30d</button><button data-range="365" aria-pressed="false">1y</button>
+      </div>
+      <div class="seg" role="group" aria-label="Theme">
+        <button data-theme-btn="light" aria-pressed="false">Light</button><button data-theme-btn="dark" aria-pressed="false">Dark</button>
+      </div>
+    </div>
+    <nav class="sec">
+      <a href="#overview">Overview</a><a href="#links">Links</a><a href="#servers">Servers</a><a href="#users">Users</a><a href="#services">Services</a><a href="#security" data-admin>Security</a><a href="#health">Health checks</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+<section id="overview">
+  <h2>Overview</h2><p class="sub">The whole network, as the hub reports it to services.</p>
+  <div class="grid g6" id="tiles"></div>
+  <div class="card" style="margin-top:14px">
+    <div style="display:flex;gap:12px;align-items:flex-start;flex-wrap:wrap">
+      <div style="flex:1;min-width:220px"><h3>Network map</h3><p class="note">Locations from GeoIP or stats.toml. Arcs are links; hover anything.</p></div>
+      <div class="seg" role="group" aria-label="Map region">
+        <button data-region="world" aria-pressed="true">World</button><button data-region="eu" aria-pressed="false">Europe</button><button data-region="am" aria-pressed="false">Americas</button><button data-region="ap" aria-pressed="false">Asia-Pacific</button>
+      </div>
+    </div>
+    <div class="legend" id="mapLegend"></div>
+    <div id="map" style="border-radius:10px;overflow:hidden;background:var(--ocean)"></div>
+    <p class="note" id="unplaced" style="margin:10px 0 0"></p>
+  </div>
+  <div class="card" style="margin-top:14px"><h3>Users online</h3><p class="note" id="usersNote"></p><div class="chart" id="usersChart"></div></div>
+  <div class="card" style="margin-top:14px"><h3>Incidents</h3><p class="note">Link splits and services outages in the selected range</p><div class="tablewrap"><table id="incidents"></table></div></div>
+</section>
+
+<section id="links">
+  <h2>Links</h2><p class="sub">Every server-to-server link, and services' link to the hub. Timeline: green = linked, red = split. Hover for details.</p>
+  <div class="card"><div class="tablewrap"><table id="linkTable"></table></div></div>
+</section>
+
+<section id="servers">
+  <h2>Servers</h2><p class="sub">Users from the hub; CPU, memory and version from each server's stats line ([debug_channel] stats_interval).</p>
+  <div class="card"><div class="tablewrap"><table id="serverTable"></table></div></div>
+</section>
+
+<section id="users">
+  <h2>Users</h2><p class="sub">How people connect and when.</p>
+  <div class="grid g11">
+    <div class="card"><h3>Connections per hour</h3><p class="note">Average new connections by weekday and hour (UTC), last 4 weeks</p><div class="chart" id="heat"></div></div>
+    <div class="card"><h3>Clients right now</h3><p class="note">Share of connected users</p><div id="clients"></div></div>
+  </div>
+</section>
+
+<section id="services">
+  <h2>Services</h2><p class="sub">NickServ and ChanServ: availability and growth.</p>
+  <div class="grid g6" id="svcTiles"></div>
+  <div class="grid g11" style="margin-top:14px">
+    <div class="card"><h3>Registered accounts</h3><p class="note">Total, end of each day</p><div class="chart" id="accChart"></div></div>
+    <div class="card"><h3>New registrations per day</h3><p class="note">Last 30 days</p><div class="chart" id="regChart"></div></div>
+  </div>
+</section>
+
+<section id="security" data-admin>
+  <h2>Security <span class="lock">admin only</span></h2><p class="sub">The protection modules on every server (DNSBL, proxy scanner, spam filter) from their stats lines, and the bans the hub saw being set.</p>
+  <div class="grid g6" id="secTiles"></div>
+  <div class="grid g11" style="margin-top:14px">
+    <div class="card"><h3>Protection per day</h3><p class="note">All servers, last 30 days</p><div class="chart" id="protChart"></div></div>
+    <div class="card"><h3>Protection by server</h3><p class="note">Since each server started; rules = spam filter rules loaded</p><div class="tablewrap"><table id="protTable"></table></div></div>
+  </div>
+  <div class="grid g11" style="margin-top:14px">
+    <div class="card"><h3>New bans per day</h3><p class="note">Last 30 days, by type</p><div class="chart" id="banChart"></div></div>
+    <div class="card"><h3>Automatic vs manual bans</h3><p class="note">Last 30 days, by who set them</p><div class="chart" id="srcChart"></div></div>
+  </div>
+  <div class="card" style="margin-top:14px"><h3>Recent bans</h3><p class="note">Latest 15</p><div class="tablewrap"><table id="banTable"></table></div></div>
+</section>
+
+<section id="health">
+  <h2>Health checks</h2><p class="sub">Probed from outside the network by netstats, so they work even when services can't see a server.</p>
+  <div class="card"><div class="tablewrap"><table id="healthTable"></table></div></div>
+</section>
+</main>
+<footer id="foot"></footer>
+
+<script id="data" type="application/json">/*@DATA@*/null</script>
+<script id="mapdata" type="application/json">/*@MAP@*/null</script>
+<script>
+const D=JSON.parse(document.getElementById('data').textContent), MAP=JSON.parse(document.getElementById('mapdata').textContent);
+const M=6e4,H=36e5,DAY=864e5;
+const $=s=>document.querySelector(s);
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const nf=new Intl.NumberFormat('en-US'), fmt=n=>n==null?'—':nf.format(Math.round(n));
+const pct=(x,d=2)=>x==null?'—':(x*100).toFixed(d)+'%';
+const dur=s=>{s=Math.max(0,Math.round(s));if(s<60)return s+'s';const m=Math.floor(s/60);if(m<60)return m+'m '+(s%60)+'s';const h=Math.floor(m/60);if(h<48)return h+'h '+(m%60)+'m';return Math.floor(h/24)+'d '+(h%24)+'h'};
+const short=n=>n.split('.')[0];
+if(!D){document.body.innerHTML='<p class="empty">This is the netstats template; run <code>stats/netstats.py render</code> or <code>serve</code>.</p>';throw 0}
+const NOW=D.now*1000, T=s=>s*1000;
+const ago=t=>dur((NOW-t)/1000)+' ago';
+const utc=(t,o={})=>new Date(t).toLocaleString('en-GB',{timeZone:'UTC',day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit',...o})+' UTC';
+const ADMIN=D.role==='admin';
+if(!ADMIN)document.querySelectorAll('[data-admin]').forEach(e=>e.remove());
+
+/* ---------- tooltip + svg helpers ---------- */
+const tip=$('#tip');
+function showTip(h,x,y){tip.innerHTML=h;tip.style.opacity=1;const r=tip.getBoundingClientRect();let L=x+14,Tp=y+14;if(L+r.width>innerWidth-8)L=x-r.width-14;if(Tp+r.height>innerHeight-8)Tp=y-r.height-14;tip.style.left=L+'px';tip.style.top=Tp+'px'}
+function hideTip(){tip.style.opacity=0}
+document.addEventListener('mousemove',e=>{const el=e.target.closest('[data-tip]');if(el)showTip(el.dataset.tip,e.clientX,e.clientY);else if(!e.target.closest('.xhair'))hideTip()});
+const NS='http://www.w3.org/2000/svg';
+function svgEl(tag,attrs={},parent){const e=document.createElementNS(NS,tag);for(const k in attrs)if(attrs[k]!=null)e.setAttribute(k,attrs[k]);if(parent)parent.appendChild(e);return e}
+function niceTicks(lo,hi,n=4){if(hi<=lo)hi=lo+1;const step0=(hi-lo)/n,mag=10**Math.floor(Math.log10(step0)),step=Math.max(1,[1,2,2.5,5,10].map(m=>m*mag).find(s=>s>=step0));/* counts: whole steps */const a=Math.floor(lo/step)*step,b=Math.ceil(hi/step)*step,t=[];for(let v=a;v<=b+step/2;v+=step)t.push(Math.round(v*1e6)/1e6);return t}
+const shortNum=v=>v>=1e6?(v/1e6).toFixed(v%1e6?2:0)+'M':v>=1e3?(v/1e3).toFixed(v%1e3?1:0)+'k':String(Math.round(v));
+const roundTop=(x,y,w,h,r)=>{r=Math.min(r,w/2,h);return `M${x},${y+h}V${y+r}Q${x},${y} ${x+r},${y}H${x+w-r}Q${x+w},${y} ${x+w},${y+r}V${y+h}Z`};
+const day=t=>new Date(t).toLocaleDateString('en-GB',{timeZone:'UTC',day:'numeric',month:'short'});
+
+function lineChart(host,{series,height=230,yZero=false,dateFmt}){
+  host.innerHTML='';
+  if(!series[0].data.length){host.innerHTML='<div class="empty">Collecting data — the first points appear within a few minutes.</div>';return}
+  const w=host.clientWidth,m={l:44,r:10,t:10,b:24},iw=w-m.l-m.r,ih=height-m.t-m.b;
+  const svg=svgEl('svg',{viewBox:`0 0 ${w} ${height}`,height,role:'img'},host);
+  const all=series.flatMap(s=>s.data.map(p=>p[1]));
+  let lo=yZero?0:Math.min(...all),hi=Math.max(...all);const pad=Math.max(1,(hi-lo)*.08);lo=yZero?0:Math.max(0,lo-pad);hi+=pad;
+  const ticks=niceTicks(lo,hi);lo=ticks[0];hi=ticks[ticks.length-1];
+  const d0=series[0].data,t0=T(d0[0][0]),t1=Math.max(T(d0[d0.length-1][0]),t0+H);
+  const X=t=>m.l+(t-t0)/(t1-t0)*iw,Y=v=>m.t+ih-(v-lo)/(hi-lo)*ih;
+  ticks.forEach(v=>{svgEl('line',{x1:m.l,x2:m.l+iw,y1:Y(v),y2:Y(v),stroke:'var(--grid)'},svg);svgEl('text',{x:m.l-8,y:Y(v)+4,'text-anchor':'end','font-size':11,fill:'var(--muted)'},svg).textContent=shortNum(v)});
+  const span=t1-t0,xstep=span<=1.1*DAY?4*H:span<=8*DAY?DAY:span<=40*DAY?5*DAY:30*DAY;
+  for(let t=Math.ceil(t0/xstep)*xstep;t<=t1;t+=xstep)svgEl('text',{x:X(t),y:height-6,'text-anchor':'middle','font-size':11,fill:'var(--muted)'},svg).textContent=span<=1.1*DAY?new Date(t).toISOString().slice(11,16):day(t);
+  svgEl('line',{x1:m.l,x2:m.l+iw,y1:m.t+ih,y2:m.t+ih,stroke:'var(--axis)'},svg);
+  series.forEach(s=>{const d=s.data.map((p,i)=>(i?'L':'M')+X(T(p[0])).toFixed(1)+','+Y(p[1]).toFixed(1)).join('');
+    if(series.length===1)svgEl('path',{d:d+`L${X(T(s.data[s.data.length-1][0]))},${m.t+ih}L${X(T(s.data[0][0]))},${m.t+ih}Z`,fill:s.color,opacity:.10},svg);
+    svgEl('path',{d,fill:'none',stroke:s.color,'stroke-width':2,'stroke-linejoin':'round'},svg);
+    if(s.data.length===1)svgEl('circle',{cx:X(T(s.data[0][0])),cy:Y(s.data[0][1]),r:4,fill:s.color},svg)});
+  const g=svgEl('g',{opacity:0},svg),vl=svgEl('line',{y1:m.t,y2:m.t+ih,stroke:'var(--axis)'},g);
+  const dots=series.map(s=>svgEl('circle',{r:4.5,fill:s.color,stroke:'var(--surface)','stroke-width':2},g));
+  const ov=svgEl('rect',{x:m.l,y:m.t,width:iw,height:ih,fill:'transparent',class:'xhair'},svg);
+  ov.addEventListener('mousemove',e=>{const b=svg.getBoundingClientRect(),px=(e.clientX-b.left)*w/b.width,t=t0+(px-m.l)/iw*(t1-t0);
+    let i=0,best=1e18;d0.forEach((p,k)=>{const dd=Math.abs(T(p[0])-t);if(dd<best){best=dd;i=k}});
+    const x=X(T(d0[i][0]));vl.setAttribute('x1',x);vl.setAttribute('x2',x);g.setAttribute('opacity',1);
+    dots.forEach((c,k)=>{c.setAttribute('cx',x);c.setAttribute('cy',Y(series[k].data[i][1]))});
+    showTip(`<b>${(dateFmt||utc)(T(d0[i][0]))}</b>`+series.map(s=>`<div class="row"><span class="dot" style="background:${s.color}"></span>${s.name}<span style="margin-left:auto;padding-left:12px;font-weight:650">${fmt(s.data[i][1])}</span></div>`).join(''),e.clientX,e.clientY)});
+  ov.addEventListener('mouseleave',()=>{g.setAttribute('opacity',0);hideTip()});
+}
+
+function barChart(host,{rows,keys,height=230}){
+  host.innerHTML='';
+  keys=keys.filter(k=>rows.some(r=>r[k.key]>0));
+  if(!rows.length||!keys.length){host.innerHTML='<div class="empty">Nothing yet.</div>';return}
+  if(keys.length>1){const lg=document.createElement('div');lg.className='legend';lg.innerHTML=keys.map(k=>`<span><i style="background:${k.color}"></i>${k.name}</span>`).join('');host.appendChild(lg)}
+  const w=host.clientWidth,m={l:36,r:6,t:8,b:24},iw=w-m.l-m.r,ih=height-m.t-m.b;
+  const svg=svgEl('svg',{viewBox:`0 0 ${w} ${height}`,height},host);
+  const tot=rows.map(r=>keys.reduce((a,k)=>a+(r[k.key]||0),0)),ticks=niceTicks(0,Math.max(...tot,1)),hi=ticks[ticks.length-1];
+  const Y=v=>m.t+ih-v/hi*ih,n=Math.max(rows.length,7),bw=iw/n,gap=Math.max(2,bw*.25);
+  ticks.forEach(v=>{svgEl('line',{x1:m.l,x2:m.l+iw,y1:Y(v),y2:Y(v),stroke:'var(--grid)'},svg);svgEl('text',{x:m.l-6,y:Y(v)+4,'text-anchor':'end','font-size':11,fill:'var(--muted)'},svg).textContent=shortNum(v)});
+  rows.forEach((r,i)=>{const x=m.l+i*bw+gap/2,bwi=bw-gap;let base=0;const present=keys.filter(k=>r[k.key]>0);
+    const th=`<b>${new Date(T(r.t)).toLocaleDateString('en-GB',{timeZone:'UTC',weekday:'short',day:'numeric',month:'short'})}</b>`+keys.map(k=>`<div class="row"><span class="dot" style="background:${k.color}"></span>${k.name}<span style="margin-left:auto;padding-left:12px;font-weight:650">${fmt(r[k.key]||0)}</span></div>`).join('');
+    present.forEach((k,j)=>{const v=r[k.key],y=Y(base+v),hgt=Y(base)-y-(j>0?2:0);
+      if(hgt>0)svgEl('path',{d:j===present.length-1?roundTop(x,y,bwi,hgt,4):`M${x},${y}h${bwi}v${hgt}h${-bwi}Z`,fill:k.color},svg);base+=v});
+    svgEl('rect',{x:m.l+i*bw,y:m.t,width:bw,height:ih,fill:'transparent','data-tip':th},svg);
+    if(i%5===rows.length%5||rows.length<=10)svgEl('text',{x:x+bwi/2,y:height-6,'text-anchor':'middle','font-size':11,fill:'var(--muted)'},svg).textContent=day(T(r.t))});
+  svgEl('line',{x1:m.l,x2:m.l+iw,y1:m.t+ih,y2:m.t+ih,stroke:'var(--axis)'},svg);
+}
+
+/* ---------- derived ---------- */
+let RANGE=7;
+const SERVERS=D.servers, LINKS=D.links, cur=D.cur||{};
+const byName=Object.fromEntries(SERVERS.map(s=>[s.name,s]));
+const linkOf=n=>LINKS.find(l=>l.a===n);
+const isDown=l=>l&&!l.present;
+const lastOut=l=>l&&l.outages.length?l.outages[l.outages.length-1]:null;
+const downFor=(l,t0,t1)=>l.outages.reduce((a,[s,e])=>a+Math.max(0,Math.min(t1,e?T(e):NOW)-Math.max(t0,T(s))),0);
+const since=()=>Math.max(NOW-RANGE*DAY,T(D.first));
+const tile=(k,v,d)=>`<div class="card tile"><div class="k">${k}</div><div class="v">${v}</div><div class="d">${d}</div></div>`;
+const statusPill=(ok,label)=>`<span class="pill" style="font-size:14px"><span class="dot ${ok?'good':'crit'}"></span>${label}</span>`;
+
+function tiles(){
+  const leaves=SERVERS.length,up=SERVERS.filter(s=>s.present).length,down=SERVERS.filter(s=>!s.present);
+  const svc=D.services;
+  $('#tiles').innerHTML=[
+    tile('Users online',fmt(cur.users),cur.users!=null?`${fmt(cur.logged)} logged in · ${fmt(cur.opers)} opers`:'waiting for the first sample'),
+    tile('Peak (30 days)',D.peak30?fmt(D.peak30[0]):'—',D.peak30?utc(T(D.peak30[1])):''),
+    tile('Servers linked',`${up}/${leaves}`,down.length?`<span class="pill"><span class="dot crit"></span>${esc(short(down[0].name))} split${down.length>1?' +'+(down.length-1):''}</span>`:'all linked'),
+    tile('Link availability',pct(D.avail30),T(D.first)>NOW-30*DAY?'since '+day(T(D.first)):'all links, last 30 days'),
+    tile('Channels',fmt(cur.channels),cur.regchans!=null?`${fmt(cur.regchans)} registered`:''),
+    tile('Services',statusPill(svc.up,svc.up?'Online':'No data'),svc.up&&svc.start?`up ${dur(D.now-svc.start)} · v${esc(svc.version)}`:'collector not reporting'),
+  ].join('');
+}
+
+/* ---------- world map ---------- */
+function proj([lon,lat]){const l=lon*Math.PI/180,p=lat*Math.PI/180,p2=p*p,p4=p2*p2;
+  return [MAP.tx+MAP.k*l*(0.8707-0.131979*p2+p4*(-0.013791+p4*(0.003971*p2-0.001529*p4))),
+          MAP.ty-MAP.k*p*(1.007226+p2*(0.015085+p4*(-0.044475+0.028874*p2-0.005916*p4)))]}
+const REGIONS={eu:[[-11,36],[32,63]],am:[[-128,24],[-66,52]],ap:[[96,-42],[158,42]]};
+function regionBox(key){
+  if(key==='world')return MAP.vb;
+  const [[a,b],[c,d]]=REGIONS[key],pts=[[a,b],[c,b],[a,d],[c,d],[(a+c)/2,d],[(a+c)/2,b]].map(proj);
+  const x0=Math.min(...pts.map(p=>p[0])),x1=Math.max(...pts.map(p=>p[0])),y0=Math.min(...pts.map(p=>p[1])),y1=Math.max(...pts.map(p=>p[1]));
+  const ar=MAP.vb[2]/MAP.vb[3],cx=(x0+x1)/2,cy=(y0+y1)/2;let w=x1-x0,h=y1-y0;if(w/h<ar)w=h*ar;else h=w/ar;
+  return [cx-w/2,cy-h/2,w,h];
+}
+let REGION='world';
+function mapView(){
+  const host=$('#map');host.innerHTML='';
+  const placed=SERVERS.filter(s=>s.lat!=null);
+  const un=SERVERS.filter(s=>s.lat==null);
+  $('#unplaced').innerHTML=un.length?`Not on the map (no location): ${un.map(s=>'<span class="mono">'+esc(s.name)+'</span>').join(', ')} — ${D.geoip?'set lat/lon in stats.toml [[servers]]':'run <span class="mono">netstats.py geoip-update</span> or set lat/lon in stats.toml [[servers]]'}.`:'';
+  const vb=regionBox(REGION),z=MAP.vb[2]/vb[2],u=v=>v/z;
+  const svg=svgEl('svg',{viewBox:vb.join(' '),width:'100%',style:'display:block;aspect-ratio:'+MAP.vb[2]+'/'+MAP.vb[3]},host);
+  svgEl('path',{d:MAP.land,fill:'var(--land)'},svg);
+  svgEl('path',{d:MAP.borders,fill:'none',stroke:'var(--land-edge)','stroke-width':u(.6),'stroke-linejoin':'round'},svg);
+  const pos={},used=[];
+  placed.forEach(s=>{let p=proj([s.lon,s.lat]);let k=0;  /* same city: fan out a little */
+    while(used.some(q=>Math.hypot(q[0]-p[0],q[1]-p[1])<u(6))&&k<12){k++;const a=k*2.4;p=[p[0]+Math.cos(a)*u(7),p[1]+Math.sin(a)*u(7)]}
+    used.push(p);pos[s.name]=p});
+  const svcLink=LINKS.find(l=>l.kind==='services');
+  if(svcLink&&pos[svcLink.b]){const h=pos[svcLink.b];pos.services=[h[0]-u(14),h[1]-u(12)]}
+  const arcs=svgEl('g',{},svg),nodes=svgEl('g',{},svg),labels=svgEl('g',{},svg);
+  LINKS.forEach(l=>{const a=pos[l.a],b=pos[l.b];if(!a||!b)return;
+    const down=isDown(l),dx=b[0]-a[0],dy=b[1]-a[1],d=Math.hypot(dx,dy)||1;let nx=-dy/d,ny=dx/d;if(ny>0){nx=-nx;ny=-ny}
+    const c=[(a[0]+b[0])/2+nx*d*.22,(a[1]+b[1])/2+ny*d*.22],o=lastOut(l);
+    const t=`<b>${esc(short(l.a))} ↔ ${esc(short(l.b))}</b><br>${down?'<span class="down">Down '+(o?ago(T(o[0])):'')+'</span><br>'+esc(o?o[2]:''):'Linked'}`;
+    const dp=`M${a[0]},${a[1]}Q${c[0]},${c[1]} ${b[0]},${b[1]}`;
+    svgEl('path',{d:dp,fill:'none',stroke:down?'var(--crit)':l.kind==='hub'?'var(--ink-2)':l.kind==='services'?'var(--s3)':'var(--s1)','stroke-width':u(l.kind==='hub'?2.4:1.3),opacity:down?1:l.kind==='hub'?.9:.6,'stroke-dasharray':down?`${u(4)} ${u(3)}`:null,'stroke-linecap':'round'},arcs);
+    svgEl('path',{d:dp,fill:'none',stroke:'transparent','stroke-width':u(9),'data-tip':t},arcs)});
+  const draw=name=>{const p=pos[name];if(!p)return;const s=byName[name],isSvc=name==='services',l=isSvc?svcLink:linkOf(name),down=isSvc?!D.services.up:(s&&!s.present),hub=s&&s.hub;
+    const t=isSvc?`<b>Services</b><br>NickServ + ChanServ, linked to ${esc(short(svcLink.b))}`:`<b>${esc(name)}</b><br>${hub?'Hub':'Leaf'}${s.loc?' · '+esc(s.loc):''}<br>${down?'<span class="down">Split '+(lastOut(l)?ago(T(lastOut(l)[0])):'')+'</span>':fmt(s.users)+' users'}`;
+    if(hub){const r=u(6.5);svgEl('rect',{x:p[0]-r,y:p[1]-r,width:2*r,height:2*r,rx:u(2),fill:down?'var(--crit)':'var(--ink)',stroke:'var(--surface)','stroke-width':u(1.5),transform:`rotate(45 ${p[0]} ${p[1]})`,'data-tip':t},nodes)}
+    else{const r=u(isSvc?4.5:3+Math.sqrt(Math.max(s?s.users:0,100)/350));
+      if(down)svgEl('circle',{cx:p[0],cy:p[1],r:r*2.2,fill:'var(--crit)',opacity:.18},nodes);
+      svgEl('circle',{cx:p[0],cy:p[1],r,fill:down?'var(--crit)':isSvc?'var(--s3)':'var(--s1)',stroke:'var(--surface)','stroke-width':u(1.5),'data-tip':t},nodes)}
+    if(!isSvc&&(hub||down||z>1.8)){const big=hub||down,up=s&&pos[s.uplink],left=!hub&&up&&up[0]>p[0];
+      const tx=svgEl('text',{x:hub?p[0]:left?p[0]-u(9):p[0]+u(9),y:hub?p[1]+u(21):p[1]+u(4),'text-anchor':hub?'middle':left?'end':'start','font-size':u(big?11:10),'font-weight':big?650:500,fill:down?'var(--crit)':big?'var(--ink)':'var(--ink-2)',stroke:'var(--ocean)','stroke-width':u(3),'paint-order':'stroke','stroke-linejoin':'round'},labels);
+      tx.textContent=short(name)+(down?' · split':'')}};
+  SERVERS.filter(s=>!s.hub).forEach(s=>draw(s.name));draw('services');SERVERS.filter(s=>s.hub).forEach(s=>draw(s.name));
+  $('#mapLegend').innerHTML=`<span><svg width="12" height="12"><rect x="2.5" y="2.5" width="7" height="7" fill="var(--ink)" transform="rotate(45 6 6)"/></svg>Hub</span><span><i style="background:var(--s1);border-radius:50%"></i>Leaf (size = users)</span><span><i style="background:var(--s3);border-radius:50%"></i>Services</span><span><svg width="22" height="10"><path d="M1 5H21" stroke="var(--crit)" stroke-width="2" stroke-dasharray="4 3"/></svg>Split link</span>`;
+}
+
+/* ---------- tables ---------- */
+function incidents(){
+  const t0=NOW-RANGE*DAY,rows=D.incidents.filter(i=>(i.end?T(i.end):NOW)>=t0);
+  const what=i=>i.kind==='services'?['warn',i.end?'Services outage':'Services down']:i.end?(i.end===i.start?['serious','Relinked']:['serious','Split, relinked']):['crit','Split, still down'];
+  $('#incidents').innerHTML=`<tr><th>When</th><th>Link</th><th>What</th><th class="n">Duration</th><th>Reason</th></tr>`+
+   (rows.length?rows.map(i=>{const [c,l]=what(i);return `<tr><td>${utc(T(i.start))}</td><td class="mono">${esc(short(i.a))} ↔ ${esc(short(i.b))}</td><td><span class="pill"><span class="dot ${c}"></span>${l}</span></td><td class="n">${dur((i.end||D.now)-i.start)}${i.end?'':'+'}</td><td>${esc(i.reason)}</td></tr>`}).join(''):`<tr><td colspan="5" style="color:var(--muted)">No incidents in this range.</td></tr>`);
+}
+function strip(l,t0,t1){
+  const W=260,Hh=14,x=t=>(t-t0)/(t1-t0)*W;
+  let s=`<svg viewBox="0 0 ${W} ${Hh}" width="${W}" height="${Hh}" style="display:block"><rect width="${W}" height="${Hh}" rx="3" fill="var(--good)" opacity=".85"/>`;
+  if(T(D.first)>t0)s+=`<rect width="${Math.max(0,x(T(D.first)))}" height="${Hh}" rx="3" fill="var(--axis)" data-tip="No data before ${esc(utc(T(D.first)))}"/>`;
+  l.outages.forEach(([a,b,r])=>{const A=Math.max(t0,T(a)),B=Math.min(t1,b?T(b):NOW);if(B<t0||A>t1)return;const xa=x(A),wd=Math.max(3,x(B)-xa);
+    s+=`<rect x="${Math.min(xa,W-3)}" width="${wd}" height="${Hh}" fill="var(--crit)" data-tip="${esc(`<b>Down ${utc(T(a))}</b><br>${dur(((b?T(b):NOW)-T(a))/1000)}${b?'':' and counting'}<br>${esc(r)}`)}"/>`});
+  return s+'</svg>';
+}
+function linkTable(){
+  const t0=since(),span=NOW-t0;
+  const rows=[...LINKS].sort((a,b)=>(a.kind==='leaf')-(b.kind==='leaf')||downFor(b,t0,NOW)-downFor(a,t0,NOW));
+  $('#linkTable').innerHTML=`<tr><th>Link</th><th>State</th><th>Timeline (${RANGE===1?'24h':RANGE===365?'1y':RANGE+'d'})</th><th class="n">Uptime</th><th class="n">Outages</th><th>Last outage</th></tr>`+(rows.length?rows.map(l=>{
+    const down=isDown(l),n=l.outages.filter(([a,b])=>(b?T(b):NOW)>=t0).length,up=span>0?1-downFor(l,t0,NOW)/span:1,o=lastOut(l);
+    return `<tr><td class="mono">${esc(short(l.a))} ↔ ${esc(short(l.b))} <span class="tag">${l.kind}</span></td>
+      <td><span class="pill"><span class="dot ${down?'crit':'good'}"></span>${down?'Down':'Linked'}</span></td>
+      <td>${strip(l,NOW-RANGE*DAY,NOW)}</td><td class="n">${pct(up,up===1?0:3)}</td><td class="n">${n}</td>
+      <td style="color:var(--ink-2);font-size:12px">${o?ago(T(o[0]))+' · '+esc(o[2]):'never'}</td></tr>`}).join(''):'<tr><td class="empty">No links seen yet.</td></tr>');
+}
+function serverTable(){
+  const total=SERVERS.reduce((a,s)=>a+s.users,0)||1,max=Math.max(1,...SERVERS.map(s=>s.users));
+  $('#serverTable').innerHTML=`<tr><th>Server</th><th>Role</th><th>Location</th>${ADMIN?'<th>Address</th>':''}<th class="n">Users</th><th style="width:14%"></th><th class="n">Share</th><th>Version</th><th class="n">Up / linked</th><th class="n">Memory</th><th class="n">CPU</th></tr>`+
+   [...SERVERS].sort((a,b)=>b.hub-a.hub||b.users-a.users).map(s=>{const down=!s.present;
+    return `<tr><td class="mono" data-tip="${esc(esc(s.desc))}">${esc(s.name)}</td><td><span class="tag">${s.hub?'hub':'leaf'}</span></td><td>${esc(s.loc)||'<span style="color:var(--muted)">—</span>'}</td>${ADMIN?`<td class="mono">${esc(s.ip)}</td>`:''}
+    <td class="n">${down?'<span class="down">split</span>':fmt(s.users)}</td>
+    <td>${down?'':`<div class="hbar" style="width:${s.users/max*100}%"></div>`}</td>
+    <td class="n">${down?'—':pct(s.users/total,1)}</td><td>${esc(s.version)||'<span style="color:var(--muted)">—</span>'}</td>
+    <td class="n">${down?'—':dur(D.now-s.linked_at)}</td><td class="n">${s.mem!=null?s.mem+' MB':'—'}</td><td class="n">${s.cpu!=null?s.cpu.toFixed(1)+'%':'—'}</td></tr>`}).join('');
+}
+function heat(){
+  const host=$('#heat');host.innerHTML='';
+  if(!D.heat){host.innerHTML='<div class="empty">Needs each server\'s stats line: set <span class="mono">[debug_channel] stats_interval = 300</span> in every sekurircd.toml.</div>';return}
+  const w=host.clientWidth,days=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'],m={l:34,t:4,b:22},cw=(w-m.l)/24,ch=Math.min(26,cw*1.1),h=m.t+ch*7+m.b;
+  const svg=svgEl('svg',{viewBox:`0 0 ${w} ${h}`,height:h},host),steps=['--q1','--q2','--q3','--q4','--q5','--q6'];
+  const all=D.heat.flat(),lo=Math.min(...all),hi=Math.max(...all);
+  D.heat.forEach((row,di)=>{svgEl('text',{x:m.l-6,y:m.t+di*ch+ch/2+4,'text-anchor':'end','font-size':11,fill:'var(--muted)'},svg).textContent=days[di];
+    row.forEach((v,hr)=>{const k=hi>lo?Math.min(5,Math.floor((v-lo)/(hi-lo+1)*6)):0;svgEl('rect',{x:m.l+hr*cw+1,y:m.t+di*ch+1,width:cw-2,height:ch-2,rx:3,fill:`var(${steps[k]})`,'data-tip':`<b>${days[di]} ${String(hr).padStart(2,'0')}:00 UTC</b><br>${fmt(v)} connections/hour`},svg)})});
+  for(let hr=0;hr<24;hr+=3)svgEl('text',{x:m.l+hr*cw+cw/2,y:h-6,'text-anchor':'middle','font-size':11,fill:'var(--muted)'},svg).textContent=String(hr).padStart(2,'0');
+}
+function clients(){
+  if(cur.users==null){$('#clients').innerHTML='<div class="empty">Waiting for the first sample.</div>';return}
+  const u=Math.max(cur.users,1),bar=(label,v,c)=>`<div style="margin:0 0 14px"><div style="display:flex;justify-content:space-between;font-size:13px"><span>${label}</span><b>${pct(v/u,0)}</b></div><div style="background:var(--surface-2);border-radius:4px;height:8px;margin-top:4px"><div style="width:${v/u*100}%;height:8px;border-radius:4px;background:${c}"></div></div><div class="note" style="margin:2px 0 0">${fmt(v)} of ${fmt(cur.users)}</div></div>`;
+  $('#clients').innerHTML=bar('Connected with TLS',cur.tls,'var(--s1)')+bar('Logged in to an account',cur.logged,'var(--s1)')+bar('Away',cur.away,'var(--s1)')+`<p class="note" style="margin:0">${fmt(cur.opers)} IRC operators online · peak since the hub started: ${fmt(cur.peak)}</p>`;
+}
+function svcTiles(){
+  const s=D.services,l=LINKS.find(x=>x.kind==='services'),t0=Math.max(NOW-30*DAY,T(D.first));
+  $('#svcTiles').innerHTML=[
+    tile('NickServ + ChanServ',statusPill(s.up,s.up?'Online':'No data'),s.version?'v'+esc(s.version):''),
+    tile('Services uptime',l?pct(1-downFor(l,t0,NOW)/Math.max(1,NOW-t0),3):'—','last 30 days'),
+    tile('Restarts',fmt(s.restarts30),'last 30 days'),
+    tile('Registered accounts',cur.accounts>=0?fmt(cur.accounts):'—',s.accounts.length>1?`+${fmt(s.accounts.at(-1)[1]-s.accounts[0][1])} in ${s.accounts.length-1} days`:''),
+    tile('Registered channels',fmt(cur.regchans_cs),'in ChanServ'),
+    tile('Logged in now',fmt(cur.logged),cur.users?pct(cur.logged/cur.users,0)+' of users':''),
+  ].join('');
+}
+function security(){
+  if(!ADMIN)return;const S=D.security,P=S.servers,today=(S.days.at(-1)||{}).t>=D.now-D.now%86400?S.days.at(-1):{};
+  const sum=k=>P.reduce((a,p)=>a+(p[k]||0),0),has=k=>P.some(p=>p[k]!=null);
+  $('#secTiles').innerHTML=[
+    tile('DNSBL hits today',fmt(today.dnsbl_hits||0),P.length?`${fmt(sum('dnsbl_bans'))} DNSBL bans active`:'needs stats_interval'),
+    tile('Open proxies today',has('scanned')?fmt(today.proxies||0):'—',has('scanned')?`${fmt(today.scanned||0)} addresses scanned`:'scanner off'),
+    tile('Spam filter actions today',has('spam')?fmt(today.spam_actions||0):'—',has('spam')?`${fmt(Math.max(0,...P.map(p=>p.spam_rules||0)))} rules loaded`:'needs stats_interval'),
+    tile('Active K-lines',S.active?fmt(S.active.K):'—','on the hub'),tile('Active G-lines',S.active?fmt(S.active.G):'—','network-wide'),
+    tile('Active Z-lines',S.active?fmt(S.active.Z):'—',`${fmt(S.today)} bans set today`),
+  ].join('');
+  $('#protTable').innerHTML=P.length?`<tr><th>Server</th><th class="n">DNSBL hits</th><th class="n">DNSBL bans</th><th class="n">Scanned</th><th class="n">Proxies</th><th class="n">Scanner bans</th><th class="n">Spam actions</th><th class="n">Rules</th></tr>`+
+    P.map(p=>`<tr><td class="mono">${esc(short(p.name))}</td><td class="n">${fmt(p.dnsbl_hits)}</td><td class="n">${fmt(p.dnsbl_bans)}</td><td class="n">${p.scanned==null?'off':fmt(p.scanned)}</td><td class="n">${p.proxies==null?'—':fmt(p.proxies)}</td><td class="n">${fmt(p.scan_bans)}</td><td class="n">${fmt(p.spam)}</td><td class="n">${fmt(p.spam_rules)}</td></tr>`).join('')
+    :'<tr><td class="empty">No stats lines yet: set <span class="mono">[debug_channel] stats_interval = 300</span> on every server.</td></tr>';
+  $('#banTable').innerHTML=`<tr><th>When</th><th>Type</th><th>Mask</th><th>Set by</th><th>Reason</th><th>Duration</th></tr>`+(S.recent.length?S.recent.map(r=>`<tr><td>${ago(T(r.t))}</td><td><span class="tag">${esc(r.type)}</span></td><td class="mono">${esc(r.mask)}</td><td>${esc(r.by)}</td><td>${esc(r.reason)}</td><td>${r.dur?dur(r.dur):'permanent'}</td></tr>`).join(''):'<tr><td colspan="6" style="color:var(--muted)">No bans seen yet.</td></tr>');
+}
+function healthTable(){
+  const ports=[...new Set(SERVERS.flatMap(s=>s.probes.map(p=>p.port)))].sort((a,b)=>a-b);
+  if(!ports.length){$('#healthTable').innerHTML='<tr><td class="empty">No probes yet (they run every few minutes).</td></tr>';return}
+  $('#healthTable').innerHTML=`<tr><th>Server</th>${ports.map(p=>`<th>${p}</th>`).join('')}<th>Certificate</th><th>Checked</th></tr>`+SERVERS.map(s=>{
+    const by=Object.fromEntries(s.probes.map(p=>[p.port,p])),tls=s.probes.find(p=>p.tls&&p.ok);
+    const cell=p=>!p?'<td style="color:var(--muted)">—</td>':`<td><span class="pill" data-tip="${esc(esc(p.err||(p.tls?'TLS handshake':'TCP connect')))}"><span class="dot ${p.ok?(p.err?'warn':'good'):'crit'}"></span>${p.ok?Math.round(p.ms)+' ms':'closed'}</span></td>`;
+    const cd=tls&&tls.cert_days!=null?`<span class="pill"><span class="dot ${tls.cert_days<7?'crit':tls.cert_days<21?'warn':'good'}"></span>${tls.cert_days} days left</span>`:'—';
+    const t=Math.max(0,...s.probes.map(p=>p.t));
+    return `<tr><td class="mono">${esc(s.name)}</td>${ports.map(p=>cell(by[p])).join('')}<td>${cd}</td><td style="color:var(--muted);font-size:12px">${t?ago(T(t)):'—'}</td></tr>`}).join('');
+}
+function charts(){
+  let data=D.series[RANGE]||[],res=RANGE;
+  if(data.length<6&&RANGE>1)for(const r of [7,1])if(r<RANGE&&(D.series[r]||[]).length>data.length){data=D.series[r];res=r} /* a new install: show the finer series */
+  $('#usersNote').textContent=`Network total, ${res===1?'5-minute':res===7?'hourly':res===30?'2-hour':'daily'} average`+(res!==RANGE?` — only ${dur((NOW-T(D.first))/1000)} of data so far`:'');
+  lineChart($('#usersChart'),{series:[{name:'Users',color:'var(--s1)',data}],height:280});
+  lineChart($('#accChart'),{series:[{name:'Accounts',color:'var(--s1)',data:D.services.accounts}],dateFmt:t=>day(t)});
+  barChart($('#regChart'),{rows:D.services.regs,keys:[{key:'reg',name:'New accounts',color:'var(--s1)'}]});
+  if(ADMIN){
+    barChart($('#banChart'),{rows:D.security.days,keys:[{key:'K',name:'K-line',color:'var(--s1)'},{key:'G',name:'G-line',color:'var(--s2)'},{key:'Z',name:'Z-line',color:'var(--s3)'},{key:'S',name:'SHUN',color:'var(--s4)'}]});
+    barChart($('#srcChart'),{rows:D.security.days,keys:[{key:'src_dnsbl',name:'DNSBL',color:'var(--s1)'},{key:'src_protection',name:'Proxy scanner',color:'var(--s2)'},{key:'src_spam',name:'Spam filter',color:'var(--s3)'},{key:'src_connect-flood',name:'Connect flood',color:'var(--s5)'},{key:'src_manual',name:'Opers',color:'var(--s4)'}]});
+    barChart($('#protChart'),{rows:D.security.days,keys:[{key:'dnsbl_hits',name:'DNSBL hits',color:'var(--s1)'},{key:'proxies',name:'Open proxies found',color:'var(--s2)'},{key:'spam_actions',name:'Spam filter actions',color:'var(--s3)'}]});
+  }
+  mapView();heat();
+}
+
+/* ---------- boot ---------- */
+document.title=D.network+' network stats';
+$('#netname').textContent=D.network;
+$('#gen').textContent=`Updated ${utc(NOW)} · ${SERVERS.length} servers · sampled every ${D.sample}s · kept ${D.retention} days`;
+$('#rolebadge').innerHTML=ADMIN?'<span class="badge">Admin</span>':(D.public&&location.protocol.startsWith('http')?'<a class="badge" href="/admin/">Log in</a>':'');
+$('#foot').innerHTML=`SekurIRCd netstats · map data Natural Earth${D.geoip?' · IP geolocation by <a href="https://db-ip.com">DB-IP</a>':''}`;
+tiles();incidents();linkTable();serverTable();clients();svcTiles();security();healthTable();charts();
+document.querySelectorAll('[data-range]').forEach(b=>b.onclick=()=>{RANGE=+b.dataset.range;document.querySelectorAll('[data-range]').forEach(x=>x.setAttribute('aria-pressed',x===b));incidents();linkTable();charts()});
+document.querySelectorAll('[data-region]').forEach(b=>b.onclick=()=>{REGION=b.dataset.region;document.querySelectorAll('[data-region]').forEach(x=>x.setAttribute('aria-pressed',x===b));mapView()});
+const theme=t=>{document.documentElement.dataset.theme=t;document.querySelectorAll('[data-theme-btn]').forEach(x=>x.setAttribute('aria-pressed',x.dataset.themeBtn===t));try{localStorage.setItem('netstats-theme',t)}catch(e){}};
+document.querySelectorAll('[data-theme-btn]').forEach(b=>b.onclick=()=>theme(b.dataset.themeBtn));
+try{const t=localStorage.getItem('netstats-theme');if(t)theme(t)}catch(e){}
+let rt;new ResizeObserver(()=>{clearTimeout(rt);rt=setTimeout(charts,120)}).observe(document.querySelector('main'));
+setTimeout(()=>{if(location.protocol.startsWith('http'))location.reload()},5*6e4); /* the served page refreshes itself */
+</script>
+</body>
+</html>

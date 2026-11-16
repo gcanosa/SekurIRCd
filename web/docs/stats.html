@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stats panel · SekurIRCd docs</title>
+<meta name="description" content="The SekurIRCd network stats panel: a self-hosted web dashboard with a world map of your servers, users over time, netsplits and their reasons, uptime, services, protection, bans and health checks.">
+<link rel="canonical" href="https://gcanosa.github.io/SekurIRCd/docs/stats.html">
+<meta property="og:title" content="Stats panel · SekurIRCd docs">
+<meta property="og:description" content="The SekurIRCd network stats panel: a self-hosted web dashboard with a world map of your servers, users over time, netsplits and their reasons, uptime, services, protection, bans and health checks.">
+<meta property="og:image" content="https://gcanosa.github.io/SekurIRCd/img/og.png">
+<meta property="og:type" content="website">
+<meta name="twitter:card" content="summary_large_image">
+<meta property="og:url" content="https://gcanosa.github.io/SekurIRCd/docs/stats.html">
+<link rel="icon" href="../img/favicon.ico" sizes="any">
+<script>(function(){var t;try{t=localStorage.getItem("theme")}catch(e){}if(t!=="light"&&t!=="dark")t=matchMedia("(prefers-color-scheme: light)").matches?"light":"dark";document.documentElement.dataset.theme=t})()</script>
+<link rel="stylesheet" href="../css/site.css">
+</head>
+<body data-root="../" data-page="stats">
+<header id="site-header"></header>
+<div class="wrap docs-layout">
+<aside id="docs-nav" class="docs-nav"></aside>
+<main class="docs">
+<h1>stats panel</h1>
+<p>The stats panel is a web page for the people who run the network. It answers the questions an IRC admin asks every day: is everything linked, how many
+  people are on, when did that leaf split and why, are services up, is the protection layer catching anything, and will a certificate expire soon.
+  It keeps the history, so you can also see last week or last year.</p>
+<p>It is optional and off by default. Nothing is collected, written or served until you turn it on, and it needs no extra software:
+  <code>stats/netstats.py</code> is plain Python (3.11 or newer, standard library only) and stores its history in SQLite.</p>
+
+<h2>what it shows</h2>
+<div class="tablewrap"><table>
+<tr><th>Section</th><th>What you see</th></tr>
+<tr><td>Overview</td><td>Users online, the 30-day peak, servers linked, link availability, channels, services status. A <strong>world map</strong> with every hub and leaf
+  and the links between them (a split link turns red), users over 24 hours, 7 days, 30 days or a year, and every incident.</td></tr>
+<tr><td>Links</td><td>Each link with a timeline of its outages, uptime for the range, how many times it split, and the last reason
+  (<code>Ping timeout: 180 seconds</code>, <code>Connection closed by peer</code>, <code>SQUIT by &lt;oper&gt;: &lt;reason&gt;</code>, ...).</td></tr>
+<tr><td>Servers</td><td>Users and share per server, location, version, how long it has been up or linked, memory and CPU.</td></tr>
+<tr><td>Users</td><td>Connections per hour of the week (a heatmap), and right now: TLS, logged in, away, opers.</td></tr>
+<tr><td>Services</td><td>NickServ/ChanServ status, uptime and restarts, registered accounts and channels, new registrations per day.</td></tr>
+<tr><td>Security <small>(admin only)</small></td><td>The <a href="protection.html">Protection bundle</a> per server: DNSBL hits and bans, open proxies the scanner found,
+  spam filter actions and how many rules are loaded. Bans per day by type and by who set them (DNSBL, scanner, spam filter, connect flood, opers),
+  active K/G/Z-lines and the latest bans with their masks and reasons.</td></tr>
+<tr><td>Health checks</td><td>netstats connects to every server from outside: each client port open or closed, how long the TLS handshake took, and
+  how many days the TLS certificate has left.</td></tr>
+</table></div>
+
+<h2>how it works</h2>
+<p>There is no extra bot on your network and nothing to install on the leaves.</p>
+<ol>
+  <li><strong>The hub</strong> already knows the whole network. When services ask (a <code>SVCSTATS</code> request over their link), it sends a
+    snapshot (users, channels, every server and its uplink) and, from then on, every link, split (with its reason) and ban as it happens.</li>
+  <li><strong>Every server</strong> sends its own numbers (CPU, memory, version, DNSBL, proxy scanner, spam filter) every
+    <code>stats_interval</code> seconds, network-wide, as the stats line in the debug channel. The hub passes those on too.</li>
+  <li><strong>Services</strong> (<code>bin/services</code>, next to the hub) write all of it to <code>stats/events.log</code>: a snapshot every minute, events as they come.</li>
+  <li><strong>netstats</strong> loads that log every minute into <code>stats/stats.db</code>, probes the servers from outside, and shows the result.</li>
+</ol>
+<p>Since services run once per network, next to the hub, the panel runs there too. A leaf only needs <code>stats_interval</code>.</p>
+<p>History is kept per minute for 7 days, per hour for 90 days and per day for <code>retention_days</code> (365 by default), so the database stays small.</p>
+
+<h2>turning it on</h2>
+<p>The quickest way is to answer yes in the config generator (<code>sekurircd --makeconf</code> or <code>tools/makeconf.py</code>), or tick it in the
+  <a href="wizard.html">web wizard</a>. It writes <code>stats/stats.toml</code> with your admin login and sets <code>stats_interval</code>. By hand, on the hub:</p>
+<pre>./sekurircd enable-stats                          # writes stats/stats.toml from the template, collector on
+stats/netstats.py --user --admin --add yourname   # a login for the panel (asks for its password)
+./sekurircd start-stats                           # http://127.0.0.1:8089/admin/</pre>
+<p>Services notice <code>stats/stats.toml</code> within 30 seconds; nothing needs a restart and nobody is disconnected. Then, on <strong>every</strong> server
+  (hub and leaves), for CPU, memory, version, the protection numbers and the heatmap:</p>
+<pre>[debug_channel]
+enabled = false            # the channel itself is optional
+stats_interval = 300</pre>
+<p>Apply that with <code>/REHASH</code>.</p>
+
+<h3>day to day</h3>
+<div class="tablewrap"><table>
+<tr><th>Command</th><th>What it does</th></tr>
+<tr><td><code>./sekurircd start-stats</code> / <code>stop-stats</code> / <code>restart-stats</code></td><td>The panel alone. <code>./sekurircd start</code>, <code>stop</code> and <code>restart</code> include it.</td></tr>
+<tr><td><code>./sekurircd status</code></td><td>Shows <code>netstats: running (pid N)</code>, <code>stopped</code> or <code>disabled</code>.</td></tr>
+<tr><td><code>./sekurircd disable-stats</code></td><td>Everything off: stops the panel and renames <code>stats.toml</code> to <code>stats.toml.disabled</code>, so services stop collecting. History and logins are kept.</td></tr>
+<tr><td><code>./sekurircd enable-stats</code></td><td>Back on, exactly as it was.</td></tr>
+</table></div>
+<p>The panel logs to <code>logs/netstats.log</code>. With systemd, <code>systemctl --user enable --now netstats</code> runs it instead of the wrapper
+  (see <a href="install.html">install</a>).</p>
+
+<h2>logins</h2>
+<p>There are two kinds of login. An <strong>admin</strong> sees everything. A <strong>viewer</strong> sees the same page without the Security section
+  and without server IP addresses.</p>
+<pre>stats/netstats.py --user --admin --add alice     # asks for the password
+stats/netstats.py --user --viewer --add staff
+stats/netstats.py --user --status                # lists them
+stats/netstats.py --user --viewer --del staff
+stats/netstats.py --mkpasswd                     # just print a hash, for a [[users]] entry written by hand</pre>
+<p>They edit the <code>[[users]]</code> entries in <code>stats/stats.toml</code> (passwords are stored as scrypt hashes, like operator passwords) and the
+  running panel picks the change up at once. After 10 wrong passwords in 10 minutes, an address has to wait.</p>
+<p>The logged-in page is at <code>/admin/</code>. The page at <code>/</code> asks for a login too, unless you set <code>public = true</code>: then anyone gets
+  the viewer page there, with a <em>Log in</em> link for the rest.</p>
+
+<h2>putting it online</h2>
+<p>By default the panel listens on <code>127.0.0.1:8089</code> only. To reach it from outside, either:</p>
+<ul>
+  <li><strong>use a reverse proxy</strong> (recommended) that already serves your website with HTTPS:
+<pre># nginx
+location /stats/ {
+    proxy_pass http://127.0.0.1:8089/;
+    proxy_set_header Authorization $http_authorization;
+}</pre></li>
+  <li><strong>or let it serve HTTPS itself</strong>: set <code>bind = "0.0.0.0"</code> and point <code>tls_cert</code>/<code>tls_key</code> at a certificate
+    (the ircd's works, for example <code>"../config/tls/cert.pem"</code>), and open the port in your firewall.</li>
+  <li><strong>or just look at it over SSH</strong>: <code>ssh -L 8089:127.0.0.1:8089 yourhub</code>, then open <code>http://127.0.0.1:8089/admin/</code>.</li>
+</ul>
+
+<h3>static pages for a website</h3>
+<p>If you'd rather not run a web server at all, set <code>[http] enabled = false</code> and the paths under <code>[export]</code>, and run
+  <code>netstats.py render</code> from cron. It writes a viewer page (<code>public_html</code>) and an admin page (<code>admin_html</code>, protect it with your
+  web server); each is a single self-contained HTML file.</p>
+<pre>*/5 * * * *  cd /home/irc/SekurIRCd &amp;&amp; python3 stats/netstats.py render</pre>
+
+<h2>the map</h2>
+<p>The map is built into the page (Natural Earth, public domain), so it works without any outside request. Each server is placed by its address:</p>
+<ul>
+  <li>run <code>stats/netstats.py geoip-update</code> once a month to download the free DB-IP Lite city database (CC BY 4.0). Lookups are made locally:
+    no server address is ever sent anywhere.</li>
+  <li>or place a server yourself, which also fixes a wrong guess:
+<pre>[[servers]]
+name = "irc.example.net"     # as in /LINKS
+location = "Amsterdam, NL"
+lat = 52.37
+lon = 4.90</pre></li>
+</ul>
+<p>The same <code>[[servers]]</code> entry can set <code>host</code> (what to probe and locate, when the server name doesn't resolve), <code>ports</code>
+  (which ports the health checks try) and <code>hide = true</code> (leave it off the page).</p>
+
+<h2>configuration</h2>
+<p><code>stats/stats.toml</code>, with every option explained in <a href="https://github.com/gcanosa/SekurIRCd/blob/main/stats/stats.template.toml">stats.template.toml</a>:</p>
+<div class="tablewrap"><table>
+<tr><th>Section</th><th>What it sets</th></tr>
+<tr><td><code>[collector]</code></td><td><code>enabled</code> (services collect), <code>sample_seconds</code> (snapshot interval, 60), <code>log</code>.</td></tr>
+<tr><td><code>[storage]</code></td><td><code>database</code>, <code>retention_days</code> (7 to 3650).</td></tr>
+<tr><td><code>[http]</code></td><td><code>enabled</code>, <code>network_name</code>, <code>bind</code>, <code>port</code>, <code>tls_cert</code>, <code>tls_key</code>, <code>public</code>.</td></tr>
+<tr><td><code>[export]</code></td><td><code>public_html</code>, <code>admin_html</code>: what <code>render</code> writes.</td></tr>
+<tr><td><code>[geoip]</code></td><td><code>file</code>: the DB-IP database <code>geoip-update</code> downloads.</td></tr>
+<tr><td><code>[health]</code></td><td><code>ports</code>, <code>tls_ports</code>, <code>interval</code>, <code>timeout</code>.</td></tr>
+<tr><td><code>[[users]]</code>, <code>[[servers]]</code></td><td>Logins (managed with <code>--user</code>) and per-server overrides.</td></tr>
+</table></div>
+<p><code>tools/confcheck.py</code> checks this file along with the others, <code>tools/backup-config.sh</code> backs it up with the database, and
+  <code>tools/upgrade.py</code> keeps both and restarts the panel after an upgrade.</p>
+</main>
+</div>
+<footer id="site-footer"></footer>
+<script src="../js/site.js"></script>
+</body>
+</html>

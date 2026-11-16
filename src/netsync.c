@@ -394,6 +394,7 @@ int netsync_link_up(server_t *srv, link_conn_t *lc, const char *name, const char
     HASH_ADD_STR(srv->servers, sid, s);
     lc->is_server = 1;
     lc->nserver = s;
+    link_svc_statev(srv, "SVCSTATEV", (const char *[]){"LINK", name, srv->self_srv->name}, 3, s->desc);
     log_info("netsync", "linked with server %s (%s)", name, sid);
     /* IRCv3 netjoin: the JOINs of its burst go into one batch, closed by its EOB. ponytail: one netjoin at a time -- a
      * second link bursting meanwhile takes this slot over (the first one's batch just closes early). */
@@ -462,6 +463,7 @@ void netsync_link_down(server_t *srv, link_conn_t *lc, const char *reason) {
     char name[128], sid[SID_LEN + 1];
     snprintf(name, sizeof name, "%s", root->name);
     snprintf(sid, sizeof sid, "%s", root->sid);
+    link_svc_statev(srv, "SVCSTATEV", (const char *[]){"SPLIT", name, srv->self_srv->name}, 3, reason ? reason : "Link closed");
     remove_server_tree(srv, root);
     char line[300];
     const char *p[] = {sid};
@@ -494,6 +496,7 @@ static void handle_server(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     s->route = lc;
     s->linked_at = time(NULL);
     HASH_ADD_STR(srv->servers, sid, s);
+    link_svc_statev(srv, "SVCSTATEV", (const char *[]){"LINK", name, from->name}, 3, desc);
     char line[300], hopb[8];
     snprintf(hopb, sizeof hopb, "%d", s->hop + 1);
     const char *p[] = {name, hopb, sid};
@@ -515,6 +518,7 @@ static void handle_squit(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     snprintf(sid, sizeof sid, "%s", s->sid);
     char snote[400]; /* a split elsewhere: only the server that dropped the link used to say so */
     snprintf(snote, sizeof snote, "Netsplit: %s %s (%s)", s->uplink ? s->uplink->name : "?", s->name, reason);
+    link_svc_statev(srv, "SVCSTATEV", (const char *[]){"SPLIT", s->name, s->uplink ? s->uplink->name : "-"}, 3, reason);
     remove_server_tree(srv, s);
     server_notify_opers(srv, snote);
     char line[300];
@@ -1385,7 +1389,7 @@ static void handle_rsquit(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     if (!s || s == srv->self_srv) return;
     if (s->route && s == s->route->nserver) {
         log_info("netsync", "RSQUIT: closing the link to %s on request", s->name);
-        link_close(srv, s->route);
+        link_close_why(srv, s->route, msg->nparams > 1 ? msg->params[msg->nparams - 1] : "SQUIT");
         return;
     }
     char fl[300];
@@ -1850,7 +1854,10 @@ static void handle_snote(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     char m[700];
     snprintf(m, sizeof m, "[%s] %s", from->name, text);
     if (!strcmp(kind, "s")) server_notify_opers(srv, m);
-    else if (!strcmp(kind, "d")) server_debug_line(srv, "stats", m);
+    else if (!strcmp(kind, "d")) {
+        server_debug_line(srv, "stats", m);
+        link_svc_statev(srv, "SVCSTATLINE", (const char *[]){from->name}, 1, text);
+    }
     char fl[700];
     irc_build(fl, sizeof fl, NULL, 0, from->sid, "SNOTE", (const char *[]){kind}, 1, text);
     flood(srv, lc, fl);
@@ -1870,7 +1877,9 @@ void netsync_squit_command(server_t *srv, client_t *oper, const char *name, cons
         char m[200];
         snprintf(m, sizeof m, "Closed link to %s (%s)", s->name, reason);
         notice_self(srv, oper, m);
-        link_close(srv, s->route);
+        char why[200];
+        snprintf(why, sizeof why, "SQUIT by %s: %s", oper->nick, reason);
+        link_close_why(srv, s->route, why);
         return;
     }
     /* a server further away: ask the server it hangs off (hop 1 from there) to close that link -- routed, not flooded,

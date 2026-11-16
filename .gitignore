@@ -21,6 +21,14 @@
 /services/*.json
 /services/*.json.bak*
 /services/*.pid
+/stats/stats.toml
+/stats/stats.toml.disabled
+/stats/*.db*
+/stats/*.log
+/stats/*.pid
+/stats/*.csv.gz*
+/stats/out/
+/stats/*.tmp
 *.d
 
 # Personal Claude Code skill, not project code.

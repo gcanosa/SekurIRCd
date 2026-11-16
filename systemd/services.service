@@ -19,8 +19,9 @@ RestartSec=2
 NoNewPrivileges=true
 ProtectSystem=strict
 # /etc/sekurircd: the account database the ircd's built-in NickServ kept there (accounts.json) is used in place;
-# /var/lib/sekurircd/chanserv: where the standalone chanserv kept chanserv.json, for a [storage] path still pointing there
-ReadWritePaths=/var/lib/sekurircd/services /var/lib/sekurircd/chanserv /etc/sekurircd
+# /var/lib/sekurircd/chanserv: where the standalone chanserv kept chanserv.json, for a [storage] path still pointing there;
+# /var/lib/sekurircd/stats: the stats collector's events.log, when stats.toml turns it on ("-": fine if it doesn't exist)
+ReadWritePaths=/var/lib/sekurircd/services /var/lib/sekurircd/chanserv /etc/sekurircd -/var/lib/sekurircd/stats
 
 [Install]
 WantedBy=default.target sekurircd.service

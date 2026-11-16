@@ -10,6 +10,8 @@
  *   NICK <nick> <user> <host> :<realname>   -- introduce a service pseudo-client (up to LINK_MAX_BOTS; a later line
  *                                              acts as the bot its ":nick!user@host" prefix names, else the first)
  *   SVCWATCH USERS                          -- subscribe to the user feed (link_svc_user)
+ *   SVCSTATS [<since>]                      -- a network snapshot (SVCSTATNET/SVCSTATSRV.../SVCSTATEND) and, from then on,
+ *                                              link/split/ban events (SVCSTATEV) and every server's stats line (SVCSTATLINE)
  *   SVSLOGIN/SVSJOIN/SVSNICK/KILL/SVCSASL/SVCREGRESULT <id> ...  -- account services (cmd_reg.c's svc_command)
  *   PRIVMSG/NOTICE <target> :<text>         -- literal IRC lines, relayed verbatim
  *   PING / PONG                             -- keepalive
@@ -60,6 +62,8 @@ typedef struct link_conn {
     struct client *bots[LINK_MAX_BOTS]; /* every one it introduced (a services daemon hosts ChanServ + NickServ) */
     int n_bots;
     int watch_users;        /* sent SVCWATCH USERS: gets the network's users and their changes (NickServ) */
+    int watch_stats;        /* sent SVCSTATS: gets server link/split, ban and stats-line events (the stats collector) */
+    char close_reason[160]; /* why link_close_why() closed it ("Ping timeout: 180 seconds"), the SQUIT reason; "" = Link closed */
     int is_server;          /* negotiated the SEKURNET state-sync protocol (see netsync.h); else a plain/service link */
     int peer_capab_sekurnet; /* acceptor side: the dialer sent CAPAB :SEKURNET before SERVER */
     char peer_capab[200];    /* the peer's CAPAB text ("SEKURNET PROTO=n MINPROTO=n VERSION=..."), see netsync_check_peer */
@@ -127,5 +131,14 @@ void link_notify_merge_ranks(struct server *srv, struct channel *chan, struct cl
  * <server> on connect/update, SVCNICK <uid> <nick>, SVCQUIT <uid>, SVCACCOUNT <uid> <account|*>. Service bots are skipped. */
 enum { SVC_EV_USER, SVC_EV_NICK, SVC_EV_QUIT, SVC_EV_ACCOUNT };
 void link_svc_user(struct server *srv, struct client *cl, int ev);
+
+/* link_close with a reason that becomes the netsplit's SQUIT reason (and the stats collector's). */
+void link_close_why(struct server *srv, link_conn_t *lc, const char *why);
+/* Sends one line to every services link that asked for the stats feed (SVCSTATS). */
+void link_svc_stats(struct server *srv, const char *line);
+/* Builds and sends one stats event, "<verb> <p...> :<trail>", if anyone asked for the feed:
+ *   SVCSTATEV LINK <server> <uplink> :<description>    SVCSTATEV SPLIT <server> <uplink> :<reason>
+ *   SVCSTATEV BAN <type> <set by> <seconds|0> <mask> :<reason>    SVCSTATLINE <server> :<its stats line> */
+void link_svc_statev(struct server *srv, const char *verb, const char **p, int n, const char *trail);
 
 #endif /* SEKURIRCD_LINK_H */

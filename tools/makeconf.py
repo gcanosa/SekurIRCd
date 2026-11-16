@@ -4,7 +4,8 @@
 
 Asks a few questions, then writes a complete sekurircd.toml and, if you run services (NickServ +
 ChanServ), a services.toml whose link name/password match it, and, with the Protection bundle on,
-a protection.toml (connection caps, flood guard, DNSBL, spam protection, proxy scanner). Passwords are stored as scrypt
+a protection.toml (connection caps, flood guard, DNSBL, spam protection, proxy scanner), and with the
+stats panel on, stats/stats.toml (stats/netstats.py, next to services). Passwords are stored as scrypt
 hashes wherever the server allows it; files are written 0600, an existing file is backed up first,
 and tools/confcheck.py (syntax, both daemons' --check, keys vs the templates, permissions) must
 accept the result without errors, or the old files are put back.
@@ -63,6 +64,10 @@ def render(a):
 
     if a.get("dbg"):
         L += ["", "[debug_channel]", "enabled = true", f"name = {q(a['dbg'])}", 'min_level = "WARNING"']
+    if a.get("statsline"):  # read even with the channel off: every server's numbers for the network's stats panel
+        if not a.get("dbg"): L += ["", "[debug_channel]", "enabled = false"]
+        L += ["# Users, bans, DNSBL/scanner/spam filter, CPU and memory every 5 minutes, network-wide (stats panel).",
+              "stats_interval = 300"]
 
     L += ["", "[messages]", 'motd = "ircd.motd"', 'oper_motd = "oper.motd"', 'rules = "ircd.rules"',
           f"history_size = {a['hist']}"]
@@ -144,6 +149,26 @@ def chk_modes(s):
 
 def chk_chans(s):
     return None if all(c[0] in "#&" for c in split(s)) else "channel names start with #"
+
+
+def render_stats(a):
+    """Answers -> stats/stats.toml text (the stats panel, stats/netstats.py), or None when it's off."""
+    if not a.get("stats"):
+        return None
+    S = ["# stats.toml written by tools/makeconf.py (the stats panel: stats/netstats.py, collector in bin/services).",
+         "# Every option is documented in stats/stats.template.toml. Logins: stats/netstats.py --user --status.", "",
+         "[collector]", "enabled = true", "sample_seconds = 60", 'log = "events.log"', "",
+         "[storage]", 'database = "stats.db"', "retention_days = 365", "",
+         "[http]", "enabled = true", f"network_name = {q(a['network'])}", f"bind = {q(a['stats_bind'])}",
+         f"port = {a['stats_port']}", f"tls_cert = {q(a.get('stats_cert', ''))}", f"tls_key = {q(a.get('stats_key', ''))}",
+         f"public = {str(a['stats_public']).lower()}", "",
+         "[export]", 'public_html = ""', 'admin_html = ""', "",
+         "[geoip]", 'file = "dbip-city-lite.csv.gz"', "",
+         "[health]", f"ports = [{a['port']}{', ' + str(a['tls_port']) if a['tls'] else ''}]",
+         f"tls_ports = [{a['tls_port'] if a['tls'] else ''}]", "interval = 300", "timeout = 5"]
+    for u in a.get("stats_users", []):
+        S += ["", "[[users]]", f"name = {q(u['name'])}", f"password = {q(u['hash'])}", f"role = {q(u['role'])}"]
+    return "\n".join(S) + "\n"
 
 
 def section(t):
@@ -246,6 +271,9 @@ def interview():
         print(dim("  Skipped: a leaf uses its hub's NickServ/ChanServ (and SASL) over the link. A second services daemon\n"
                   "  would be refused by the network."))
         a["svc"] = False
+        section("stats panel")
+        print(dim("  The network's stats panel runs next to the hub's services; a leaf only reports its own numbers."))
+        a["statsline"] = yes("Report this server's CPU, memory and protection numbers to the network (stats_interval)?", True)
         return a
     print(dim("  One services daemon per network, normally next to the hub. On a leaf whose hub already runs them, answer n:\n"
               "  the leaf reaches the hub's NickServ/ChanServ (and SASL) over the link. Two would collide."))
@@ -261,6 +289,28 @@ def interview():
         a["enforce"] = a["ns"] and yes("Enforce nick ownership (rename to Guest after 60s)?", False)
         a["admins"] = split(ask("Services admins, by account name (empty = none)", "")) if a["ns"] else []
         a["founder"] = ["o", "q"][pick("Channel founder rank", ["o: channel op (@)", "q: channel owner (~)"], 1)]
+
+        section("stats panel (stats/stats.toml)")
+        print(dim("  A web page for admins: world map of the servers, users over time, splits and their reasons, uptime,\n"
+                  "  services, protection (DNSBL, proxy scanner, spam filter), bans and health checks. Collected by services."))
+        a["stats"] = yes("Enable the network stats panel?", False)
+        if a["stats"]:
+            a["statsline"] = True
+            a["stats_port"] = int(ask("Panel port", "8089", chk_port))
+            print(dim("  127.0.0.1 = only through a reverse proxy (nginx/caddy) or an SSH tunnel; 0.0.0.0 = open to the internet."))
+            a["stats_bind"] = ask("Panel bind address", "127.0.0.1")
+            if a["stats_bind"] not in ("127.0.0.1", "::1", "localhost") and a["tls"] and \
+                    yes("Serve the panel over HTTPS with the ircd's TLS certificate?", True):
+                cfgdir = os.path.join(ROOT, "config")  # stats.toml paths are relative to stats/
+                rel = lambda p: os.path.relpath(p if os.path.isabs(p) else os.path.join(cfgdir, p), os.path.join(ROOT, "stats"))
+                a["stats_cert"], a["stats_key"] = rel(a["cert"]), rel(a["key"])
+            a["stats_public"] = yes("Let anyone see the viewer page without logging in (no IPs, no security data)?", False)
+            a["stats_users"] = []
+            name = ask("  Admin login name for the panel", "admin", lambda s: None if re.fullmatch(r"[A-Za-z0-9_.@-]{1,40}", s) else "letters, digits, _ . @ -")
+            pw = password("  Panel password")
+            print(dim("  hashing..."))
+            a["stats_users"].append({"name": name, "hash": scrypt_hash(pw), "role": "admin"})
+            print(dim("  More logins later: stats/netstats.py --user --admin|--viewer --add NAME"))
     return a
 
 
@@ -309,6 +359,12 @@ def write_all(files, svc_path):
         os.chmod(path, 0o600)
     print()
     ok = confcheck(files, svc_path)
+    for path, _ in files:
+        if os.path.basename(path) == "stats.toml":
+            r = subprocess.run([sys.executable, os.path.join(ROOT, "stats", "netstats.py"), "-c", path, "check"],
+                               capture_output=True, text=True)
+            print(("  " + green("✔ ") if r.returncode == 0 else "  " + red("✘ ")) + (r.stdout + r.stderr).strip())
+            ok = ok and r.returncode == 0
     if not ok:
         for path, bak in backups:
             if bak: shutil.move(bak, path)
@@ -343,7 +399,10 @@ def selftest():
              klines=True, umodes="iw", omodes="+osw", autojoin=["#lobby"], hist=50,
              opers=[{"name": "admin", "hash": scrypt_hash("pw"), "hosts": ["*@*"]}], operjoin="#opers", dbg="#dbg",
              email="a@b.c", loglevel="INFO", svc=True, link_port=7000, svc_name="services.test.org", svc_pass="p1",
-             svc_hash=scrypt_hash("p1"), other_links=False, ns=True, enforce=True, admins=["alice"], founder="q")
+             svc_hash=scrypt_hash("p1"), other_links=False, ns=True, enforce=True, admins=["alice"], founder="q",
+             stats=True, statsline=True, stats_port=8089, stats_bind="0.0.0.0", stats_cert="../config/tls/cert.pem",
+             stats_key="../config/tls/key.pem", stats_public=True, tls_port=6697,
+             stats_users=[{"name": "admin", "hash": scrypt_hash("pw"), "role": "admin"}])
     ircd, svc = render(a)
     assert svc is not None
     try:
@@ -368,6 +427,18 @@ def selftest():
                            capture_output=True, text=True)
         assert r.returncode == 0 and " ! " not in r.stdout, r.stdout  # confcheck has nothing to say about our output
     assert render(dict(a, svc=False))[1] is None and render_protection(dict(a, protect=False)) is None
+    assert render_stats(dict(a, stats=False)) is None
+    sys.path.insert(0, os.path.join(ROOT, "stats"))
+    import netstats
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "stats.toml")
+        open(p, "w").write(render_stats(a))
+        c = netstats.load_config(p)
+        assert c["users"][0]["role"] == "admin" and c["http"]["public"] and c["network"] == "TestNet"
+        assert c["health"]["ports"] == [6667] and c["http"]["tls_cert"].endswith("config/tls/cert.pem")
+    if "tomllib" in sys.modules:
+        assert tomllib.loads(ircd)["debug_channel"]["stats_interval"] == 300
+        assert tomllib.loads(render(dict(a, dbg="", statsline=False))[0]).get("debug_channel") is None
     print("selftest ok")
 
 
@@ -375,6 +446,7 @@ def main():
     ap = argparse.ArgumentParser(description="Write a complete sekurircd.toml (and services.toml) from a few questions.")
     ap.add_argument("-c", "--config", default=os.path.join(ROOT, "config", "sekurircd.toml"), help="sekurircd.toml to write")
     ap.add_argument("-s", "--services", default=os.path.join(ROOT, "services", "services.toml"), help="services.toml to write")
+    ap.add_argument("--stats", default=os.path.join(ROOT, "stats", "stats.toml"), help="stats.toml to write (the stats panel)")
     ap.add_argument("--print", action="store_true", help="write nothing, print the files")
     ap.add_argument("--no-banner", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--selftest", action="store_true", help=argparse.SUPPRESS)
@@ -383,15 +455,17 @@ def main():
     if not o.no_banner: subprocess.run(["bash", "-c", f'source "{ROOT}/tools/lib.sh"; banner'])
     print("A few questions, then a complete config. Enter keeps the [default]; Ctrl-C quits without writing.")
     print(dim("Prefer a browser? https://gcanosa.github.io/SekurIRCd/docs/wizard.html"))
-    exists = [p for p in (o.config, o.services, os.path.join(os.path.dirname(os.path.abspath(o.config)), "protection.toml"))
-              if os.path.exists(p)]
+    exists = [p for p in (o.config, o.services, os.path.join(os.path.dirname(os.path.abspath(o.config)), "protection.toml"),
+                          o.stats) if os.path.exists(p)]
     if exists and not o.print:
         print(yellow("\nAlready there (a backup is kept if you overwrite): " + ", ".join(exists)))
     a = interview()
     ircd, svc = render(a)
     prot = render_protection(a)
+    stats = render_stats(a)
     files = [(o.config, ircd)] + ([(o.services, svc)] if svc else []) + \
-        ([(os.path.join(os.path.dirname(os.path.abspath(o.config)), "protection.toml"), prot)] if prot else [])
+        ([(os.path.join(os.path.dirname(os.path.abspath(o.config)), "protection.toml"), prot)] if prot else []) + \
+        ([(o.stats, stats)] if stats else [])
     if o.print:
         for path, text in files:
             print("\n" + bold(f"# ---- {path}") + "\n" + text)
@@ -407,8 +481,12 @@ def main():
     if a.get("leaf") or not svc:
         print(f"  link it:       tools/linkmgmt.py add   {dim('(choose: this server dials the hub; paste what it prints on the hub)')}")
         print(f"                 {dim('services stay off here: ./sekurircd status says so; an old services.toml? ./sekurircd disable-services')}")
+    if stats:
+        scheme = "https" if a.get("stats_cert") else "http"
+        print(f"  stats panel:   {scheme}://{a['stats_bind']}:{a['stats_port']}/admin/   {dim('(./sekurircd start runs it; on/off: ./sekurircd enable-stats|disable-stats)')}")
+        print(f"                 {dim('map positions: stats/netstats.py geoip-update, or lat/lon per server in ' + o.stats)}")
     if os.path.abspath(o.config) == os.path.join(ROOT, "config", "sekurircd.toml"):
-        print(f"  start:         ./sekurircd start   {dim('(both daemons, from ' + ROOT + ')')}")
+        print(f"  start:         ./sekurircd start   {dim('(the daemons, from ' + ROOT + ')')}")
     else:
         print(f"  start:         sekurircd --config {o.config}" + (f"   and   services --config {o.services}" if svc else ""))
 

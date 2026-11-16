@@ -1,0 +1,28 @@
+# A systemd *user* unit (installs under ~/.config/systemd/user, run via
+# `systemctl --user ...`) -- no root/sudo anywhere. `make install` rewrites
+# the /usr/local/lib, /etc/sekurircd and /var/lib/sekurircd paths below to
+# $(PREFIX)/$(SYSCONFDIR)/$(STATEDIR) -- see the Makefile's install target.
+# Edit those by hand if installing this file directly.
+#
+# The stats panel (stats/netstats.py): only on the server that runs services (the hub), and only once
+# stats.toml exists (./sekurircd enable-stats, or copy stats.template.toml and add a login with
+# netstats.py --user --admin --add NAME). Independent of the ircd: restarting it disconnects nobody.
+[Unit]
+Description=SekurIRCd network stats panel (netstats)
+After=network.target services.service
+ConditionPathExists=/etc/sekurircd/stats.toml
+
+[Service]
+Type=simple
+WorkingDirectory=/var/lib/sekurircd/stats
+ExecStartPre=/usr/bin/env python3 /usr/local/lib/sekurircd/stats/netstats.py -c /etc/sekurircd/stats.toml check
+ExecStart=/usr/bin/env python3 /usr/local/lib/sekurircd/stats/netstats.py -c /etc/sekurircd/stats.toml serve
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+# its database and the collector's log live here; stats.toml itself is only read (--user edits run as you, not here)
+ReadWritePaths=/var/lib/sekurircd/stats
+
+[Install]
+WantedBy=default.target

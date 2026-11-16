@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Config wizard · SekurIRCd docs</title>
-<meta name="description" content="Answer a few questions and get a complete sekurircd.toml, plus services.toml for NickServ and ChanServ.">
+<meta name="description" content="Answer a few questions and get a complete sekurircd.toml, plus services.toml for NickServ and ChanServ, protection.toml and the stats panel's stats.toml.">
 <link rel="canonical" href="https://gcanosa.github.io/SekurIRCd/docs/wizard.html">
 <meta property="og:title" content="Config wizard · SekurIRCd docs">
 <meta property="og:description" content="Answer a few questions and get a complete sekurircd.toml, plus services.toml for NickServ and ChanServ.">
@@ -24,7 +24,8 @@
 <h1>wizard</h1>
 <p>Fill in the form and the wizard writes a complete <code>sekurircd.toml</code>. If you turn on services, it also writes
   <code>services.toml</code> for NickServ and ChanServ, with both files' link settings already matching. With the Protection
-  bundle on, it writes <code>protection.toml</code> too.
+  bundle on, it writes <code>protection.toml</code> too, and with the <a href="stats.html">stats panel</a> on,
+  <code>stats.toml</code>.
   The files are built in your browser and nothing is sent anywhere. Any setting you leave out uses its built-in default,
   which <a href="configuration.html">configuration</a> documents.</p>
 <p class="note">On the server itself, <code>tools/makeconf.py</code> (or <code>sekurircd --makeconf</code>) asks the same questions in the terminal.
@@ -162,6 +163,23 @@
     </div>
   </div>
 </fieldset>
+
+<fieldset><legend>stats panel</legend>
+  <label class="chk"><input type="checkbox" name="statsline" checked> Report this server's numbers every 5 minutes (<code>[debug_channel] stats_interval</code>): users, bans, DNSBL, proxy scanner, spam filter, CPU and memory. Every server needs it for the network's panel.</label>
+  <div data-if="svc">
+    <label class="chk"><input type="checkbox" name="stats"> Run the <a href="stats.html">stats panel</a> here: a web page with a world map of the servers, users over time, splits and their reasons, uptime, services, protection, bans and health checks</label>
+    <p class="note">The panel runs next to services, so only on the hub. A leaf just reports its numbers (the box above).</p>
+    <div data-if="stats">
+      <div class="row">
+        <label>Panel port<input name="st_port" type="number" min="1" max="65535" value="8089"></label>
+        <label>Bind address <small>127.0.0.1 = behind a reverse proxy</small><input name="st_bind" value="127.0.0.1"></label>
+      </div>
+      <label class="chk"><input type="checkbox" name="st_tls"> Serve it over HTTPS with the ircd's TLS certificate (when it's not behind a proxy)</label>
+      <label class="chk"><input type="checkbox" name="st_public"> Anyone can see the viewer page without logging in (no IPs, no security data)</label>
+      <p class="hint">Logins are added on the server, as scrypt hashes: <code>stats/netstats.py --user --admin --add yourname</code> (see next steps).</p>
+    </div>
+  </div>
+</fieldset>
 </form>
 
 <div id="wz-err" class="note" hidden></div>
@@ -180,6 +198,12 @@
 <h2>protection.toml</h2>
 <p><button type="button" class="btn primary" data-dl="prot">download protection.toml</button></p>
 <pre><code id="out-prot"></code></pre>
+</div>
+
+<div data-if="svc&stats">
+<h2>stats.toml</h2>
+<p><button type="button" class="btn primary" data-dl="stats">download stats.toml</button></p>
+<pre><code id="out-stats"></code></pre>
 </div>
 
 <h2>next steps</h2>
@@ -223,7 +247,7 @@
 
   function build() {
     var err = [], L = [], S = [];
-    document.querySelectorAll("[data-if]").forEach(function (el) { el.hidden = !c(el.dataset.if); });
+    document.querySelectorAll("[data-if]").forEach(function (el) { el.hidden = !el.dataset.if.split("&").every(c); });
 
     var name = v("name"), sid = v("sid").toUpperCase(), svc = c("svc");
     if (!/^[A-Za-z0-9.-]+\.[A-Za-z0-9.-]+$/.test(name)) err.push("Server name must be a hostname with a dot, e.g. irc.example.org.");
@@ -232,6 +256,10 @@
       var n = +v(p); if (!(n >= 1 && n <= 65535)) err.push(p.replace("_", " ") + " must be 1-65535.");
     });
     if (c("ws") && c("ws_tls") && !c("tls")) err.push("wss:// needs the TLS listener enabled.");
+    if (svc && c("stats")) {
+      var sp = +v("st_port"); if (!(sp >= 1 && sp <= 65535)) err.push("Panel port must be 1-65535.");
+      if (c("st_tls") && !c("tls")) err.push("The panel's HTTPS uses the ircd's TLS certificate: enable TLS above.");
+    }
     if (svc && !v("svc_pass")) err.push("Services need a link password.");
     if (svc && v("svc_name") === name) err.push("Services name must differ from the server name.");
 
@@ -265,6 +293,11 @@
 
     if (c("dbg")) L.push("", "[debug_channel]", "enabled = true", "name = " + q(v("dbg_name")), "min_level = " + q(v("dbg_level")));
     if (svc && c("dbg")) L.push('chanserv_pidfile = "services/services.pid"');
+    var stats = svc && c("stats");
+    if (c("statsline") || stats) {  // read even with the channel off
+      if (!c("dbg")) L.push("", "[debug_channel]", "enabled = false");
+      L.push("# Users, bans, DNSBL/scanner/spam filter, CPU and memory every 5 minutes, network-wide (stats panel).", "stats_interval = 300");
+    }
 
     L.push("", "[messages]", 'motd = "ircd.motd"', 'oper_motd = "oper.motd"', 'rules = "ircd.rules"', "history_size = " + +v("hist"));
     if (c("histfile")) L.push('history_file = "history.json"');
@@ -341,24 +374,46 @@
         "[scanner.target]", "ip = " + q(scanIp), "port = " + +v("port"));
     }
 
+    var T = [];
+    if (stats) {
+      var rel = function (p) { return p.charAt(0) === "/" ? p : "../config/" + p; };  // stats.toml paths are relative to stats/
+      var https = c("st_tls") && c("tls");
+      T.push("# stats.toml generated by the SekurIRCd config wizard (the stats panel: stats/netstats.py, collector in bin/services).",
+        "# Every option is documented in stats/stats.template.toml. Logins: stats/netstats.py --user --admin|--viewer --add NAME.", "",
+        "[collector]", "enabled = true", "sample_seconds = 60", 'log = "events.log"', "",
+        "[storage]", 'database = "stats.db"', "retention_days = 365", "",
+        "[http]", "enabled = true", "network_name = " + q(v("network")), "bind = " + q(v("st_bind") || "127.0.0.1"),
+        "port = " + +v("st_port"), "tls_cert = " + q(https ? rel(v("cert")) : ""), "tls_key = " + q(https ? rel(v("key")) : ""),
+        "public = " + tf(c("st_public")), "",
+        "[export]", 'public_html = ""', 'admin_html = ""', "",
+        "[geoip]", 'file = "dbip-city-lite.csv.gz"', "",
+        "[health]", "ports = [" + +v("port") + (c("tls") ? ", " + +v("tls_port") : "") + "]",
+        "tls_ports = [" + (c("tls") ? +v("tls_port") : "") + "]", "interval = 300", "timeout = 5");
+    }
+
     var steps = [
-      "# 1. save sekurircd.toml" + (c("protect") ? " and protection.toml" : "") + " into config/" + (svc ? ", services.toml into services/" : ""),
+      "# 1. save sekurircd.toml" + (c("protect") ? " and protection.toml" : "") + " into config/" + (svc ? ", services.toml into services/" : "") + (stats ? ", stats.toml into stats/" : ""),
       "# ircd.motd is made from its template on first start: edit it then"
     ];
     if (c("tls")) steps.push("tools/mkcert.sh --domain " + name + "    # or any PEM cert/key at the paths above");
     if (plain || svc) steps.push("", "# 2. replace plain passwords with scrypt hashes (same passwords keep working)", "tools/confcheck.py --fix --write    # run from the SekurIRCd checkout");
-    steps.push("chmod 600 config/sekurircd.toml" + (c("protect") ? " config/protection.toml" : "") + (svc ? " services/services.toml" : ""));
+    steps.push("chmod 600 config/sekurircd.toml" + (c("protect") ? " config/protection.toml" : "") + (svc ? " services/services.toml" : "") + (stats ? " stats/stats.toml" : ""));
+    if (stats) steps.push("stats/netstats.py --user --admin --add yourname    # the panel's login (asks for its password)");
     steps.push("", "# 3. check, then start", "bin/sekurircd --config config/sekurircd.toml --check");
     if (svc) steps.push("bin/services --config services/services.toml --check");
+    if (stats) steps.push("stats/netstats.py check");
     if (!svc) steps.push("", "# a leaf: link it to the hub (run it here, paste what it prints on the hub), then start",
                          "tools/linkmgmt.py add    # choose: this server dials the hub");
     steps.push("./sekurircd start");
     if (!svc) steps.push("./sekurircd status    # services: \"not run here: this server is a leaf\" once it is linked as one");
+    if (stats) steps.push("# the panel starts with ./sekurircd start: " + (c("st_tls") && c("tls") ? "https" : "http") + "://" + (v("st_bind") || "127.0.0.1") + ":" + +v("st_port") + "/admin/",
+                          "# map positions: stats/netstats.py geoip-update (or lat/lon per server in stats.toml)");
     if (!nops) steps.push("", "# note: no operators configured, so nobody can /OPER");
 
     document.getElementById("out-ircd").textContent = L.join("\n") + "\n";
     document.getElementById("out-svc").textContent = S.join("\n") + "\n";
     document.getElementById("out-prot").textContent = P.join("\n") + "\n";
+    document.getElementById("out-stats").textContent = T.join("\n") + "\n";
     document.getElementById("steps").textContent = steps.join("\n");
     var e = document.getElementById("wz-err");
     e.hidden = !err.length;
@@ -367,7 +422,7 @@
 
   document.querySelectorAll("[data-dl]").forEach(function (b) {
     b.onclick = function () {
-      var k = b.dataset.dl, name = { ircd: "sekurircd.toml", svc: "services.toml", prot: "protection.toml" }[k];
+      var k = b.dataset.dl, name = { ircd: "sekurircd.toml", svc: "services.toml", prot: "protection.toml", stats: "stats.toml" }[k];
       var a = document.createElement("a");
       a.href = URL.createObjectURL(new Blob([document.getElementById("out-" + k).textContent], { type: "application/toml" }));
       a.download = name;

@@ -539,6 +539,7 @@ void link_forward_line(link_conn_t *lc, const char *line) {
     size_t len = strlen(line), need = lc->sbuf_len - lc->sbuf_off + len + 2;
     if (need > LINK_SENDQ_MAX) { /* dropping one line silently desyncs the network; dropping the link resyncs it */
         log_warn("link", "link '%s' sendq exceeded (%zu bytes), closing it", lc->peer_name, need);
+        if (!lc->close_reason[0]) snprintf(lc->close_reason, sizeof lc->close_reason, "SendQ exceeded");
         lc->closing = 1;
         return;
     }
@@ -575,13 +576,73 @@ void link_handle_writable(server_t *srv, link_conn_t *lc) {
             if (lc->sbuf_cap > 65536) { free(lc->sbuf); lc->sbuf = NULL; lc->sbuf_cap = 0; }
         }
     } else if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
-        link_close(srv, lc);
+        char why[96];
+        snprintf(why, sizeof why, "Write error: %s", strerror(errno));
+        link_close_why(srv, lc, why);
     }
 }
 
 void link_close(server_t *srv, link_conn_t *lc) {
     (void)srv;
     lc->closing = 1;
+}
+
+void link_close_why(server_t *srv, link_conn_t *lc, const char *why) {
+    if (!lc->closing && !lc->close_reason[0]) snprintf(lc->close_reason, sizeof lc->close_reason, "%s", why); /* the first cause wins */
+    link_close(srv, lc);
+}
+
+void link_svc_stats(server_t *srv, const char *line) {
+    for (link_conn_t *lc = srv->links; lc; lc = lc->next)
+        if (lc->watch_stats && !lc->closing) link_forward_line(lc, line);
+}
+
+void link_svc_statev(server_t *srv, const char *verb, const char **p, int n, const char *trail) {
+    int any = 0;
+    for (link_conn_t *lc = srv->links; lc && !any; lc = lc->next) any = lc->watch_stats && !lc->closing;
+    if (!any) return;
+    char line[700];
+    irc_build(line, sizeof line, NULL, 0, NULL, verb, p, n, trail && trail[0] ? trail : "-");
+    link_svc_stats(srv, line);
+}
+
+/* SVCSTATS [<since>]: the network as the hub sees it, for the stats collector (stats/netstats.py via bin/services).
+ *   SVCSTATNET <now> <users> <channels> <registered chans> <opers> <away> <tls> <logged in> <peak> <start time>
+ *   SVCSTATSRV <name> <sid> <uplink|-> <hop> <users> <linked at> <synced> :<description>   (one per server, us included)
+ *   SVCSTATEND
+ * and from then on SVCSTATEV/SVCSTATLINE events (link_svc_stats). Service bots aren't users. */
+static void send_svc_stats(server_t *srv, link_conn_t *lc) {
+    int users = 0, opers = 0, away = 0, tls = 0, logged = 0, chans = 0, reg = 0, bots_here = 0;
+    client_t *u, *ut;
+    HASH_ITER(hh, srv->users, u, ut) {
+        if (u->is_service) { bots_here += !u->remote; continue; } /* our services' bots count in our n_users */
+        if (!u->registered) continue;
+        users++;
+        if (u->umodes & UMODE_O) opers++;
+        if (u->away[0]) away++;
+        if (u->umodes & UMODE_Z) tls++;
+        if (u->account[0]) logged++;
+    }
+    channel_t *ch, *ct;
+    HASH_ITER(hh, srv->channels, ch, ct) { chans++; if (ch->modes & CMODE_R) reg++; }
+    char line[700], b[10][24];
+    long v[10] = {(long)time(NULL), users, chans, reg, opers, away, tls, logged, srv->max_users_seen, (long)srv->start_time};
+    const char *p[10];
+    for (int i = 0; i < 10; i++) { snprintf(b[i], sizeof b[i], "%ld", v[i]); p[i] = b[i]; }
+    irc_build(line, sizeof line, NULL, 0, NULL, "SVCSTATNET", p, 10, NULL);
+    link_forward_line(lc, line);
+    netserver_t *s, *st;
+    HASH_ITER(hh, srv->servers, s, st) {
+        char hop[12], nu[12], at[24], syn[4];
+        snprintf(hop, sizeof hop, "%d", s->hop);
+        snprintf(nu, sizeof nu, "%d", s == srv->self_srv && s->n_users >= bots_here ? s->n_users - bots_here : s->n_users);
+        snprintf(at, sizeof at, "%ld", (long)(s == srv->self_srv ? srv->start_time : s->linked_at));
+        snprintf(syn, sizeof syn, "%d", s == srv->self_srv || s->synced);
+        const char *sp[] = {s->name, s->sid, s->uplink ? s->uplink->name : "-", hop, nu, at, syn};
+        irc_build(line, sizeof line, NULL, 0, NULL, "SVCSTATSRV", sp, 7, s->desc[0] ? s->desc : "-");
+        link_forward_line(lc, line);
+    }
+    link_forward_line(lc, "SVCSTATEND");
 }
 
 /* Close a services link now, its bots included: they're removed at once (so their nicks are free right away, e.g. for
@@ -607,7 +668,7 @@ void link_reap(server_t *srv) {
         *pp = lc->next;
         srv->traffic.ln_in += lc->bytes_in; srv->traffic.ln_out += lc->bytes_out; /* STATS t keeps counting closed links */
         srv->traffic.ln_min += lc->msgs_in; srv->traffic.ln_mout += lc->msgs_out;
-        if (lc->is_server) netsync_link_down(srv, lc, "Link closed");
+        if (lc->is_server) netsync_link_down(srv, lc, lc->close_reason[0] ? lc->close_reason : "Link closed");
         if (lc->service) { srv->svc_gone_at = time(NULL); srv->svc_back_at = 0; } /* channels made from now on go unwatched */
         for (int b = 0; b < lc->n_bots; b++) {
             log_info("link", "link '%s' lost -- removing service nick '%s'", lc->peer_name, lc->bots[b]->nick);
@@ -861,6 +922,7 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
         HASH_ITER(hh, srv->users, u, tmp) if (u->registered) send_svc_user(srv, lc, u, SVC_EV_USER);
         return 0;
     }
+    if (strcasecmp(msg.command, "SVCSTATS") == 0) { lc->watch_stats = 1; send_svc_stats(srv, lc); return 0; }
     if (!strcmp(msg.command, "SVSLOGIN") || !strcmp(msg.command, "SVSJOIN") || !strcmp(msg.command, "SVSNICK") || !strcmp(msg.command, "KILL") ||
         !strcmp(msg.command, "SVCSASL") || !strcmp(msg.command, "SVCREGRESULT")) {
         svc_command(srv, svc, &msg);
@@ -1213,7 +1275,13 @@ static int link_handle_readable_once(server_t *srv, link_conn_t *lc) {
     char tmp[4096];
     ssize_t n = link_io_read(lc, tmp, sizeof tmp);
     if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) return 0;
-    if (n <= 0) { link_close(srv, lc); return 0; }
+    if (n <= 0) {
+        char why[96];
+        if (n == 0) snprintf(why, sizeof why, "Connection closed by peer");
+        else snprintf(why, sizeof why, "Read error: %s", strerror(errno));
+        link_close_why(srv, lc, why);
+        return 0;
+    }
     lc->last_activity = time(NULL);
     lc->bytes_in += (size_t)n;
     /* Enforces the *configured* links.max_line_length (validated at load
@@ -1277,7 +1345,9 @@ void link_tick(server_t *srv) {
             }
         } else if (idle > srv->cfg.links.ping_timeout) {
             log_warn("link", "link '%s' timed out", lc->peer_name);
-            link_close(srv, lc);
+            char why[64];
+            snprintf(why, sizeof why, "Ping timeout: %d seconds", (int)idle);
+            link_close_why(srv, lc, why);
         } else if (idle > srv->cfg.links.ping_interval && difftime(now, lc->last_ping) >= srv->cfg.links.ping_interval) {
             lc->last_ping = now; /* one PING per interval, not one per tick */
             link_forward_line(lc, "PING");

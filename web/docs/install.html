@@ -128,7 +128,8 @@ tools/backup-config.sh --restore [ARCHIVE|DIR]  # restore one (lists the backups
 make install
 #  binaries         -> ~/.local/bin
 #  config templates -> ~/.config/sekurircd   (never overwrites a live sekurircd.toml)
-#  state and logs   -> ~/.local/state/sekurircd/{ircd,services}
+#  state and logs   -> ~/.local/state/sekurircd/{ircd,services,stats}
+#  stats panel      -> ~/.local/lib/sekurircd/stats/netstats.py
 #  units            -> ~/.config/systemd/user
 
 cp ~/.config/sekurircd/sekurircd.template.toml ~/.config/sekurircd/sekurircd.toml
@@ -136,6 +137,10 @@ cp ~/.config/sekurircd/protection.template.toml ~/.config/sekurircd/protection.t
 systemctl --user enable --now sekurircd services   # services start, stop and restart with sekurircd
 systemctl --user reload sekurircd      # same as --rehash
 journalctl --user -u sekurircd -f</pre>
+<p>The optional <a href="stats.html">stats panel</a> runs on the server with services (the hub) and has its own unit:</p>
+<pre>cp ~/.config/sekurircd/stats.template.toml ~/.config/sekurircd/stats.toml   # set [collector] enabled = true
+python3 ~/.local/lib/sekurircd/stats/netstats.py -c ~/.config/sekurircd/stats.toml --user --admin --add yourname
+systemctl --user enable --now netstats</pre>
 <p>A user unit stops when your last session ends. To keep it running after logout or start it at boot:
   <code>loginctl enable-linger $(whoami)</code>. <code>make uninstall</code> removes binaries and units but leaves
   your config and state. Override <code>PREFIX</code>, <code>SYSCONFDIR</code>, <code>STATEDIR</code> or

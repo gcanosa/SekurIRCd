@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """SekurIRCd config checker (Python 3.8+, stdlib only). Changes nothing unless --fix --write.
 
-For each live config (sekurircd.toml, protection.toml, services.toml):
+For each live config (sekurircd.toml, protection.toml, services.toml, stats/stats.toml):
   1. TOML syntax, with line/column (Python 3.11+; older Pythons rely on step 2)
-  2. the daemon's own validation: `bin/sekurircd --check` / `bin/services --check`
+  2. the daemon's own validation: `bin/sekurircd --check` / `bin/services --check` / `stats/netstats.py check`
      -- the exact rules the server applies at start and /REHASH (types, ranges,
      durations, required fields, the Protection bundle, ...)
   3. against its template: unknown keys (typos / removed options, with
@@ -42,6 +42,7 @@ except ImportError:
 
 CHECKERS = {  # live file -> daemon binary that validates it
     "config/sekurircd.toml": "bin/sekurircd",
+    "stats/stats.toml": "stats/netstats.py",
     "services/services.toml": "bin/services" if os.path.exists(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin/services")) else "bin/chanserv",
 }
 P = "config/protection.toml"
@@ -63,7 +64,8 @@ RETIRED = {  # sections the ircd no longer reads at all -> where the settings we
                 "(its accounts.json is used in place)",
 }
 RETIRED_TO = {"accounts": (SV, "nickserv")}
-OPTIONAL = {"config/protection.toml"}  # sekurircd.toml settings apply when it's absent
+OPTIONAL = {"config/protection.toml", "stats/stats.toml"}  # sekurircd.toml settings apply when it's absent; the stats panel is off
+HOW_TO_ADD = {"stats/stats.toml": "./sekurircd enable-stats"}
 
 errors = warnings = 0
 perm_fixes = []  # (path, mode) chmods --fix --write applies: only ones this user can make without sudo or chown
@@ -95,6 +97,13 @@ def check_syntax(path):
 
 
 def check_daemon(path, binary):
+    if binary.endswith(".py"):  # the stats panel: Python, `-c FILE check`; exit 3 = valid but no login can open it
+        p = subprocess.run([sys.executable, binary, "-c", path, "check"], capture_output=True, text=True)
+        msg = (p.stdout + p.stderr).strip().splitlines()
+        if p.returncode == 0: ok(f"{os.path.basename(binary)} check")
+        elif p.returncode == 3: warn(msg[-1].removeprefix("netstats: ") if msg else "the panel has no logins")
+        else: err(msg[-1] if msg else f"{binary} check exited {p.returncode}")
+        return
     if not os.path.exists(binary):
         warn(f"{binary} not built -- skipped the server's own validation (run make)")
         return
@@ -387,6 +396,8 @@ def secret_files():
                         "the TLS private key"))
     out += [(f, "account password hashes and e-mails") for f in sorted(glob.glob("config/accounts.json*"))]
     out += [(f, "channel password hashes") for f in sorted(glob.glob("services/*.json*"))]
+    out += [(f, "stats panel login hashes") for f in ("stats/stats.toml", "stats/stats.toml.disabled")]
+    out += [(f, "stats history: server addresses, ban masks") for f in sorted(glob.glob("stats/stats.db*"))]
     out += [(f, "a --fix backup: may hold the old plain-text passwords") for f in sorted(glob.glob("*/*.pre-fix-*"))]
     out += [(f, "a linkmgmt backup: may hold link passwords") for f in sorted(glob.glob("*/*.pre-linkmgmt-*"))]
     out += [(f, "linkmgmt's part for another server: holds the link password") for f in sorted(glob.glob("link-for-*.toml"))]
@@ -398,7 +409,7 @@ def check_permissions(paths=None):
     me, users = pwd.getpwuid(os.getuid()).pw_name, daemon_users()
     bad = 0
     perm_fixes.clear()
-    for d in ("config", "services", "config/tls"):
+    for d in ("config", "services", "config/tls", "stats"):
         if os.path.isdir(d) and os.stat(d).st_mode & (stat.S_IWGRP | stat.S_IWOTH):
             warn(f"{d}/ is writable by {'everyone' if os.stat(d).st_mode & stat.S_IWOTH else 'its group'}: anyone who can "
                  f"write there can swap in their own config -- fix: {sudo_for(d, me)}chmod go-w {d}"); bad += 1
@@ -731,7 +742,7 @@ def report(config, quiet):
         if not os.path.exists(path):
             (note if path in OPTIONAL else err)(
                 "not installed" + (" (optional)" if path in OPTIONAL else "")
-                + (f" -- cp {tpl_of[path]} {path}" if path in tpl_of else ""))
+                + (f" -- {HOW_TO_ADD[path]}" if path in HOW_TO_ADD else f" -- cp {tpl_of[path]} {path}" if path in tpl_of else ""))
             continue
         if not check_syntax(path):
             continue

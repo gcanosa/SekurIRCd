@@ -38,5 +38,18 @@ int ns_event(irc_message_t *msg);
 const char *ns_account_of(const char *nick);
 void ns_tick(void);    /* once a second: enforcement deadlines, SASL timeouts, store flush */
 void ns_shutdown(void); /* flush and free */
+int ns_account_count(void); /* registered accounts, -1 with NickServ off */
+
+/* chanserv.c: registered channels. */
+int cs_registered_count(void);
+
+/* stats.c -- the stats collector (stats/stats.toml [collector]); every call is a no-op while it's off. */
+void st_config(const char *services_config_path); /* finds stats.toml (beside it, or ../stats/); re-read on change */
+void st_started(void);
+void st_stopping(void);
+void st_session_start(void); /* hub link up: ask for the feed */
+void st_session_end(void);
+void st_tick(void);          /* once a second */
+int st_event(irc_message_t *msg); /* SVCSTAT*: 1 if it was one */
 
 #endif

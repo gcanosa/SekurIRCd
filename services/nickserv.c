@@ -139,6 +139,7 @@ int ns_config(toml_node_t *raw, const char *config_path, char *err, size_t errsz
 }
 
 int ns_enabled(void) { return C.enabled; }
+int ns_account_count(void) { return C.enabled ? accounts_count(&g_acc) : -1; }
 
 int ns_start(char *err, size_t errsz) {
     if (!C.enabled) return 0;

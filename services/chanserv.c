@@ -361,6 +361,8 @@ static void store_del(const char *cf) {
     if (next) store_index_put(cf, next);
 }
 
+int cs_registered_count(void) { return (int)HASH_COUNT(g_store_idx); }
+
 static cJSON *store_get(const char *chan) {
     char cf[128];
     irc_casefold(cf, sizeof cf, chan);
@@ -2332,6 +2334,7 @@ static void process_line(char *line) {
         g_from_account[0] = '\0';
         return;
     }
+    if (st_event(&msg)) return;
     if (ns_event(&msg)) return;
     if (strcasecmp(msg.command, "SVCJOIN") == 0) { handle_svcjoin(&msg); return; }
     if (strcasecmp(msg.command, "SVCNEW") == 0) { handle_svcnew(&msg); return; }
@@ -2395,6 +2398,7 @@ static int run_session(void) {
     g_last_activity = time(NULL);
     log_info("services", "session established as '%s'%s", g_cfg.nick, ns_enabled() ? " + NickServ" : "");
     ns_session_start();
+    st_session_start();
     guard_join_all();
 
     while (!g_term) {
@@ -2433,6 +2437,7 @@ static int run_session(void) {
         expire_sweep();
         store_flush();
         ns_tick();
+        st_tick();
         if (g_pending_register.active && difftime(time(NULL), g_pending_register.sent_at) > 5) {
             g_pending_register.active = 0;
             reply(g_pending_register.nick, "Timed out waiting for the server -- try REGISTER again.");
@@ -2443,6 +2448,7 @@ static int run_session(void) {
         }
         if (difftime(time(NULL), g_last_activity) > 240) break; /* link keepalive timeout */
     }
+    st_session_end();
     if (g_fd >= 0) { close(g_fd); g_fd = -1; }
     return g_refused ? 2 : 0;
 }
@@ -2575,6 +2581,8 @@ int main(int argc, char **argv) {
         return 1;
     }
     log_info("services", "starting (v%s), ChanServ storage=%s", SERVICES_VERSION, g_cfg.storage_path);
+    st_config(config_path);
+    st_started();
     if (geteuid() == 0)
         log_warn("chanserv", "running as root is not recommended: services never need it; "
                              "use a dedicated unprivileged user");
@@ -2605,6 +2613,7 @@ int main(int argc, char **argv) {
     }
 
     log_info("services", "shutting down");
+    st_stopping();
     store_flush();
     ns_shutdown();
     if (pidfile[0]) unlink(pidfile);
