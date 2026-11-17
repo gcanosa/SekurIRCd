@@ -29,6 +29,7 @@
 #define CFG_MAX_WEBIRC           16
 #define CFG_MAX_CLASSES          16
 #define CFG_MAX_HOSTS_PER_WEBIRC 16
+#define CFG_MAX_EXTRA_PORTS 16 /* [server] / [tls] extra_ports: per kind (plain, TLS) */
 #define CFG_MAX_HOSTS_PER_VHOST  16
 #define CFG_MAX_ALLOWED_CHANNELS 64
 #define CFG_MAX_AUTO_JOIN        32
@@ -49,6 +50,8 @@ typedef struct {
     char sid[4];          /* 3-character server id for linked networks (digit + 2 of [0-9A-Z]); "" = derived from the name */
     char bind[CFG_STR];
     int port;
+    int extra_ports[CFG_MAX_EXTRA_PORTS]; /* more plaintext client ports next to `port` (same bind) */
+    int n_extra_ports;
     int ipv6;             /* also listen on IPv6 (bind6): every listener gets an IPv6-only twin; off = IPv4 only, as before */
     char bind6[CFG_STR];  /* "::" */
     int ipv6_limit_prefix; /* per-IP limits count an IPv6 client's whole /N (64): one subscriber's block, not one address */
@@ -106,6 +109,8 @@ typedef struct {
 typedef struct {
     int enabled;
     int port;
+    int extra_ports[CFG_MAX_EXTRA_PORTS]; /* more TLS client ports next to `port`; the STS policy still names `port` */
+    int n_extra_ports;
     char cert_file[CFG_PATH];
     char key_file[CFG_PATH];
     int request_client_cert; /* ask (never require) a TLS client cert -- see SASL EXTERNAL */

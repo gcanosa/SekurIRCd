@@ -73,6 +73,10 @@ bind = "0.0.0.0"
 # Plaintext client port.
 port = 6667
 
+# More plaintext client ports, on the same bind address (and IPv6, when on). Only these are opened on top of `port`;
+# REHASH opens and closes them live. A port that is already taken is logged and skipped. Up to 16.
+#extra_ports = [6668, 6669]
+
 # Also listen on IPv6 (every listener: clients, TLS, WebSocket, links).
 # Masks everywhere accept CIDR too, e.g. "2001:db8::/32".
 #ipv6 = false
@@ -101,6 +105,9 @@ port = 6667
 
 enabled = false
 port = 6697
+
+# More TLS client ports (same certificate), next to `port`. The STS policy still names `port`. Up to 16.
+#extra_ports = [7000, 9999]
 
 # PEM certificate (or chain) and its key, relative to this file. Required when
 # enabled. A self-signed certificate works (clients must allow it):

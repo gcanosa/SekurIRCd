@@ -1740,6 +1740,54 @@ static void apply_v6_listeners(server_t *srv) {
                    c->server.ipv6 && want[i], i == L6_LINK ? c->links.bind6 : c->server.bind6, port[i]);
 }
 
+/* Extra client ports: close the ones the config no longer lists, open the new ones (kept as they are when unchanged, so a
+ * rehash never drops a connected listener's backlog). A port that won't bind is logged and skipped, never fatal: the main
+ * listener is what the server needs to run. TLS ports need the TLS context, like the main TLS listener. */
+static void apply_extra_listeners(server_t *srv, int rehash) {
+    const config_t *c = &srv->cfg;
+    struct xl_want { int tls, port; const char *bind; int done; } want[MAX_XL];
+    int nw = 0;
+    for (int tls = 0; tls < 2; tls++) {
+        int n = tls ? (c->tls.enabled && srv->tls_ctx ? c->tls.n_extra_ports : 0) : c->server.n_extra_ports;
+        for (int i = 0; i < n; i++) {
+            int port = tls ? c->tls.extra_ports[i] : c->server.extra_ports[i];
+            want[nw++] = (struct xl_want){tls, port, c->server.bind, 0};
+            if (c->server.ipv6) want[nw++] = (struct xl_want){tls, port, c->server.bind6, 0};
+        }
+    }
+    for (int i = 0; i < MAX_XL; i++) {
+        if (srv->xl[i].fd < 0) continue;
+        int keep = 0;
+        for (int j = 0; j < nw && !keep; j++)
+            if (!want[j].done && want[j].tls == srv->xl[i].tls && want[j].port == srv->xl[i].port && strcmp(want[j].bind, srv->xl[i].bind) == 0)
+                keep = want[j].done = 1;
+        if (keep) continue;
+        close(srv->xl[i].fd);
+        srv->xl[i].fd = -1;
+        srv->xl_dirty = 1;
+        log_info("net", "extra %s listener on %s:%d closed", srv->xl[i].tls ? "TLS" : "client", srv->xl[i].bind, srv->xl[i].port);
+        if (rehash) server_rehash_note(srv, "extra %s port %d closed", srv->xl[i].tls ? "TLS" : "client", srv->xl[i].port);
+    }
+    for (int j = 0; j < nw; j++) {
+        if (want[j].done) continue;
+        int slot = 0;
+        while (slot < MAX_XL && srv->xl[slot].fd >= 0) slot++;
+        if (slot == MAX_XL) break; /* unreachable: MAX_XL covers every combination the config can ask for */
+        int fd = net_listen(want[j].bind, want[j].port);
+        if (fd < 0) {
+            log_error("net", "could not bind extra %s port %s:%d -- skipped", want[j].tls ? "TLS" : "client", want[j].bind, want[j].port);
+            if (rehash) server_rehash_note(srv, "extra %s port %s:%d: could not bind -- skipped", want[j].tls ? "TLS" : "client", want[j].bind, want[j].port);
+            continue;
+        }
+        srv->xl[slot].fd = fd;
+        srv->xl[slot].tls = want[j].tls;
+        srv->xl[slot].port = want[j].port;
+        snprintf(srv->xl[slot].bind, sizeof srv->xl[slot].bind, "%s", want[j].bind);
+        log_info("net", "extra %s listener on %s:%d", want[j].tls ? "TLS" : "client", want[j].bind, want[j].port);
+        if (rehash) server_rehash_note(srv, "extra %s port %d opened", want[j].tls ? "TLS" : "client", want[j].port);
+    }
+}
+
 void net_apply_listeners(server_t *srv) {
     const config_t *c = &srv->cfg;
     rebind_one(srv, "client", &srv->listen_fd, srv->bound_main.bind, sizeof srv->bound_main.bind, &srv->bound_main.port,
@@ -1761,6 +1809,7 @@ void net_apply_listeners(server_t *srv) {
     rebind_one(srv, "link", &srv->link_listen_fd, srv->bound_link.bind, sizeof srv->bound_link.bind, &srv->bound_link.port,
                c->links.enabled && strcmp(c->links.mode, "leaf") != 0, c->links.bind, c->links.port);
     apply_v6_listeners(srv);
+    apply_extra_listeners(srv, 1);
 }
 
 int net_run(server_t *srv) {
@@ -1802,6 +1851,7 @@ int net_run(server_t *srv) {
     link_start_hub(srv);
     if (srv->link_listen_fd >= 0) { snprintf(srv->bound_link.bind, sizeof srv->bound_link.bind, "%s", srv->cfg.links.bind); srv->bound_link.port = srv->cfg.links.port; }
     apply_v6_listeners(srv);
+    apply_extra_listeners(srv, 0);
     if (srv->cfg.links.autoconnect) link_dial_peers(srv, 1, NULL); /* every dial-out peer, now (later attempts back off per peer in link_leaf_tick) */
 
     alwayson_restore(srv); /* before any link bursts, so they carry the restored sessions */
@@ -1815,7 +1865,7 @@ int net_run(server_t *srv) {
      * fed by client_mark_quit). Links and proxy-scan probes are few, so they are still walked each pass. */
     if (ev_init() != 0) { log_critical("net", "event backend (%s) failed to start: %s", ev_backend(), strerror(errno)); return 1; }
     log_info("net", "event backend: %s", ev_backend());
-    enum { SL_MAIN, SL_WAKE, SL_LINK, SL_WS, SL_TLS, SL_V6, N_SLOTS = SL_V6 + 4 };
+    enum { SL_MAIN, SL_WAKE, SL_LINK, SL_WS, SL_TLS, SL_V6, SL_X = SL_V6 + 4, N_SLOTS = SL_X + MAX_XL };
     struct { int fd; unsigned char mask; } slot[N_SLOTS];
     for (int i = 0; i < N_SLOTS; i++) { slot[i].fd = -1; slot[i].mask = 0; }
     ev_event_t evs[256];
@@ -1836,6 +1886,11 @@ int net_run(server_t *srv) {
         int paused = srv->accept_paused_until > time(NULL);
         int want_fd[N_SLOTS] = {srv->listen_fd, worker_wake_fd(), srv->link_listen_fd, srv->ws_listen_fd, srv->tls_listen_fd,
                                 srv->l6[0].fd, srv->l6[1].fd, srv->l6[2].fd, srv->l6[3].fd};
+        for (int i = 0; i < MAX_XL; i++) want_fd[SL_X + i] = srv->xl[i].fd; /* the rest of the initializer above is 0, not -1 */
+        if (srv->xl_dirty) { /* close() dropped the old registration: a new listener reusing the same fd number must be added again */
+            srv->xl_dirty = 0;
+            for (int i = 0; i < MAX_XL; i++) slot[SL_X + i].mask = 0;
+        }
         for (int i = 0; i < N_SLOTS; i++) {
             if (slot[i].fd != want_fd[i]) { /* the old fd (if any) is already closed, which unregistered it */
                 if (slot[i].fd >= 0) ev_forget(slot[i].fd, &slot[i].mask);
@@ -1889,6 +1944,7 @@ int net_run(server_t *srv) {
                 else if (sl == SL_LINK) link_accept(srv, srv->link_listen_fd);
                 else if (sl == SL_TLS) accept_clients(srv, srv->tls_listen_fd, 1);
                 else if (sl == SL_WS) accept_clients(srv, srv->ws_listen_fd, srv->cfg.websocket.tls ? 3 : 2);
+                else if (sl >= SL_X) accept_clients(srv, srv->xl[sl - SL_X].fd, srv->xl[sl - SL_X].tls);
                 else {
                     int k = sl - SL_V6;
                     if (k == L6_LINK) link_accept(srv, srv->l6[k].fd);
@@ -2005,6 +2061,7 @@ int net_run(server_t *srv) {
     if (srv->tls_listen_fd >= 0) close(srv->tls_listen_fd);
     if (srv->ws_listen_fd >= 0) close(srv->ws_listen_fd);
     for (int i = 0; i < 4; i++) if (srv->l6[i].fd >= 0) close(srv->l6[i].fd);
+    for (int i = 0; i < MAX_XL; i++) if (srv->xl[i].fd >= 0) close(srv->xl[i].fd);
     if (srv->tls_ctx) SSL_CTX_free(srv->tls_ctx);
     link_tls_cleanup();
     config_free(&srv->cfg);

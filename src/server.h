@@ -80,6 +80,11 @@ typedef struct server {
     /* [server] ipv6: each listener's IPv6-only twin (index L6_*), -1 when off. Separate sockets, so IPv4 clients keep
      * plain IPv4 addresses (a dual-stack socket would show them as ::ffff:a.b.c.d and miss every existing IPv4 ban). */
     struct { int fd; char bind[256]; int port; } l6[4];
+    /* [server] extra_ports / [tls] extra_ports (+ their IPv6 twins): extra client listeners, a free-slot table (fd -1 =
+     * unused) that apply_extra_listeners keeps equal to the config at start and on every rehash. */
+#define MAX_XL (2 * 2 * CFG_MAX_EXTRA_PORTS) /* plain + TLS, IPv4 + IPv6 */
+    struct { int fd; int tls; char bind[64]; int port; } xl[MAX_XL];
+    int xl_dirty;       /* an extra listener was closed: net_run re-registers them all (its fd number may come straight back) */
     int ws_listen_fd;   /* -1 unless [websocket] enabled */
     int tls_listen_fd;  /* -1 unless [tls] enabled (see net.c's TLS listener) */
     SSL_CTX *tls_ctx;

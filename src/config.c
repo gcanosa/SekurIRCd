@@ -175,6 +175,26 @@ static int cfg_get_str_array(toml_node_t *tab, const char *key,
     return 0;
 }
 
+/* An array of TCP ports (1-65535), at most CFG_MAX_EXTRA_PORTS; duplicates inside it are an error, not a silent no-op. */
+static int cfg_get_port_array(toml_node_t *tab, const char *key, int *out, int *n,
+                               char *errbuf, size_t errbufsz, const char *fieldname) {
+    *n = 0;
+    if (!tab || !tx_get(tab, key)) return 0;
+    toml_node_t *arr = tx_array(tab, key);
+    if (!arr) { snprintf(errbuf, errbufsz, "%s must be an array of port numbers, e.g. [6668, 6669]", fieldname); return -1; }
+    int cnt = tx_len(arr);
+    if (cnt > CFG_MAX_EXTRA_PORTS) { snprintf(errbuf, errbufsz, "%s has too many entries (max %d)", fieldname, CFG_MAX_EXTRA_PORTS); return -1; }
+    for (int i = 0; i < cnt; i++) {
+        toml_node_t *d = tx_at(arr, i, TOML_INT64);
+        if (!d || d->u.int64 < 1 || d->u.int64 > 65535) { snprintf(errbuf, errbufsz, "%s: entry %d is not a port (1-65535)", fieldname, i + 1); return -1; }
+        for (int j = 0; j < i; j++)
+            if (out[j] == (int)d->u.int64) { snprintf(errbuf, errbufsz, "%s lists port %d twice", fieldname, out[j]); return -1; }
+        out[i] = (int)d->u.int64;
+        (*n)++;
+    }
+    return 0;
+}
+
 /* --- path helpers ------------------------------------------------------------ */
 
 static int is_absolute_path(const char *p) { return p[0] == '/'; }
@@ -574,6 +594,7 @@ static int build_config(toml_node_t *raw, const char *path, config_t *out,
         snprintf(errbuf, errbufsz, "server.port must be in 1-65535");
         return -1;
     }
+    if (cfg_get_port_array(srv, "extra_ports", out->server.extra_ports, &out->server.n_extra_ports, errbuf, errbufsz, "server.extra_ports")) return -1;
 
     /* security.reserved_nicks: default differs from "absent -> []" (every
      * other array here), so it needs its own presence check like Python's
@@ -1011,6 +1032,7 @@ static int build_config(toml_node_t *raw, const char *path, config_t *out,
         if (cfg_get_int(t, "sts_duration", 0, &out->tls.sts_duration, errbuf, errbufsz, "tls.sts_duration")) return -1;
         if (out->tls.sts_duration < 0) { snprintf(errbuf, errbufsz, "tls.sts_duration must be >= 0"); return -1; }
         if (out->tls.port < 1 || out->tls.port > 65535) { snprintf(errbuf, errbufsz, "tls.port must be in 1-65535"); return -1; }
+        if (cfg_get_port_array(t, "extra_ports", out->tls.extra_ports, &out->tls.n_extra_ports, errbuf, errbufsz, "tls.extra_ports")) return -1;
         if (out->tls.enabled && !(out->tls.cert_file[0] && out->tls.key_file[0])) {
             snprintf(errbuf, errbufsz, "tls.enabled is true but tls.cert_file/tls.key_file are not both set");
             return -1;
@@ -1454,6 +1476,30 @@ static int load_protection_file(config_t *out, char *errbuf, size_t errbufsz) {
     return 0;
 }
 
+/* An extra port that another listener already wants would just fail to bind at start and on every rehash: refuse it here
+ * with the name of the clash. (Only extras are checked against the main ports -- the main ones keep working as before.) */
+static int check_listener_ports(const config_t *c, char *errbuf, size_t errbufsz) {
+    struct { int port; const char *what; } o[] = {{c->server.port, "server.port"},
+                                                  {c->tls.enabled ? c->tls.port : 0, "tls.port"},
+                                                  {c->websocket.enabled ? c->websocket.port : 0, "websocket.port"}};
+    int hub = c->links.enabled && strcmp(c->links.mode, "leaf") != 0;
+    int links_clash = hub && (strcmp(c->links.bind, c->server.bind) == 0 || strcmp(c->links.bind, "0.0.0.0") == 0 ||
+                              strcmp(c->server.bind, "0.0.0.0") == 0); /* links.bind is its own address: only a shared one can collide */
+    for (int k = 0; k < 2; k++) { /* 0: [server] extra_ports, 1: [tls] extra_ports (ignored while TLS is off) */
+        const int *ex = k ? c->tls.extra_ports : c->server.extra_ports;
+        int n = k ? (c->tls.enabled ? c->tls.n_extra_ports : 0) : c->server.n_extra_ports;
+        const char *field = k ? "tls.extra_ports" : "server.extra_ports";
+        for (int i = 0; i < n; i++) {
+            for (size_t j = 0; j < sizeof o / sizeof *o; j++)
+                if (o[j].port == ex[i]) { snprintf(errbuf, errbufsz, "%s: port %d is already %s", field, ex[i], o[j].what); return -1; }
+            if (links_clash && c->links.port == ex[i]) { snprintf(errbuf, errbufsz, "%s: port %d is already links.port", field, ex[i]); return -1; }
+            for (int j = 0; k && j < c->server.n_extra_ports; j++)
+                if (c->server.extra_ports[j] == ex[i]) { snprintf(errbuf, errbufsz, "port %d is in both server.extra_ports and tls.extra_ports", ex[i]); return -1; }
+        }
+    }
+    return 0;
+}
+
 int config_load(const char *path, config_t *out, char *errbuf, size_t errbufsz) {
     char resolved[CFG_PATH];
 
@@ -1492,6 +1538,7 @@ int config_load(const char *path, config_t *out, char *errbuf, size_t errbufsz) 
 
     int rc = build_config(&res.toptab, resolved, out, errbuf, errbufsz);
     toml_free(res);
+    if (rc == 0) rc = check_listener_ports(out, errbuf, errbufsz);
     if (rc == 0) rc = load_protection_file(out, errbuf, errbufsz);
     if (rc != 0) config_free(out); /* build_config started from defaults, so whatever it allocated is ours to drop */
     return rc;

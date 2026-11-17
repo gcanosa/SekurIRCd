@@ -133,6 +133,7 @@ int server_init(server_t *srv, const config_t *cfg) {
     srv->ws_listen_fd = -1;
     srv->link_listen_fd = -1;
     for (int i = 0; i < 4; i++) srv->l6[i].fd = -1;
+    for (int i = 0; i < MAX_XL; i++) srv->xl[i].fd = -1;
     srv->start_time = time(NULL);
     server_load_motd(srv);
 

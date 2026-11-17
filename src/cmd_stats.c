@@ -246,6 +246,12 @@ static void st_ports(server_t *srv, client_t *cl, char letter, const char *arg) 
         snprintf(port, sizeof port, "%d", L[i].port);
         client_reply(cl, N_STATSPLINE, (const char *[]){"P", port, L[i].type, L[i].bind[0] ? L[i].bind : "*"}, 4, "active");
     }
+    for (int i = 0; i < MAX_XL; i++) { /* extra_ports */
+        if (srv->xl[i].fd < 0) continue;
+        char port[16];
+        snprintf(port, sizeof port, "%d", srv->xl[i].port);
+        client_reply(cl, N_STATSPLINE, (const char *[]){"P", port, srv->xl[i].tls ? "tls" : "plain", srv->xl[i].bind}, 4, "active");
+    }
 }
 
 static void st_reserved(server_t *srv, client_t *cl, char letter, const char *arg) {
