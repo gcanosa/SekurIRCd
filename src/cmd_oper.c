@@ -27,6 +27,34 @@
 /* Applies (or refuses) the OPER grant once the password is known good or
  * bad -- shared by the plaintext-password path (checked inline, cheap) and
  * cmd_finish_privileged_auth's AUTH_OPER case (checked on a worker). */
+/* After a rehash: each local oper's privileges come from their [[operators]] block as it is now; one whose block is
+ * gone or no longer allows their host is de-opered (-o and the oper-only modes), so removing a login takes effect
+ * without a restart. Returns how many were de-opered. */
+int cmd_opers_rehash(server_t *srv) {
+    int n = 0;
+    client_t *c, *tmp;
+    HASH_ITER(hh, srv->users, c, tmp) {
+        if (c->remote || !(c->umodes & UMODE_O) || !c->oper_name[0]) continue;
+        const cfg_operator_t *op = NULL;
+        for (int i = 0; i < srv->cfg.n_operators && !op; i++)
+            if (strcmp(srv->cfg.operators[i].name, c->oper_name) == 0) op = &srv->cfg.operators[i];
+        int host_ok = 0;
+        for (int j = 0; op && j < op->n_hosts && !host_ok; j++) host_ok = irc_host_mask_match(c->user, c->ip, op->hosts[j]);
+        if (op && host_ok) { c->oper_privs = op->privs ? op->privs : OPER_PRIV_ALL; continue; }
+        char prefix[320], line[200];
+        client_prefix(c, prefix, sizeof prefix);
+        c->umodes &= ~(UMODE_O | UMODE_OPERONLY);
+        c->oper_name[0] = '\0';
+        c->oper_privs = 0;
+        irc_build(line, sizeof line, NULL, 0, prefix, "MODE", (const char *[]){c->nick, "-o"}, 2, NULL);
+        client_send(c, line);
+        netsync_user_modes(srv, c);
+        notice_self(srv, c, "You are no longer an IRC operator: your oper login was removed or changed in the server config");
+        n++;
+    }
+    return n;
+}
+
 static void finish_oper(server_t *srv, client_t *cl, const char *op_name, int pw_ok) {
     if (!pw_ok) {
         cl->oper_fails++;

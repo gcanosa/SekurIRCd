@@ -642,7 +642,15 @@ daemons; by hand it is the same shape as `sekurircd` itself:
 # as a detached daemon (POSIX double-fork); logs to services/services.log
 ./bin/services --config services/services.toml --daemon --pidfile services/services.pid
 ./bin/services --stop --pidfile services/services.pid
+./bin/services --rehash --pidfile services/services.pid   # reload services.toml (SIGHUP)
 ```
+
+`--rehash` applies ChanServ's `founder_mode` and `expire_days` and every
+NickServ policy (admins, nick enforcement, always-on, limits, email command)
+at once. The `[link]` to the hub, the bots' nick/user/host/realname and the
+database paths are kept until a restart, and the log says which of them you
+changed: the link is one session, the bots are introduced when it starts and
+the databases are loaded at start.
 
 `--stop` sends SIGTERM and waits for the process to exit; starting a second
 `--daemon` against a live pidfile is refused. If the ircd isn't up yet, or

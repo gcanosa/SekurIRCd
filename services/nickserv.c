@@ -39,7 +39,7 @@
 
 #define NS_MAX_ADMINS 32
 
-static struct {
+typedef struct {
     int enabled;
     char nick[64], user[64], host[256], realname[256];
     char store_file[512];
@@ -53,7 +53,8 @@ static struct {
     long always_on_expire; /* seconds a detached always-on nick is kept (0 = never expires) */
     char admins[NS_MAX_ADMINS][64];
     int n_admins;
-} C;
+} ns_cfg_t;
+static ns_cfg_t C;
 
 static account_store_t g_acc;
 
@@ -84,6 +85,30 @@ static void beside(const char *base, const char *rel, char *out, size_t outsz) {
 }
 
 static int file_exists(const char *p) { struct stat st; return stat(p, &st) == 0; }
+
+/* A rehash: ns_save() before load_app_config re-runs ns_config, then ns_rehashed() keeps what can't change live and
+ * names it in `kept`, or ns_restore() if the new file was refused. */
+void *ns_save(void) {
+    ns_cfg_t *o = malloc(sizeof *o);
+    if (o) *o = C;
+    return o;
+}
+void ns_restore(void *old) { if (old) C = *(ns_cfg_t *)old; free(old); }
+void ns_rehashed(void *old, char *kept, size_t keptsz) {
+    ns_cfg_t *o = old;
+    if (!o) return;
+    /* On or off, its nick and host, and its database: the bot is introduced and the accounts are loaded at start. */
+#define KEEP(cond, what, restore) do { if (cond) { restore; size_t l_ = strlen(kept); snprintf(kept + l_, keptsz - l_, "%s" what, l_ ? ", " : ""); } } while (0)
+    KEEP(o->enabled != C.enabled, "[nickserv] enabled", C.enabled = o->enabled);
+    KEEP(strcmp(o->nick, C.nick) || strcmp(o->user, C.user) || strcmp(o->host, C.host) || strcmp(o->realname, C.realname),
+         "[nickserv] nick/user/host/realname",
+         (memcpy(C.nick, o->nick, sizeof C.nick), memcpy(C.user, o->user, sizeof C.user), memcpy(C.host, o->host, sizeof C.host),
+          memcpy(C.realname, o->realname, sizeof C.realname)));
+    KEEP(strcmp(o->store_file, C.store_file), "[nickserv] store_file", memcpy(C.store_file, o->store_file, sizeof C.store_file));
+#undef KEEP
+    if (!C.network_set) memcpy(C.network, o->network, sizeof C.network); /* the one the hub's SVCINFO named */
+    free(o);
+}
 
 int ns_config(toml_node_t *raw, const char *config_path, char *err, size_t errsz) {
     memset(&C, 0, sizeof C);

@@ -382,6 +382,8 @@ void config_smotd_path(const config_t *cfg, char *out, size_t outsz);
 void config_oper_motd_path(const config_t *cfg, char *out, size_t outsz);
 void config_rules_path(const config_t *cfg, char *out, size_t outsz);
 /* Returns 1 and fills `out`, or 0 (out untouched) if klines_file is empty. */
+struct log_config;
+void config_log_cfg(const config_t *cfg, struct log_config *out); /* [logging] as log_init takes it */
 int config_klines_path(const config_t *cfg, char *out, size_t outsz);
 /* [spam] filters_file resolved against the config dir; 0 if unset. */
 int config_spamfilters_path(const config_t *cfg, char *out, size_t outsz);

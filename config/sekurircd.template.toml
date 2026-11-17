@@ -12,7 +12,8 @@
 #    4. ./sekurircd start
 #
 #  Every key is optional: the value shown (commented out or not) is the
-#  built-in default unless noted. Changes apply live with /REHASH.
+#  built-in default unless noted. Changes apply live with /REHASH, except
+#  [server] name and sid (this server's identity on the network: a restart).
 #
 #  Relative paths: motd/rules/klines/history files and TLS cert/key resolve
 #  against this file's directory; [logging] directory against the working
@@ -44,7 +45,8 @@
 [server]
 
 # Hostname shown to clients. Must contain a dot: clients read a dotless
-# prefix as a nick.
+# prefix as a nick. Changing it needs a restart: linked servers and their
+# [[links.peers]] know this server by it (/REHASH keeps the old one and says so).
 name = "irc.example.org"
 
 # Network name shown in the welcome message.
@@ -57,6 +59,7 @@ network = "SekuriIRC Network"
 # (e.g. "0AB"), unique across the network. "" (default) derives one from
 # [server] name, which is fine unless two server names happen to derive the same
 # one -- the link is then refused and you set a different sid on one of them.
+# Changing it needs a restart: every local user's ID starts with it.
 #sid = ""
 
 # Version string for 004/VERSION. Leave unset to report the running build.

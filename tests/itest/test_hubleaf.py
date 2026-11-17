@@ -190,3 +190,50 @@ def test_link_warns_when_cloak_secrets_differ():
             assert whois and "127.0.0.1" not in whois[0], whois  # cloaked, as its own server made it
         finally:
             leaf.stop(); hub.stop()
+
+
+def test_cloak_settings_change_on_rehash():
+    """Cloak settings edited in the .toml take effect with /REHASH on each server, no restart: masking turned on cloaks
+    the users already online (+x), host_masking_ip_ranges adds the range labels, and a G-line set on the leaf against a
+    hub user's cloak disconnects them, since the hub matches its users' cloaks."""
+    hub, leaf = pair()
+    try:
+        ca, cb = Client(hub.port, "ca"), Client(leaf.port, "cb")
+        oh, ol = Client(hub.port, "oh"), Client(leaf.port, "ol")
+        time.sleep(1.0)
+        oh.say("OPER boss bosspw", 0.5); ol.say("OPER boss bosspw", 0.5)
+        assert any("127.0.0.1" in l for l in cb.say("WHOIS ca", 0.5) if " 311 " in l)  # masking off: the real host
+
+        for s in (hub, leaf):
+            s.cfg["security"].update(host_masking=True, host_masking_secret="same", host_masking_ip_ranges=True)
+            s.write_config()
+        ca.drain()
+        for o in (oh, ol):
+            assert any(" 382 " in l for l in o.say("REHASH", 0.8))
+        got = ca.drain(0.5)
+        assert any(" MODE ca :+x" in l or " MODE ca +x" in l for l in got) and any(" 396 " in l for l in got), got
+        whois = [l for l in cb.say("WHOIS ca", 0.5) if " 311 " in l]
+        assert whois and "127.0.0.1" not in whois[0], whois
+        cloak = whois[0].split()[5]
+        assert re.fullmatch(r"[0-9a-f]+\.[0-9a-f]{8}\.[0-9a-f]{8}\.users\.testnet", cloak), cloak  # ranges: full.r24.r16
+
+        # a Z-line on a cloak is refused, not stored
+        assert any("A Z-line takes an IP" in l for l in ol.say(f"ZLINE {cloak} 10m :no", 0.5))
+
+        # a new secret: cb gets a new cloak, seen from the hub too
+        before = [l for l in oh.say("WHOIS cb", 0.5) if " 311 " in l][0].split()[5]
+        for s in (hub, leaf):
+            s.cfg["security"]["host_masking_secret"] = "other"
+            s.write_config()
+        for o in (oh, ol):
+            o.say("REHASH", 0.8)
+        after = [l for l in oh.say("WHOIS cb", 0.5) if " 311 " in l][0].split()[5]
+        assert after != before and after.endswith(".users.testnet"), (before, after)
+
+        # a G-line set on the leaf, on the cloak it shows: the hub drops its own user (every client here is 127.0.0.1,
+        # so all but the oper setting it go)
+        ol.say(f"GLINE *@{after} 10m :cloak copied from WHOIS", 1.0)
+        assert any(" 401 " in l for l in ol.say("WHOIS ca", 0.5)), "the hub did not enforce a G-line on its user's cloak"
+        assert "disconnecting ca (127.0.0.1): G-Lined" in hub.output()
+    finally:
+        leaf.stop(); hub.stop()

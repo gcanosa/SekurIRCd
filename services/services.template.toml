@@ -13,6 +13,10 @@
 #
 #  Or let tools/makeconf.py write both files with matching settings.
 #  Without services there is no NickServ, no ChanServ and no SASL.
+#
+#  bin/services --rehash (SIGHUP) reloads this file. [link], the bots'
+#  nick/user/host/realname and the database paths need a restart; the rest
+#  applies at once.
 # =============================================================================
 
 

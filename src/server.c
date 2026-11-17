@@ -3,6 +3,7 @@
 #include "crypto.h"
 #include "log.h"
 #include "net.h"
+#include "netsync.h"
 #include "proto.h"
 #include "spam.h"
 #include "worker.h"
@@ -227,6 +228,39 @@ static void note_textfile(server_t *srv, const char *what, const textfile_t *tf,
     else NOTE("%s: %s (missing or empty)", what, path);
 }
 
+/* After a rehash that changed how cloaks are made (the secret, format, token bytes, kept labels, IP ranges) or turned
+ * host_masking on: every cloak is made again, so bans and G-lines written against the new ones match users already
+ * online. Our own users showing their cloak get the new one (CHGHOST, to the network too); with masking just turned on,
+ * those showing their real host get +x and a cloak as a new connection would. A vhost or oper host stays, and only the
+ * kept cloak changes. A linked server's users get their kept cloak here, their visible one when their server rehashes.
+ * ponytail: turning masking off leaves the cloaks on until users reconnect or -x, rather than show every real host. */
+static int recloak_all(server_t *srv, int turned_on) {
+    int n = 0;
+    client_t *c, *tmp;
+    HASH_ITER(hh, srv->users, c, tmp) {
+        if (c->is_service) continue;
+        int shows_cloak = (c->umodes & UMODE_X) && c->cloak[0] && strcmp(c->host, c->cloak) == 0;
+        int shows_real = turned_on && !(c->umodes & UMODE_X) && strcmp(c->host, c->realhost) == 0;
+        if (c->remote || (!shows_cloak && !shows_real)) { net_set_cloak(srv, c); continue; }
+        char old_prefix[320], old_host[HOSTLEN];
+        client_prefix(c, old_prefix, sizeof old_prefix);
+        snprintf(old_host, sizeof old_host, "%s", c->host);
+        if (shows_real) {
+            c->umodes |= UMODE_X;
+            char line[200];
+            irc_build(line, sizeof line, NULL, 0, old_prefix, "MODE", (const char *[]){c->nick, "+x"}, 2, NULL);
+            client_send(c, line);
+            netsync_user_modes(srv, c);
+        }
+        net_reset_host(srv, c);
+        if (strcmp(old_host, c->host) == 0) continue;
+        broadcast_chghost(srv, c, old_prefix);
+        client_reply(c, N_HOSTHIDDEN, (const char *[]){c->host}, 1, "is now your displayed host");
+        n++;
+    }
+    return n;
+}
+
 int server_rehash(server_t *srv, char *errbuf, size_t errbufsz) {
     srv->rehash_report[0] = '\0';
     if (srv->cfg.path[0] == '\0') {
@@ -241,10 +275,44 @@ int server_rehash(server_t *srv, char *errbuf, size_t errbufsz) {
         NOTE("protection: %s%s", path, tmp.protection.loaded ? "" : " (not found, using sekurircd.toml values)");
     note_changed_sections(srv, &srv->cfg, &tmp);
     int old_history = srv->cfg.messages.history_size > 0;
+    /* The name and SID are this server's identity on the network: peers' [[links.peers]] and every linked server
+     * know it by them, and each local user's UID starts with the SID. Changed live they would orphan all of that, so
+     * they stay until a restart (the rest of the file still applies). */
+    if (strcasecmp(tmp.server.name, srv->cfg.server.name) != 0) {
+        NOTE("server.name stays %s until a restart (the network knows this server by it)", srv->cfg.server.name);
+        snprintf(tmp.server.name, sizeof tmp.server.name, "%s", srv->cfg.server.name);
+    }
+    if (strcmp(tmp.server.sid, srv->cfg.server.sid) != 0) {
+        NOTE("server.sid stays %s until a restart (every local user's UID starts with it)", srv->self_srv ? srv->self_srv->sid : srv->cfg.server.sid);
+        snprintf(tmp.server.sid, sizeof tmp.server.sid, "%s", srv->cfg.server.sid);
+    }
+    char old_klines[CFG_PATH] = "", new_klines[CFG_PATH] = "";
+    config_klines_path(&srv->cfg, old_klines, sizeof old_klines);
+    config_klines_path(&tmp, new_klines, sizeof new_klines);
+    const cfg_security_t *os = &srv->cfg.security, *ns = &tmp.security;
+    int os_masking = os->host_masking;
+    int recloak = ns->host_masking && (strcmp(os->host_masking_format, ns->host_masking_format) || os->host_masking_token_bytes != ns->host_masking_token_bytes ||
+                                       os->host_masking_keep_labels != ns->host_masking_keep_labels || os->host_masking_ip_ranges != ns->host_masking_ip_ranges ||
+                                       strcmp(os->host_masking_secret, ns->host_masking_secret) || !os->host_masking ||
+                                       strcmp(srv->cfg.server.network, tmp.server.network)); /* {network} is in the cloak */
     config_free(&srv->cfg); /* the new config owns its own arrays; nothing keeps a pointer into the old ones across commands */
     srv->cfg = tmp;
     server_apply_cloak_secret(srv);
+    if (recloak) {
+        int n = recloak_all(srv, !os_masking);
+        NOTE("cloaks: made again, %d user%s here got a new one", n, n == 1 ? "" : "s");
+    }
     warn_plain_passwords(&srv->cfg);
+    log_config_t lcfg;
+    config_log_cfg(&srv->cfg, &lcfg);
+    log_reinit(&lcfg);
+    if (strcmp(old_klines, new_klines) != 0) { /* the lines we hold, plus the new file's, saved there */
+        server_kline_load(srv);
+        srv->klines_dirty = 1, srv->kline_gen++;
+        NOTE("K/G/Z-lines: now kept in %s", new_klines[0] ? new_klines : "memory only");
+    }
+    int n_deopered = cmd_opers_rehash(srv);
+    if (n_deopered) NOTE("opers: %d logged out (their [[operators]] block is gone or no longer allows their host)", n_deopered);
     link_tls_cleanup(); /* the next dial reloads this server's certificate (and the new [tls] paths) */
     if (srv->self_srv) snprintf(srv->self_srv->desc, sizeof srv->self_srv->desc, "%s", srv->cfg.server.network); /* LINKS/MAP description follows the network name */
     cmd_cap_notify_changes(srv, srv->services_online, old_history);
@@ -1042,6 +1110,9 @@ void server_kline_load(server_t *srv) {
         if ((v = cJSON_GetObjectItemCaseSensitive(o, "set_by")) && cJSON_IsString(v)) snprintf(k->set_by, sizeof k->set_by, "%s", v->valuestring);
         if ((v = cJSON_GetObjectItemCaseSensitive(o, "line_type")) && cJSON_IsString(v)) snprintf(k->line_type, sizeof k->line_type, "%s", v->valuestring);
         if ((v = cJSON_GetObjectItemCaseSensitive(o, "expires_at")) && cJSON_IsNumber(v)) k->expires_at = (time_t)v->valuedouble;
+        int dup = 0; /* a rehash onto another klines_file merges it: a line we already hold isn't added twice */
+        for (kline_entry_t *e = srv->klines; e && !dup; e = e->next) dup = !strcasecmp(e->mask, k->mask) && !strcmp(e->line_type, k->line_type);
+        if (dup) { free(k); continue; }
         k->next = srv->klines;
         srv->klines = k;
     }

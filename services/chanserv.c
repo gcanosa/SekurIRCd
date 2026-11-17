@@ -64,8 +64,11 @@ typedef struct {
     char founder_mode; /* 'o' (default) or 'q': the rank IDENTIFY/CLAIM grants the founder */
 } app_cfg_t;
 
-static volatile sig_atomic_t g_term = 0;
+static volatile sig_atomic_t g_term = 0, g_hup = 0;
 static void on_term(int sig) { (void)sig; g_term = 1; }
+static void on_hup(int sig) { (void)sig; g_hup = 1; }
+static const char *g_config_path;
+static void services_rehash(void);
 
 /* --- tiny services.toml loader (schema is small; not worth reusing config.c,
  * which is ircd-specific and lives in a different translation unit tree) --- */
@@ -2402,6 +2405,7 @@ static int run_session(void) {
     guard_join_all();
 
     while (!g_term) {
+        if (g_hup) { g_hup = 0; services_rehash(); }
         struct pollfd pfd;
         pfd.fd = g_fd;
         pfd.events = POLLIN | (g_sbuf_len > 0 ? POLLOUT : 0);
@@ -2464,6 +2468,37 @@ static void daemonize(void) {
     if (devnull >= 0) { dup2(devnull, 0); dup2(devnull, 1); dup2(devnull, 2); if (devnull > 2) close(devnull); }
 }
 
+/* SIGHUP (services --rehash): services.toml again. ChanServ's founder_mode and expire_days and every NickServ policy
+ * (admins, enforce_*, always_on*, max_accounts, email_command, network, backup counts) apply at once. The [link] to the
+ * hub, the bots' nick/user/host/realname and the database paths stay until a restart: the link is one session, the
+ * bots are introduced when it starts, and the databases are loaded at start (a new path would leave the loaded data
+ * behind or overwrite another file). */
+static void services_rehash(void) {
+    void *ns_old = ns_save();
+    app_cfg_t n;
+    char err[256], kept[400] = "";
+    if (load_app_config(g_config_path, &n, err, sizeof err) != 0) {
+        ns_restore(ns_old);
+        log_error("services", "rehash failed: %s -- still running the previous config", err);
+        return;
+    }
+#define KEEP(cond, what, restore) do { if (cond) { restore; size_t l_ = strlen(kept); snprintf(kept + l_, sizeof kept - l_, "%s" what, l_ ? ", " : ""); } } while (0)
+    KEEP(strcmp(n.link_host, g_cfg.link_host) || n.link_port != g_cfg.link_port || strcmp(n.link_name, g_cfg.link_name) ||
+         strcmp(n.link_password, g_cfg.link_password), "[link]",
+         (memcpy(n.link_host, g_cfg.link_host, sizeof n.link_host), n.link_port = g_cfg.link_port,
+          memcpy(n.link_name, g_cfg.link_name, sizeof n.link_name), memcpy(n.link_password, g_cfg.link_password, sizeof n.link_password)));
+    KEEP(strcmp(n.nick, g_cfg.nick) || strcmp(n.user, g_cfg.user) || strcmp(n.host, g_cfg.host) || strcmp(n.realname, g_cfg.realname),
+         "[chanserv] nick/user/host/realname",
+         (memcpy(n.nick, g_cfg.nick, sizeof n.nick), memcpy(n.user, g_cfg.user, sizeof n.user), memcpy(n.host, g_cfg.host, sizeof n.host),
+          memcpy(n.realname, g_cfg.realname, sizeof n.realname)));
+    KEEP(strcmp(n.storage_path, g_cfg.storage_path), "[storage] path", memcpy(n.storage_path, g_cfg.storage_path, sizeof n.storage_path));
+#undef KEEP
+    ns_rehashed(ns_old, kept, sizeof kept);
+    g_cfg = n;
+    if (kept[0]) log_warn("services", "rehashed %s; these stay as they were until a restart: %s", g_config_path, kept);
+    else log_info("services", "rehashed %s", g_config_path);
+}
+
 static long read_pidfile(const char *path) {
     FILE *fp = fopen(path, "r");
     if (!fp) return -1;
@@ -2477,6 +2512,14 @@ static int pidfile_is_live(const char *path) {
     long pid = read_pidfile(path);
     if (pid <= 0) return 0;
     return kill((pid_t)pid, 0) == 0;
+}
+
+static int rehash_daemon(const char *pidfile) {
+    long pid = read_pidfile(pidfile);
+    if (pid <= 0) { fprintf(stderr, "services:  no running daemon (can't read a pid from %s)\n", pidfile); return 1; }
+    if (kill((pid_t)pid, SIGHUP) != 0) { fprintf(stderr, "services:  could not signal process %ld: %s\n", pid, strerror(errno)); return 1; }
+    printf("services:  asked pid %ld to reload its config (see its log for the result)\n", pid);
+    return 0;
 }
 
 static int stop_daemon(const char *pidfile) {
@@ -2509,6 +2552,7 @@ int main(int argc, char **argv) {
         else if (strcmp(a, "-d") == 0 || strcmp(a, "--daemon") == 0) do_daemon = 1;
         else if (strcmp(a, "--pidfile") == 0 && i + 1 < argc) pidfile = argv[++i];
         else if (strcmp(a, "--stop") == 0) do_stop = 1;
+        else if (strcmp(a, "--rehash") == 0) do_stop = 2;
         else if (strcmp(a, "-t") == 0 || strcmp(a, "--check") == 0) do_check = 1;
         else if (strcmp(a, "--version") == 0) { /* under its old name (bin/chanserv, see the Makefile) it answers as that */
             const char *b = strrchr(argv[0], '/');
@@ -2518,7 +2562,8 @@ int main(int argc, char **argv) {
         else { fprintf(stderr, "unrecognized argument: %s\n", a); return 2; }
     }
 
-    if (do_stop) return stop_daemon(pidfile);
+    if (do_stop) return do_stop == 2 ? rehash_daemon(pidfile) : stop_daemon(pidfile);
+    g_config_path = config_path;
 
     char errbuf[256];
     if (load_app_config(config_path, &g_cfg, errbuf, sizeof errbuf) != 0) {
@@ -2571,6 +2616,8 @@ int main(int argc, char **argv) {
     sa.sa_handler = on_term;
     sigaction(SIGTERM, &sa, NULL);
     sigaction(SIGINT, &sa, NULL);
+    sa.sa_handler = on_hup;
+    sigaction(SIGHUP, &sa, NULL);
 
     if (store_load() != 0) return 1;
     store_index_all();
@@ -2609,6 +2656,7 @@ int main(int argc, char **argv) {
         if (g_term) break;
         struct timespec ts = {backoff, 0};
         nanosleep(&ts, NULL);
+        if (g_hup) { g_hup = 0; services_rehash(); } /* link down: the next session dials the hub with the old [link] */
         if (rc < 0) backoff = backoff < 60 ? backoff * 2 : 60;
     }
 

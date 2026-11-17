@@ -24,6 +24,9 @@ void cs_account_chans(const char *account, void (*cb)(const char *chan, const ch
 /* nickserv.c -------------------------------------------------------------------------------------------------- */
 /* [nickserv] from services.toml (`config_path` resolves relative paths). -1 + err on a bad value. */
 int ns_config(toml_node_t *raw, const char *config_path, char *err, size_t errsz);
+void *ns_save(void);                                      /* rehash: a copy of the NickServ settings */
+void ns_restore(void *old);                               /* rehash refused: put them back (frees old) */
+void ns_rehashed(void *old, char *kept, size_t keptsz);   /* rehash done: keep what needs a restart, named in kept (frees old) */
 int ns_enabled(void);
 /* Load the account database. -1 + err if it exists but can't be read (never starts empty over it). */
 int ns_start(char *err, size_t errsz);

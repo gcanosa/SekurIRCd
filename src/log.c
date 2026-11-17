@@ -70,12 +70,17 @@ static void open_log_file(void) {
     if (g_file_size < 0) g_file_size = 0;
 }
 
+static int g_verbose;
+
 void log_init(const log_config_t *cfg, int verbose) {
+    g_verbose = verbose;
     g_cfg = *cfg;
     g_min_level = (cfg->debug || verbose) ? LOG_DEBUG : cfg->level;
     g_use_color = use_color();
     open_log_file();
 }
+
+void log_reinit(const log_config_t *cfg) { log_init(cfg, g_verbose); } /* /REHASH: the new [logging], same -v */
 
 void log_set_hook(void (*hook)(log_level_t, const char *, const char *)) {
     g_hook = hook;

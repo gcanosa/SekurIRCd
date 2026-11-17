@@ -250,6 +250,17 @@ void config_rules_path(const config_t *cfg, char *out, size_t outsz) {
     seed_from_template(out);
 }
 
+void config_log_cfg(const config_t *cfg, struct log_config *out) {
+    memset(out, 0, sizeof *out);
+    out->enabled = cfg->logging.enabled;
+    out->debug = cfg->logging.debug;
+    out->level = log_level_from_name(cfg->logging.level);
+    out->max_bytes = cfg->logging.max_bytes;
+    out->backup_count = cfg->logging.backup_count;
+    snprintf(out->directory, sizeof out->directory, "%s", cfg->logging.directory);
+    snprintf(out->file, sizeof out->file, "%s", cfg->logging.file);
+}
+
 int config_klines_path(const config_t *cfg, char *out, size_t outsz) {
     if (cfg->security.klines_file[0] == '\0') return 0;
     resolve_against_config_dir(cfg, cfg->security.klines_file, out, outsz);

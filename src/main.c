@@ -261,15 +261,8 @@ int main(int argc, char **argv) {
         if (fp) { fprintf(fp, "%d\n", (int)getpid()); fclose(fp); }
     }
 
-    log_config_t lcfg = {
-        .enabled = cfg.logging.enabled,
-        .debug = cfg.logging.debug,
-        .level = log_level_from_name(cfg.logging.level),
-        .max_bytes = cfg.logging.max_bytes,
-        .backup_count = cfg.logging.backup_count,
-    };
-    snprintf(lcfg.directory, sizeof lcfg.directory, "%s", cfg.logging.directory);
-    snprintf(lcfg.file, sizeof lcfg.file, "%s", cfg.logging.file);
+    log_config_t lcfg;
+    config_log_cfg(&cfg, &lcfg);
     log_init(&lcfg, verbose);
 
     log_info("main", "sekurircd %s starting (config: %s)", sekurircd_version,

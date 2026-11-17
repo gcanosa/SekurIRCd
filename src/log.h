@@ -14,7 +14,7 @@ typedef enum {
     LOG_CRITICAL,
 } log_level_t;
 
-typedef struct {
+typedef struct log_config {
     int enabled;            /* file logging master switch */
     char directory[512];
     char file[256];
@@ -47,6 +47,7 @@ void log_write(log_level_t level, const char *tag, const char *fmt, ...)
 /* Parse "DEBUG"/"INFO"/.../"CRITICAL" (case-insensitive); returns LOG_INFO
  * for an unrecognized name (config.c validates the string itself, this is
  * just the enum conversion). */
+void log_reinit(const log_config_t *cfg); /* log_init again with the -v given at start (a rehash) */
 log_level_t log_level_from_name(const char *name);
 
 #endif /* SEKURIRCD_LOG_H */
