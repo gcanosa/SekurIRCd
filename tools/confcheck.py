@@ -64,8 +64,11 @@ RETIRED = {  # sections the ircd no longer reads at all -> where the settings we
                 "(its accounts.json is used in place)",
 }
 RETIRED_TO = {"accounts": (SV, "nickserv")}
-OPTIONAL = {"config/protection.toml", "stats/stats.toml"}  # sekurircd.toml settings apply when it's absent; the stats panel is off
-HOW_TO_ADD = {"stats/stats.toml": "./sekurircd enable-stats"}
+# protection.toml: sekurircd.toml settings apply when it's absent; stats.toml: the stats panel is off; services.toml: no
+# NickServ/ChanServ here -- a leaf (or any server whose hub runs them) has none, so makeconf's own check must not refuse that
+OPTIONAL = {"config/protection.toml", "stats/stats.toml", "services/services.toml"}
+HOW_TO_ADD = {"stats/stats.toml": "./sekurircd enable-stats",
+              "services/services.toml": "none on a leaf: it uses its hub's NickServ/ChanServ. To run them here: tools/makeconf.py"}
 
 errors = warnings = 0
 perm_fixes = []  # (path, mode) chmods --fix --write applies: only ones this user can make without sudo or chown
