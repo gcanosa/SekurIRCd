@@ -243,3 +243,28 @@ def test_expiry_counts_through_restarts():
         s.start()
         b = s.client("aooldw")
         assert not any(" 311 " in l for l in b.say("WHOIS aoold", 0.6)), "expired while down: not restored"
+
+
+def test_leaf_restart_keeps_its_detached_users_on_the_network():
+    """A detached always-on user on a server that dials its uplink (a leaf) is still on the other servers once that
+    server restarts: the restore has to come before the first link burst, or the hub never hears of them."""
+    from harness import Network
+    from test_netsync import OPERS
+    n = Network(cfg={**OPERS, "accounts": {"enabled": True, "store_file": "acc.json"}})
+    n.add("a")
+    n.add("b", parent="a")
+    n.start()
+    try:
+        c = n.client("b", "aoleaf")
+        ns(c, "REGISTER leafpass1")
+        assert any("Always-on enabled" in l for l in ns(c, "SET ALWAYS-ON ON"))
+        c.say("JOIN #aoleaf", 0.5)
+        c.close()
+        time.sleep(1.0)
+        n.servers["b"].restart()
+        time.sleep(4)  # b dials a again (reconnect_delay 1)
+        w = n.client("a", "aoleafw")
+        got = w.say("WHOIS aoleaf", 1.0)
+        assert any(" 311 aoleafw aoleaf " in l for l in got), "a still sees the detached user after b restarted: %r" % got[-3:]
+    finally:
+        n.stop()

@@ -1852,9 +1852,10 @@ int net_run(server_t *srv) {
     if (srv->link_listen_fd >= 0) { snprintf(srv->bound_link.bind, sizeof srv->bound_link.bind, "%s", srv->cfg.links.bind); srv->bound_link.port = srv->cfg.links.port; }
     apply_v6_listeners(srv);
     apply_extra_listeners(srv, 0);
+    /* Restore first: dial_peer sends our burst before returning, so a leaf that dialed first introduced none of its
+     * restored sessions to the hub (it said "No such nick" for them until the next relink). */
+    alwayson_restore(srv);
     if (srv->cfg.links.autoconnect) link_dial_peers(srv, 1, NULL); /* every dial-out peer, now (later attempts back off per peer in link_leaf_tick) */
-
-    alwayson_restore(srv); /* before any link bursts, so they carry the restored sessions */
     server_install_debug_log_hook(srv);
     time_t last_tick = time(NULL);
 
