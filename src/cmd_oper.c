@@ -615,6 +615,11 @@ static void line_common(server_t *srv, client_t *cl, irc_message_t *msg, const c
     if (line_type[0] == 'Z') {
         char *zat = strrchr(maskbuf, '@');
         if (zat) memmove(maskbuf, zat + 1, strlen(zat + 1) + 1);
+        /* a hostname or cloak could never match at accept(): say so instead of storing a dead line */
+        if (maskbuf[strspn(maskbuf, "0123456789abcdefABCDEF.:*?/")]) {
+            notice_self(srv, cl, "A Z-line takes an IP, IP glob or CIDR (it applies before any host is known): use a G-line or K-line for a hostname or cloak");
+            return;
+        }
     }
     /* Refuse a mask whose host component is a bare "*": that bans every
      * address on the network. Checked on the host part specifically, since
@@ -660,7 +665,7 @@ static void line_common(server_t *srv, client_t *cl, irc_message_t *msg, const c
     } else snprintf(m, sizeof m, "%s-line added: %s (%s) [permanent]", line_type, maskbuf, reason);
     notice_self(srv, cl, m);
     int is_ban = line_type[0] != 'S' && line_type[0] != 'E'; /* SHUN/ELINE disconnect nobody */
-    if (is_ban && server_line_mask_hits(maskbuf, line_type, cl->ip, cl->user, cl->realhost, cl->ident_confirmed))
+    if (is_ban && server_client_line_hits(maskbuf, line_type, cl))
         notice_self(srv, cl, "Warning: this mask matches your own address -- you won't be able to reconnect from it while it's active");
 
     /* enforce: disconnect anyone already connected who matches, except the

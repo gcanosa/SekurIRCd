@@ -215,7 +215,7 @@ int client_apply_real_address(server_t *srv, client_t *cl, const char *given, co
     }
     cl->webirc = 1; /* "address supplied by a trusted intermediary": also makes net.c ignore the DNSBL result for the old address */
     cl->rdns_pending = cl->ident_pending = cl->dnsbl_pending = 0;
-    const char *kl = server_kline_match(srv, cl->ip, NULL, cl->realhost, 0);
+    const char *kl = server_kline_match(srv, cl->ip, NULL, cl->realhost, 0, cl->cloak);
     if (kl) {
         snprintf(cl->quit_reason, sizeof cl->quit_reason, "%s", kl);
         client_mark_quit(cl);

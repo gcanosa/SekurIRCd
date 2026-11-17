@@ -459,7 +459,7 @@ void link_accept(server_t *srv, int listen_fd) {
 
     /* Same blocklist as the client listener -- a K-lined host shouldn't get
      * a free pass at the link port just because it's a different socket. */
-    const char *kline_reason = server_kline_match(srv, ipbuf, NULL, ipbuf, 0);
+    const char *kline_reason = server_kline_match(srv, ipbuf, NULL, ipbuf, 0, NULL);
     if (kline_reason) {
         close(fd);
         log_warn("link", "rejected inbound link from %s: %s", ipbuf, kline_reason);
@@ -1092,7 +1092,8 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
             channel_set_ban_extra(NULL); /* AKICK cleanup: no stale client context for ~r/~z/~j */
             int hit = channel_mask_hit(mask, target->nick, target->user, target->host, target->account, target->ident_confirmed) ||
                       channel_mask_hit(mask, target->nick, target->user, target->realhost, target->account, target->ident_confirmed) ||
-                      channel_mask_hit(mask, target->nick, target->user, target->ip, target->account, target->ident_confirmed);
+                      channel_mask_hit(mask, target->nick, target->user, target->ip, target->account, target->ident_confirmed) ||
+                      (target->cloak[0] && channel_mask_hit(mask, target->nick, target->user, target->cloak, target->account, target->ident_confirmed));
             if (!hit) continue;
             masklist_del(&chan->bans, mask);
             char line[400];

@@ -298,8 +298,11 @@ int server_line_mask_hits(const char *mask, const char *line_type, const char *i
  * many. Shared by the KLINE/GLINE/ZLINE commands, DNSBL hits and the scanner. */
 int server_kline_enforce(server_t *srv, const char *mask, const char *line_type,
                           const char *quit_reason, client_t *except);
+/* `cloak`: the client's +x cloak (cl->cloak) or NULL -- K/G/E-lines and shuns match it too, so a line an oper copied
+ * from a cloaked WHOIS bites; a Z-line never (IP only). */
 const char *server_kline_match(server_t *srv, const char *ip, const char *user,
-                                const char *host, int ident_confirmed);
+                                const char *host, int ident_confirmed, const char *cloak);
+int server_client_line_hits(const char *mask, const char *line_type, const struct client *c);
 
 /* Records nick/user/host/realname into the WHOWAS ring buffer -- called
  * from server_remove_client right before a client is freed. */

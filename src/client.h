@@ -79,6 +79,7 @@ typedef struct client {
     int port;
     char host[HOSTLEN];       /* displayed host */
     char realhost[HOSTLEN];   /* actual resolved/connecting host, for oper WHOIS */
+    char cloak[HOSTLEN];      /* the +x cloak, kept when a vhost replaces it so bans on it still match; "" = none */
 
     char nick[NICKLEN];
     char casefold_nick[NICKLEN];

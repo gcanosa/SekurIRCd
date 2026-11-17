@@ -184,7 +184,7 @@ void cmd_send_welcome_if_ready(server_t *srv, client_t *cl) {
     /* Only now are user/host final (USER, identd and rDNS have all landed),
      * so this is the first point a hostname K/G-line can be evaluated at all
      * -- the accept-time check only ever had the IP. */
-    const char *kl = server_kline_match(srv, cl->ip, cl->user, cl->realhost, cl->ident_confirmed);
+    const char *kl = server_kline_match(srv, cl->ip, cl->user, cl->realhost, cl->ident_confirmed, cl->cloak);
     if (kl) {
         snprintf(cl->quit_reason, sizeof cl->quit_reason, "%s", kl);
         client_mark_quit(cl);

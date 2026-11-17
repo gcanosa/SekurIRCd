@@ -437,6 +437,21 @@ void irc_ip_limit_key(const char *ip, int prefix6, char *out, size_t outsz) {
     snprintf(out, outsz, "%s/%d", net, prefix6);
 }
 
+int irc_ip_prefix_key(const char *ip, int bits4, int bits6, char *out, size_t outsz) {
+    unsigned char b[16];
+    int fam = parse_ip(ip, b);
+    if (!fam) return -1;
+    int bits = fam == 4 ? bits4 : bits6;
+    for (int i = 0; i < (fam == 4 ? 4 : 16); i++) {
+        int keep = bits - i * 8;
+        b[i] &= keep >= 8 ? 0xff : keep <= 0 ? 0 : (unsigned char)(0xff << (8 - keep));
+    }
+    char net[64];
+    if (format_ip(fam, b, net, sizeof net) != 0) return -1;
+    snprintf(out, outsz, "%s/%d", net, bits);
+    return 0;
+}
+
 /* --- misc --------------------------------------------------------------------- */
 
 long irc_parse_duration(const char *token) {

@@ -67,6 +67,7 @@ typedef struct {
     int host_masking;
     char host_masking_format[CFG_STR];
     int host_masking_token_bytes;
+    int host_masking_ip_ranges;   /* {token} of an IP-keyed cloak is "full.r24.r16" (IPv6 /64./48./32): bans can take a range */
     int host_masking_keep_labels; /* trailing real-hostname labels kept verbatim in {suffix}; 0 = never use the real host (old fully-opaque cloak) */
     char host_masking_secret[CFG_STR]; /* HMAC key for the cloak token; "" = a random one is generated at startup (see server_t.cloak_secret) */
     int oper_host_masking;

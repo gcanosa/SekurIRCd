@@ -112,6 +112,8 @@ int irc_ip_mask_match(const char *mask, const char *ip);
 /* The key per-IP limits count by: an IPv6 address cut to its first `prefix6` bits ("2001:db8:1:2::/64" -- providers hand
  * every customer a whole /64, so one address each would be no limit), anything else unchanged. */
 void irc_ip_limit_key(const char *ip, int prefix6, char *out, size_t outsz);
+/* "net/bits" of `ip`: its first bits4 (IPv4) or bits6 (IPv6) bits; -1 if `ip` isn't an address. */
+int irc_ip_prefix_key(const char *ip, int bits4, int bits6, char *out, size_t outsz);
 
 /* Parse "1d"/"12h"/"30m"/"3600" into seconds. Returns -1 if not a duration
  * token at all (bare digits default to seconds). */

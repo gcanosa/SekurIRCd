@@ -1,4 +1,5 @@
 #include "netsync.h"
+#include "net.h"
 
 #include "channel.h"
 #include "client.h"
@@ -304,12 +305,23 @@ static const char *services_home(server_t *srv) {
     return "none";
 }
 
+/* CLOAKFMT=: a hash of how cloaks are built besides the secret (format, token bytes, kept labels, IP ranges), so two
+ * servers with the same secret but different settings still find out. Older peers send none and aren't checked. */
+static void cloak_fmt_token(server_t *srv, char *out, size_t outsz) {
+    const cfg_security_t *c = &srv->cfg.security;
+    char recipe[CFG_STR + 64];
+    snprintf(recipe, sizeof recipe, "%s|%d|%d|%d", c->host_masking_format, c->host_masking_token_bytes, c->host_masking_keep_labels,
+             c->host_masking_ip_ranges);
+    crypto_hmac_hex("sekurircd-link-cloak-format", recipe, out, outsz, 8);
+}
+
 void netsync_capab_line(server_t *srv, char *out, size_t outsz) {
-    char ver[96], cloak[24];
+    char ver[96], cloak[24], fmt[24];
     server_software_version(srv, ver, sizeof ver);
     cloak_check_token(srv, cloak, sizeof cloak);
-    snprintf(out, outsz, "CAPAB :SEKURNET PROTO=%d MINPROTO=%d VERSION=%s CLOAK=%s SERVICES=%s", NETSYNC_PROTO, NETSYNC_PROTO_MIN, ver,
-             cloak, services_home(srv));
+    cloak_fmt_token(srv, fmt, sizeof fmt);
+    snprintf(out, outsz, "CAPAB :SEKURNET PROTO=%d MINPROTO=%d VERSION=%s CLOAK=%s CLOAKFMT=%s SERVICES=%s", NETSYNC_PROTO, NETSYNC_PROTO_MIN,
+             ver, cloak, fmt, services_home(srv));
 }
 
 /* Never refuses: the burst's collision rules keep the older daemon and drop the other one; this names both early. */
@@ -340,7 +352,16 @@ static void cloak_check_peer(server_t *srv, link_conn_t *lc, const char *name) {
     else if (strcmp(ours, theirs) != 0)
         snprintf(m, sizeof m, "Link with %s: its [security] host_masking_secret differs from ours, so the same user gets a "
                  "different cloak on each server (and can dodge a cloak ban by switching) -- set the same secret on both", name);
-    else return;
+    else {
+        const char *f = strstr(lc->peer_capab, "CLOAKFMT=");
+        char tf[24] = "", of[24];
+        if (f) sscanf(f + 9, "%23s", tf);
+        cloak_fmt_token(srv, of, sizeof of);
+        if (!tf[0] || strcmp(tf, of) == 0) return;
+        snprintf(m, sizeof m, "Link with %s: its cloak settings (host_masking_format, _token_bytes, _keep_labels, _ip_ranges) differ "
+                 "from ours, so the same user gets a different cloak on each server and cloak bans and G-lines miss on one side "
+                 "-- set them the same on every server", name);
+    }
     log_warn("netsync", "%s", m);
     server_notify_opers(srv, m);
 }
@@ -618,6 +639,7 @@ static void handle_uid(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     snprintf(cl->host, sizeof cl->host, "%s", host);
     snprintf(cl->realhost, sizeof cl->realhost, "%s", realhost);
     snprintf(cl->ip, sizeof cl->ip, "%s", ip);
+    net_set_cloak(srv, cl);
     snprintf(cl->realname, sizeof cl->realname, "%s", msg->params[11]);
     if (strcmp(account, "*") != 0) snprintf(cl->account, sizeof cl->account, "%s", account);
     cl->ident_confirmed = msg->params[10][0] == '1';

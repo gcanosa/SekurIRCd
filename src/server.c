@@ -1110,9 +1110,21 @@ void server_kline_add(server_t *srv, const char *mask, const char *reason,
     server_notify_opers(srv, snote);
 }
 
+/* server_line_mask_hits on ip/realhost, or on the cloak (not for a Z-line: those are IP-only). Never the vhost:
+ * many users can share one. */
+static int line_hits_cloak(const char *mask, const char *line_type, const char *ip, const char *user, const char *host,
+                           int ident_confirmed, const char *cloak) {
+    if (server_line_mask_hits(mask, line_type, ip, user, host, ident_confirmed)) return 1;
+    return line_type[0] != 'Z' && cloak && cloak[0] && server_line_mask_hits(mask, line_type, NULL, user, cloak, ident_confirmed);
+}
+
+int server_client_line_hits(const char *mask, const char *line_type, const client_t *c) {
+    return line_hits_cloak(mask, line_type, c->ip, c->user, c->realhost, c->ident_confirmed, c->cloak);
+}
+
 static int server_client_eline_exempt(server_t *srv, client_t *c) {
     for (kline_entry_t *e = srv->klines; e; e = e->next)
-        if (e->line_type[0] == 'E' && server_line_mask_hits(e->mask, "K", c->ip, c->user, c->realhost, c->ident_confirmed)) return 1;
+        if (e->line_type[0] == 'E' && server_client_line_hits(e->mask, "K", c)) return 1;
     return 0;
 }
 
@@ -1121,7 +1133,7 @@ int server_kline_enforce(server_t *srv, const char *mask, const char *line_type,
     int matched = 0;
     for (client_t *c = srv->all_clients; c; c = c->all_next) {
         if (c == except || c->fd < 0 || c->quitting) continue;
-        if (!server_line_mask_hits(mask, line_type, c->ip, c->user, c->realhost, c->ident_confirmed)) continue;
+        if (!server_client_line_hits(mask, line_type, c)) continue;
         if (line_type[0] != 'Z' && server_client_eline_exempt(srv, c)) continue; /* ELINE protects an already-connected user too */
         snprintf(c->quit_reason, sizeof c->quit_reason, "%s", quit_reason);
         client_mark_quit(c);
@@ -1179,15 +1191,15 @@ int server_line_mask_hits(const char *mask, const char *line_type, const char *i
 }
 
 const char *server_kline_match(server_t *srv, const char *ip, const char *user,
-                                const char *host, int ident_confirmed) {
+                                const char *host, int ident_confirmed, const char *cloak) {
     static char reason_buf[300];
     for (kline_entry_t *k = srv->klines; k; k = k->next) {
         if (k->line_type[0] == 'S' || k->line_type[0] == 'E') continue; /* SHUN/ELINE aren't bans */
-        if (!server_line_mask_hits(k->mask, k->line_type, ip, user, host, ident_confirmed)) continue;
+        if (!line_hits_cloak(k->mask, k->line_type, ip, user, host, ident_confirmed, cloak)) continue;
         if (k->line_type[0] != 'Z') { /* an ELINE exempts K/G lines (a Z-line is applied before any user@host exists) */
             int exempt = 0;
             for (kline_entry_t *e = srv->klines; e && !exempt; e = e->next)
-                if (e->line_type[0] == 'E' && server_line_mask_hits(e->mask, "K", ip, user, host, ident_confirmed)) exempt = 1;
+                if (e->line_type[0] == 'E' && line_hits_cloak(e->mask, "K", ip, user, host, ident_confirmed, cloak)) exempt = 1;
             if (exempt) continue;
         }
         snprintf(reason_buf, sizeof reason_buf, "%s-Lined: %s", k->line_type, k->reason);
@@ -1204,7 +1216,7 @@ int server_is_shunned(server_t *srv, client_t *cl) {
         cl->shun_gen = srv->kline_gen + 1;
         cl->shunned = 0;
         for (kline_entry_t *k = srv->klines; k && !cl->shunned; k = k->next)
-            if (k->line_type[0] == 'S' && server_line_mask_hits(k->mask, "K", cl->ip, cl->user, cl->realhost, cl->ident_confirmed)) cl->shunned = 1;
+            if (k->line_type[0] == 'S' && server_client_line_hits(k->mask, "K", cl)) cl->shunned = 1;
     }
     return cl->shunned;
 }

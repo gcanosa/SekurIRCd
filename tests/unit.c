@@ -230,6 +230,65 @@ static void test_channel_ban_matches_realhost_and_ip(void) {
     channel_free(chan2);
 }
 
+/* A ban on the cloak still holds once a vhost shows instead, and host_masking_ip_ranges gives an IP's cloak its /24
+ * and /16 as their own labels, so a range can be banned without showing it. */
+static void test_cloak_kept_and_ranges(void) {
+    config_t cfg;
+    config_defaults(&cfg);
+    cfg.security.host_masking = 1;
+    snprintf(cfg.security.host_masking_secret, sizeof cfg.security.host_masking_secret, "unit-secret");
+    server_t srv;
+    assert(server_init(&srv, &cfg) == 0);
+    client_t *a = client_new(-1, &srv), *b = client_new(-1, &srv);
+    assert(a && b);
+    snprintf(a->ip, sizeof a->ip, "198.51.100.7"), snprintf(a->realhost, sizeof a->realhost, "198.51.100.7");
+    snprintf(b->ip, sizeof b->ip, "198.51.100.9"), snprintf(b->realhost, sizeof b->realhost, "198.51.100.9");
+    a->umodes |= UMODE_X, b->umodes |= UMODE_X;
+
+    net_reset_host(&srv, a);
+    assert(strcmp(a->host, a->cloak) == 0 && strstr(a->host, ".users.") && strchr(a->host, '.') - a->host == 8);
+    char flat[HOSTLEN];
+    snprintf(flat, sizeof flat, "%s", a->cloak);
+
+    /* a vhost: the ban on the old cloak still catches them, through the ban-extra client */
+    channel_t *chan = channel_new("#c", "#c");
+    char ban[300];
+    snprintf(ban, sizeof ban, "*!*@%s", a->cloak);
+    assert(masklist_add(&chan->bans, ban) == 0);
+    snprintf(a->host, sizeof a->host, "cool.vhost.example");
+    ban_extra_t bx = {"", 0, a};
+    channel_set_ban_extra(&bx);
+    assert(channel_is_banned(chan, "n", "u", a->host, a->realhost, a->ip, "", 0));
+    channel_set_ban_extra(NULL);
+    assert(!channel_is_banned(chan, "n", "u", a->host, a->realhost, a->ip, "", 0)); /* without it: the old gap */
+    /* a user from a linked server: the same cloak, worked out here */
+    client_t *r = client_new(-1, &srv);
+    snprintf(r->ip, sizeof r->ip, "198.51.100.7"), snprintf(r->realhost, sizeof r->realhost, "198.51.100.7");
+    net_set_cloak(&srv, r);
+    assert(strcmp(r->cloak, flat) == 0);
+
+    /* ranges: full.r24.r16; a neighbour in the /24 shares the last two */
+    srv.cfg.security.host_masking_ip_ranges = 1;
+    net_reset_host(&srv, a), net_reset_host(&srv, b);
+    char *ra = strchr(a->host, '.'), *rb = strchr(b->host, '.');
+    assert(ra && rb && strcmp(ra, rb) == 0 && strcmp(a->host, b->host) != 0);
+    assert(strncmp(a->host, flat, 8) == 0); /* the first token is the one it had */
+    snprintf(ban, sizeof ban, "*!*@*%s", ra);
+    channel_t *c2 = channel_new("#d", "#d");
+    assert(masklist_add(&c2->bans, ban) == 0);
+    assert(channel_is_banned(c2, "n", "u", b->host, b->realhost, b->ip, "", 0));
+    snprintf(b->ip, sizeof b->ip, "198.51.101.9"), snprintf(b->realhost, sizeof b->realhost, "198.51.101.9");
+    net_reset_host(&srv, b); /* another /24 in the same /16: only the last range label is shared */
+    assert(!channel_is_banned(c2, "n", "u", b->host, b->realhost, b->ip, "", 0));
+    assert(strcmp(strchr(strchr(a->host, '.') + 1, '.'), strchr(strchr(b->host, '.') + 1, '.')) == 0); /* the r16 on */
+
+    char k[64];
+    assert(irc_ip_prefix_key("198.51.100.7", 24, 48, k, sizeof k) == 0 && strcmp(k, "198.51.100.0/24") == 0);
+    assert(irc_ip_prefix_key("2001:db8:1:2::5", 24, 48, k, sizeof k) == 0 && strcmp(k, "2001:db8:1::/48") == 0);
+    assert(irc_ip_prefix_key("not-an-ip", 24, 48, k, sizeof k) == -1);
+    channel_free(chan), channel_free(c2);
+}
+
 /* Regression: the "m:"/"~m:" quiet extban blocks speaking (channel_is_quieted)
  * but must NOT block JOIN (channel_is_banned skips it); "~a:" is an alias
  * for the bare "a:" account extban. */
@@ -737,7 +796,11 @@ static void test_spam_filters_and_check(void) {
     /* rule order: first (viagra) wins, so use a text that only the new rule hits */
     assert(spam_check_message(&srv, cl, "#chan", "BOTNET-ADVERT now", 0) == 1);
     assert(cl->quitting == 1);
-    assert(server_kline_match(&srv, "203.0.113.5", "u", "h", 0) != NULL);
+    assert(server_kline_match(&srv, "203.0.113.5", "u", "h", 0, NULL) != NULL);
+    assert(server_kline_match(&srv, "198.51.100.1", "u", "h", 0, "zz.cloak.example") == NULL);
+    server_kline_add(&srv, "*@zz.cloak.example", "copied from WHOIS", "oper", "G", 0); /* a G-line on a cloak bites */
+    assert(server_kline_match(&srv, "198.51.100.1", "u", "h", 0, "zz.cloak.example") != NULL);
+    assert(server_kline_match(&srv, "198.51.100.1", "u", "h", 0, NULL) == NULL);
 
     spam_free(&srv);
     assert(srv.spam_filters == NULL);
@@ -820,6 +883,19 @@ static void test_line_mask_hits(void) {
     assert(server_line_mask_hits("~bob@host.example", "K", "203.0.113.7", "bob", "host.example", 0));
     assert(server_line_mask_hits("bob@host.example", "K", "203.0.113.7", "bob", "host.example", 1));
     assert(!server_line_mask_hits("*.other", "K", "203.0.113.7", "bob", "host.example", 0));
+
+    /* the cloak: K/G/E-lines and shuns match it (an oper copies it from WHOIS), a Z-line never, the vhost never */
+    client_t *c = client_new(-1, NULL);
+    snprintf(c->ip, sizeof c->ip, "203.0.113.7"), snprintf(c->user, sizeof c->user, "bob");
+    snprintf(c->realhost, sizeof c->realhost, "host.example"), snprintf(c->cloak, sizeof c->cloak, "a1b2c3d4.users.net");
+    snprintf(c->host, sizeof c->host, "shared.vhost.example");
+    assert(server_client_line_hits("*@a1b2c3d4.users.net", "G", c) && server_client_line_hits("*@*.users.net", "K", c));
+    assert(!server_client_line_hits("a1b2c3d4.users.net", "Z", c));
+    assert(!server_client_line_hits("*@shared.vhost.example", "G", c));
+    assert(server_client_line_hits("*@host.example", "G", c)); /* the real host as before */
+    c->cloak[0] = '\0';
+    assert(!server_client_line_hits("*@a1b2c3d4.users.net", "G", c));
+    client_free(c);
 }
 
 /* Tiny runner: the old main() printed a hardcoded "0 assertions across 24
@@ -1176,6 +1252,7 @@ int main(void) {
     RUN(test_host_tail);
     RUN(test_glob_and_masks);
     RUN(test_channel_ban_matches_realhost_and_ip);
+    RUN(test_cloak_kept_and_ranges);
     RUN(test_quiet_extban_and_tilde_alias);
     RUN(test_normalize_mask);
     RUN(test_timed_ban_and_unreal_flood);

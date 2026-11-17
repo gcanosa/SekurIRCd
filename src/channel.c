@@ -167,13 +167,16 @@ static int is_quiet_mask(const char *mask) { /* also ~n: -- an action ban, not a
     return strncasecmp(mask, "m:", 2) == 0 || strncasecmp(mask, "n:", 2) == 0;
 }
 
-/* True if `mask` hits any of host/realhost/ip (see channel_is_banned's doc). */
+/* True if `mask` hits any of host/realhost/ip, or the cloak of the ban-extra client (see channel_is_banned's doc). */
 static int mask_hit_any_host(const char *mask, const char *nick, const char *user,
                               const char *host, const char *realhost, const char *ip,
                               const char *account, int ident_confirmed) {
     if (channel_mask_hit(mask, nick, user, host, account, ident_confirmed)) return 1;
     if (strcmp(realhost, host) != 0 && channel_mask_hit(mask, nick, user, realhost, account, ident_confirmed)) return 1;
     if (strcmp(ip, host) != 0 && strcmp(ip, realhost) != 0 && channel_mask_hit(mask, nick, user, ip, account, ident_confirmed)) return 1;
+    /* the cloak a vhost hides: a ban on it still holds */
+    const char *ck = g_extra && g_extra->cl ? g_extra->cl->cloak : "";
+    if (ck[0] && strcmp(ck, host) != 0 && channel_mask_hit(mask, nick, user, ck, account, ident_confirmed)) return 1;
     return 0;
 }
 
@@ -332,6 +335,7 @@ void channel_ban_state(channel_t *chan, member_t *m, const char *nick, const cha
     if (g_extra) { /* ~r / ~z depend on these too */
         for (const unsigned char *p = (const unsigned char *)(g_extra->realname ? g_extra->realname : ""); *p; p++) h = (h ^ *p) * 16777619u;
         h = (h ^ (unsigned)g_extra->secure) * 16777619u;
+        if (g_extra->cl) for (const unsigned char *p = (const unsigned char *)g_extra->cl->cloak; *p; p++) h = (h ^ *p) * 16777619u;
     }
     unsigned lists_gen = chan->bans.gen + chan->exceptions.gen;
     int dynamic = chan->bans.dynamic || chan->exceptions.dynamic; /* ~j: verdicts can change with no list/identity change */

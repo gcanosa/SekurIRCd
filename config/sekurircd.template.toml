@@ -189,6 +189,13 @@ host_masking_token_bytes = 4
 # "vps123.ovh.net" into "ovh.net").
 host_masking_keep_labels = 0
 
+# Cloaks keyed on an IP (no real-host suffix) get the IP's /24 and /16 (IPv6:
+# /48 and /32) as their own labels: a1b2c3d4e5f6a7b8.1a2b3c4d.5e6f7a8b.users.net.
+# Channel ops can then ban *!*@*.1a2b3c4d.5e6f7a8b.users.net for a whole /24
+# without seeing it. Turning it on changes those cloaks, so bans on the old ones
+# stop matching; set it the same on every linked server.
+host_masking_ip_ranges = false
+
 # Key behind {token}. Empty = random at each start, so cloaks change on every
 # restart and differ between linked servers. Set one (and the same one on
 # every linked server) for stable cloaks. Keep it out of version control.

@@ -588,6 +588,7 @@ static int build_config(toml_node_t *raw, const char *path, config_t *out,
     if (cfg_get_bool(sec, "host_masking", 0, &out->security.host_masking, errbuf, errbufsz, "security.host_masking")) return -1;
     if (cfg_get_str(sec, "host_masking_format", "{token}.users.{network}", out->security.host_masking_format, CFG_STR, errbuf, errbufsz, "security.host_masking_format")) return -1;
     if (cfg_get_int(sec, "host_masking_token_bytes", 4, &out->security.host_masking_token_bytes, errbuf, errbufsz, "security.host_masking_token_bytes")) return -1;
+    if (cfg_get_bool(sec, "host_masking_ip_ranges", 0, &out->security.host_masking_ip_ranges, errbuf, errbufsz, "security.host_masking_ip_ranges")) return -1;
     if (cfg_get_int(sec, "host_masking_keep_labels", 0, &out->security.host_masking_keep_labels, errbuf, errbufsz, "security.host_masking_keep_labels")) return -1;
     if (cfg_get_str(sec, "host_masking_secret", "", out->security.host_masking_secret, CFG_STR, errbuf, errbufsz, "security.host_masking_secret")) return -1;
     if (cfg_get_bool(sec, "oper_host_masking", 0, &out->security.oper_host_masking, errbuf, errbufsz, "security.oper_host_masking")) return -1;

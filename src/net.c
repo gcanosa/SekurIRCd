@@ -561,25 +561,49 @@ static int g_accept_errno;
  * host_masking_keep_labels > 0, {suffix} becomes that hostname's trailing
  * labels instead (e.g. "orange.es"), matching the opt-in "partial cloak"
  * documented in config/sekurircd.template.toml. */
-static void apply_masked_host(server_t *srv, client_t *cl, const char *basis, const char *resolved_host) {
+static void cloak_for(server_t *srv, const client_t *cl, const char *basis, const char *resolved_host, char *out, size_t outsz) {
     char network[CFG_STR];
     irc_casefold(network, sizeof network, srv->cfg.server.network);
     for (char *p = network; *p; p++) if (*p == ' ') *p = '-';
+
+    char suffix[CFG_STR] = "";
+    if (resolved_host && srv->cfg.security.host_masking_keep_labels > 0)
+        irc_host_tail(resolved_host, srv->cfg.security.host_masking_keep_labels, suffix, sizeof suffix);
+    int from_host = suffix[0] != 0;
+    if (!from_host) snprintf(suffix, sizeof suffix, "users.%s", network); /* also a one-label host's "" */
 
     /* An IPv6 address is cloaked by its /64 (ipv6_limit_prefix): the same subscriber keeps one cloak however the
      * address rotates inside it, so a channel ban on the cloak sticks. IPv4 addresses and hostnames are unchanged. */
     char key[64];
     server_ip_key(srv, basis, key, sizeof key);
-    char token[80];
-    crypto_hmac_hex(srv->cloak_secret, key, token, sizeof token, srv->cfg.security.host_masking_token_bytes);
+    char token[200];
+    crypto_hmac_hex(srv->cloak_secret, key, token, 80, srv->cfg.security.host_masking_token_bytes);
+    /* host_masking_ip_ranges: with no real-host suffix, the IP's /24 and /16 (IPv6: /48, /32) follow as their own
+     * shorter tokens, as UnrealIRCd does, so *!*@*.<r24>.<r16>.users.net bans a range without showing it */
+    char r1[64], r2[64], h1[24], h2[24];
+    if (srv->cfg.security.host_masking_ip_ranges && !from_host && cl->ip[0] &&
+        irc_ip_prefix_key(cl->ip, 24, 48, r1, sizeof r1) == 0 && irc_ip_prefix_key(cl->ip, 16, 32, r2, sizeof r2) == 0) {
+        server_ip_key(srv, cl->ip, key, sizeof key);
+        crypto_hmac_hex(srv->cloak_secret, key, token, 80, srv->cfg.security.host_masking_token_bytes);
+        crypto_hmac_hex(srv->cloak_secret, r1, h1, sizeof h1, 4); /* ponytail: 8 hex each: a range, not a person */
+        crypto_hmac_hex(srv->cloak_secret, r2, h2, sizeof h2, 4);
+        size_t l = strlen(token);
+        snprintf(token + l, sizeof token - l, ".%s.%s", h1, h2);
+    }
 
-    char suffix[CFG_STR] = "";
-    if (resolved_host && srv->cfg.security.host_masking_keep_labels > 0)
-        irc_host_tail(resolved_host, srv->cfg.security.host_masking_keep_labels, suffix, sizeof suffix);
-    if (!suffix[0]) snprintf(suffix, sizeof suffix, "users.%s", network); /* also a one-label host's "" */
+    if (config_format_cloak(srv->cfg.security.host_masking_format, token, network, suffix, out, outsz) != 0)
+        snprintf(out, outsz, "%s.users.%s", token, network); /* template overflowed -- never leave a half-written/real host */
+}
 
-    if (config_format_cloak(srv->cfg.security.host_masking_format, token, network, suffix, cl->host, sizeof cl->host) != 0)
-        snprintf(cl->host, sizeof cl->host, "%s.users.%s", token, network); /* template overflowed -- never leave a half-written/real host */
+static void apply_masked_host(server_t *srv, client_t *cl, const char *basis, const char *resolved_host) {
+    cloak_for(srv, cl, basis, resolved_host, cl->host, sizeof cl->host);
+    snprintf(cl->cloak, sizeof cl->cloak, "%s", cl->host);
+}
+
+void net_set_cloak(server_t *srv, client_t *cl) {
+    if (!srv->cfg.security.host_masking) return;
+    int resolved = strcmp(cl->realhost, cl->ip) != 0;
+    cloak_for(srv, cl, resolved ? cl->realhost : cl->ip, resolved ? cl->realhost : NULL, cl->cloak, sizeof cl->cloak);
 }
 
 int net_assign_class(server_t *srv, client_t *cl) {
@@ -647,7 +671,7 @@ static client_t *accept_common(server_t *srv, int listen_fd) {
     /* Accept time: no USER/ident/rDNS yet, so only the IP and the raw host
      * are known. A hostname K-line is re-checked once registration
      * completes -- see cmd_send_welcome_if_ready. */
-    const char *kline_reason = server_kline_match(srv, ipbuf, NULL, ipbuf, 0);
+    const char *kline_reason = server_kline_match(srv, ipbuf, NULL, ipbuf, 0, NULL);
     if (kline_reason) {
         char err[350];
         snprintf(err, sizeof err, "ERROR :Closing Link: %s (%s)\r\n", ipbuf, kline_reason);
@@ -1281,6 +1305,7 @@ static void alwayson_restore(server_t *srv) {
         snprintf(cl->host, sizeof cl->host, "%s", get_str(o, "host"));
         snprintf(cl->realhost, sizeof cl->realhost, "%s", get_str(o, "realhost"));
         snprintf(cl->ip, sizeof cl->ip, "%s", get_str(o, "ip"));
+        net_set_cloak(srv, cl);
         snprintf(cl->realname, sizeof cl->realname, "%s", get_str(o, "realname"));
         snprintf(cl->account, sizeof cl->account, "%s", account);
         snprintf(cl->acct_created_for, sizeof cl->acct_created_for, "%s", get_str(o, "acct_created_for"));

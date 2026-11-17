@@ -33,6 +33,9 @@ int net_assign_class(struct server *srv, struct client *cl);
 void net_release_class(struct server *srv, struct client *cl);
 void net_reclass_all(struct server *srv); /* after a rehash changed the class list */
 void net_reset_host(struct server *srv, struct client *cl);
+/* cl->cloak for a user from a linked server: what its +x cloak is (the same secret makes it the same everywhere),
+ * so a ban on it still matches once a vhost shows instead. Nothing with host_masking off. */
+void net_set_cloak(struct server *srv, struct client *cl);
 /* After a rehash: rebind any listener whose bind/port changed, open/close listeners that were enabled/disabled,
  * and reload the TLS certificate. A bind failure keeps the old listener (logged) -- never leaves it dead. */
 void net_apply_listeners(struct server *srv);
