@@ -209,7 +209,7 @@ install: all
 	    -e 's|^file = "dbip-city-lite.csv.gz"|file = "$(STATEDIR)/stats/dbip-city-lite.csv.gz"|' \
 	    stats/stats.template.toml > $(SYSCONFDIR)/stats.template.toml
 	chmod 644 $(SYSCONFDIR)/stats.template.toml
-	install -m644 config/ircd.template.motd config/oper.template.motd config/ircd.template.rules $(SYSCONFDIR)/
+	install -m644 config/ircd.template.motd config/ircd.template.smotd config/oper.template.motd config/ircd.template.rules $(SYSCONFDIR)/
 	sed -e 's|/usr/local/bin|$(PREFIX)/bin|g' -e 's|/etc/sekurircd|$(SYSCONFDIR)|g' -e 's|/var/lib/sekurircd|$(STATEDIR)|g' \
 	    systemd/sekurircd.service > $(UNITDIR)/sekurircd.service
 	sed -e 's|/usr/local/bin|$(PREFIX)/bin|g' -e 's|/etc/sekurircd|$(SYSCONFDIR)|g' -e 's|/var/lib/sekurircd|$(STATEDIR)|g' \

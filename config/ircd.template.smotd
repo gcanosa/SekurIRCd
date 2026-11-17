@@ -1,0 +1,16 @@
+
+11          ____          _                  _   _         _   
+11         / ___|   ___  | | __ _   _  _ __ | \ | |  ___  | |_ 
+12         \___ \  / _ \ | |/ /| | | || '__||  \| | / _ \ | __|
+12          ___) ||  __/ |   < | |_| || |   | |\  ||  __/ | |_ 
+
+  15small network  -  secure by default  -  no nonsense
+
+  11TLS ......... port 6697 (09recommended, gets you +z)
+  03Lobby ....... #SekurNet   help: #help
+  06Account ..... /msg NickServ REGISTER <password> [email]
+  06Help ........ /msg NickServ HELP   /msg ChanServ HELP
+  04Rules ....... be civil, no flooding or spam -- /RULES
+
+  08>> Type /MOTD for the complete MOTD: network, channels,
+  08   rules, registering a channel and privacy.

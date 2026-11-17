@@ -30,7 +30,8 @@
 <p>The MOTD, oper MOTD, rules and spam filters are your own files, not tracked by git. The repo ships <code>config/ircd.template.motd</code>,
   <code>oper.template.motd</code>, <code>ircd.template.rules</code> and <code>spamfilters.template.conf</code>. At start and on <code>REHASH</code>, the ircd creates a
   missing <code>ircd.motd</code>, <code>oper.motd</code>, <code>ircd.rules</code> or <code>spamfilters.conf</code> from its template and never touches one that exists,
-  so upgrades keep your edits.</p>
+  so upgrades keep your edits. A short MOTD for connect is optional and never created for you: <code>cp config/ircd.template.smotd config/ircd.smotd</code>
+  gives a colored one that tells users <code>/MOTD</code> shows the complete one.</p>
 
 <div class="note"><strong>Full templates on GitHub:</strong>
   <a href="https://github.com/gcanosa/SekurIRCd/blob/main/config/sekurircd.template.toml"><code>config/sekurircd.template.toml</code></a> (ircd) and
