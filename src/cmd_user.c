@@ -562,6 +562,7 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
             outtext = censored;
         }
         if (m && m->hidden) channel_reveal_member(chan, m); /* +D: speaking reveals you */
+        if (!is_notice) cl->last_msg = time(NULL);
         build_lines(lines, cl, prefix, verb, p, is_tagmsg ? NULL : outtext, &x);
 
         member_t *mm, *tmp;
@@ -608,6 +609,7 @@ static void send_msg(server_t *srv, client_t *cl, irc_message_t *msg, const char
             return;
         }
         if (!dst->remote && !pm_target_ok(cl, dst, textbuf, is_notice)) return;
+        if (!is_notice) cl->last_msg = time(NULL);
         build_lines(lines, cl, prefix, verb, p, is_tagmsg ? NULL : textbuf, &x);
         if (dst->remote) { /* on another server: it runs the recipient-side checks and delivers */
             irc_tag_t wt[1 + MAX_CLIENT_TAGS];
@@ -836,7 +838,7 @@ static void whois_one(server_t *srv, client_t *cl, const char *nick) {
     }
 
     if (!target->remote && (!(target->umodes & UMODE_HIDEIDLE) || self_or_oper)) { /* idle time lives on the user's own server */
-        long idle = (long)difftime(time(NULL), target->last_activity);
+        long idle = (long)difftime(time(NULL), target->last_msg);
         char idlebuf[32], signonbuf[32];
         snprintf(idlebuf, sizeof idlebuf, "%ld", idle);
         snprintf(signonbuf, sizeof signonbuf, "%ld", (long)target->signon_time);
@@ -887,9 +889,9 @@ static const char *whox_value(char letter, client_t *u, channel_t *chan, client_
     }
     case 'd': return "0";
     case 'o': return "0"; /* oplevel: not tracked */
-    case 'l': {
-        long idle = (long)difftime(time(NULL), u->last_activity);
-        snprintf(scratch, scratchsz, "%ld", idle);
+    case 'l': { /* idle lives on the user's own server; +I hides it as in WHOIS */
+        if (u->remote || ((u->umodes & UMODE_HIDEIDLE) && u != cl && !OPER_CAN(cl, OPER_PRIV_AUSPEX))) return "0";
+        snprintf(scratch, scratchsz, "%ld", (long)difftime(time(NULL), u->last_msg));
         return scratch;
     }
     case 'a': return u->account[0] ? u->account : "0";

@@ -91,7 +91,7 @@ static void st_opers_online(server_t *srv, client_t *cl, char letter, const char
         if ((u->umodes & UMODE_H) && !OPER_CAN(cl, OPER_PRIV_AUSPEX)) continue; /* +H hides oper status from non-opers */
         char idle[24];
         if ((u->umodes & UMODE_HIDEIDLE) && !OPER_CAN(cl, OPER_PRIV_AUSPEX) && u != cl) snprintf(idle, sizeof idle, "hidden");
-        else dur((long)difftime(now, u->last_activity), idle, sizeof idle);
+        else dur((long)difftime(now, u->last_msg), idle, sizeof idle);
         dbg(cl, letter, "[O] %s (%s@%s) Idle: %s%s", u->nick, u->user, OPER_CAN(cl, OPER_PRIV_AUSPEX) ? u->realhost : u->host, idle,
             u->is_away ? " (away)" : "");
         n++;

@@ -44,7 +44,7 @@ client_t *client_new(int fd, struct server *srv) {
     cl->fd = fd;
     cl->srv = srv;
     cl->class_idx = -1; /* calloc's 0 would mean "class 0" */
-    cl->signon_time = cl->last_activity = time(NULL);
+    cl->signon_time = cl->last_activity = cl->last_msg = time(NULL);
     cl->sbuf_cap = 4096;
     cl->sbuf = malloc(cl->sbuf_cap);
     cl->rbuf_cap = RBUF_START;

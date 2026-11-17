@@ -1086,6 +1086,7 @@ int net_takeover(server_t *srv, client_t *cl) {
     snprintf(cl->uid, sizeof cl->uid, "%s", g->uid);
     cl->nserver = g->nserver;
     cl->nick_ts = g->nick_ts;
+    cl->last_msg = g->last_msg; /* idle is the user's, not the connection's */
     cl->umodes = (g->umodes & ~UMODE_Z) | (cl->umodes & UMODE_Z); /* +Z follows this connection's TLS */
     cl->acct_created = g->acct_created;
     snprintf(cl->acct_created_for, sizeof cl->acct_created_for, "%s", g->acct_created_for);

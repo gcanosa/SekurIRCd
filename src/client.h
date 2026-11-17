@@ -193,7 +193,8 @@ typedef struct client {
     /* STATS l <nick> / t: what this connection moved (bytes as the IRC layer saw them, lines queued/dispatched). */
     unsigned long long bytes_in, bytes_out;
     unsigned long msgs_in, msgs_out;
-    time_t last_activity;   /* last line received */
+    time_t last_activity;   /* last bytes received (PING/PONG included): liveness, drives the ping timeout -- NOT user idle */
+    time_t last_msg;        /* last PRIVMSG this user sent: the WHOIS "seconds idle" (NOTICE/TAGMSG/PING/PONG don't count) */
     int ping_sent;          /* a PING is outstanding, awaiting PONG */
 
     time_t flood_window_start;

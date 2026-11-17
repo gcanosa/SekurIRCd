@@ -4,7 +4,8 @@
     "date": "",
     "changes": [
       "Short MOTD: put an ircd.smotd next to ircd.motd (same name, .smotd) and it is shown on connect, while /MOTD shows the full ircd.motd. If only one of the two exists, it is used for both. REHASH reloads it. config/ircd.template.smotd is a colored one to start from (cp it to ircd.smotd): the banner, TLS port, lobby, NickServ/ChanServ HELP, the rules in one line and a pointer to /MOTD for the complete one",
-      "Bot MOTD: an optional bot.motd next to the config file is shown to a user when they set user mode +B (bot)"
+      "Bot MOTD: an optional bot.motd next to the config file is shown to a user when they set user mode +B (bot)",
+      "WHOIS \"seconds idle\" only resets when the user sends a PRIVMSG, as on other ircds. It used to reset on every byte the server read from them, so a client's automatic PING/PONG keepalives, a CTCP reply (a NOTICE) or typing/reaction TAGMSGs kept the idle counter at zero or made it jump back to a few seconds. The ping-timeout clock is separate and unchanged. A PRIVMSG that fails (no such nick, blocked, flood-dropped) no longer counts, always-on users keep their idle time when they reattach, STATS o shows the same idle, and WHOX %l (idle) now follows +I (hide idle) and is 0 for users on other servers instead of a made-up number"
     ]
   },
   {
