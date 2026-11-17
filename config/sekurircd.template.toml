@@ -184,7 +184,9 @@ host_masking_format = "{token}.users.{network}"
 host_masking_token_bytes = 4
 
 # Labels of the resolved hostname kept in {suffix} (2 keeps "orange.es").
-# 0 = never show the real host. "co.uk"-style domains need 3.
+# 0 = never show the real host. "co.uk"-style domains need 3. Never the whole
+# hostname: one with this many labels or fewer keeps one less (3 turns
+# "vps123.ovh.net" into "ovh.net").
 host_masking_keep_labels = 0
 
 # Key behind {token}. Empty = random at each start, so cloaks change on every

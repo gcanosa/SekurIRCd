@@ -293,14 +293,13 @@ void irc_host_tail(const char *host, int keep_labels, char *out, size_t outsz) {
     const char *cut = host;
     if (keep_labels > 0) {
         int dots = 0;
-        size_t len = strlen(host);
-        for (size_t i = len; i > 0; i--) {
-            if (host[i - 1] == '.') {
-                dots++;
-                if (dots == keep_labels) { cut = host + i; break; }
-            }
-        }
-        if (dots < keep_labels) cut = host; /* fewer labels than requested -- keep it all */
+        for (const char *p = host; *p; p++) dots += *p == '.';
+        /* Never the whole host: one with keep_labels labels or fewer ("vps123.ovh.net" at 3) keeps one less
+         * ("ovh.net"), and a single label ("localhost") nothing. */
+        int keep = dots < keep_labels ? dots : keep_labels, seen = 0;
+        cut = host + strlen(host);
+        for (size_t i = strlen(host); i > 0 && keep > 0; i--)
+            if (host[i - 1] == '.' && ++seen == keep) { cut = host + i; break; }
     }
     snprintf(out, outsz, "%s", cut);
 }

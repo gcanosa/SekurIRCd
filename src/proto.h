@@ -67,8 +67,9 @@ void irc_casefold(char *out, size_t outsz, const char *in);
 
 /* Last `keep_labels` dot-separated labels of `host` (e.g. keep_labels=2 on
  * "dsl-host.dyn.orange.es" gives "orange.es") -- the visible remainder of a
- * partially-masked cloak. If `host` has fewer labels than `keep_labels`, or
- * keep_labels <= 0, the whole `host` is copied through unchanged. No public-
+ * partially-masked cloak. Never all of a hostname: one with `keep_labels`
+ * labels or fewer keeps one less ("vps123.ovh.net" at 3 gives "ovh.net"), a
+ * single label gives "". keep_labels <= 0 copies `host` through unchanged. No public-
  * suffix-list awareness (ponytail: a config knob covers ccTLD domains like
  * "orange.es" or "co.uk" that need 2 vs 3 labels kept -- see
  * security.host_masking_keep_labels). */

@@ -573,12 +573,10 @@ static void apply_masked_host(server_t *srv, client_t *cl, const char *basis, co
     char token[80];
     crypto_hmac_hex(srv->cloak_secret, key, token, sizeof token, srv->cfg.security.host_masking_token_bytes);
 
-    char suffix[CFG_STR];
-    if (resolved_host && srv->cfg.security.host_masking_keep_labels > 0) {
+    char suffix[CFG_STR] = "";
+    if (resolved_host && srv->cfg.security.host_masking_keep_labels > 0)
         irc_host_tail(resolved_host, srv->cfg.security.host_masking_keep_labels, suffix, sizeof suffix);
-    } else {
-        snprintf(suffix, sizeof suffix, "users.%s", network);
-    }
+    if (!suffix[0]) snprintf(suffix, sizeof suffix, "users.%s", network); /* also a one-label host's "" */
 
     if (config_format_cloak(srv->cfg.security.host_masking_format, token, network, suffix, cl->host, sizeof cl->host) != 0)
         snprintf(cl->host, sizeof cl->host, "%s.users.%s", token, network); /* template overflowed -- never leave a half-written/real host */

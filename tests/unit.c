@@ -169,8 +169,14 @@ static void test_host_tail(void) {
     char out[64];
     irc_host_tail("dsl-host.dyn.orange.es", 2, out, sizeof out);
     assert(strcmp(out, "orange.es") == 0);
-    irc_host_tail("localhost", 2, out, sizeof out); /* fewer labels than requested -- keep it all */
-    assert(strcmp(out, "localhost") == 0);
+    irc_host_tail("vps123.ovh.net", 3, out, sizeof out); /* no more labels than kept: one less, never the whole host */
+    assert(strcmp(out, "ovh.net") == 0);
+    irc_host_tail("example.com", 3, out, sizeof out);
+    assert(strcmp(out, "com") == 0);
+    irc_host_tail("a.b.example.co.uk", 3, out, sizeof out);
+    assert(strcmp(out, "example.co.uk") == 0);
+    irc_host_tail("localhost", 2, out, sizeof out); /* a single label: nothing (the cloak says users.<network>) */
+    assert(strcmp(out, "") == 0);
     irc_host_tail("dsl-host.dyn.orange.es", 0, out, sizeof out); /* disabled -- passthrough */
     assert(strcmp(out, "dsl-host.dyn.orange.es") == 0);
 }
