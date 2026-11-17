@@ -14,6 +14,11 @@
   06Account ........... /msg NickServ REGISTER <password> [email]
   06Help .............. /msg NickServ HELP   /msg ChanServ HELP
   04Rules ............. be civil, no flooding or spam -- /RULES
+  10Website ........... https://www.sekurnet.org
+  10Webchat ........... https://webchat.sekurnet.org
+
+  09>> IRC client? Try 09iSekur: terminal, bouncer and webchat
+  09   https://gcanosa.github.io/isekur-site/
 
   08>> Type /MOTD for the complete MOTD: network, channels,
   08   rules, registering a channel and privacy.
