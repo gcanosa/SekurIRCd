@@ -1,5 +1,6 @@
 import time
 from harness import Server, ChanServ
+from test_accounts2 import ns
 
 PW = "svcsecret"
 
@@ -164,3 +165,26 @@ def test_account_levels_need_no_password():
         cs(v, "TOPIC #cs second chanpass1")  # the right password straight after the miss isn't tried: it stays text
         t = " ".join(l for l in f.say("TOPIC #cs") if " 332 " in l)
         assert t.endswith(":second chanpass1"), t
+
+
+def test_help_per_command():
+    s = net()
+    with s, ChanServ(s, s.link_port, password=PW):
+        c = s.client("helper")
+        r = cs(c, "HELP")
+        assert any("HELP <command>" in l for l in r) and any("ACCESS" in l for l in r), r
+        assert not any("Syntax:" in l for l in r), "HELP alone is the short list"
+        r = cs(c, "HELP access")
+        assert any("Syntax: ACCESS #channel ADD" in l for l in r) and any("/msg ChanServ ACCESS #mychan ADD =alice o" in l for l in r), r
+        assert not any("AKICK" in l for l in r), r
+        r = cs(c, "HELP SET")
+        assert all(any(f"SET #channel {k}" in l for l in r) for k in ("MLOCK", "FOUNDER", "DESC|URL|ENTRYMSG")), r
+        r = cs(c, "HELP set mlock")
+        assert any("Syntax: SET #channel MLOCK" in l for l in r) and not any("FOUNDER" in l for l in r), r
+        assert any("Syntax: OP|DEOP" in l for l in cs(c, "HELP DEVOICE")), "an alias finds its group"
+        assert any("No help for NOPE" in l for l in cs(c, "HELP NOPE"))
+        r = ns(c, "HELP")
+        assert any("REGAIN" in l for l in r) and not any("SUSPEND" in l for l in r), "admin commands hidden"
+        r = ns(c, "HELP set ajoin")
+        assert any("Syntax: SET AJOIN" in l for l in r) and any("Example" in l for l in r), r
+        assert any("Syntax: IDENTIFY" in l for l in ns(c, "HELP ID"))

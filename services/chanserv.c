@@ -1747,80 +1747,216 @@ static void topic_pending_done(const irc_message_t *msg) {
     }
 }
 
+static int help_name_is(const char *names, const char *want, size_t wlen, int prefix) {
+    for (const char *p = names; *p;) {
+        size_t len = strcspn(p, "|");
+        if (prefix ? (len > wlen && p[wlen] == ' ' && strncasecmp(p, want, wlen) == 0)
+                   : (len == wlen && strncasecmp(p, want, wlen) == 0)) return 1;
+        p += len;
+        if (*p) p++;
+    }
+    return 0;
+}
+
+static void help_entry(const svc_help_t *e, void (*out)(const char *, const char *), const char *to) {
+    char line[400];
+    for (const char *p = e->text; *p;) {
+        size_t len = strcspn(p, "\n");
+        snprintf(line, sizeof line, "%.*s", (int)len, p);
+        out(to, line);
+        p += len;
+        if (*p) p++;
+    }
+}
+
+void svc_help(const char *svc, const char *intro, const svc_help_t *t, size_t n, const char *args, int admin,
+              void (*out)(const char *to, const char *line), const char *to) {
+    char want[100], line[400];
+    size_t w = 0;
+    for (const char *p = args ? args : ""; *p && w + 1 < sizeof want; p++) /* "  set   mlock " -> "set mlock" */
+        if (*p != ' ' || (w && want[w - 1] != ' ')) want[w++] = *p;
+    while (w && want[w - 1] == ' ') w--;
+    want[w] = '\0';
+    if (!w) {
+        snprintf(line, sizeof line, "%s commands -- /msg %s HELP <command> for details and examples:", svc, svc);
+        out(to, line);
+        if (intro) help_entry(&(svc_help_t){NULL, NULL, intro, 0}, out, to);
+        for (size_t i = 0; i < n; i++) {
+            if (t[i].admin && !admin) continue;
+            snprintf(line, sizeof line, "  %-16.*s %s", (int)strcspn(t[i].names, "|"), t[i].names, t[i].summary);
+            out(to, line);
+        }
+        return;
+    }
+    /* Exact name; else every entry under it (HELP SET); else the first word alone (HELP ACCESS ADD #chan). */
+    for (int pass = 0; pass < 3; pass++) {
+        size_t len = pass == 2 ? strcspn(want, " ") : w;
+        if (pass == 2 && len == w) break;
+        int shown = 0;
+        for (size_t i = 0; i < n; i++) {
+            if ((t[i].admin && !admin) || !help_name_is(t[i].names, want, len, pass == 1)) continue;
+            if (shown++) out(to, " ");
+            help_entry(&t[i], out, to);
+        }
+        if (shown) return;
+    }
+    snprintf(line, sizeof line, "No help for %s -- /msg %s HELP lists the commands", want, svc);
+    out(to, line);
+}
+
+static const svc_help_t CS_HELP[] = {
+    {"LEVELS|ACCESS LEVELS", "what each access level (v h o a q) may do",
+     "Logged in to NickServ (or SASL)? No password needed: the founder account can do everything, and an\n"
+     "=account ACCESS entry can do what its level allows:\n"
+     "  v  VOICE/DEVOICE yourself, INVITE/UNBAN yourself\n"
+     "  h  + KICK, TOPIC/TOPICAPPEND/TOPICPREPEND/TOPICSWAP, HALFOP yourself, VOICE/INVITE/UNBAN others\n"
+     "  o  + OP/DEOP, HALFOP others, AKICK ADD/DEL\n"
+     "  a  + TOPICLOCK, ACCESS ADD/DEL (below your level), ADMIN yourself\n"
+     "  q  + SET (not FOUNDER), JOIN/PART, OWNER yourself, ADMIN others\n"
+     "  founder  DROP, SETPASS, SET FOUNDER, SUCCESSOR, OWNER others\n"
+     "KICK and taking a rank away never work on someone at or above your own level (the founder can act on anyone).\n"
+     "The channel password still works for everything; IDENTIFY with it counts as founder until you quit.", 0},
+    {"REGISTER", "register a channel you op",
+     "Syntax: REGISTER #channel <password>\n"
+     "Registers a channel you hold ops in. The password is the channel's founder password. If you are logged\n"
+     "in to NickServ, your account also becomes the founder, so you never need the password yourself.\n"
+     "Example: /msg ChanServ REGISTER #mychan s3cretpass", 0},
+    {"IDENTIFY", "become founder for this session",
+     "Syntax: IDENTIFY #channel [password]\n"
+     "Counts you as founder until you quit, so later commands need no password. Without a password it works\n"
+     "when you are logged in to the founder account.\n"
+     "Example: /msg ChanServ IDENTIFY #mychan s3cretpass", 0},
+    {"DROP", "unregister a channel (founder)",
+     "Syntax: DROP #channel [password]\n"
+     "Unregisters the channel: its access list, AKICKs, modes lock and settings are deleted. Cannot be undone.\n"
+     "Example: /msg ChanServ DROP #mychan s3cretpass", 0},
+    {"JOIN", "ChanServ joins and keeps the channel alive",
+     "Syntax: JOIN #channel [password]\n"
+     "ChanServ joins and stays, so the channel never empties out and is never destroyed (modes, bans and topic\n"
+     "survive). ENTRYMSG is only sent while ChanServ is in the channel. Needs level q.\n"
+     "Example: /msg ChanServ JOIN #mychan", 0},
+    {"PART", "ChanServ leaves (undoes JOIN)",
+     "Syntax: PART #channel [password]\n"
+     "ChanServ leaves the channel. Needs level q.\n"
+     "Example: /msg ChanServ PART #mychan", 0},
+    {"SETPASS", "change the channel password (founder)",
+     "Syntax: SETPASS #channel [old-password] <new-password>\n"
+     "Changes the founder password. The old one can be left out when you are IDENTIFY'd or logged in to the\n"
+     "founder account.\n"
+     "Examples: /msg ChanServ SETPASS #mychan oldpass newpass\n"
+     "          /msg ChanServ SETPASS #mychan newpass", 0},
+    {"TOPICLOCK", "restore the topic when ChanServ rejoins",
+     "Syntax: TOPICLOCK #channel ON|OFF [password]\n"
+     "ON remembers the current topic and puts it back whenever ChanServ (re)joins: after a server restart,\n"
+     "or when the channel emptied out. Needs level a.\n"
+     "Example: /msg ChanServ TOPICLOCK #mychan ON", 0},
+    {"INFO", "registration, founder and settings of a channel",
+     "Syntax: INFO #channel\n"
+     "Shows when the channel was registered, its founder, DESC, URL, and whether JOIN (guard), TOPICLOCK and\n"
+     "the SET options are on.\n"
+     "Example: /msg ChanServ INFO #mychan", 0},
+    {"LIST", "registered channels",
+     "Syntax: LIST [pattern]\n"
+     "Lists registered channels matching a * and ? pattern (all of them without one), with their DESC.\n"
+     "PRIVATE channels are left out unless they are yours. At most 50 are shown.\n"
+     "Examples: /msg ChanServ LIST\n"
+     "          /msg ChanServ LIST #sekur*", 0},
+    {"ACCESS|ACCESS ADD|ACCESS DEL|ACCESS LIST", "who gets +v/+h/+o/+a/+q automatically",
+     "Syntax: ACCESS #channel ADD <mask> <v|h|o|a|q> [password]\n"
+     "        ACCESS #channel DEL <mask> [password]\n"
+     "        ACCESS #channel LIST\n"
+     "ADD gives everyone matching <mask> that rank on every JOIN, and lets them use the ChanServ commands of\n"
+     "that level (HELP LEVELS). The mask is a host (*.example.com), user@host or nick!user@host -- a host is\n"
+     "always required, so a nick alone never matches. =account matches a NickServ account instead: use it when\n"
+     "host masking is on, since a cloaked host changes and a hostmask can stop matching. You can only add or\n"
+     "remove levels below your own (level a and up).\n"
+     "Examples: /msg ChanServ ACCESS #mychan ADD =alice o\n"
+     "          /msg ChanServ ACCESS #mychan ADD *!*@*.example.com v\n"
+     "          /msg ChanServ ACCESS #mychan DEL =alice\n"
+     "          /msg ChanServ ACCESS #mychan LIST", 0},
+    {"AKICK|AKICK ADD|AKICK DEL|AKICK LIST", "auto-kick and ban on join",
+     "Syntax: AKICK #channel ADD <mask> [password]\n"
+     "        AKICK #channel DEL <mask> [password]\n"
+     "        AKICK #channel LIST\n"
+     "Anyone matching <mask> is banned and kicked when they join. Same mask forms as ACCESS; =account is the\n"
+     "one that still holds when someone's host or cloak changes. ADD and DEL need level o.\n"
+     "Examples: /msg ChanServ AKICK #mychan ADD =spammer\n"
+     "          /msg ChanServ AKICK #mychan ADD *!*@203.0.113.*\n"
+     "          /msg ChanServ AKICK #mychan DEL =spammer", 0},
+    {"SUCCESSOR|SUCCESSOR SET|SUCCESSOR CLAIM", "who may take over the channel (founder)",
+     "Syntax: SUCCESSOR #channel SET <mask> [password]\n"
+     "        SUCCESSOR #channel CLAIM <new-password>\n"
+     "SET names who may take the channel over (founder only). CLAIM makes you founder with a new password;\n"
+     "it only works from a matching mask and while nobody is IDENTIFY'd as founder.\n"
+     "Examples: /msg ChanServ SUCCESSOR #mychan SET =bob\n"
+     "          /msg ChanServ SUCCESSOR #mychan CLAIM newpass123   (sent by bob)", 0},
+    {"SET MLOCK|MLOCK", "lock channel modes on or off",
+     "Syntax: SET #channel MLOCK <+modes-modes [params]> [password]\n"
+     "ChanServ puts back any locked mode that gets changed. k l f j L take their parameters in order; no sign\n"
+     "means +. An empty lock clears it. Needs level q.\n"
+     "Examples: /msg ChanServ SET #mychan MLOCK +nt-s\n"
+     "          /msg ChanServ SET #mychan MLOCK +ntk secretkey\n"
+     "          /msg ChanServ SET #mychan MLOCK", 0},
+    {"SET FOUNDER|FOUNDER", "the founder account (founder)",
+     "Syntax: SET #channel FOUNDER <account|-> [password]\n"
+     "The founder account is recognised on join and needs no password (or * as the password). - clears it.\n"
+     "Example: /msg ChanServ SET #mychan FOUNDER alice s3cretpass", 0},
+    {"SET PRIVATE|SET RESTRICTED|SET SECUREOPS|PRIVATE|RESTRICTED|SECUREOPS", "PRIVATE, RESTRICTED, SECUREOPS",
+     "Syntax: SET #channel PRIVATE|RESTRICTED|SECUREOPS ON|OFF [password]\n"
+     "  PRIVATE     hides the channel from ChanServ LIST\n"
+     "  RESTRICTED  kicks anyone who joins without an ACCESS entry\n"
+     "  SECUREOPS   takes +o away from anyone the access list doesn't give it to\n"
+     "Needs level q.\n"
+     "Example: /msg ChanServ SET #mychan SECUREOPS ON", 0},
+    {"SET DESC|SET URL|SET ENTRYMSG|DESC|URL|ENTRYMSG", "description, URL, message on join",
+     "Syntax: SET #channel DESC|URL|ENTRYMSG <text> [password]\n"
+     "DESC and URL are shown by INFO (DESC also by LIST); ENTRYMSG is sent as a notice to whoever joins,\n"
+     "while ChanServ sits in the channel (JOIN). Empty text clears it. Needs level q.\n"
+     "Examples: /msg ChanServ SET #mychan DESC Talk about anything\n"
+     "          /msg ChanServ SET #mychan ENTRYMSG Welcome! Read the topic first.", 0},
+    {"OP|DEOP|VOICE|DEVOICE|HALFOP|DEHALFOP|ADMIN|DEADMIN|OWNER|DEOWNER", "also DEOP, (DE)VOICE, (DE)HALFOP, (DE)ADMIN, (DE)OWNER",
+     "Syntax: OP|DEOP|VOICE|DEVOICE|HALFOP|DEHALFOP|ADMIN|DEADMIN|OWNER|DEOWNER #channel [nick] [password]\n"
+     "Gives or takes that rank (+o +v +h +a +q). Without a nick it is you. Each needs a level: HELP LEVELS.\n"
+     "Examples: /msg ChanServ OP #mychan\n"
+     "          /msg ChanServ VOICE #mychan bob\n"
+     "          /msg ChanServ DEOP #mychan bob", 0},
+    {"INVITE", "invite yourself or someone in",
+     "Syntax: INVITE #channel [nick] [password]\n"
+     "Invites you (or nick) into the channel. Yourself needs level v, someone else h.\n"
+     "Examples: /msg ChanServ INVITE #mychan\n"
+     "          /msg ChanServ INVITE #mychan bob", 0},
+    {"UNBAN", "remove the bans matching you or someone",
+     "Syntax: UNBAN #channel [nick] [password]\n"
+     "Removes every ban that matches you (or nick). Yourself needs level v, someone else h.\n"
+     "Examples: /msg ChanServ UNBAN #mychan\n"
+     "          /msg ChanServ UNBAN #mychan bob", 0},
+    {"KICK", "kick someone out",
+     "Syntax: KICK #channel <nick> [reason] [password]\n"
+     "Kicks nick, who must be below your level. Needs level h.\n"
+     "Example: /msg ChanServ KICK #mychan troll stop flooding", 0},
+    {"TOPIC", "set the topic",
+     "Syntax: TOPIC #channel <text> [password]\n"
+     "Sets the topic through ChanServ, even when you have no ops. Needs level h.\n"
+     "Example: /msg ChanServ TOPIC #mychan Welcome to #mychan | rules: be nice", 0},
+    {"TOPICAPPEND|TOPICPREPEND", "also TOPICPREPEND: add to the topic",
+     "Syntax: TOPICAPPEND|TOPICPREPEND #channel <text> [password]\n"
+     "Adds <text> after (APPEND) or before (PREPEND) the current topic, joined by \" | \". Needs level h.\n"
+     "Example: /msg ChanServ TOPICAPPEND #mychan meeting Friday 18:00 UTC", 0},
+    {"TOPICSWAP", "replace part of the topic",
+     "Syntax: TOPICSWAP #channel <search>:<replace> [password]\n"
+     "Replaces the first <search> in the topic with <replace>. Needs level h.\n"
+     "Example: /msg ChanServ TOPICSWAP #mychan Friday:Saturday", 0},
+    {"HELP", "this list, or HELP <command>",
+     "Syntax: HELP [command [subcommand]]\n"
+     "Examples: /msg ChanServ HELP ACCESS\n"
+     "          /msg ChanServ HELP SET MLOCK\n"
+     "          /msg ChanServ HELP SET", 0},
+};
+
 static void cmd_help(const char *from_nick, char *args) {
-    (void)args;
-    reply(from_nick, "ChanServ commands:");
-    reply(from_nick, "  Logged in to NickServ (or SASL)? No password needed: the founder account can do everything,");
-    reply(from_nick, "  an =account ACCESS entry can do what its level allows:");
-    reply(from_nick, "    v  VOICE/DEVOICE yourself, INVITE/UNBAN yourself");
-    reply(from_nick, "    h  + KICK, TOPIC/TOPICAPPEND/TOPICPREPEND/TOPICSWAP, HALFOP yourself, VOICE/INVITE/UNBAN others");
-    reply(from_nick, "    o  + OP/DEOP, HALFOP others, AKICK ADD/DEL");
-    reply(from_nick, "    a  + TOPICLOCK, ACCESS ADD/DEL (below your level), ADMIN yourself");
-    reply(from_nick, "    q  + SET (not FOUNDER), JOIN/PART, OWNER yourself, ADMIN others");
-    reply(from_nick, "    founder  DROP, SETPASS, SET FOUNDER, SUCCESSOR, OWNER others");
-    reply(from_nick, "  KICK and taking a rank away never work on someone at or above your own level (the founder can act on anyone).");
-    reply(from_nick, "  The channel password still works for everything; IDENTIFY with it counts as founder until you quit.");
-    reply(from_nick, "  REGISTER #channel [password]  -- register a channel you currently op");
-    reply(from_nick, "  IDENTIFY #channel [password]  -- reclaim founder status this session");
-    reply(from_nick, "  DROP #channel [password]      -- unregister a channel");
-    reply(from_nick, "  JOIN #channel [password]      -- ChanServ joins and stays, protecting the");
-    reply(from_nick, "                                    channel from ever emptying/being destroyed");
-    reply(from_nick, "  PART #channel [password]      -- ChanServ leaves (undoes JOIN above)");
-    reply(from_nick, "  SETPASS #channel [old] <new>  -- change a channel's password");
-    reply(from_nick, "  TOPICLOCK #channel ON|OFF [password]");
-    reply(from_nick, "                                -- remember the topic and restore it when");
-    reply(from_nick, "                                   ChanServ (re)joins (server restart, channel");
-    reply(from_nick, "                                   emptied out, etc.)");
-    reply(from_nick, "  INFO #channel                 -- show registration/GUARD/TOPICLOCK status");
-    reply(from_nick, "  ACCESS #channel ADD <mask> <v|h|o|a|q> [password]");
-    reply(from_nick, "                                -- auto-grant +v/+h/+o/+a(admin)/+q(owner) on every JOIN matching");
-    reply(from_nick, "                                   <mask>, without sharing the password. Accepts");
-    reply(from_nick, "                                   a bare host (*.example.com), user@host, or a");
-    reply(from_nick, "                                   full nick!user@host mask -- host is always");
-    reply(from_nick, "                                   required, so a nick alone never grants it.");
-    reply(from_nick, "                                   =accountname matches by services account");
-    reply(from_nick, "                                   instead (must be SASL/REGISTER identified) --");
-    reply(from_nick, "                                   use this if host_masking is on, since the");
-    reply(from_nick, "                                   cloak shown in JOIN/WHOIS is random per");
-    reply(from_nick, "                                   connection and can never match a hostmask");
-    reply(from_nick, "  ACCESS #channel DEL <mask> [password]");
-    reply(from_nick, "                                -- remove a mask from the access list");
-    reply(from_nick, "  ACCESS #channel LIST          -- show the access list");
-    reply(from_nick, "  SUCCESSOR #channel SET <mask> [password]");
-    reply(from_nick, "                                -- designate who may CLAIM founder status if");
-    reply(from_nick, "                                   nobody is currently IDENTIFY'd for this channel");
-    reply(from_nick, "  SUCCESSOR #channel CLAIM <new-password>");
-    reply(from_nick, "                                -- become founder (only works from the designated");
-    reply(from_nick, "                                   mask, and only while nobody is IDENTIFY'd)");
-    reply(from_nick, "  AKICK #channel ADD <mask> [password]");
-    reply(from_nick, "                                -- auto-kick anyone matching <mask> on JOIN;");
-    reply(from_nick, "                                   same mask forms as ACCESS, incl. =accountname");
-    reply(from_nick, "  AKICK #channel DEL <mask> [password]");
-    reply(from_nick, "                                -- remove a mask from the auto-kick list");
-    reply(from_nick, "  AKICK #channel LIST           -- show the auto-kick list");
-    reply(from_nick, "  SET #channel MLOCK <+modes-modes [params]> [password]");
-    reply(from_nick, "                                -- lock modes; ChanServ puts back any that get changed (empty clears).");
-    reply(from_nick, "                                   e.g. +ntk-s secretkey forces n t k(key) on and s off; k l f j L");
-    reply(from_nick, "                                   take their parameters in order. No sign means +.");
-    reply(from_nick, "  SET #channel FOUNDER <account|-> [password]");
-    reply(from_nick, "                                -- the founder ACCOUNT is recognised on join and may use * as the password");
-    reply(from_nick, "  SET #channel PRIVATE|RESTRICTED|SECUREOPS ON|OFF [password]");
-    reply(from_nick, "                                -- PRIVATE hides it from LIST; RESTRICTED kicks anyone not on the access list;");
-    reply(from_nick, "                                   SECUREOPS takes ops away from anyone the access list doesn't back");
-    reply(from_nick, "  LIST [pattern]                -- registered channels (not PRIVATE ones)");
-    reply(from_nick, "  SET #channel DESC|URL|ENTRYMSG <text> [password]");
-    reply(from_nick, "                                -- free-text metadata (DESC/URL shown by INFO,");
-    reply(from_nick, "                                   ENTRYMSG sent to whoever JOINs); empty clears");
-    reply(from_nick, "  OP|DEOP|VOICE|DEVOICE|HALFOP|DEHALFOP|ADMIN|DEADMIN|OWNER|DEOWNER #channel [nick] [password]");
-    reply(from_nick, "                                -- set/remove that rank; nick defaults to yourself");
-    reply(from_nick, "  INVITE #channel [nick] [password]  -- invite yourself or someone else in");
-    reply(from_nick, "  UNBAN #channel [nick] [password]   -- remove any ban matching yourself/someone");
-    reply(from_nick, "  KICK #channel <nick> [reason] [password]  -- kick someone out");
-    reply(from_nick, "  TOPIC #channel <text> [password]          -- set the topic");
-    reply(from_nick, "  TOPICAPPEND|TOPICPREPEND #channel <text> [password]");
-    reply(from_nick, "                                -- add <text> after/before the current topic, joined by \" | \"");
-    reply(from_nick, "  TOPICSWAP #channel <search>:<replace> [password]");
-    reply(from_nick, "                                -- replace the first <search> in the topic with <replace>");
+    svc_help("ChanServ", "  Logged in to NickServ? Your account's access level decides what you may do (HELP LEVELS);\n"
+             "  [password] is the channel password, needed only without that.",
+             CS_HELP, sizeof CS_HELP / sizeof *CS_HELP, args, 0, reply, from_nick);
 }
 
 #define CTCP_DELIM '\x01'

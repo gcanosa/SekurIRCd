@@ -43,6 +43,13 @@ void ns_tick(void);    /* once a second: enforcement deadlines, SASL timeouts, s
 void ns_shutdown(void); /* flush and free */
 int ns_account_count(void); /* registered accounts, -1 with NickServ off */
 
+/* chanserv.c: HELP for a service. One entry per command: '|'-separated names ("SET MLOCK|MLOCK"), a one-line summary
+ * for the command list, and the detailed text ('\n' between lines). HELP alone lists the commands; HELP <cmd> [sub]
+ * shows the entry, or every entry under it ("HELP SET"). admin entries only show when `admin`. */
+typedef struct { const char *names, *summary, *text; int admin; } svc_help_t;
+void svc_help(const char *svc, const char *intro, const svc_help_t *t, size_t n, const char *args, int admin,
+              void (*out)(const char *to, const char *line), const char *to);
+
 /* chanserv.c: registered channels. */
 int cs_registered_count(void);
 

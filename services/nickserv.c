@@ -1014,66 +1014,134 @@ static void cmd_listchans(nsuser_t *u) {
     else sayf(u->nick, "%s is not founder of, or on the access list (=%s) of, any registered channel", u->account, u->account);
 }
 
-static void cmd_help(nsuser_t *u) {
-    static const char *const lines[] = {
-        "NickServ commands:",
-        "  Your account is named after the nick you REGISTER with. Logging in (IDENTIFY, or SASL when you connect)",
-        "  is what ChanServ, AJOIN and always-on go by. Commands below marked * need you to be logged in.",
-        " Account:",
-        "  REGISTER <password> [email]   -- register your current nick as an account and log in to it.",
-        "                                   Password: 6-199 characters. With an email, a code is mailed",
-        "                                   to you -- confirm it with VERIFY",
-        "  IDENTIFY [account] <password> -- log in (ID works too). Without an account, your current nick",
-        "                                   is used. Repeated wrong passwords lock you out for a minute",
-        "  LOGOUT                      * -- log out of your account (you keep your nick)",
-        "  INFO [account]                -- when an account was registered; for your own account also",
-        "                                   email, grouped nicks, AJOIN, certificate and last login",
-        "  VERIFY <code>               * -- confirm your email address with the code that was mailed",
-        "  RESETPASS <account>           -- forgot your password? Mails a code to the account's verified",
-        "                                   email address, then:",
-        "  RESETPASS <account> <code> <new password>",
-        "                                -- set a new password with that code (valid for an hour). Every",
-        "                                   session logged in with the old password is logged out",
-        "  DROP <password>             * -- permanently delete your account. Cannot be undone",
-        " Settings:",
-        "  SET PASSWORD <current> <new>* -- change your password",
-        "  SET EMAIL <address>         * -- change your email address (a new VERIFY code is mailed)",
-        "  SET AJOIN <#chan[,#chan...]>* -- channels you join automatically at every login",
-        "  SET AJOIN OFF               * -- clear that list. Bans, +i, +k and +l still apply as usual",
-        "  SET ALWAYS-ON ON|OFF        * -- keep your nick online and in your channels when you",
-        "                                   disconnect; reconnect with SASL to pick it up again.",
-        "                                   SET ALWAYS-ON alone shows whether it is on",
-        "  CERT ADD                    * -- bind the TLS client certificate you're connected with, so",
-        "                                   SASL EXTERNAL logs you in without a password",
-        "  CERT DEL                    * -- remove it (SASL EXTERNAL stops working for the account)",
-        "  CERT INFO                   * -- show the fingerprint on file",
-        " Nicks:",
-        "  GROUP                       * -- add the nick you are using now to your account (up to 10),",
-        "                                   so it is protected and logs in to the same account",
-        "  UNGROUP <nick>              * -- remove a nick from your account",
-        "  GHOST <nick>                * -- disconnect a session using one of your nicks (e.g. a stale",
-        "                                   connection after a dropped link)",
-        "  REGAIN <nick>               * -- take one of your nicks back: whoever has it is renamed to a",
-        "                                   guest nick and you switch to it",
-        " Lookups:",
-        "  STATUS [nick]                 -- is <nick> logged in to the account that owns it?",
-        "                                   Reply: STATUS <nick> <0|1|3> <account>. 0 = offline or not",
-        "                                   registered, 1 = online but not logged in, 3 = logged in",
-        "  ACC [nick]                    -- the same in Atheme's format: <nick> ACC <0|1|3>",
-        "  LISTLOGINS                  * -- every connection logged in to your account right now",
-        "  LISTCHANS                   * -- channels where you are founder or on the access list",
-        "  HELP                          -- this list",
-    };
-    static const char *const admin[] = {
-        " Services admin commands:",
-        "  SUSPEND <account> [reason]    -- lock an account: it is logged out everywhere and cannot log in",
-        "  UNSUSPEND <account>           -- lift a suspension",
-        "  FDROP <account>               -- delete an account without its password",
-        "  SASET PASSWORD <account> <new password>",
-        "                                -- set an account's password",
-    };
-    for (size_t i = 0; i < sizeof lines / sizeof *lines; i++) say(u->nick, lines[i]);
-    if (is_admin(u)) for (size_t i = 0; i < sizeof admin / sizeof *admin; i++) say(u->nick, admin[i]);
+static const svc_help_t NS_HELP[] = {
+    {"REGISTER", "register your nick as an account",
+     "Syntax: REGISTER <password> [email]\n"
+     "Registers the nick you are using as an account and logs you in to it. Password: 6-199 characters.\n"
+     "With an email address, a code is mailed to you -- confirm it with VERIFY. A verified email is what\n"
+     "lets you RESETPASS a forgotten password.\n"
+     "Examples: /msg NickServ REGISTER s3cretpass\n"
+     "          /msg NickServ REGISTER s3cretpass me@example.org", 0},
+    {"IDENTIFY|ID", "log in (ID works too)",
+     "Syntax: IDENTIFY [account] <password>\n"
+     "Logs you in. Without an account, your current nick is used. Repeated wrong passwords lock you out for\n"
+     "a minute. Tip: SASL logs you in while you connect, before you join anything.\n"
+     "Examples: /msg NickServ IDENTIFY s3cretpass\n"
+     "          /msg NickServ ID alice s3cretpass", 0},
+    {"LOGOUT", "log out (you keep your nick)",
+     "Syntax: LOGOUT\n"
+     "Logs you out of your account. You keep the nick you are using.\n"
+     "Example: /msg NickServ LOGOUT", 0},
+    {"INFO", "about an account",
+     "Syntax: INFO [account]\n"
+     "When an account was registered. For your own account also its email, grouped nicks, AJOIN,\n"
+     "certificate and last login.\n"
+     "Examples: /msg NickServ INFO\n"
+     "          /msg NickServ INFO alice", 0},
+    {"VERIFY", "confirm your email address",
+     "Syntax: VERIFY <code>\n"
+     "Confirms your email address with the code REGISTER or SET EMAIL mailed you. Needs you logged in.\n"
+     "Example: /msg NickServ VERIFY 4f9a1c2e7b30", 0},
+    {"RESETPASS", "forgot your password? reset it by email",
+     "Syntax: RESETPASS <account>\n"
+     "        RESETPASS <account> <code> <new password>\n"
+     "The first form mails a code to the account's verified email address; the second sets a new password\n"
+     "with that code (valid for an hour). Every session logged in with the old password is logged out.\n"
+     "Examples: /msg NickServ RESETPASS alice\n"
+     "          /msg NickServ RESETPASS alice 4f9a1c2e7b30 newpass456", 0},
+    {"DROP", "delete your account for good",
+     "Syntax: DROP <password>\n"
+     "Permanently deletes your account and logs out every session on it. Cannot be undone.\n"
+     "Example: /msg NickServ DROP s3cretpass", 0},
+    {"SET PASSWORD|PASSWORD", "change your password",
+     "Syntax: SET PASSWORD <current> <new>\n"
+     "Changes your password (6-199 characters). Needs you logged in.\n"
+     "Example: /msg NickServ SET PASSWORD s3cretpass newpass456", 0},
+    {"SET EMAIL|EMAIL", "change your email address",
+     "Syntax: SET EMAIL <address>\n"
+     "Changes your email address; a new code is mailed to it for VERIFY. Needs you logged in.\n"
+     "Example: /msg NickServ SET EMAIL me@example.org", 0},
+    {"SET AJOIN|AJOIN", "channels to join at every login",
+     "Syntax: SET AJOIN <#channel[,#channel...]>\n"
+     "        SET AJOIN OFF\n"
+     "You join these channels automatically every time you log in. Bans, +i, +k and +l still apply as usual.\n"
+     "OFF clears the list. Needs you logged in.\n"
+     "Examples: /msg NickServ SET AJOIN #sekurnet,#help\n"
+     "          /msg NickServ SET AJOIN OFF", 0},
+    {"SET ALWAYS-ON|ALWAYS-ON", "stay online while disconnected",
+     "Syntax: SET ALWAYS-ON [ON|OFF]\n"
+     "ON keeps your nick online and in your channels when you disconnect; reconnect with SASL to pick it up\n"
+     "again. Without ON or OFF it shows whether it is on. Needs you logged in.\n"
+     "Example: /msg NickServ SET ALWAYS-ON ON", 0},
+    {"CERT|CERT ADD|CERT DEL|CERT INFO", "log in with a TLS client certificate",
+     "Syntax: CERT ADD|DEL|INFO\n"
+     "  ADD   binds the TLS client certificate you are connected with, so SASL EXTERNAL logs you in\n"
+     "        without a password\n"
+     "  DEL   removes it (SASL EXTERNAL stops working for the account)\n"
+     "  INFO  shows the fingerprint on file\n"
+     "Needs you logged in.\n"
+     "Example: /msg NickServ CERT ADD", 0},
+    {"GROUP", "add your current nick to your account",
+     "Syntax: GROUP\n"
+     "Adds the nick you are using now to your account (up to 10 nicks), so it is protected and logs in to\n"
+     "the same account. Log in first, then change to the nick and GROUP.\n"
+     "Example: /nick alice_away  then  /msg NickServ GROUP", 0},
+    {"UNGROUP", "remove a nick from your account",
+     "Syntax: UNGROUP <nick>\n"
+     "Removes a grouped nick from your account. Needs you logged in.\n"
+     "Example: /msg NickServ UNGROUP alice_away", 0},
+    {"GHOST", "disconnect a session using your nick",
+     "Syntax: GHOST <nick>\n"
+     "Disconnects whoever is using one of your nicks, e.g. your own stale connection after a dropped link.\n"
+     "Needs you logged in.\n"
+     "Example: /msg NickServ GHOST alice", 0},
+    {"REGAIN", "take your nick back",
+     "Syntax: REGAIN <nick>\n"
+     "Takes one of your nicks back: whoever has it is renamed to a guest nick and you switch to it.\n"
+     "Needs you logged in.\n"
+     "Example: /msg NickServ REGAIN alice", 0},
+    {"STATUS", "is a nick logged in to its account?",
+     "Syntax: STATUS [nick]\n"
+     "Reply: STATUS <nick> <0|1|3> <account>. 0 = offline or not registered, 1 = online but not logged in,\n"
+     "3 = logged in. Without a nick it is you.\n"
+     "Example: /msg NickServ STATUS alice", 0},
+    {"ACC", "STATUS in Atheme's format",
+     "Syntax: ACC [nick]\n"
+     "Same as STATUS, replied as <nick> ACC <0|1|3>, for bots and scripts written for Atheme.\n"
+     "Example: /msg NickServ ACC alice", 0},
+    {"LISTLOGINS", "connections logged in to your account",
+     "Syntax: LISTLOGINS\n"
+     "Every connection logged in to your account right now. Needs you logged in.\n"
+     "Example: /msg NickServ LISTLOGINS", 0},
+    {"LISTCHANS", "channels you found or have access to",
+     "Syntax: LISTCHANS\n"
+     "Channels where you are founder or on the access list (=account). Needs you logged in.\n"
+     "Example: /msg NickServ LISTCHANS", 0},
+    {"HELP", "this list, or HELP <command>",
+     "Syntax: HELP [command [subcommand]]\n"
+     "Examples: /msg NickServ HELP REGISTER\n"
+     "          /msg NickServ HELP SET AJOIN\n"
+     "          /msg NickServ HELP SET", 0},
+    {"SUSPEND", "(admin) lock an account",
+     "Syntax: SUSPEND <account> [reason]\n"
+     "Locks an account: it is logged out everywhere and cannot log in until UNSUSPEND.\n"
+     "Example: /msg NickServ SUSPEND spammer flooding #help", 1},
+    {"UNSUSPEND", "(admin) lift a suspension",
+     "Syntax: UNSUSPEND <account>\n"
+     "Example: /msg NickServ UNSUSPEND spammer", 1},
+    {"FDROP", "(admin) delete an account",
+     "Syntax: FDROP <account>\n"
+     "Deletes an account without its password. Cannot be undone.\n"
+     "Example: /msg NickServ FDROP spammer", 1},
+    {"SASET PASSWORD|SASET", "(admin) set an account's password",
+     "Syntax: SASET PASSWORD <account> <new password>\n"
+     "Example: /msg NickServ SASET PASSWORD alice temppass123", 1},
+};
+
+static void cmd_help(nsuser_t *u, const char *args) {
+    svc_help("NickServ", "  Your account is named after the nick you REGISTER with. Logging in (IDENTIFY, or SASL when you\n"
+             "  connect) is what ChanServ, AJOIN and always-on go by.",
+             NS_HELP, sizeof NS_HELP / sizeof *NS_HELP, args, is_admin(u), say, u->nick);
 }
 
 int ns_privmsg(const char *target, const char *from_nick, const char *text) {
@@ -1090,7 +1158,7 @@ int ns_privmsg(const char *target, const char *from_nick, const char *text) {
     char *save = NULL, *cmd = strtok_r(buf, " ", &save);
     char *a = cmd ? strtok_r(NULL, " ", &save) : NULL, *b = cmd ? strtok_r(NULL, " ", &save) : NULL;
     char *c3 = cmd ? strtok_r(NULL, " ", &save) : NULL;
-    if (!cmd || strcasecmp(cmd, "HELP") == 0) cmd_help(u);
+    if (!cmd || strcasecmp(cmd, "HELP") == 0) cmd_help(u, cmd ? text + strcspn(text, " ") : "");
     else if (strcasecmp(cmd, "REGISTER") == 0) {
         if (!a) say(u->nick, "Syntax: REGISTER <password> [email]");
         else if (u->account[0]) say(u->nick, "You are already logged in to an account");
