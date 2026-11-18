@@ -70,6 +70,11 @@ typedef struct server {
     struct watch_entry *mon_idx, *watch_idx; /* watched nick (casefolded) -> the clients watching it; see server_watch_index_add */
     char msgid_prefix[17]; /* random per run, so msgids stay unique across restarts */
     uint64_t msgid_counter;
+    /* What the hub we dial says our opers may do (netsync.c's OPERSCOPE, set by the hub's [[links.peers]] oper_scope / oper_deny):
+     * oper_local = nothing that reaches past this server; oper_deny = OPER_PRIV_* bits taken off every local oper. Kept while
+     * the link is down, so a dropped uplink doesn't lift the limits; the next link-up restates them. */
+    int oper_local;
+    unsigned oper_deny;
     int listen_fd;
 #define L6_MAIN 0
 #define L6_TLS 1

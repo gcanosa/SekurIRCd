@@ -114,13 +114,16 @@ def mode_for(dials, accepts):
     return "hub"
 
 
-def peer_block(name, pw=None, pw_hash=None, host=None, port=None, ips=None, fp=None):
+def peer_block(name, pw=None, pw_hash=None, host=None, port=None, ips=None, fp=None, old=None):
     out = ["[[links.peers]]", f'name = "{name}"']
     if pw_hash: out.append(f'password_hash = "{pw_hash}"')
     elif pw: out.append(f'password = "{pw}"')
     if fp: out.append(f'fingerprint = "{fp}"')
     if host: out += [f'host = "{host}"', f"port = {port}"]
     if ips: out.append("allowed_ips = " + json.dumps(ips))
+    if old and not host:  # an edit rewrites the block: keep what the hub says about this leaf's opers (set by hand, see the template)
+        if old.get("oper_scope"): out.append("oper_scope = " + json.dumps(old["oper_scope"]))
+        if old.get("oper_deny"): out.append("oper_deny = " + json.dumps(old["oper_deny"]))
     return "\n".join(out)
 
 
@@ -447,9 +450,9 @@ def wizard(cfg, path, old=None, dry_run=False):
     if we_dial:
         mine = peer_block(name, pw=pw, host=rhost, port=rport, fp=their_fp)
     elif pw:
-        mine = peer_block(name, pw_hash=scrypt_hash(pw), ips=ips, fp=their_fp)
+        mine = peer_block(name, pw_hash=scrypt_hash(pw), ips=ips, fp=their_fp, old=old)
     else:  # edit, password kept: keep whatever it has (hash, plain, or only a fingerprint)
-        mine = peer_block(name, pw_hash=old.get("password_hash"), pw=old.get("password"), ips=ips, fp=their_fp)
+        mine = peer_block(name, pw_hash=old.get("password_hash"), pw=old.get("password"), ips=ips, fp=their_fp, old=old)
     restart = (not lk.get("enabled")) or "tls" in kv or bool(tls_kv) or (lk.get("mode", "hub") == "leaf" and need_mode != "leaf")
 
     # cloaks are made by each user's own server: every server needs the same key, or a user's cloak (and a ban on it)
@@ -700,6 +703,8 @@ def selftest():
     lines = base.splitlines()
     put_peer(lines, peer_block("b.test.net", pw_hash=scrypt_hash("x"), ips=["1.2.3.4"]).splitlines())
     assert [n for *_, n in peer_spans(lines)] == ["services.x", "b.test.net"]
+    kept = peer_block("c.test.net", pw_hash="h", old={"oper_scope": "local", "oper_deny": ["override"]})  # an edit keeps the hub's oper limits
+    assert 'oper_scope = "local"' in kept and 'oper_deny = ["override"]' in kept and "oper_" not in peer_block("c.test.net", pw="p", host="h", port=1, old={"oper_scope": "local"})
     t = "\n".join(lines)
     assert t.index('name = "b.test.net"') < t.index("# --- channels") and '#[[links.peers]]\n#name = "leaf1"' in t
     set_keys(lines, "links", {"mode": '"both"', "tls": "false"})

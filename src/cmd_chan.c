@@ -1366,6 +1366,11 @@ void cmd_samode(server_t *srv, client_t *cl, irc_message_t *msg) {
     if (chan_name[0] != '#') { err_no_such_channel(cl, chan_name); return; }
     channel_t *chan = server_find_channel(srv, chan_name);
     if (!chan) { err_no_such_channel(cl, chan_name); return; }
+    if (srv->oper_local) { /* a channel with members elsewhere is theirs too: SAMODE past its ranks would change it for all of them */
+        member_t *m, *mt;
+        HASH_ITER(hh, chan->members, m, mt)
+            if (m->client->remote && netsync_scope_refuse(srv, cl, "SAMODE on a channel with users on other servers")) return;
+    }
     const char *args[16];
     int nargs = 0;
     for (int i = 2; i < msg->nparams && nargs < 16; i++) args[nargs++] = msg->params[i];

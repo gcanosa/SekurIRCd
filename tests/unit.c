@@ -584,6 +584,21 @@ static void test_config_cloak_format(void) {
     assert(config_format_cloak("{bogus}", "tok", "net", "suf", out, sizeof out) == -1);
 }
 
+/* The privilege names that [[links.peers]] oper_deny and the OPERSCOPE link line carry. */
+static void test_oper_priv_names(void) {
+    char out[200];
+    assert(oper_priv_from_csv("kill,override") == (OPER_PRIV_KILL | OPER_PRIV_OVERRIDE));
+    assert(oper_priv_from_csv("-") == 0 && oper_priv_from_csv("") == 0 && oper_priv_from_csv(NULL) == 0);
+    assert(oper_priv_from_csv("telepathy,auspex") == OPER_PRIV_AUSPEX); /* a name this version doesn't know is skipped */
+    assert(oper_priv_from_csv("all") == OPER_PRIV_ALL);
+    oper_priv_to_csv(OPER_PRIV_KILL | OPER_PRIV_AUSPEX, out, sizeof out);
+    assert(strcmp(out, "kill,auspex") == 0);
+    oper_priv_to_csv(0, out, sizeof out);
+    assert(strcmp(out, "-") == 0);
+    oper_priv_to_csv(OPER_PRIV_ALL, out, sizeof out);
+    assert(oper_priv_from_csv(out) == OPER_PRIV_ALL && strstr(out, "immune") && !strstr(out, ",all"));
+}
+
 static void test_config_load_missing_file(void) {
     config_t cfg;
     char err[256];
@@ -1270,6 +1285,7 @@ int main(void) {
     RUN(test_hmac_hex);
     RUN(test_config_defaults);
     RUN(test_config_cloak_format);
+    RUN(test_oper_priv_names);
     RUN(test_config_load_missing_file);
     RUN(test_links_allowed_ips_config);
     RUN(test_connect_flood_throttle);

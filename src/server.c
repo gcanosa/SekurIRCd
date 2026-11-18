@@ -312,6 +312,7 @@ int server_rehash(server_t *srv, char *errbuf, size_t errbufsz) {
         srv->klines_dirty = 1, srv->kline_gen++;
         NOTE("K/G/Z-lines: now kept in %s", new_klines[0] ? new_klines : "memory only");
     }
+    netsync_oper_policy_resend(srv); /* a changed oper_scope / oper_deny reaches the linked leaves now, not at their next link-up */
     int n_deopered = cmd_opers_rehash(srv);
     if (n_deopered) NOTE("opers: %d logged out (their [[operators]] block is gone or no longer allows their host)", n_deopered);
     link_tls_cleanup(); /* the next dial reloads this server's certificate (and the new [tls] paths) */

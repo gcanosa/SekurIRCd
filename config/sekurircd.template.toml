@@ -526,12 +526,54 @@ reconnect_delay_max = 300.0
 #                  Checked before any password; with it, the password may be
 #                  left out. Get it with: tools/linkmgmt.py fingerprint
 #   allowed_ips    IP globs the peer may connect from (accepting side)
+#
+#   How far a leaf's IRC operators reach. Hub side only (the block without
+#   `host`); the leaf needs no setting: the hub tells it when it links and
+#   again on every /REHASH. Hub operators are never limited -- they keep the
+#   whole network, leaves included.
+#   oper_scope     "global" (default) = what an oper's `privileges` allow, on
+#                  any server.   "local" = only on their own server. The
+#                  leaf's opers can then not (their server says so; the hub
+#                  also drops it if it arrives anyway):
+#                    KILL, SAJOIN/SAPART/SANICK/CHGHOST/CHGIDENT on a user
+#                    of another server;  GLINE/UNGLINE/SHUN/UNSHUN (K/Z/E-lines
+#                    stay on their own server);  SQUIT of a server that isn't
+#                    linked to theirs;  REHASH/STATS of another server.
+#                  Their server also refuses SAMODE on a channel that has users
+#                  on other servers.
+#                  Allowed: WHOIS/VERSION/... of anything, WALLOPS/GLOBOPS,
+#                  and everything on their own server.
+#   oper_deny      privileges taken away from that leaf's opers on top of
+#                  their own `privileges` (the same names, see [[operators]]);
+#                  default none. Any of:
+#                    kill     KILL                 kline    K/G/Z/SHUN/E-LINE, SPAMFILTER, PROTECT
+#                    sa       SAJOIN/SAPART/SAMODE/SANICK
+#                    host     CHGHOST/SETHOST/CHGIDENT/USERIP
+#                    wallops  WALLOPS/GLOBOPS/LOCOPS    rehash   REHASH
+#                    die      DIE/RESTART          link     SQUIT/CONNECT
+#                    override past channel rules: +i/+k/+l/+b/+m/+n/+t, kick
+#                             anyone, MODE without ops, PM past +D/+R/+g/+Z
+#                    auspex   see hidden info: real hosts/IPs, +i users, +p
+#                             channels, +H opers, idle, keys, TRACE
+#                    immune   exempt from SHUN, spam filters, +f/+j limits
+#                    all      everything
+#                  override is the one oper_scope can't cover (a channel is
+#                  shared), so a limited leaf normally denies it too.
+#                  A leaf running an older version ignores oper_deny; the
+#                  hub still drops what oper_scope forbids when it arrives.
 
 # Hub side: a leaf that connects in.
 #[[links.peers]]
 #name = "leaf1"
 #password_hash = "scrypt$16384$8$1$<salt-hex>$<digest-hex>"
 #allowed_ips = ["203.0.113.5"]
+
+# Hub side: a leaf run by someone else -- its opers keep their own server only.
+#[[links.peers]]
+#name = "leaf2"
+#password_hash = "scrypt$16384$8$1$<salt-hex>$<digest-hex>"
+#oper_scope = "local"
+#oper_deny = ["override", "auspex"]
 
 # Hub side: services (bin/services). Same name and plain password as [link]
 # in services/services.toml.

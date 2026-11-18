@@ -162,4 +162,11 @@ void cmd_deliver_remote_message(struct server *srv, struct client *from, const c
                                 const char *text, const irc_message_t *tags);
 void netsync_squit_command(struct server *srv, struct client *oper, const char *name, const char *reason);
 
+/* [[links.peers]] oper_scope / oper_deny. The hub states a leaf's limits in `:<sid> OPERSCOPE <local|global> <priv,..|->` (at link-up
+ * and after every rehash); the leaf takes them off its own opers (server.oper_local / oper_deny) and refuses what would reach past
+ * itself with a clear message. The hub drops the same things when they arrive anyway (an older or modified leaf), see netsync.c. */
+void netsync_oper_policy_resend(struct server *srv);
+/* 1 (and tells the oper) when this server's opers are limited to local scope and `what` would reach another server. */
+int netsync_scope_refuse(struct server *srv, struct client *cl, const char *what);
+
 #endif

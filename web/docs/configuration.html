@@ -225,6 +225,32 @@ fingerprint = "sha256:&lt;the hub's certificate&gt;"</pre>
   and the pinned TLS above, or <code>[links] bind</code> on a private network address (WireGuard, your provider's private network) so it isn't public at all.
   Changing the port needs a restart of the listening server.</p>
 
+<h2>limiting a leaf's opers</h2>
+<p>By default an IRC operator on any server of the network can use what their <code>privileges</code> allow on every server: KILL a user anywhere, set a
+  network-wide G-line, SAJOIN a user on another server, REHASH the hub. When a leaf is run by someone else, or you just want its opers to look after
+  their own server, limit them on the <strong>hub</strong>, in that leaf's peer entry. The leaf needs no setting: the hub tells it when it links and again
+  on every <code>/REHASH</code> (no restart, no relink). Hub opers are never limited.</p>
+<pre># on the hub
+[[links.peers]]
+name = "irc2.example.net"
+password_hash = "scrypt$16384$8$1$&lt;salt-hex&gt;$&lt;digest-hex&gt;"
+oper_scope = "local"                  # "global" (default) | "local"
+oper_deny  = ["override", "auspex"]   # taken off that leaf's opers, on top of their own privileges</pre>
+<p><code>oper_scope = "local"</code>: that leaf's opers keep their own server (KILL, SAJOIN, CHGHOST, K/Z/E-lines, DIE, REHASH, STATS and the rest, as their
+  <code>privileges</code> allow) but can't reach another one: no KILL, SAJOIN/SAPART/SANICK/CHGHOST/CHGIDENT of a user on another server, no GLINE or SHUN (the
+  network-wide bans; a K-line stays on their server), no SQUIT of a server that isn't linked to theirs, no REHASH or STATS of another server, no SAMODE on a
+  channel with users on other servers. Their server says so when they try; if an older or modified leaf sends it anyway the hub drops it, tells the oper,
+  and posts a notice to its own opers. WHOIS, VERSION and the like, and WALLOPS/GLOBOPS, still work. A limited leaf's own spam filters still shun locally, but those SHUNs don't spread to the rest of the network.</p>
+<p><code>oper_deny</code> takes the same names as an <code>[[operators]]</code> <code>privileges</code> list: <code>kill</code>, <code>kline</code>,
+  <code>sa</code>, <code>host</code>, <code>wallops</code>, <code>rehash</code>, <code>die</code>, <code>link</code>, <code>override</code>,
+  <code>auspex</code>, <code>immune</code>, or <code>all</code>. The leaf takes them off every one of its opers as soon as it hears (the hub also
+  announces a change right after a rehash). <code>override</code> (kick or change modes past channel ranks, join past +i/+k/+b) is the one
+  <code>oper_scope</code> can't cover, because a channel is shared by every server, so a limited leaf normally denies it too; <code>auspex</code> hides the
+  real hosts and IPs of your users from them.</p>
+<p>What this stops is a leaf's opers and an unmodified leaf. A leaf you don't trust at all can still forge any link traffic: for that, pin its certificate
+  fingerprint (above) or don't link it. <code>oper_scope</code> and <code>oper_deny</code> belong in the hub's entry (the one without <code>host</code>); a
+  config that sets them next to <code>host</code> is refused. A leaf runs the limits from the moment it links until it hears otherwise, so a dropped link doesn&rsquo;t lift them (a restarted leaf has none until it links).</p>
+
 <h2>file permissions</h2>
 <p><code>sekurircd.toml</code>, <code>services.toml</code>, the TLS key, <code>accounts.json</code> and the ChanServ store hold secrets.
   <code>tools/confcheck.py</code> warns about any of them other local users can read or change, and prints the exact fix for each: <code>chmod 600</code> for

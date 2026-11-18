@@ -214,6 +214,8 @@ typedef struct {
     char allowed_ips[CFG_MAX_LINK_ALLOWED_IPS][CFG_MASK]; /* hub-role only: IP globs this peer may
                                                              * connect from; empty = any IP (back-compat) */
     int n_allowed_ips;
+    int oper_local;          /* hub-role only, oper_scope = "local": that server's opers can't reach past their own server */
+    unsigned oper_deny;      /* hub-role only, oper_deny: OPER_PRIV_* bits stripped from that server's opers */
 } cfg_link_peer_t;
 
 typedef struct {
@@ -369,6 +371,11 @@ typedef struct {
     cfg_protection_t protection;
     char path[CFG_PATH]; /* "" = built-in defaults, no file loaded */
 } config_t;
+
+/* "kill,sa" <-> OPER_PRIV_* bits (the [[operators]] privilege names); "-" or "" is none, unknown names are skipped. Used for the
+ * OPERSCOPE link line, which names privileges instead of sending bit values so versions can differ. */
+unsigned oper_priv_from_csv(const char *csv);
+void oper_priv_to_csv(unsigned bits, char *out, size_t outsz);
 
 /* Fill `out` with built-in defaults (equivalent to Python's Config()). Overwrites whatever `out` held: free it first. */
 void config_defaults(config_t *out);

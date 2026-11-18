@@ -40,7 +40,7 @@ int cmd_opers_rehash(server_t *srv) {
             if (strcmp(srv->cfg.operators[i].name, c->oper_name) == 0) op = &srv->cfg.operators[i];
         int host_ok = 0;
         for (int j = 0; op && j < op->n_hosts && !host_ok; j++) host_ok = irc_host_mask_match(c->user, c->ip, op->hosts[j]);
-        if (op && host_ok) { c->oper_privs = op->privs ? op->privs : OPER_PRIV_ALL; continue; }
+        if (op && host_ok) { c->oper_privs = (op->privs ? op->privs : OPER_PRIV_ALL) & ~srv->oper_deny; continue; }
         char prefix[320], line[200];
         client_prefix(c, prefix, sizeof prefix);
         c->umodes &= ~(UMODE_O | UMODE_OPERONLY);
@@ -81,6 +81,7 @@ static void finish_oper(server_t *srv, client_t *cl, const char *op_name, int pw
         if (op->privs) cl->oper_privs = op->privs;
         if (op->modes[0]) om = op->modes;
     }
+    cl->oper_privs &= ~srv->oper_deny; /* what the hub we link to takes off our opers */
     /* "+o" plus whichever configured modes weren't already on ("+" in om is a login's explicit "just o") */
     char added[32] = "+o";
     size_t na = 2;
@@ -195,6 +196,7 @@ void cmd_kill(server_t *srv, client_t *cl, irc_message_t *msg) {
     client_t *target = server_find_user(srv, target_nick);
     if (!target) { err_no_such_nick(cl, target_nick); return; }
     if (target->remote && !target->is_service) { /* someone else's user: their server disconnects them */
+        if (netsync_scope_refuse(srv, cl, "KILL of a user on another server")) return;
         netsync_kill(srv, cl, target, reason);
         log_info("oper", "%s KILLed %s (on %s): %s", cl->nick, target->nick, netsync_server_name_of(srv, target), reason);
         char snote[400];
@@ -378,6 +380,7 @@ static void oper_notice(server_t *srv, client_t *cl, const char *text) {
 /* REHASH [<server>|*]: this server, another one (it answers over the link), or every server. */
 void cmd_rehash(server_t *srv, client_t *cl, irc_message_t *msg) {
     const char *target = !cl->remote && msg->nparams > 0 && msg->params[0][0] ? msg->params[0] : NULL;
+    if (target && strcasecmp(target, srv->cfg.server.name) != 0 && netsync_scope_refuse(srv, cl, "REHASH of another server")) return;
     if (target) {
         int all = strcmp(target, "*") == 0, sent = 0;
         netserver_t *s, *tmp;
@@ -634,6 +637,7 @@ static void line_common(server_t *srv, client_t *cl, irc_message_t *msg, const c
         if (!any) notice_self(srv, cl, "No active K/G/Z-lines");
         return;
     }
+    if ((line_type[0] == 'G' || line_type[0] == 'S') && netsync_scope_refuse(srv, cl, line_type[0] == 'G' ? "GLINE (a network-wide ban; use KLINE for this server)" : "SHUN (a network-wide shun)")) return;
     char maskbuf[256];
     snprintf(maskbuf, sizeof maskbuf, "%s", msg->params[0]);
     /* A Z-line is enforced at accept(), before any user/host exists, so it
@@ -725,10 +729,10 @@ static void unline_typed(server_t *srv, client_t *cl, const char *mask, char typ
     snprintf(m, sizeof m, server_kline_remove_typed(srv, mask, type) ? "Removed line: %s" : "No such line: %s", mask);
     notice_self(srv, cl, m);
 }
-void cmd_unshun(server_t *srv, client_t *cl, irc_message_t *msg) { unline_typed(srv, cl, msg->params[0], 'S'); netsync_unshun(srv, msg->params[0]); }
+void cmd_unshun(server_t *srv, client_t *cl, irc_message_t *msg) { if (netsync_scope_refuse(srv, cl, "UNSHUN")) return; unline_typed(srv, cl, msg->params[0], 'S'); netsync_unshun(srv, msg->params[0]); }
 void cmd_uneline(server_t *srv, client_t *cl, irc_message_t *msg) { unline_typed(srv, cl, msg->params[0], 'E'); }
 void cmd_unkline(server_t *srv, client_t *cl, irc_message_t *msg) { unline_common(srv, cl, msg->params[0]); }
-void cmd_ungline(server_t *srv, client_t *cl, irc_message_t *msg) { unline_typed(srv, cl, msg->params[0], 'G'); netsync_ungline(srv, msg->params[0]); }
+void cmd_ungline(server_t *srv, client_t *cl, irc_message_t *msg) { if (netsync_scope_refuse(srv, cl, "UNGLINE")) return; unline_typed(srv, cl, msg->params[0], 'G'); netsync_ungline(srv, msg->params[0]); }
 void cmd_unzline(server_t *srv, client_t *cl, irc_message_t *msg) { unline_common(srv, cl, msg->params[0]); }
 
 /* --- SQUIT (closes any link, hub or leaf side) / CONNECT (leaf-mode manual

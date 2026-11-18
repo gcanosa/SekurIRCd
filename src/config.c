@@ -197,6 +197,36 @@ static int cfg_get_port_array(toml_node_t *tab, const char *key, int *out, int *
 
 /* --- path helpers ------------------------------------------------------------ */
 
+/* [[operators]] privileges / [[links.peers]] oper_deny names. "accounts" is accepted so old configs load, but it never did anything. */
+static const struct { const char *name; unsigned bit; } OPER_PRIV_NAMES[] = {
+    {"kill", OPER_PRIV_KILL}, {"kline", OPER_PRIV_KLINE}, {"sa", OPER_PRIV_SA}, {"host", OPER_PRIV_HOST},
+    {"wallops", OPER_PRIV_WALLOPS}, {"rehash", OPER_PRIV_REHASH}, {"die", OPER_PRIV_DIE}, {"link", OPER_PRIV_LINK},
+    {"override", OPER_PRIV_OVERRIDE}, {"auspex", OPER_PRIV_AUSPEX}, {"immune", OPER_PRIV_IMMUNE},
+    {"accounts", 0}, {"all", OPER_PRIV_ALL},
+};
+#define N_OPER_PRIV_NAMES (sizeof OPER_PRIV_NAMES / sizeof OPER_PRIV_NAMES[0])
+
+unsigned oper_priv_from_csv(const char *csv) {
+    unsigned bits = 0;
+    char buf[200], *save = NULL;
+    snprintf(buf, sizeof buf, "%s", csv ? csv : "");
+    for (char *t = strtok_r(buf, ",", &save); t; t = strtok_r(NULL, ",", &save))
+        for (size_t k = 0; k < N_OPER_PRIV_NAMES; k++)
+            if (strcasecmp(t, OPER_PRIV_NAMES[k].name) == 0) bits |= OPER_PRIV_NAMES[k].bit;
+    return bits;
+}
+
+void oper_priv_to_csv(unsigned bits, char *out, size_t outsz) {
+    out[0] = '\0';
+    for (size_t k = 0; k < N_OPER_PRIV_NAMES; k++) {
+        unsigned b = OPER_PRIV_NAMES[k].bit;
+        if (!b || b == OPER_PRIV_ALL || !(bits & b)) continue;
+        size_t n = strlen(out);
+        snprintf(out + n, outsz - n, "%s%s", n ? "," : "", OPER_PRIV_NAMES[k].name);
+    }
+    if (!out[0]) snprintf(out, outsz, "-");
+}
+
 static int is_absolute_path(const char *p) { return p[0] == '/'; }
 
 static void config_dir(const config_t *cfg, char *out, size_t outsz) {
@@ -792,12 +822,6 @@ static int build_config(toml_node_t *raw, const char *path, config_t *out,
                 return -1;
             }
             {
-                static const struct { const char *name; unsigned bit; } OPER_PRIV_NAMES[] = {
-                    {"kill", OPER_PRIV_KILL}, {"kline", OPER_PRIV_KLINE}, {"sa", OPER_PRIV_SA}, {"host", OPER_PRIV_HOST},
-                    {"wallops", OPER_PRIV_WALLOPS}, {"rehash", OPER_PRIV_REHASH}, {"die", OPER_PRIV_DIE}, {"link", OPER_PRIV_LINK},
-                    {"override", OPER_PRIV_OVERRIDE}, {"auspex", OPER_PRIV_AUSPEX}, {"immune", OPER_PRIV_IMMUNE},
-                    {"accounts", 0}, {"all", OPER_PRIV_ALL}, /* accounts: accepted so old configs load, but it never did anything */
-                };
                 char pv[16][CFG_STR];
                 int npv = 0;
                 snprintf(fn, sizeof fn, "operators[%d].privileges", i);
@@ -805,7 +829,7 @@ static int build_config(toml_node_t *raw, const char *path, config_t *out,
                 op->privs = 0;
                 for (int j = 0; j < npv; j++) {
                     int found = 0;
-                    for (size_t k = 0; k < sizeof OPER_PRIV_NAMES / sizeof OPER_PRIV_NAMES[0]; k++)
+                    for (size_t k = 0; k < N_OPER_PRIV_NAMES; k++)
                         if (strcasecmp(pv[j], OPER_PRIV_NAMES[k].name) == 0) { op->privs |= OPER_PRIV_NAMES[k].bit; found = 1; }
                     if (found && strcasecmp(pv[j], "accounts") == 0)
                         log_warn("config", "operators[%d].privileges: \"accounts\" is ignored -- NickServ admin commands are for [nickserv] admins in services.toml", i);
@@ -1098,6 +1122,29 @@ static int build_config(toml_node_t *raw, const char *path, config_t *out,
                 snprintf(fn, sizeof fn, "links.peers[%d].allowed_ips", i);
                 if (cfg_get_str_array(pe, "allowed_ips", p->allowed_ips, CFG_MAX_LINK_ALLOWED_IPS, &p->n_allowed_ips, errbuf, errbufsz, fn)) return -1;
 
+                {   /* what this peer's opers may do (the hub states it; see netsync.c's OPERSCOPE) */
+                    char sc[16];
+                    snprintf(fn, sizeof fn, "links.peers[%d].oper_scope", i);
+                    if (cfg_get_str(pe, "oper_scope", "global", sc, sizeof sc, errbuf, errbufsz, fn)) return -1;
+                    if (strcasecmp(sc, "global") != 0 && strcasecmp(sc, "local") != 0) {
+                        snprintf(errbuf, errbufsz, "%s must be \"global\" or \"local\"", fn);
+                        return -1;
+                    }
+                    p->oper_local = strcasecmp(sc, "local") == 0;
+                    char dv[16][CFG_STR];
+                    int ndv = 0;
+                    snprintf(fn, sizeof fn, "links.peers[%d].oper_deny", i);
+                    if (cfg_get_str_array(pe, "oper_deny", dv, 16, &ndv, errbuf, errbufsz, fn)) return -1;
+                    for (int j = 0; j < ndv; j++) {
+                        int found = 0;
+                        for (size_t k = 0; k < N_OPER_PRIV_NAMES; k++)
+                            if (OPER_PRIV_NAMES[k].bit && strcasecmp(dv[j], OPER_PRIV_NAMES[k].name) == 0) { p->oper_deny |= OPER_PRIV_NAMES[k].bit; found = 1; }
+                        if (!found) {
+                            snprintf(errbuf, errbufsz, "%s: unknown privilege '%s' (kill, kline, sa, host, wallops, rehash, die, link, override, auspex, immune, all)", fn, dv[j]);
+                            return -1;
+                        }
+                    }
+                }
                 if (!p->name[0] || strpbrk(p->name, " \t\r\n")) {
                     snprintf(errbuf, errbufsz, "links.peers[%d].name must be non-empty with no whitespace", i);
                     return -1;
@@ -1114,6 +1161,10 @@ static int build_config(toml_node_t *raw, const char *path, config_t *out,
                     }
                     if (p->n_allowed_ips) {
                         snprintf(errbuf, errbufsz, "links.peers[%d] has host set (leaf-role) -- allowed_ips only applies to a hub-role peer it accepts from", i);
+                        return -1;
+                    }
+                    if (p->oper_local || p->oper_deny) {
+                        snprintf(errbuf, errbufsz, "links.peers[%d] has host set (leaf-role) -- oper_scope and oper_deny go on the hub's block for that leaf, the one without host", i);
                         return -1;
                     }
                 } else if (p->password[0] && p->password_hash[0]) {

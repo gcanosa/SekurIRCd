@@ -431,11 +431,13 @@ void cmd_stats(server_t *srv, client_t *cl, irc_message_t *msg) {
     /* "STATS x <server>" or "STATS x <nick on another server>": that server answers (no further hop once there). */
     if (target && !cl->remote) {
         netserver_t *s = netsync_find_name(srv, target);
+        if (s && s != srv->self_srv && is_oper(cl) && netsync_scope_refuse(srv, cl, "STATS of another server")) return;
         if (s && s != srv->self_srv) { netsync_rquery(srv, cl, s, "STATS", (char *[]){(char *)letter}, letter[0] ? 1 : 0); return; }
         if (!s) {
             client_t *u = server_find_user(srv, target);
             if (!u) { client_reply(cl, N_NOSUCHSERVER, (const char *[]){target}, 1, "No such server"); return; }
             if (u->remote && u->nserver && u->nserver != srv->self_srv) {
+                if (is_oper(cl) && netsync_scope_refuse(srv, cl, "STATS of another server")) return;
                 netsync_rquery(srv, cl, u->nserver, "STATS", (char *[]){(char *)letter, u->nick}, 2);
                 return;
             }

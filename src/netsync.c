@@ -397,6 +397,8 @@ int netsync_check_peer(server_t *srv, link_conn_t *lc, const char *name) {
     return 0;
 }
 
+static void send_oper_policy(server_t *srv, link_conn_t *lc);
+
 int netsync_link_up(server_t *srv, link_conn_t *lc, const char *name, const char *sid, const char *desc) {
     if (netsync_find_sid(srv, sid) || netsync_find_name(srv, name)) {
         link_forward_line(lc, "ERROR :Server or SID already exists on this network");
@@ -421,6 +423,7 @@ int netsync_link_up(server_t *srv, link_conn_t *lc, const char *name, const char
      * second link bursting meanwhile takes this slot over (the first one's batch just closes early). */
     server_fbatch_begin(srv, FB_NETJOIN, "netjoin", srv->self_srv->name, name);
     srv->netjoin_lc = lc;
+    send_oper_policy(srv, lc);
     send_burst(srv, lc);
     /* tell the rest of the tree about the new server (its own users arrive when it bursts to us) */
     char line[300], hop[8];
@@ -446,6 +449,77 @@ static client_t *src_user(server_t *srv, link_conn_t *lc, const char *prefix) {
     client_t *u = netsync_find_uid(srv, prefix);
     if (u && u->remote && u->nserver && netsync_is_behind(u->nserver, lc->nserver)) return u;
     return NULL;
+}
+
+/* --- oper scope (see netsync.h) -------------------------------------------------------------------------- */
+
+static const cfg_link_peer_t *peer_cfg(server_t *srv, const link_conn_t *lc) {
+    for (int i = 0; i < srv->cfg.links.n_peers; i++)
+        if (strcasecmp(srv->cfg.links.peers[i].name, lc->peer_name) == 0) return &srv->cfg.links.peers[i];
+    return NULL; /* looked up per message, never kept: a rehash frees the array */
+}
+
+/* Does this link's [[links.peers]] block (the accepting side's) say its opers are limited to their own server? */
+static int limited_link(server_t *srv, const link_conn_t *lc) {
+    const cfg_link_peer_t *p = peer_cfg(srv, lc);
+    return p && !p->host[0] && p->oper_local;
+}
+
+/* A limited server's oper asked for something that reaches past that server and it arrived anyway: dropped, and the oper and
+ * our opers hear about it. (The leaf normally refuses first; this is the older-or-modified-leaf backstop.) */
+static void scope_deny(server_t *srv, link_conn_t *lc, client_t *oper, const char *what) {
+    char m[300];
+    const char *from = lc->nserver ? lc->nserver->name : lc->peer_name;
+    snprintf(m, sizeof m, "Refused %s from %s%s%s: opers on %s are limited to their own server (oper_scope = local)",
+             what, oper ? oper->nick : "", oper ? " on " : "", from, from);
+    log_info("netsync", "%s", m);
+    server_notify_opers(srv, m);
+    if (oper && oper->remote) {
+        char line[400], text[300];
+        snprintf(text, sizeof text, "%s refused: your server's opers can only act on their own server (set by the hub)", what);
+        irc_build(line, sizeof line, NULL, 0, srv->cfg.server.name, "NOTICE", (const char *[]){oper->nick}, 1, text);
+        netsync_push(srv, oper, line);
+    }
+}
+
+int netsync_scope_refuse(server_t *srv, client_t *cl, const char *what) {
+    if (!srv->oper_local || cl->remote) return 0;
+    char m[300];
+    snprintf(m, sizeof m, "%s: refused -- the hub limits this server's opers to this server (oper_scope = local)", what);
+    notice_self(srv, cl, m);
+    return 1;
+}
+
+/* :<sid> OPERSCOPE <local|global> <priv,priv|-> -- only the accepting side states it, always (so a lifted limit is heard too). */
+static void send_oper_policy(server_t *srv, link_conn_t *lc) {
+    const cfg_link_peer_t *p = peer_cfg(srv, lc);
+    if (!p || p->host[0]) return;
+    char deny[160], line[300];
+    oper_priv_to_csv(p->oper_deny, deny, sizeof deny);
+    irc_build(line, sizeof line, NULL, 0, self_sid(srv), "OPERSCOPE", (const char *[]){p->oper_local ? "local" : "global", deny}, 2, NULL);
+    send_link(lc, line);
+}
+
+void netsync_oper_policy_resend(server_t *srv) {
+    for (link_conn_t *lc = srv->links; lc; lc = lc->next) send_oper_policy(srv, lc);
+}
+
+/* From the hub we dialed (and only that: a peer that dialed us never limits us). */
+static void handle_operscope(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
+    const cfg_link_peer_t *p = peer_cfg(srv, lc);
+    if (!p || !p->host[0] || !lc->nserver || msg->nparams < 2) return;
+    if (msg->prefix && strcmp(msg->prefix, lc->nserver->sid) != 0) return;
+    int local = strcmp(msg->params[0], "local") == 0;
+    unsigned deny = oper_priv_from_csv(msg->params[1]);
+    if (local == srv->oper_local && deny == srv->oper_deny) return;
+    srv->oper_local = local;
+    srv->oper_deny = deny;
+    cmd_opers_rehash(srv); /* every local oper's privileges again, now minus `deny` */
+    char names[160], m[300];
+    oper_priv_to_csv(deny, names, sizeof names);
+    snprintf(m, sizeof m, "%s sets the opers here to %s scope, denied: %s", lc->peer_name, local ? "local" : "global", names);
+    log_info("netsync", "%s", m);
+    server_notify_opers(srv, m);
 }
 
 static void kill_back(server_t *srv, link_conn_t *lc, const char *uid, const char *reason) {
@@ -819,6 +893,10 @@ static void handle_account(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
 
 static void handle_kill(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     if (msg->nparams < 1) return;
+    if (msg->prefix && limited_link(srv, lc) && netsync_find_uid(srv, msg->prefix)) { /* an oper's KILL; a server's (collision, session resume) passes */
+        scope_deny(srv, lc, src_user(srv, lc, msg->prefix), "KILL");
+        return;
+    }
     client_t *target = netsync_find_uid(srv, msg->params[0]);
     if (!target) return;
     const char *reason = msg->nparams > 1 ? msg->params[msg->nparams - 1] : "Killed";
@@ -1376,6 +1454,10 @@ static void handle_wallops(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
 }
 
 static void handle_gline(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
+    if (limited_link(srv, lc)) { /* network-wide bans are not a local oper's: this also keeps the leaf's burst and spam-filter SHUNs local */
+        log_debug("netsync", "%s %s from %s dropped (oper_scope = local)", msg->command, msg->nparams ? msg->params[0] : "", lc->peer_name);
+        return;
+    }
     netserver_t *s = src_server(srv, lc, msg->prefix);
     if (!s && msg->prefix && lc->nserver && strcmp(msg->prefix, lc->nserver->sid) == 0) s = lc->nserver;
     if (!s || msg->nparams < 4) return;
@@ -1397,6 +1479,7 @@ static void handle_gline(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
 
 static void handle_ungline(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     if (msg->nparams < 1) return;
+    if (limited_link(srv, lc)) { log_debug("netsync", "%s %s from %s dropped (oper_scope = local)", msg->command, msg->params[0], lc->peer_name); return; }
     server_kline_remove_typed(srv, msg->params[0], !strcmp(msg->command, "UNSHUN") ? 'S' : 'G'); /* never a local K/Z with that mask */
     char fl[300];
     irc_build(fl, sizeof fl, NULL, 0, msg->prefix, msg->command, (const char *[]){msg->params[0]}, 1, NULL);
@@ -1407,6 +1490,7 @@ static void handle_ungline(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
  * everyone else passes the request along toward it. */
 static void handle_rsquit(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     if (msg->nparams < 1) return;
+    if (limited_link(srv, lc)) { scope_deny(srv, lc, NULL, "SQUIT of another server"); return; } /* its own uplink closes locally, never as an RSQUIT */
     netserver_t *s = netsync_find_sid(srv, msg->params[0]);
     if (!s || s == srv->self_srv) return;
     if (s->route && s == s->route->nserver) {
@@ -1496,6 +1580,10 @@ static void handle_rquery(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     if (!u || msg->nparams < 2) return;
     netserver_t *dest = netsync_find_sid(srv, msg->params[0]);
     if (!dest) return;
+    if ((u->umodes & UMODE_O) && limited_link(srv, lc) && (!strcasecmp(msg->params[1], "REHASH") || !strcasecmp(msg->params[1], "STATS"))) {
+        scope_deny(srv, lc, u, msg->params[1]); /* another server's config and stats are not a local oper's */
+        return;
+    }
     if (dest != srv->self_srv) {
         char fl[600];
         irc_build(fl, sizeof fl, NULL, 0, u->uid, "RQUERY", (const char **)msg->params, msg->nparams, NULL);
@@ -1535,6 +1623,7 @@ static void handle_encap(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     };
     client_t *oper = src_user(srv, lc, msg->prefix);
     if (!oper || !(oper->umodes & UMODE_O) || msg->nparams < 3) return;
+    if (limited_link(srv, lc)) { scope_deny(srv, lc, oper, msg->params[1]); return; } /* a command for a local user never crosses a link, so this is aimed elsewhere */
     client_t *target = netsync_find_uid(srv, msg->params[0]);
     if (!target) return;
     if (target->remote) { /* not ours yet: pass it on toward the user's server */
@@ -1558,6 +1647,7 @@ static void handle_encap(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
 
 void netsync_encap(server_t *srv, client_t *oper, client_t *target, const char *cmd, char **args, int nargs) {
     if (!oper->uid[0] || !target->remote || !target->nserver) return;
+    if (netsync_scope_refuse(srv, oper, cmd)) return;
     const char *p[IRC_MAX_PARAMS] = {target->uid, cmd};
     int np = 2;
     for (int i = 0; i < nargs && np < IRC_MAX_PARAMS; i++) p[np++] = args[i];
@@ -1611,6 +1701,7 @@ void netsync_handle(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     else if (!strcmp(c, "SVCRELAY")) handle_svcrelay(srv, lc, msg);
     else if (!strcmp(c, "CERTFP")) handle_certfp(srv, lc, msg);
     else if (!strcmp(c, "ENCAP")) handle_encap(srv, lc, msg);
+    else if (!strcmp(c, "OPERSCOPE")) handle_operscope(srv, lc, msg);
     else if (!strcmp(c, "EOB")) {
         netserver_t *from = src_server(srv, lc, msg->prefix);
         if (!from) from = lc->nserver;
@@ -1904,6 +1995,7 @@ void netsync_squit_command(server_t *srv, client_t *oper, const char *name, cons
         link_close_why(srv, s->route, why);
         return;
     }
+    if (netsync_scope_refuse(srv, oper, "SQUIT of a server that isn't linked to this one")) return;
     /* a server further away: ask the server it hangs off (hop 1 from there) to close that link -- routed, not flooded,
      * because only its own uplink may remove it; the netsplit then propagates normally. */
     char line[300];
