@@ -204,3 +204,12 @@ def test_class_hosts_mix_ipv4_and_ipv6():
         first = s.client("a", host="127.0.0.1")
         assert _refused(s, "b", "::1"), "the IPv6 client counts against the same class"
         assert first
+
+
+def test_a_bare_ipv6_address_works_in_every_ip_mask_list():
+    # "::1" used to match nothing: clients are matched by the text "0::1". Now the config rewrites it, in webirc hosts too.
+    cfg = {**V6, "webirc": [{"name": "gw", "password": "gwpass", "hosts": ["::1", "10.0.0.0/8"]}]}
+    with Server(cfg=cfg) as s:
+        c = s.client("w1", host="::1", register=False, extra=["WEBIRC gwpass kiwi host.example.org 198.51.100.7"])
+        c.send("NICK w1"); c.send("USER w1 0 * :x"); c.expect(r" 001 ")
+        assert any("198.51.100.7" in l or "host.example.org" in l for l in c.say("WHOIS w1", 0.4)), "WEBIRC from ::1 was accepted"
