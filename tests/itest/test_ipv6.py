@@ -180,3 +180,27 @@ def test_services_link_over_ipv6():
             assert "inbound link connection accepted from 0::1" in s.output()
         finally:
             svc.stop()
+
+
+def _refused(s, nick, host):
+    try:
+        s.client(nick, host=host)
+        return False
+    except AssertionError:
+        return True
+
+
+def test_class_hosts_mix_ipv4_and_ipv6():
+    cls = [{"name": "six", "hosts": ["2001:db8::/32", "::1"], "max_clients": 1},   # a bare ::1 is rewritten to 0::1, the way clients are matched
+           {"name": "four", "hosts": ["10.0.0.0/8", "127.0.0.0/8"], "max_clients": 1}]
+    with Server(cfg={**V6, "classes": cls}) as s:
+        six = s.client("six1", host="::1")
+        assert _refused(s, "six2", "::1"), "::1 belongs to the IPv6 class"
+        four = s.client("four1", host="127.0.0.1")                                  # the IPv4 class counts on its own
+        assert _refused(s, "four2", "127.0.0.1")
+        assert six and four
+    one = [{"name": "both", "hosts": ["127.0.0.0/8", "::1/128"], "max_clients": 1}]  # one class, both families
+    with Server(cfg={**V6, "classes": one}) as s:
+        first = s.client("a", host="127.0.0.1")
+        assert _refused(s, "b", "::1"), "the IPv6 client counts against the same class"
+        assert first

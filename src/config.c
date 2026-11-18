@@ -227,6 +227,16 @@ void oper_priv_to_csv(unsigned bits, char *out, size_t outsz) {
     if (!out[0]) snprintf(out, outsz, "-");
 }
 
+/* A [[classes]] host written as a plain IPv6 address ("::1", "2001:0DB8::5") is rewritten the way the server spells client
+ * addresses ("0::1", "2001:db8::5"), and a glob that starts with ':' gets the same leading "0": a client is matched by that text, so
+ * "::1" would otherwise never match. CIDR ranges are parsed, so any spelling works there and they are left alone. */
+static void class_host_normalize(char *h) {
+    if (!h[0] || strchr(h, '/')) return;
+    char out[CFG_MASK];
+    if (!strpbrk(h, "*?") && irc_ip_normalize(h, out, sizeof out) == 0) snprintf(h, CFG_MASK, "%s", out);
+    else if (h[0] == ':' && strlen(h) + 2 <= CFG_MASK) memmove(h + 1, h, strlen(h) + 1), h[0] = '0';
+}
+
 static int is_absolute_path(const char *p) { return p[0] == '/'; }
 
 static void config_dir(const config_t *cfg, char *out, size_t outsz) {
@@ -924,6 +934,7 @@ static int build_config(toml_node_t *raw, const char *path, config_t *out,
                 snprintf(errbuf, errbufsz, "classes[%d] needs a name and at least one hosts glob", i);
                 return -1;
             }
+            for (int j = 0; j < cc->n_hosts; j++) class_host_normalize(cc->hosts[j]);
             if (cc->max_clients < 0 || cc->max_per_ip < 0 || cc->flood_max_msgs < 0 || cc->flood_window < 0 ||
                 cc->sendq_max < 0 || (cc->sendq_max > 0 && (cc->sendq_max < 4096 || cc->sendq_max > (16 << 20)))) {
                 snprintf(errbuf, errbufsz, "classes[%d]: limits must be >= 0 (sendq_max 4096-16777216)", i);

@@ -404,8 +404,10 @@ chanserv_pidfile = ""
 # -----------------------------------------------------------------------------
 #  [[classes]] -- different limits for some hosts
 # -----------------------------------------------------------------------------
-# A client gets the FIRST class whose `hosts` (IP globs) match. Every limit is
-# optional; 0 or unset = the global setting.
+# A client gets the FIRST class whose `hosts` match. A host is an IP glob or a
+# CIDR range, IPv4 and IPv6 mixed in one list ("192.0.2.*", "10.0.0.0/8",
+# "2001:db8::/32", "::1"). Every limit is optional; 0 or unset = the global
+# setting.
 #   max_clients     connections in this class
 #   max_per_ip      replaces the per-IP connection cap
 #   sendq_max       bytes queued for a slow reader before "SendQ exceeded"
@@ -413,7 +415,7 @@ chanserv_pidfile = ""
 #
 #[[classes]]
 #name = "office"
-#hosts = ["192.0.2.*"]
+#hosts = ["192.0.2.*", "2001:db8:1::/48"]
 #max_clients = 200
 #max_per_ip = 50
 #sendq_max = 0
