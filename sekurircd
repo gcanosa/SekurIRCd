@@ -120,7 +120,7 @@ stop_one() {
 # An old bin/chanserv still running next to bin/services would put two ChanServs on the link: stop it through its own
 # pidfile (by PID, never by name pattern).
 stop_old_chanserv() {
-    pid_running "$OLD_CHANSERV_PIDFILE" || return 0
+    pid_running "$OLD_CHANSERV_PIDFILE" || { rm -f "$OLD_CHANSERV_PIDFILE"; return 0; } # a dead one is just litter
     local pid
     pid=$(cat "$OLD_CHANSERV_PIDFILE")
     kill "$pid" 2>/dev/null

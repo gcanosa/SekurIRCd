@@ -91,16 +91,22 @@ static void emit_stats_snote(server_t *srv) {
     proc_stats(getpid(), &ircd_cpu, &ircd_rss);
 
     char chanserv_part[160] = "";
-    if (srv->cfg.debug_channel.chanserv_pidfile[0]) {
-        FILE *pf = fopen(srv->cfg.debug_channel.chanserv_pidfile, "r");
+    /* A leaf never runs services (the hub does), so there is nothing to look for: a chanserv_pidfile left in its config
+     * (the installer fills it in) only produced a false "services: not running" in every stats line. */
+    int is_leaf = srv->cfg.links.enabled && strcmp(srv->cfg.links.mode, "leaf") == 0;
+    if (srv->cfg.debug_channel.chanserv_pidfile[0] && !is_leaf) {
+        FILE *pf = NULL;
         const char *base = strrchr(srv->cfg.debug_channel.chanserv_pidfile, '/');
-        if (!pf && strcmp(base ? base + 1 : srv->cfg.debug_channel.chanserv_pidfile, "chanserv.pid") == 0) {
-            /* a config from before bin/chanserv became bin/services: its pidfile is services.pid beside the old one */
+        if (strcmp(base ? base + 1 : srv->cfg.debug_channel.chanserv_pidfile, "chanserv.pid") == 0) {
+            /* a config from before bin/chanserv became bin/services: the live pidfile is services.pid beside the old one.
+             * Try it FIRST -- the old standalone ChanServ's chanserv.pid is often still lying there, stale, and reading
+             * it reported a running services as "not running (stale pidfile)". */
             char alt[CFG_PATH];
             snprintf(alt, sizeof alt, "%.*sservices.pid", base ? (int)(base - srv->cfg.debug_channel.chanserv_pidfile + 1) : 0,
                      srv->cfg.debug_channel.chanserv_pidfile);
             pf = fopen(alt, "r");
         }
+        if (!pf) pf = fopen(srv->cfg.debug_channel.chanserv_pidfile, "r");
         int cs_pid = 0;
         if (pf) {
             if (fscanf(pf, "%d", &cs_pid) != 1) cs_pid = 0;
