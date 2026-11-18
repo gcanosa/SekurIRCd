@@ -18,8 +18,8 @@ page: served live with admin/viewer logins, or written to files for a website (c
   netstats.py check                            validate stats.toml (exit 3: valid, but no login can open the panel)
   netstats.py selftest                         offline self-check (synthetic log -> database -> page)
 Every command takes -c/--config (default: stats.toml next to this file)."""
-import argparse, base64, fcntl, getpass, gzip, hashlib, hmac, http.server, ipaddress, json, os, re, secrets, signal
-import socket, socketserver, sqlite3, ssl, sys, tempfile, threading, time, urllib.request
+import argparse, base64, fcntl, getpass, gzip, hashlib, hmac, html, http.server, ipaddress, json, os, re, secrets, signal
+import socket, socketserver, sqlite3, ssl, sys, tempfile, threading, time, urllib.error, urllib.parse, urllib.request
 from datetime import datetime, timezone
 
 try:
@@ -31,6 +31,38 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 ASSETS = os.path.join(HERE, "assets")
 DAY, HOUR = 86400, 3600
+SESSION_TTL = 12 * HOUR  # a browser stays logged in this long, or until it logs out
+
+# The login form (the panel's only other page). /*...*/ placeholders: network name, error line, link back to the public page.
+LOGIN_PAGE = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex">
+<title>Log in</title>
+<script>try{var t=localStorage.getItem('netstats-theme');if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+<style>
+:root{color-scheme:light;--page:#f9f9f7;--surface:#fcfcfb;--surface-2:#f3f2ee;--ink:#0b0b0b;--ink-2:#52514e;--muted:#898781;--axis:#c3c2b7;--ring:rgba(11,11,11,.10);--accent:#2a78d6;--crit:#d03b3b}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){color-scheme:dark;--page:#0d0d0d;--surface:#1a1a19;--surface-2:#232321;--ink:#f0efec;--ink-2:#c3c2b7;--axis:#383835;--ring:rgba(255,255,255,.10);--accent:#3987e5}}
+:root[data-theme="dark"]{color-scheme:dark;--page:#0d0d0d;--surface:#1a1a19;--surface-2:#232321;--ink:#f0efec;--ink-2:#c3c2b7;--axis:#383835;--ring:rgba(255,255,255,.10);--accent:#3987e5}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:grid;place-items:center;padding:16px;background:var(--page);color:var(--ink);font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
+form{width:100%;max-width:340px;background:var(--surface);border-radius:12px;box-shadow:0 0 0 1px var(--ring);padding:24px}
+h1{font-size:16px;margin:0 0 16px;font-weight:650}
+label{display:block;font-size:12px;color:var(--ink-2);margin:0 0 12px}
+input{display:block;width:100%;margin-top:4px;font:inherit;font-size:14px;padding:8px 10px;border-radius:8px;border:0;background:var(--surface-2);color:var(--ink);box-shadow:inset 0 0 0 1px var(--ring)}
+input:focus-visible{outline:2px solid var(--accent)}
+button{width:100%;font:inherit;font-weight:600;padding:9px;border:0;border-radius:8px;background:var(--accent);color:#fff;cursor:pointer}
+button:focus-visible{outline:2px solid var(--ink)}
+.err{color:var(--crit);font-size:13px;margin:0 0 12px}
+p{margin:14px 0 0;text-align:center;font-size:12px}
+a{color:var(--accent)}
+</style></head><body>
+<form method="post" action="/login">
+<h1>/*NET*/ network stats</h1>
+/*ERR*/<label>Name<input name="user" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="40" required autofocus></label>
+<label>Password<input name="password" type="password" autocomplete="current-password" required></label>
+<button>Log in</button>
+/*BACK*/</form>
+</body></html>
+"""
 RAW_DAYS, HOURLY_DAYS, STATLINE_DAYS = 7, 90, 35
 ROLES = ("admin", "viewer")
 
@@ -618,12 +650,15 @@ def build(c, db, role, now=None):
     return data
 
 
-def render(c, db, role, now=None):
+def render(c, db, role, now=None, live=False):
+    """The page for `role`; live = served by the panel (shows Log in / Log out), not written to a file for a website."""
     with open(os.path.join(ASSETS, "page.html"), encoding="utf-8") as f:
         page = f.read()
     with open(os.path.join(ASSETS, "world-110m.json"), encoding="utf-8") as f:
         world = f.read()
-    data = json.dumps(build(c, db, role, now), separators=(",", ":")).replace("</", "<\\/")
+    d = build(c, db, role, now)
+    d["live"] = live
+    data = json.dumps(d, separators=(",", ":")).replace("</", "<\\/")
     return page.replace("/*@DATA@*/null", data, 1).replace("/*@MAP@*/null", world, 1)
 
 
@@ -653,9 +688,10 @@ class Panel:
         self.pages, self.lock = {}, threading.Lock()
         self.fails = {}  # ip -> [timestamps of failed logins]
         self.good = {}   # sha256(header) -> (role, expires): skip scrypt on every reload
+        self.sessions = {}  # cookie token -> (login name, its password hash, expires): a logged-in browser
 
     def refresh(self, db):
-        pages = {r: render(self.c, db, r).encode() for r in ROLES}
+        pages = {r: render(self.c, db, r, live=True).encode() for r in ROLES}
         with self.lock:
             self.pages = pages
 
@@ -692,8 +728,17 @@ class Panel:
                 self.log(f"stats.toml changed but can't be loaded, keeping the old logins: {e}")
         self.conf_mtime = m
 
+    def check(self, name, pw, ip):
+        """The [[users]] entry for a good name + password, else None (counted against `ip`)."""
+        for u in self.c["users"]:
+            if hmac.compare_digest(u["name"].encode(), name.encode()) and check_password(pw, u["password"]):
+                return u
+        self.fails.setdefault(ip, []).append(time.time())
+        self.log(f"failed login for '{name[:40]}' from {ip}")
+        return None
+
     def auth(self, header, ip):
-        """'admin' / 'viewer' for good credentials, None for none, False for bad ones (counted)."""
+        """HTTP Basic (curl -u, scripts): 'admin' / 'viewer' for good credentials, None for none, False for bad ones."""
         self.reload_users()
         if not header or not header.startswith("Basic "):
             return None
@@ -705,13 +750,47 @@ class Panel:
             user, _, pw = base64.b64decode(header[6:]).decode().partition(":")
         except ValueError:
             return False
+        u = self.check(user, pw, ip)
+        if not u:
+            return False
+        self.good[key] = (u["role"], time.time() + 600)
+        return u["role"]
+
+    def session_start(self, u):
+        now = time.time()
+        for k in [k for k, v in list(self.sessions.items()) if v[2] <= now]:
+            self.sessions.pop(k, None)
+        tok = secrets.token_urlsafe(32)
+        self.sessions[tok] = (u["name"], u["password"], now + SESSION_TTL)
+        return tok
+
+    def cookie(self, token, age=SESSION_TTL):
+        h = self.c["http"]
+        # Secure when the browser is on HTTPS: our own certificate, or the reverse proxy that [http] hostname names
+        return (f"netstats_session={token}; Path=/; Max-Age={age}; HttpOnly; SameSite=Strict"
+                + ("; Secure" if h["tls_cert"] or h["hostname"] else ""))
+
+    def login_page(self, error=""):
+        err = f'<div class="err" role="alert">{html.escape(error)}</div>\n' if error else ""
+        back = '<p><a href="/">Back to the public page</a></p>\n' if self.c["http"]["public"] else ""
+        return (LOGIN_PAGE.replace("/*NET*/", html.escape(self.c["network"])).replace("/*ERR*/", err)
+                .replace("/*BACK*/", back).encode())
+
+    @staticmethod
+    def session_token(cookie):
+        m = re.search(r"(?:^|;\s*)netstats_session=([\w-]+)", cookie or "")
+        return m.group(1) if m else None
+
+    def session_role(self, cookie):
+        """The role of the browser's login session, None when it has none (or its login was removed / changed password)."""
+        self.reload_users()
+        s = self.sessions.get(self.session_token(cookie))
+        if not s or s[2] <= time.time():
+            return None
         for u in self.c["users"]:
-            if hmac.compare_digest(u["name"], user) and check_password(pw, u["password"]):
-                self.good[key] = (u["role"], time.time() + 600)
+            if u["name"] == s[0] and u["password"] == s[1]:
                 return u["role"]
-        self.fails.setdefault(ip, []).append(time.time())
-        self.log(f"failed login for '{user[:40]}' from {ip}")
-        return False
+        return None
 
     def client_ip(self, peer, xff):
         """The visitor's address: the proxy's X-Forwarded-For entry when the request comes from a trusted proxy (Caddy,
@@ -746,7 +825,7 @@ class Panel:
                 self.send_header("X-Frame-Options", "DENY")
                 self.send_header("Referrer-Policy", "no-referrer")
                 self.send_header("Content-Security-Policy", "default-src 'none'; script-src 'unsafe-inline'; "
-                                 "style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'")
+                                 "style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'self'")
                 for k, v in extra:
                     self.send_header(k, v)
                 self.end_headers()
@@ -759,27 +838,61 @@ class Panel:
             def do_HEAD(self):
                 self.do_GET()
 
+            def go(self, where, code=302, extra=()):
+                self.send(code, extra=[("Location", where), *extra])
+
             def do_GET(self):
                 ip = panel.client_ip(self.client_address[0], self.headers.get("X-Forwarded-For"))
                 path = self.path.split("?", 1)[0]
                 if path == "/healthz":
                     return self.send(200, b"ok\n")
-                if path in ("/admin", "/login"):
-                    return self.send(301, extra=[("Location", "/admin/")])
-                if path not in ("/", "/admin/"):
+                if path == "/admin":
+                    return self.go("/admin/", 301)
+                if path not in ("/", "/admin/", "/login"):
                     return self.send(404, b"Not found\n")
                 if panel.throttled(ip):
                     return self.send(429, b"Too many failed logins, try again later\n")
-                # /admin/ always asks (browsers resend Basic credentials only for the path they were asked on and
-                # below, so the logged-in page lives there); / is the viewer page for everyone when public = true.
-                role = panel.auth(self.headers.get("Authorization"), ip)
-                if role is False or (role is None and (path == "/admin/" or not panel.c["http"]["public"])):
+                session = panel.session_role(self.headers.get("Cookie"))
+                if path == "/login":  # the form; a browser that is logged in already goes on to the page
+                    return self.go("/admin/") if session else self.send(200, panel.login_page(), "text/html; charset=utf-8")
+                # /admin/ is the logged-in page (always asks); / is the viewer page for everyone when public = true.
+                # A browser with a login session always lives at /admin/, where the page shows Log out.
+                if session and path == "/":
+                    return self.go("/admin/")
+                role = session or panel.auth(self.headers.get("Authorization"), ip)  # else HTTP Basic: curl -u
+                if role is False:
                     return self.challenge()
+                if role is None and (path == "/admin/" or not panel.c["http"]["public"]):
+                    return self.go("/login")
                 with panel.lock:
                     page = panel.pages.get(role or "viewer")
                 if page is None:
                     return self.send(503, b"Starting up, reload in a moment\n")
                 self.send(200, page, "text/html; charset=utf-8")
+
+            def do_POST(self):
+                ip = panel.client_ip(self.client_address[0], self.headers.get("X-Forwarded-For"))
+                path = self.path.split("?", 1)[0]
+                try:
+                    n = int(self.headers.get("Content-Length") or 0)
+                except ValueError:
+                    return self.send(400, b"Bad request\n")
+                if n > 4096:
+                    return self.send(413, b"Too big\n")
+                form = urllib.parse.parse_qs(self.rfile.read(n).decode("utf-8", "replace"))
+                if path == "/logout":  # POST only: a link or image on another site can't log anyone out
+                    panel.sessions.pop(panel.session_token(self.headers.get("Cookie")), None)
+                    return self.go("/" if panel.c["http"]["public"] else "/login", 303, [("Set-Cookie", panel.cookie("", 0))])
+                if path != "/login":
+                    return self.send(404, b"Not found\n")
+                if panel.throttled(ip):
+                    return self.send(429, b"Too many failed logins, try again later\n")
+                panel.reload_users()
+                u = panel.check(form.get("user", [""])[0], form.get("password", [""])[0], ip)
+                if not u:
+                    # 200, not 401: a 401 must carry WWW-Authenticate, which would pop up the browser's own login box
+                    return self.send(200, panel.login_page("Wrong name or password."), "text/html; charset=utf-8")
+                self.go("/admin/", 303, [("Set-Cookie", panel.cookie(panel.session_start(u)))])
         return H
 
     def serve(self):
@@ -816,7 +929,7 @@ class Panel:
 # --- daemon plumbing (mirrors the ircd's --daemon/--stop/--pidfile) ---------------------------------------------------
 
 def exposure_notes(h):
-    """What to tell an admin about a panel bound beyond localhost: the firewall, and Basic auth without TLS."""
+    """What to tell an admin about a panel bound beyond localhost: the firewall, and clear-text logins without TLS."""
     if h["bind"] in ("127.0.0.1", "::1", "localhost"):
         return caddy_notes(h)
     port = h["port"]
@@ -827,7 +940,7 @@ def exposure_notes(h):
              f"  pf (BSD/macOS): add 'pass in proto tcp to port {port}' to /etc/pf.conf, then sudo pfctl -f /etc/pf.conf",
              "  and in your provider's firewall / security group, if it has one"]
     if not h["tls_cert"]:
-        notes.append("WARNING: no tls_cert: logins cross the network in clear text (HTTP Basic auth) -- set tls_cert/tls_key, "
+        notes.append("WARNING: no tls_cert: logins cross the network in clear text -- set tls_cert/tls_key, "
                      "or bind 127.0.0.1 behind an HTTPS reverse proxy")
     return notes
 
@@ -1073,6 +1186,44 @@ def selftest():
             load_config(f); assert False
         except ConfigError:
             pass
+    # the login form against a real in-process panel: wrong password, session cookie, logout, removed login
+    c2 = load_config(conf)  # bob (viewer, password "pw")
+    c2["http"]["public"] = True
+    pn = Panel(c2, lambda m: None)
+    pn.pages = {r: b"page-" + r.encode() for r in ROLES}
+    httpd = http.server.HTTPServer(("127.0.0.1", 0), pn.handler())
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *a, **k):
+            return None
+
+    def req(path, data=None, cookie=None):
+        r = urllib.request.Request(f"http://127.0.0.1:{httpd.server_address[1]}{path}", headers={"Cookie": cookie or ""},
+                                   data=None if data is None else data.encode())
+        try:
+            with urllib.request.build_opener(NoRedirect).open(r) as x:
+                return x.status, x.headers, x.read()
+        except urllib.error.HTTPError as e:  # a redirect we refused to follow
+            return e.code, e.headers, e.read()
+
+    assert req("/admin/")[0] == 302 and req("/admin/")[1]["Location"] == "/login"
+    assert req("/")[2] == b"page-viewer" and b'name="password"' in req("/login")[2]
+    st, hd, body = req("/login", "user=bob&password=nope")
+    assert st == 200 and b"Wrong name or password" in body and "Set-Cookie" not in hd
+    st, hd, _ = req("/login", "user=bob&password=pw")
+    ck = hd["Set-Cookie"].split(";")[0]
+    assert st == 303 and hd["Location"] == "/admin/" and "HttpOnly" in hd["Set-Cookie"] and "SameSite=Strict" in hd["Set-Cookie"]
+    assert req("/admin/", cookie=ck)[2] == b"page-viewer" and req("/", cookie=ck)[1]["Location"] == "/admin/"
+    assert req("/logout", cookie=ck)[0] == 404  # a GET (link, image) can't log anyone out
+    assert req("/logout", "", ck)[0] == 303
+    assert req("/admin/", cookie=ck)[0] == 302  # the old cookie is dead
+    ck = req("/login", "user=bob&password=pw")[1]["Set-Cookie"].split(";")[0]
+    user_del(conf, "bob", "viewer")
+    os.utime(conf, (now + 10, now + 10))  # coarse file systems: make the change visible
+    assert req("/admin/", cookie=ck)[0] == 302  # a login that was removed loses its sessions at once
+    httpd.shutdown()
+    httpd.server_close()
     print("netstats selftest: ok")
     return 0
 

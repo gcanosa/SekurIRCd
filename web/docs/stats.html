@@ -92,8 +92,10 @@ stats/netstats.py --user --viewer --del staff
 stats/netstats.py --mkpasswd                     # just print a hash, for a [[users]] entry written by hand</pre>
 <p>They edit the <code>[[users]]</code> entries in <code>stats/stats.toml</code> (passwords are stored as scrypt hashes, like operator passwords) and the
   running panel picks the change up at once. After 10 wrong passwords in 10 minutes, an address has to wait.</p>
-<p>The logged-in page is at <code>/admin/</code>. The page at <code>/</code> asks for a login too, unless you set <code>public = true</code>: then anyone gets
-  the viewer page there, with a <em>Log in</em> link for the rest.</p>
+<p>The logged-in page is at <code>/admin/</code>. The page at <code>/</code> sends you to the login form (<code>/login</code>) too, unless you set <code>public = true</code>:
+  then anyone gets the viewer page there, with a <em>Log in</em> button for the rest. Once logged in, the button on the right of the section bar (under the
+  Light/Dark toggle) says <em>Log out</em>: it ends the session at once. A session lasts 12 hours, and removing a login with <code>--user --del</code> (or changing its
+  password) ends its sessions too. Scripts can still use HTTP Basic: <code>curl -u alice:password http://127.0.0.1:8089/admin/</code>.</p>
 
 <h2>putting it online</h2>
 <p>By default the panel listens on <code>127.0.0.1:8089</code> only. To reach it from outside, either:</p>
@@ -145,7 +147,7 @@ pass in proto tcp to port 8089</pre>
 <p>Cloud servers (AWS, Hetzner, OVH, DigitalOcean, ...) often have a second firewall in the provider's control panel (a "security group"
   or "cloud firewall"): open the port there too. When the panel starts bound publicly, <code>./sekurircd start-stats</code>,
   <code>netstats.py check</code> and <code>logs/netstats.log</code> print these same commands with your port.</p>
-<p>Without <code>tls_cert</code>, a public panel sends its logins in clear text (HTTP Basic auth), and netstats warns about it. Use HTTPS, or keep
+<p>Without <code>tls_cert</code>, a public panel sends its logins in clear text (the login form), and netstats warns about it. Use HTTPS, or keep
   <code>127.0.0.1</code> behind a reverse proxy that has it.</p>
 
 <h3>static pages for a website</h3>

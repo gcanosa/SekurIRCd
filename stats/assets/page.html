@@ -50,11 +50,17 @@ header.top{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--p
 .brand small{display:block;font-weight:400;color:var(--muted);font-size:12px}
 .badge{font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--ink-2);border:1px solid var(--axis);padding:2px 8px;border-radius:99px;text-decoration:none}
 .spacer{flex:1}
+#auth{display:flex;align-items:center;gap:8px;flex:none}
+#auth form{margin:0}
+.btn{all:unset;box-sizing:border-box;cursor:pointer;font-size:13px;padding:6px 12px;border-radius:8px;color:var(--ink);background:var(--surface-2);box-shadow:inset 0 0 0 1px var(--ring)}
+.btn:hover{background:var(--surface);box-shadow:inset 0 0 0 1px var(--axis)}
+.btn:focus-visible{outline:2px solid var(--accent)}
 .seg{display:inline-flex;background:var(--surface-2);border-radius:8px;padding:2px;box-shadow:inset 0 0 0 1px var(--ring)}
 .seg button{all:unset;cursor:pointer;padding:5px 11px;border-radius:6px;font-size:13px;color:var(--ink-2)}
 .seg button[aria-pressed="true"]{background:var(--surface);color:var(--ink);box-shadow:0 1px 2px rgba(0,0,0,.08),0 0 0 1px var(--ring);font-weight:600}
 .seg button:focus-visible{outline:2px solid var(--accent)}
-nav.sec{display:flex;gap:4px;overflow-x:auto;padding:0 0 10px;scrollbar-width:none}
+.navrow{display:flex;align-items:center;gap:8px;padding:0 0 10px}
+nav.sec{display:flex;gap:4px;overflow-x:auto;flex:1;min-width:0;scrollbar-width:none}
 nav.sec a{color:var(--ink-2);text-decoration:none;font-size:13px;padding:5px 10px;border-radius:6px;white-space:nowrap}
 nav.sec a:hover{background:var(--surface-2);color:var(--ink)}
 section{padding:28px 0 4px;scroll-margin-top:110px}
@@ -105,7 +111,6 @@ footer{color:var(--muted);font-size:12px;padding:32px 0 40px;text-align:center}
         <svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" fill="var(--accent)"/><path d="M9 21V11m7 10V7m7 14v-6" stroke="#fff" stroke-width="3" stroke-linecap="round"/></svg>
         <div><span id="netname"></span> network stats<small id="gen"></small></div>
       </div>
-      <span id="rolebadge"></span>
       <div class="spacer"></div>
       <div class="seg" role="group" aria-label="Time range">
         <button data-range="1" aria-pressed="false">24h</button><button data-range="7" aria-pressed="true">7d</button><button data-range="30" aria-pressed="false">30d</button><button data-range="365" aria-pressed="false">1y</button>
@@ -114,9 +119,12 @@ footer{color:var(--muted);font-size:12px;padding:32px 0 40px;text-align:center}
         <button data-theme-btn="light" aria-pressed="false">Light</button><button data-theme-btn="dark" aria-pressed="false">Dark</button>
       </div>
     </div>
+    <div class="navrow">
     <nav class="sec">
       <a href="#overview">Overview</a><a href="#links">Links</a><a href="#servers">Servers</a><a href="#users">Users</a><a href="#services">Services</a><a href="#security" data-admin>Security</a><a href="#health">Health checks</a>
     </nav>
+    <div id="auth"></div>
+    </div>
   </div>
 </header>
 
@@ -444,7 +452,8 @@ function charts(){
 document.title=D.network+' network stats';
 $('#netname').textContent=D.network;
 $('#gen').textContent=`Updated ${utc(NOW)} · ${SERVERS.length} servers · sampled every ${D.sample}s · kept ${D.retention} days`;
-$('#rolebadge').innerHTML=ADMIN?'<span class="badge">Admin</span>':(D.public&&location.protocol.startsWith('http')?'<a class="badge" href="/admin/">Log in</a>':'');
+/* the served page only (not the exported files): logged in lives under /admin/, which asks for a login */
+$('#auth').innerHTML=!D.live?'':location.pathname.startsWith('/admin')?`<span class="badge">${ADMIN?'Admin':'Viewer'}</span><form method="post" action="/logout"><button class="btn">Log out</button></form>`:'<a class="btn" href="/login">Log in</a>';
 $('#foot').innerHTML=`SekurIRCd netstats · map data Natural Earth${D.geoip?' · IP geolocation by <a href="https://db-ip.com">DB-IP</a>':''}`;
 tiles();incidents();linkTable();serverTable();clients();svcTiles();security();healthTable();charts();
 document.querySelectorAll('[data-range]').forEach(b=>b.onclick=()=>{RANGE=+b.dataset.range;document.querySelectorAll('[data-range]').forEach(x=>x.setAttribute('aria-pressed',x===b));incidents();linkTable();charts()});
