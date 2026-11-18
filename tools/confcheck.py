@@ -117,6 +117,9 @@ def check_daemon(path, binary):
     msg = (p.stdout + p.stderr).strip()
     if p.returncode == 0:
         ok(f"{os.path.basename(binary)} --check")
+        for m in msg.splitlines():  # the daemon's own config warnings (a padded IPv6 glob, an ignored privilege...)
+            w = re.search(r"\bWARNING +config: (.*)", m)
+            if w: warn(w.group(1))
     elif "unrecognized argument" in msg:
         warn(f"{binary} predates --check -- rebuild (make) for full validation")
     else:

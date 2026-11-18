@@ -408,6 +408,12 @@ chanserv_pidfile = ""
 # CIDR range, IPv4 and IPv6 mixed in one list ("192.0.2.*", "10.0.0.0/8",
 # "2001:db8::/32", "::1"). Every limit is optional; 0 or unset = the global
 # setting.
+# A glob is matched against the text the server spells the address with: IPv6
+# in its short form, no leading zeros ("c8", not "00c8") and "::" for a run of
+# zero groups. "2602:f992:00c8:b79*" is therefore read as "2602:f992:c8:b79*"
+# (and logged, and shown by tools/confcheck.py); a glob can still miss when an
+# address compresses differently. A CIDR range ("2602:f992:c8:b793::/64") never
+# does, so prefer it for IPv6.
 #   max_clients     connections in this class
 #   max_per_ip      replaces the per-IP connection cap
 #   sendq_max       bytes queued for a slow reader before "SendQ exceeded"

@@ -656,6 +656,30 @@ static void test_links_allowed_ips_config(void) {
      * beyond confirming the config actually gets there. */
 }
 
+/* An IPv6 glob written with zero-padded groups ("00c8") is read the way the server spells clients ("c8"): it used to match nothing. */
+static void test_config_ipv6_glob_padding(void) {
+    char dir[64];
+    snprintf(dir, sizeof dir, "/tmp/sekurircd-v6glob-%d", (int)getpid());
+    assert(mkdir(dir, 0700) == 0);
+    char path[600], err[512];
+    snprintf(path, sizeof path, "%s/sekurircd.toml", dir);
+    write_file(dir, "sekurircd.toml",
+               "[[classes]]\nname = \"t\"\nhosts = [\"2602:f992:00c8:b79*\", \"2a0a:4cc0:2000:11*\", \"0000:*\", \"10.0.0.*\", \"2001:0DB8:0:0:0:0:0:5\", \"2001:0db8::/32\"]\n");
+    config_t cfg;
+    assert(config_load(path, &cfg, err, sizeof err) == 0);
+    assert(cfg.n_classes == 1 && cfg.classes[0].n_hosts == 6);
+    assert(strcmp(cfg.classes[0].hosts[0], "2602:f992:c8:b79*") == 0);
+    assert(strcmp(cfg.classes[0].hosts[1], "2a0a:4cc0:2000:11*") == 0); /* nothing to strip: untouched */
+    assert(strcmp(cfg.classes[0].hosts[2], "0:*") == 0);
+    assert(strcmp(cfg.classes[0].hosts[3], "10.0.0.*") == 0);
+    assert(strcmp(cfg.classes[0].hosts[4], "2001:db8::5") == 0);        /* a plain address: rewritten as before */
+    assert(strcmp(cfg.classes[0].hosts[5], "2001:0db8::/32") == 0);     /* CIDR: any spelling, left alone */
+    assert(irc_ip_mask_match(cfg.classes[0].hosts[0], "2602:f992:c8:b793::1"));
+    char cmd[128];
+    snprintf(cmd, sizeof cmd, "rm -rf %s", dir);
+    if (system(cmd) != 0) { /* best effort */ }
+}
+
 static void test_connect_flood_throttle(void) {
     cfg_security_t sec;
     memset(&sec, 0, sizeof sec);
@@ -1288,6 +1312,7 @@ int main(void) {
     RUN(test_oper_priv_names);
     RUN(test_config_load_missing_file);
     RUN(test_links_allowed_ips_config);
+    RUN(test_config_ipv6_glob_padding);
     RUN(test_connect_flood_throttle);
     RUN(test_channel_mode_string_cannot_overflow);
     RUN(test_line_mask_hits);

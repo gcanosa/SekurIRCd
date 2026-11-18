@@ -206,6 +206,15 @@ def test_class_hosts_mix_ipv4_and_ipv6():
         assert first
 
 
+def test_zero_padded_ipv6_glob_matches_the_way_clients_are_spelled():
+    # clients are "0::1", never "0000::1" or "0000:*": a padded group in a glob used to match nothing, so the class was skipped
+    cls = [{"name": "padded", "hosts": ["0000:*"], "max_clients": 1}]
+    with Server(cfg={**V6, "classes": cls}) as s:
+        first = s.client("p1", host="::1")
+        assert _refused(s, "p2", "::1"), "the padded glob must land ::1 in its class"
+        assert first
+
+
 def test_a_bare_ipv6_address_works_in_every_ip_mask_list():
     # "::1" used to match nothing: clients are matched by the text "0::1". Now the config rewrites it, in webirc hosts too.
     cfg = {**V6, "webirc": [{"name": "gw", "password": "gwpass", "hosts": ["::1", "10.0.0.0/8"]}]}

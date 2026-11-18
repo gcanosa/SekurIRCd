@@ -230,14 +230,33 @@ void oper_priv_to_csv(unsigned bits, char *out, size_t outsz) {
 /* An IP mask from the config (a [[classes]] host, a webirc/proxy/allowed_ips/exempt entry) written as a plain IPv6 address ("::1", "2001:0DB8::5") is rewritten the way the server spells client
  * addresses ("0::1", "2001:db8::5"), and a glob that starts with ':' gets the same leading "0": a client is matched by that text, so
  * "::1" would otherwise never match. CIDR ranges are parsed, so any spelling works there and they are left alone. */
-static void ip_mask_normalize(char *h) {
-    if (!h[0] || strchr(h, '/')) return;
-    char out[CFG_MASK];
-    if (!strpbrk(h, "*?") && irc_ip_normalize(h, out, sizeof out) == 0) snprintf(h, CFG_MASK, "%s", out);
-    else if (h[0] == ':' && strlen(h) + 2 <= CFG_MASK) memmove(h + 1, h, strlen(h) + 1), h[0] = '0';
+/* In an IPv6 glob, a group written with leading zeros ("00c8", "0000") never matched: clients are spelled "c8", "0". Strip them from
+ * every group that is plain hex (a group with a '*' or '?' in it is the user's own pattern and stays). 1 if anything changed. */
+static int glob_unpad_groups(char *h) {
+    if (!strchr(h, ':')) return 0;
+    int changed = 0;
+    for (char *g = h;;) {
+        size_t len = strcspn(g, ":"), z = 0;
+        if (len > 1 && len <= 4 && strspn(g, "0123456789abcdefABCDEF") == len)
+            while (z + 1 < len && g[z] == '0') z++;
+        if (z) { memmove(g, g + z, strlen(g + z) + 1); len -= z; changed = 1; }
+        if (g[len] != ':') return changed;
+        g += len + 1;
+    }
 }
 
-#define NORM_MASKS(arr, n) do { for (int k_ = 0; k_ < (n); k_++) ip_mask_normalize((arr)[k_]); } while (0)
+static void ip_mask_normalize(char *h, const char *what) {
+    if (!h[0] || strchr(h, '/')) return;
+    char out[CFG_MASK], was[CFG_MASK];
+    snprintf(was, sizeof was, "%s", h);
+    if (!strpbrk(h, "*?") && irc_ip_normalize(h, out, sizeof out) == 0) { snprintf(h, CFG_MASK, "%s", out); return; }
+    if (glob_unpad_groups(h))
+        log_warn("config", "%s: \"%s\" is read as \"%s\" -- the server writes IPv6 addresses without leading zeros (c8, not 00c8), so the "
+                 "padded form would never match; write it that way, or use a CIDR range (\"2001:db8::/32\")", what, was, h);
+    if (h[0] == ':' && strlen(h) + 2 <= CFG_MASK) memmove(h + 1, h, strlen(h) + 1), h[0] = '0';
+}
+
+#define NORM_MASKS(arr, n, what) do { for (int k_ = 0; k_ < (n); k_++) ip_mask_normalize((arr)[k_], what); } while (0)
 
 static int is_absolute_path(const char *p) { return p[0] == '/'; }
 
@@ -631,7 +650,7 @@ static int build_config(toml_node_t *raw, const char *path, config_t *out,
         }
     }
     if (cfg_get_str_array(srv, "proxy_protocol_hosts", out->server.proxy_hosts, CFG_MAX_HOSTS_PER_WEBIRC, &out->server.n_proxy_hosts, errbuf, errbufsz, "server.proxy_protocol_hosts")) return -1;
-    NORM_MASKS(out->server.proxy_hosts, out->server.n_proxy_hosts);
+    NORM_MASKS(out->server.proxy_hosts, out->server.n_proxy_hosts, "[server] proxy_protocol_hosts");
     if (cfg_get_int(srv, "port", 6667, &out->server.port, errbuf, errbufsz, "server.port")) return -1;
     if (out->server.port < 1 || out->server.port > 65535) {
         snprintf(errbuf, errbufsz, "server.port must be in 1-65535");
@@ -937,7 +956,7 @@ static int build_config(toml_node_t *raw, const char *path, config_t *out,
                 snprintf(errbuf, errbufsz, "classes[%d] needs a name and at least one hosts glob", i);
                 return -1;
             }
-            NORM_MASKS(cc->hosts, cc->n_hosts);
+            NORM_MASKS(cc->hosts, cc->n_hosts, "[[classes]] hosts");
             if (cc->max_clients < 0 || cc->max_per_ip < 0 || cc->flood_max_msgs < 0 || cc->flood_window < 0 ||
                 cc->sendq_max < 0 || (cc->sendq_max > 0 && (cc->sendq_max < 4096 || cc->sendq_max > (16 << 20)))) {
                 snprintf(errbuf, errbufsz, "classes[%d]: limits must be >= 0 (sendq_max 4096-16777216)", i);
@@ -965,7 +984,7 @@ static int build_config(toml_node_t *raw, const char *path, config_t *out,
             if (cfg_get_str(w, "password", "", wi->password, CFG_STR, errbuf, errbufsz, fn)) return -1;
             snprintf(fn, sizeof fn, "webirc[%d].hosts", i);
             if (cfg_get_str_array(w, "hosts", wi->hosts, CFG_MAX_HOSTS_PER_WEBIRC, &wi->n_hosts, errbuf, errbufsz, fn)) return -1;
-            NORM_MASKS(wi->hosts, wi->n_hosts);
+            NORM_MASKS(wi->hosts, wi->n_hosts, "[[webirc]] hosts");
             if (!wi->password[0] || strpbrk(wi->password, " \t\r\n")) {
                 snprintf(errbuf, errbufsz, "webirc[%d].password must be non-empty with no whitespace", i);
                 return -1;
@@ -1046,7 +1065,7 @@ static int build_config(toml_node_t *raw, const char *path, config_t *out,
         if (cfg_get_int(w, "port", 8080, &out->websocket.port, errbuf, errbufsz, "websocket.port")) return -1;
         if (cfg_get_bool(w, "tls", 0, &out->websocket.tls, errbuf, errbufsz, "websocket.tls")) return -1;
         if (cfg_get_str_array(w, "trusted_proxies", out->websocket.trusted_proxies, CFG_MAX_HOSTS_PER_WEBIRC, &out->websocket.n_trusted_proxies, errbuf, errbufsz, "websocket.trusted_proxies")) return -1;
-        NORM_MASKS(out->websocket.trusted_proxies, out->websocket.n_trusted_proxies);
+        NORM_MASKS(out->websocket.trusted_proxies, out->websocket.n_trusted_proxies, "[websocket] trusted_proxies");
         if (cfg_get_str_array(w, "allowed_origins", out->websocket.allowed_origins, CFG_MAX_HOSTS_PER_WEBIRC, &out->websocket.n_allowed_origins, errbuf, errbufsz, "websocket.allowed_origins")) return -1;
         if (out->websocket.enabled && (out->websocket.port < 1 || out->websocket.port > 65535)) {
             snprintf(errbuf, errbufsz, "websocket.port must be in 1-65535");
@@ -1137,7 +1156,7 @@ static int build_config(toml_node_t *raw, const char *path, config_t *out,
                 if (cfg_get_int(pe, "port", 0, &p->port, errbuf, errbufsz, fn)) return -1;
                 snprintf(fn, sizeof fn, "links.peers[%d].allowed_ips", i);
                 if (cfg_get_str_array(pe, "allowed_ips", p->allowed_ips, CFG_MAX_LINK_ALLOWED_IPS, &p->n_allowed_ips, errbuf, errbufsz, fn)) return -1;
-                NORM_MASKS(p->allowed_ips, p->n_allowed_ips);
+                NORM_MASKS(p->allowed_ips, p->n_allowed_ips, "[[links.peers]] allowed_ips");
 
                 {   /* what this peer's opers may do (the hub states it; see netsync.c's OPERSCOPE) */
                     char sc[16];
@@ -1436,7 +1455,7 @@ static int apply_protection(toml_node_t *raw, config_t *out, char *errbuf, size_
     toml_node_t *ex = cfg_get_section(raw, "exempt", errbuf, errbufsz, &e);
     if (e) return -1;
     if (cfg_get_str_array(ex, "ips", p->exempt, CFG_MAX_EXEMPTS, &p->n_exempt, errbuf, errbufsz, "exempt.ips")) return -1;
-    NORM_MASKS(p->exempt, p->n_exempt);
+    NORM_MASKS(p->exempt, p->n_exempt, "[protection] exempt");
 
     toml_node_t *cn = cfg_get_section(raw, "connection", errbuf, errbufsz, &e);
     if (e) return -1;
