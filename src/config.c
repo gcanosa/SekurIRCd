@@ -3,6 +3,8 @@
 #include "history.h"
 
 #include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 #include "client.h" /* SPAM_TRACK */
 #include "log.h"
 #include "proto.h"

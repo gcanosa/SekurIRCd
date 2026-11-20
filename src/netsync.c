@@ -991,7 +991,7 @@ static void reset_channel_for_ts(server_t *srv, channel_t *chan) {
     HASH_ITER(hh, chan->members, m, tmp) m->rank = 0;
     char flagsoff[40] = "-";
     for (const char *c = "nipstmzrPCTSVQNROMcDuGK"; *c; c++)
-        if (chan->modes & channel_flag_bit(*c)) strncat(flagsoff, (char[]){*c, 0}, sizeof flagsoff - strlen(flagsoff) - 1);
+        if (chan->modes & channel_flag_bit(*c)) strncat(flagsoff, ((char[]){*c, 0}), sizeof flagsoff - strlen(flagsoff) - 1);
     char ps[8] = "";
     const char *pargs[4];
     int np = 0;

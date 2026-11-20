@@ -990,7 +990,7 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
         const char *ka[] = {"*"};
         int nk = 0;
         for (const char *c = "imnpstzCTSVQNRMcDuGK"; *c; c++) /* never r (ChanServ's), P or O (oper-set) */
-            if ((chan->modes & channel_flag_bit(*c)) && !strchr(srv->cfg.channels.default_modes, *c)) strncat(ms, (char[]){*c, 0}, sizeof ms - strlen(ms) - 1);
+            if ((chan->modes & channel_flag_bit(*c)) && !strchr(srv->cfg.channels.default_modes, *c)) strncat(ms, ((char[]){*c, 0}), sizeof ms - strlen(ms) - 1);
         if (chan->modes & CMODE_K) { strncat(ms, "k", sizeof ms - strlen(ms) - 1); nk = 1; }
         if (chan->modes & CMODE_L) strncat(ms, "l", sizeof ms - strlen(ms) - 1);
         if (chan->modes & CMODE_FLOOD) strncat(ms, "f", sizeof ms - strlen(ms) - 1);

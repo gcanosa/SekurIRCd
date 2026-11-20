@@ -120,7 +120,7 @@ def test_pinned_tls_link_over_ipv6_and_linkmgmt_sees_it():
         assert "is plain text" not in out  # the loopback sniff saw a TLS ClientHello, not a plain link
         assert "(TLS)" in leaf.output()
         tool = os.path.join(os.path.dirname(__file__), "..", "..", "tools", "linkmgmt.py")
-        r = subprocess.run([sys.executable, tool, "test", "::1", str(hub.link_port), "--tls", "--no-banner"],
+        r = subprocess.run([sys.executable, tool, "-c", hub.cfg_path, "test", "::1", str(hub.link_port), "--tls", "--no-banner"],
                            capture_output=True, text=True, timeout=30)
         plain = re.sub(r"\x1b\[[0-9;]*m", "", r.stdout)
         assert f"TCP  ::1 port {hub.link_port}: open" in plain, plain

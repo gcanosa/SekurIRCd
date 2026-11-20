@@ -2438,16 +2438,16 @@ static void process_line(char *line) {
             for (int i = 0; i < N_MLOCK_PARAMS; i++) if (MLOCK_PARAMS[i].letter == *c) pi = i;
             if (pi >= 0) {
                 const char *want = rec_str(rec, MLOCK_PARAMS[pi].field);
-                if (sign == '+' && strchr(off, *c)) { strncat(fix_off, (char[]){*c, 0}, sizeof fix_off - strlen(fix_off) - 1); if (*c == 'k') strncat(fix_off_args, "*", sizeof fix_off_args - strlen(fix_off_args) - 1); }
+                if (sign == '+' && strchr(off, *c)) { strncat(fix_off, ((char[]){*c, 0}), sizeof fix_off - strlen(fix_off) - 1); if (*c == 'k') strncat(fix_off_args, "*", sizeof fix_off_args - strlen(fix_off_args) - 1); }
                 else if (want[0] && ((sign == '-') || (arg && strcmp(arg, want) != 0))) {
-                    strncat(fix_on, (char[]){*c, 0}, sizeof fix_on - strlen(fix_on) - 1);
+                    strncat(fix_on, ((char[]){*c, 0}), sizeof fix_on - strlen(fix_on) - 1);
                     strncat(fix_args, fix_args[0] ? " " : "", sizeof fix_args - strlen(fix_args) - 1);
                     strncat(fix_args, want, sizeof fix_args - strlen(fix_args) - 1);
                 }
                 continue;
             }
-            if (sign == '-' && strchr(on, *c) && !strchr(fix_on, *c) && strlen(fix_on) < sizeof fix_on - 1) strncat(fix_on, (char[]){*c, 0}, sizeof fix_on - strlen(fix_on) - 1);
-            if (sign == '+' && strchr(off, *c) && !strchr(fix_off, *c) && strlen(fix_off) < sizeof fix_off - 1) strncat(fix_off, (char[]){*c, 0}, sizeof fix_off - strlen(fix_off) - 1);
+            if (sign == '-' && strchr(on, *c) && !strchr(fix_on, *c) && strlen(fix_on) < sizeof fix_on - 1) strncat(fix_on, ((char[]){*c, 0}), sizeof fix_on - strlen(fix_on) - 1);
+            if (sign == '+' && strchr(off, *c) && !strchr(fix_off, *c) && strlen(fix_off) < sizeof fix_off - 1) strncat(fix_off, ((char[]){*c, 0}), sizeof fix_off - strlen(fix_off) - 1);
         }
         if (fix_on[0] || fix_off[0]) {
             char modes[40] = "";

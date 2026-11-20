@@ -69,6 +69,10 @@ CFLAGS   ?= -std=c11 -O2 -g $(WARN) $(HARDEN_CFLAGS) -MMD -MP
 # and all the hardening with it).
 REQ_CFLAGS := -std=c11 -MMD -MP $(HARDEN_CFLAGS)
 CPPFLAGS := -I$(SRC_DIR) -I$(VEND_DIR) -D_POSIX_C_SOURCE=200809L $(OPENSSL_CFLAGS) $(REQ_CFLAGS)
+# NetBSD hides its non-POSIX declarations (kqueue among them) once _POSIX_C_SOURCE is set, unless _NETBSD_SOURCE is too.
+ifeq ($(UNAME_S),NetBSD)
+  CPPFLAGS += -D_NETBSD_SOURCE
+endif
 LDFLAGS  ?= $(HARDEN_LDFLAGS)
 LDLIBS   := $(OPENSSL_LIBS) -lpthread
 
