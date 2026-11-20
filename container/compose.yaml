@@ -1,0 +1,34 @@
+# SekurIRCd with Docker Compose (or podman compose), for machines that can't use container/setup.sh: Docker, podman older
+# than 5.0, or no systemd user session. The same image, the same /data layout; see container/README.md.
+#
+#   export SEKURIRCD_UID=$(id -u) SEKURIRCD_GID=$(id -g)        # the containers run as you, so the data directory stays yours
+#   mkdir -p data
+#   docker compose run --rm -it ircd makeconf                   # the config wizard: writes data/config/ (and services, stats)
+#   docker compose up -d                                        # the ircd
+#   docker compose --profile services --profile stats up -d     # add services (NickServ + ChanServ) and the stats panel
+#
+# Settings (shell or a .env file next to this one): SEKURIRCD_DATA (default ./data), SEKURIRCD_IMAGE (default the latest release).
+x-sekurircd: &base
+  image: ${SEKURIRCD_IMAGE:-ghcr.io/gcanosa/sekurircd:latest}
+  network_mode: host            # clients keep their real addresses (bans, limits, cloaks, DNSBL); nothing to publish
+  user: "${SEKURIRCD_UID:-1000}:${SEKURIRCD_GID:-1000}"
+  volumes: ["${SEKURIRCD_DATA:-./data}:/data:z"]
+  read_only: true
+  tmpfs: [/tmp]
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  restart: unless-stopped
+  stop_grace_period: 15s
+
+services:
+  ircd:
+    <<: *base
+    command: ircd
+  services:
+    <<: *base
+    command: services
+    profiles: [services]
+  stats:
+    <<: *base
+    command: stats
+    profiles: [stats]

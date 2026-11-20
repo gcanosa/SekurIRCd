@@ -1,0 +1,25 @@
+# The image build context: the code and the templates, never a live config, a secret or a database.
+.git
+bin
+build
+build-debug
+logs
+web
+plans
+tests
+dist
+tags
+.codegraph
+**/__pycache__
+**/*.pid
+**/*.bak*
+**/*.log
+config/*
+!config/*.template.*
+services/*.json
+services/services.toml
+stats/*.db*
+stats/stats.toml*
+stats/*.csv.gz*
+stats/out
+stats/*.tmp

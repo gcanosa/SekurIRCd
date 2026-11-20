@@ -1,6 +1,7 @@
 name: CI
 # Every platform the website says SekurIRCd supports builds here and passes the unit tests and the integration suite.
-# A release (v* tag) needs all of these green.
+# A release (v* tag) needs all of these green. The container image (container/) is built and smoke-tested on x86-64 and arm64
+# in every run, and published to ghcr.io only from main and v* tags, after everything else has passed.
 on:
   push:
     branches: [main]
@@ -78,3 +79,104 @@ jobs:
       - run: make -j4
       - run: make check
       - run: make itest
+
+  # The container image (container/): built natively on x86-64 and arm64, then the whole admin story is exercised in it
+  # (container/smoke.sh: config wizard, ircd + services + panel, restart, rehash, graceful stop), and compose.yaml is checked.
+  container:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      ENGINE: docker
+    steps:
+      - uses: actions/checkout@v6
+      - run: container/build.sh sekurircd:ci
+      - run: container/smoke.sh sekurircd:ci
+      - name: compose.yaml runs the image (user, read-only root, host network, volume)
+        run: |
+          mkdir -p "$RUNNER_TEMP/data"
+          export SEKURIRCD_IMAGE=sekurircd:ci SEKURIRCD_UID=$(id -u) SEKURIRCD_GID=$(id -g) SEKURIRCD_DATA="$RUNNER_TEMP/data"
+          docker compose -f container/compose.yaml config -q
+          docker compose -f container/compose.yaml run --rm ircd sekurircd --version | grep -q '^sekurircd '
+
+  # Publish ghcr.io/gcanosa/sekurircd: "edge" from main, "latest" and the version tags from a v* tag, and only once every platform
+  # above and both image builds are green. One build per architecture on a native runner (no emulation), joined into one tag below.
+  # The first publish creates the package private: make it public once (GitHub > Packages > sekurircd > Package settings).
+  publish:
+    needs: [native, bsd, windows, container]
+    if: github.event_name == 'push'
+    strategy:
+      matrix:
+        include:
+          - {os: ubuntu-latest, arch: amd64}
+          - {os: ubuntu-24.04-arm, arch: arm64}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v6
+      - id: ver
+        run: '{ echo "args<<EOF"; container/version.sh; echo EOF; } >> "$GITHUB_OUTPUT"'
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: container/Containerfile
+          build-args: ${{ steps.ver.outputs.args }}
+          platforms: linux/${{ matrix.arch }}
+          provenance: false
+          sbom: false
+          outputs: type=image,name=ghcr.io/gcanosa/sekurircd,push-by-digest=true,name-canonical=true,push=true
+      - run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: digests-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  manifest:
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@v4
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/gcanosa/sekurircd
+          tags: |
+            type=edge,branch=main
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: One tag for both architectures
+        working-directory: /tmp/digests
+        run: docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") $(printf 'ghcr.io/gcanosa/sekurircd@sha256:%s ' *)
+      - run: docker buildx imagetools inspect ghcr.io/gcanosa/sekurircd:${{ steps.meta.outputs.version }}

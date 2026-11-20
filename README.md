@@ -32,6 +32,7 @@ tools/makeconf.py     # answer a few questions: writes config/sekurircd.toml and
 
 Then connect any IRC client to your server on port `6667` (plain), or `6697` if you turned TLS on.
 Prefer a browser? The [config wizard](https://gcanosa.github.io/SekurIRCd/docs/wizard.html) builds the same files online.
+Prefer a container? [container/README.md](container/README.md) runs it in podman or Docker on x86-64 and arm64 (a Raspberry Pi included), with a guided `container/setup.sh install`.
 
 Running it as a service, upgrading, and every option are in the [install guide](https://gcanosa.github.io/SekurIRCd/docs/install.html).
 

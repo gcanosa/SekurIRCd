@@ -923,6 +923,8 @@ class Panel:
             self.log(f"public address: https://{h['hostname']}/admin/ (through your reverse proxy)")
         for n in exposure_notes(h):
             self.log(n)
+        if signal.getsignal(signal.SIGTERM) is signal.SIG_DFL:  # not daemonized (that sets its own): as a container's PID 1 it would ignore SIGTERM
+            signal.signal(signal.SIGTERM, lambda *a: os._exit(0))
         httpd.serve_forever()
 
 

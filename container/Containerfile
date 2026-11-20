@@ -1,0 +1,44 @@
+# SekurIRCd in a container: the ircd, services (NickServ + ChanServ), the stats panel and the config tools in one image.
+# Build it from the repository root with container/build.sh (it passes the version arguments), or by hand:
+#   podman build -f container/Containerfile -t sekurircd .
+# Everything the admin owns lives in the /data volume (see container/README.md); the image holds only code and templates.
+
+FROM debian:trixie-slim AS build
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends gcc make libc6-dev libssl-dev pkg-config \
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY Makefile ./
+COPY src src
+COPY services services
+# What /VERSION reports: the Makefile reads git for these, and there is no .git in here, so container/version.sh passes them.
+ARG BUILD_ID=release
+ARG VERSION_SUFFIX=
+RUN make -j"$(nproc)" BUILD_ID="$BUILD_ID" VERSION_SUFFIX="$VERSION_SUFFIX" bin/sekurircd bin/services
+
+FROM debian:trixie-slim
+# python3: the config wizard, the tools and the stats panel. procps: the ircd's STATS reads its memory and CPU with ps.
+# openssl: the wizard's self-signed certificate. bash: the tools' banner.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libssl3t64 python3 bash openssl procps ca-certificates \
+ && rm -rf /var/lib/apt/lists/* \
+ && useradd --uid 1000 --no-create-home --shell /usr/sbin/nologin sekur \
+ && mkdir /data && chown sekur /data
+WORKDIR /opt/sekurircd
+COPY --from=build /src/bin/sekurircd /src/bin/services bin/
+COPY src/version.h src/version.h
+COPY tools tools
+COPY config config
+COPY services/services.template.toml services/
+COPY stats stats
+COPY LICENSE ./
+COPY container/entrypoint.sh /usr/local/bin/sekurircd-entrypoint
+ENV PATH=/opt/sekurircd/bin:$PATH PYTHONDONTWRITEBYTECODE=1 SEKURIRCD_DATA=/data
+LABEL org.opencontainers.image.title="SekurIRCd" \
+      org.opencontainers.image.description="IRC server with built-in services, written in C" \
+      org.opencontainers.image.source="https://github.com/gcanosa/SekurIRCd" \
+      org.opencontainers.image.licenses="MIT"
+USER 1000:1000
+WORKDIR /data
+ENTRYPOINT ["/usr/local/bin/sekurircd-entrypoint"]
+CMD ["ircd"]
