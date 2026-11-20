@@ -22,7 +22,9 @@
 <aside id="docs-nav" class="docs-nav"></aside>
 <main class="docs">
 <h1>install</h1>
-<p>SekurIRCd builds from source with a C11 compiler and <code>make</code>. It runs on macOS, Linux and the BSDs, and on Windows through <a href="#windows">WSL2</a>.</p>
+<p>SekurIRCd builds from source with a C11 compiler and <code>make</code>. Every change is built and run through the unit tests and the full
+  integration suite on <strong>Linux</strong> (x86-64 and arm64), <strong>macOS</strong>, <strong>FreeBSD</strong>, <strong>OpenBSD</strong>,
+  <strong>NetBSD</strong> and <strong>Windows</strong> (<a href="#windows">Cygwin</a>), and a release needs all of them to pass.</p>
 
 <h2>dependencies</h2>
 <ul>
@@ -30,6 +32,11 @@
   <li>OpenSSL 3 (or LibreSSL) headers and libraries, used for scrypt hashing, randomness and TLS.
     macOS: <code>brew install openssl@3</code>. Debian/Ubuntu: <code>apt install libssl-dev</code>.</li>
   <li>Everything else (tomlc17, cJSON, uthash/utlist) is vendored in <code>src/vendor/</code>.</li>
+  <li>On FreeBSD, OpenBSD and NetBSD, <code>make</code> is the BSD make and can't read the Makefile: install GNU make and type
+    <code>gmake</code> wherever this page says <code>make</code>.
+    FreeBSD: <code>pkg install gmake python3</code> (the stats panel also needs <code>py3x-sqlite3</code>).
+    OpenBSD: <code>pkg_add gmake python%3</code>. NetBSD: <code>pkgin install gmake python313</code>.
+    OpenSSL (LibreSSL on OpenBSD) is part of the base system on all three.</li>
 </ul>
 
 <h2>build</h2>
@@ -146,8 +153,22 @@ systemctl --user enable --now netstats</pre>
   your config and state. Override <code>PREFIX</code>, <code>SYSCONFDIR</code>, <code>STATEDIR</code> or
   <code>UNITDIR</code> on the <code>make</code> command line to relocate any of it.</p>
 
-<h2 id="windows">windows (WSL2)</h2>
-<p>There is no native Windows build. On Windows, run the Linux build inside WSL2: it's the same code and the same steps as on Linux.</p>
+<h2 id="windows">windows</h2>
+<p>Two ways: build it with <a href="#cygwin">Cygwin</a> (the same code, running on Cygwin's POSIX layer), or run the Linux build inside <a href="#wsl2">WSL2</a>.
+  WSL2 is the better fit for a server that stays up; Cygwin needs no virtual machine.</p>
+
+<h3 id="cygwin">cygwin</h3>
+<p>Install <a href="https://www.cygwin.com/">Cygwin</a> with the packages <code>gcc-core make libssl-devel python312 git</code>, then in a Cygwin terminal:</p>
+<pre>git clone https://github.com/gcanosa/SekurIRCd.git &amp;&amp; cd SekurIRCd
+make
+make check</pre>
+<p>The binaries run from a Cygwin terminal and need <code>cygwin1.dll</code> and the OpenSSL DLLs from the Cygwin install next to them (they are in <code>C:\cygwin64\bin</code>).
+  Open the ports in Windows Defender Firewall (<code>New-NetFirewallRule</code>, as in the WSL2 steps below), and use the Task Scheduler to start it with Windows.
+  The process stats line in the debug channel reports memory but not CPU.
+  <code>make install</code> (systemd) is Linux only; run the binaries directly, as in <a href="#run">run</a>.</p>
+
+<h3 id="wsl2">wsl2</h3>
+<p>Run the Linux build inside WSL2: it's the same code and the same steps as on Linux.</p>
 <pre># PowerShell as Administrator, then reboot
 wsl --install -d Ubuntu
 

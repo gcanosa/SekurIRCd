@@ -21,7 +21,7 @@ works with the clients you already use: weechat, irssi, The Lounge, Kiwi and oth
 
 ## Quick start
 
-You need a C11 compiler, `make` and OpenSSL 3 (macOS: `brew install openssl@3`; Debian/Ubuntu: `apt install libssl-dev`).
+You need a C11 compiler, `make` and OpenSSL 3 (macOS: `brew install openssl@3`; Debian/Ubuntu: `apt install libssl-dev`). On FreeBSD, OpenBSD and NetBSD install `gmake` and use it in place of `make`; on Windows build with Cygwin (see the install docs).
 
 ```bash
 git clone https://github.com/gcanosa/SekurIRCd.git && cd SekurIRCd

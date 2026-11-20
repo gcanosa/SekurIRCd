@@ -3,15 +3,15 @@ name: CI
 # A release (v* tag) needs all of these green.
 on:
   push:
-    branches: [main, ci-platforms]  # ci-platforms: temporary, while the matrix is brought up
+    branches: [main]
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
 permissions:
   contents: read
 concurrency:
-  group: ci-${{ github.run_id }}  # ponytail: unique per run while the matrix is brought up; back to ci-${{ github.ref }} after
-  cancel-in-progress: false  # ponytail: off while the matrix is brought up (a run is 30+ min); back to true after
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   # Linux x86-64, Linux arm64, macOS arm64: the runner's own toolchain.
