@@ -144,13 +144,15 @@ def test_three_servers_mixing_ipv6_and_ipv4_links():
 
 
 def test_link_host_name_prefers_ipv6_and_falls_back_to_ipv4():
-    # "localhost" resolves to ::1 first here. Hub with IPv6: the leaf links over ::1.
+    # The link dials in the resolver's order (::1 first on Linux and macOS, 127.0.0.1 first on FreeBSD). Hub with IPv6: the
+    # leaf links over whichever of the two the resolver lists first.
+    first = socket.getaddrinfo("localhost", None, type=socket.SOCK_STREAM)[0][0]
     net = Network()
     hub, leaf = net.add("hub"), net.add("leaf", parent="hub")
     link_v6(hub); link_v6(leaf)
     leaf.cfg["links.peers"][0]["host"] = "localhost"
     with net:
-        assert "inbound link connection accepted from 0::1" in hub.output()
+        assert f"inbound link connection accepted from {'0::1' if first == socket.AF_INET6 else '127.0.0.1'}" in hub.output()
     # Hub without IPv6: ::1 is refused, the next address (127.0.0.1) links.
     net = Network()
     hub, leaf = net.add("hub"), net.add("leaf", parent="hub")

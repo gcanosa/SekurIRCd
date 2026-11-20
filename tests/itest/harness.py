@@ -9,12 +9,22 @@ SERVICES = os.environ.get("SERVICES_BIN", os.path.join(ROOT, "bin", "services"))
 SVC_NAME, SVC_PW = "services.test.net", "svcsecret"
 
 
+_ports = set()
+
+
 def free_port():
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    p = s.getsockname()[1]
-    s.close()
-    return p
+    """A port nobody is listening on, and never the same one twice in a row of servers: the kernel can hand a just-closed port
+    to the next bind(0), which put a hub's link port on its client port and a leaf's TLS handshake got plain text back."""
+    while True:
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        p = s.getsockname()[1]
+        s.close()
+        if p not in _ports:
+            if len(_ports) > 5000:
+                _ports.clear()
+            _ports.add(p)
+            return p
 
 
 def toml_value(v):
@@ -121,7 +131,14 @@ class Server:
             if self.proc.poll() is not None:
                 raise RuntimeError("ircd exited early:\n" + self.output())
             try:
-                socket.create_connection(("127.0.0.1", self.port), timeout=0.3).close()
+                probe = socket.create_connection(("127.0.0.1", self.port), timeout=0.3)
+                try:  # wait for the server to close it: a probe still open counts against a class limit, and a first real client was refused
+                    probe.sendall(b"QUIT\r\n")
+                    while probe.recv(4096):
+                        pass
+                except OSError:
+                    pass
+                probe.close()
                 if self.wants_services():
                     if self.services and self.services.proc and self.services.proc.poll() is None:
                         self.wait_services()  # a restart: services relink on their own
