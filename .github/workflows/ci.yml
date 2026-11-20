@@ -10,7 +10,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.run_id }}  # ponytail: unique per run while the matrix is brought up; back to ci-${{ github.ref }} after
   cancel-in-progress: false  # ponytail: off while the matrix is brought up (a run is 30+ min); back to true after
 
 jobs:
