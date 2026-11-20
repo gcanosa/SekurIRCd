@@ -24,7 +24,8 @@
 <h1>install</h1>
 <p>SekurIRCd builds from source with a C11 compiler and <code>make</code>. Every change is built and run through the unit tests and the full
   integration suite on <strong>Linux</strong> (x86-64 and arm64), <strong>macOS</strong>, <strong>FreeBSD</strong>, <strong>OpenBSD</strong>,
-  <strong>NetBSD</strong> and <strong>Windows</strong> (<a href="#windows">Cygwin</a>), and a release needs all of them to pass.</p>
+  <strong>NetBSD</strong> and <strong>Windows</strong> (<a href="#windows">Cygwin</a>), and a release needs all of them to pass.
+  Prefer a container? There is <a href="#containers">an image for x86-64 and arm64</a>.</p>
 
 <h2>dependencies</h2>
 <ul>
@@ -152,6 +153,25 @@ systemctl --user enable --now netstats</pre>
   <code>loginctl enable-linger $(whoami)</code>. <code>make uninstall</code> removes binaries and units but leaves
   your config and state. Override <code>PREFIX</code>, <code>SYSCONFDIR</code>, <code>STATEDIR</code> or
   <code>UNITDIR</code> on the <code>make</code> command line to relocate any of it.</p>
+
+<h2 id="containers">containers (podman, docker)</h2>
+<p>A prebuilt image with the ircd, services (NickServ + ChanServ), the stats panel and the config tools: <code>ghcr.io/gcanosa/sekurircd</code>,
+  for <strong>x86-64 and arm64</strong> (a Raspberry Pi 3, 4 or 5 on a 64-bit OS pulls it instead of compiling). CI builds it on both architectures,
+  runs a smoke test in it (config wizard, ircd + services + panel, restart, rehash, graceful stop) and publishes it only after every platform above passes.
+  32-bit ARM (armv7) is not supported.</p>
+<pre>git clone https://github.com/gcanosa/SekurIRCd.git &amp;&amp; cd SekurIRCd
+container/setup.sh install</pre>
+<p><code>setup.sh</code> (podman 5.0 or newer, rootless, on a systemd Linux) pulls the image, asks where to keep your data (default <code>~/sekurircd</code>),
+  runs the config wizard inside the container, installs systemd user units and turns on linger, so it starts at boot. Afterwards
+  <code>container/setup.sh status | logs | rehash | restart | upgrade | backup | uninstall</code>.</p>
+<ul>
+<li><strong>One data directory</strong> holds everything you own (config, TLS, accounts, bans, logs, the stats database), laid out like the repository root. Rebuilding or upgrading the containers never touches it.</li>
+<li><strong>Host network.</strong> Clients keep their real addresses, which K-lines, per-IP limits, cloaks and the DNSBL depend on. Open the ports in your firewall; check once that <code>/WHOIS</code> from another machine shows that machine's address.</li>
+<li><strong>Tags.</strong> <code>latest</code> is the newest release, <code>1.3.4</code> pins one, <code>edge</code> is the newest commit on <code>main</code>. Updates are never automatic: restarting an IRC server is your call.</li>
+<li><strong>Docker</strong>, older podman, or no systemd user session: <code>container/compose.yaml</code> runs the same three containers.</li>
+</ul>
+<p>The step-by-step guide (the same steps by hand, where each file lives, TLS, upgrades, backups, troubleshooting) is
+  <a href="https://github.com/gcanosa/SekurIRCd/blob/main/container/README.md">container/README.md</a>.</p>
 
 <h2 id="windows">windows</h2>
 <p>Two ways: build it with <a href="#cygwin">Cygwin</a> (the same code, running on Cygwin's POSIX layer), or run the Linux build inside <a href="#wsl2">WSL2</a>.
