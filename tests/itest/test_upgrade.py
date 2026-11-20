@@ -1,9 +1,12 @@
 """Upgrading from the built-in NickServ: the old data must be used in place and nothing lost."""
 import base64, hashlib, json, os, shutil, subprocess, tempfile, time
-from harness import Server, Client, SERVICES, SVC_NAME, SVC_PW
+from harness import Server, Client, IRCD, SERVICES, SVC_NAME, SVC_PW
 
 
 def scrypt_hash(pw):  # the ircd's format: scrypt$N$r$p$<salt hex>$<digest hex>
+    if not hasattr(hashlib, "scrypt"):  # Python built on LibreSSL (OpenBSD) has none: the ircd makes the same format
+        out = subprocess.run([IRCD, "--hash-password"], input=f"{pw}\n{pw}\n", capture_output=True, text=True).stdout
+        return out.split()[-1]
     salt = os.urandom(16)
     d = hashlib.scrypt(pw.encode(), salt=salt, n=16384, r=8, p=1, maxmem=64 * 1024 * 1024, dklen=64)
     return f"scrypt$16384$8$1${salt.hex()}${d.hex()}"

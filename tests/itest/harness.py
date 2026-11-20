@@ -178,8 +178,16 @@ class Server:
         """Rewrite the config (after editing self.cfg) and send SIGHUP."""
         self.write_config()
         self.port = self.cfg["server"]["port"]
+        before = self._rehashes()
         self.proc.send_signal(signal.SIGHUP)
-        time.sleep(0.6)
+        deadline = time.time() + 20  # a slow VM takes seconds, not the 0.6 this used to sleep
+        while self._rehashes() == before and time.time() < deadline:
+            time.sleep(0.05)
+        time.sleep(0.2)
+
+    def _rehashes(self):
+        out = self.output()
+        return out.count("rehashed config") + out.count("rehash failed")
 
     def __enter__(self):
         return self.start()

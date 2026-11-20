@@ -113,8 +113,12 @@ def test_websocket_frames_split_across_reads():
 
 def make_cert(d):
     crt, key = os.path.join(d, "t.crt"), os.path.join(d, "t.key")
-    subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", key, "-out", crt, "-days", "1",
-                    "-subj", "/CN=localhost"], check=True, capture_output=True)
+    conf = os.path.join(d, "t.cnf")  # our own: NetBSD's openssl has no system openssl.cnf to read
+    with open(conf, "w") as f:
+        f.write("[req]\ndistinguished_name = dn\nprompt = no\n[dn]\nCN = localhost\n")
+    r = subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", key, "-out", crt, "-days", "1",
+                        "-config", conf], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
     return crt, key
 
 
