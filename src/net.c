@@ -52,7 +52,7 @@ static void on_hup(int sig) { (void)sig; g_hup = 1; }
  * Returns 0 on success, -1 if `pid` doesn't exist or ps didn't report it. */
 int proc_stats(pid_t pid, double *cpu_pct, long *rss_kb) {
     char cmd[64];
-    snprintf(cmd, sizeof cmd, "ps -o rss=,%%cpu= -p %d 2>/dev/null", (int)pid);
+    snprintf(cmd, sizeof cmd, "ps -o rss= -o %%cpu= -p %d 2>/dev/null", (int)pid);
     FILE *p = popen(cmd, "r");
     if (!p) return -1;
     long rss = 0;

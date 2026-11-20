@@ -22,6 +22,90 @@
 #define SCRYPT_DKLEN 64
 #define SCRYPT_MAXMEM (32 * 1024 * 1024)
 
+#ifdef LIBRESSL_VERSION_NUMBER
+/* LibreSSL (OpenBSD's libcrypto) has no EVP_PBE_scrypt. This is scrypt as RFC 7914 writes it, on the PBKDF2-HMAC-SHA256
+ * LibreSSL does have, so the hashes are byte-for-byte what OpenSSL makes (an account made on Linux verifies on OpenBSD). */
+#define ROTL32(a, b) (((a) << (b)) | ((a) >> (32 - (b))))
+
+static void salsa20_8(uint32_t B[16]) {
+    uint32_t x[16];
+    memcpy(x, B, sizeof x);
+    for (int i = 0; i < 8; i += 2) {
+        x[ 4] ^= ROTL32(x[ 0] + x[12],  7);  x[ 8] ^= ROTL32(x[ 4] + x[ 0],  9);
+        x[12] ^= ROTL32(x[ 8] + x[ 4], 13);  x[ 0] ^= ROTL32(x[12] + x[ 8], 18);
+        x[ 9] ^= ROTL32(x[ 5] + x[ 1],  7);  x[13] ^= ROTL32(x[ 9] + x[ 5],  9);
+        x[ 1] ^= ROTL32(x[13] + x[ 9], 13);  x[ 5] ^= ROTL32(x[ 1] + x[13], 18);
+        x[14] ^= ROTL32(x[10] + x[ 6],  7);  x[ 2] ^= ROTL32(x[14] + x[10],  9);
+        x[ 6] ^= ROTL32(x[ 2] + x[14], 13);  x[10] ^= ROTL32(x[ 6] + x[ 2], 18);
+        x[ 3] ^= ROTL32(x[15] + x[11],  7);  x[ 7] ^= ROTL32(x[ 3] + x[15],  9);
+        x[11] ^= ROTL32(x[ 7] + x[ 3], 13);  x[15] ^= ROTL32(x[11] + x[ 7], 18);
+        x[ 1] ^= ROTL32(x[ 0] + x[ 3],  7);  x[ 2] ^= ROTL32(x[ 1] + x[ 0],  9);
+        x[ 3] ^= ROTL32(x[ 2] + x[ 1], 13);  x[ 0] ^= ROTL32(x[ 3] + x[ 2], 18);
+        x[ 6] ^= ROTL32(x[ 5] + x[ 4],  7);  x[ 7] ^= ROTL32(x[ 6] + x[ 5],  9);
+        x[ 4] ^= ROTL32(x[ 7] + x[ 6], 13);  x[ 5] ^= ROTL32(x[ 4] + x[ 7], 18);
+        x[11] ^= ROTL32(x[10] + x[ 9],  7);  x[ 8] ^= ROTL32(x[11] + x[10],  9);
+        x[ 9] ^= ROTL32(x[ 8] + x[11], 13);  x[10] ^= ROTL32(x[ 9] + x[ 8], 18);
+        x[12] ^= ROTL32(x[15] + x[14],  7);  x[13] ^= ROTL32(x[12] + x[15],  9);
+        x[14] ^= ROTL32(x[13] + x[12], 13);  x[15] ^= ROTL32(x[14] + x[13], 18);
+    }
+    for (int i = 0; i < 16; i++) B[i] += x[i];
+}
+
+/* B is 32*r words; Y is scratch of the same size. */
+static void blockmix(uint32_t *B, uint32_t *Y, size_t r) {
+    uint32_t X[16];
+    memcpy(X, &B[(2 * r - 1) * 16], sizeof X);
+    for (size_t i = 0; i < 2 * r; i++) {
+        for (int j = 0; j < 16; j++) X[j] ^= B[i * 16 + j];
+        salsa20_8(X);
+        memcpy(&Y[i * 16], X, sizeof X);
+    }
+    for (size_t i = 0; i < r; i++) {
+        memcpy(&B[i * 16], &Y[(2 * i) * 16], sizeof X);
+        memcpy(&B[(i + r) * 16], &Y[(2 * i + 1) * 16], sizeof X);
+    }
+}
+
+static int EVP_PBE_scrypt_compat(const char *pass, size_t passlen, const unsigned char *salt, size_t saltlen,
+                                 uint64_t N, uint64_t r, uint64_t p, uint64_t maxmem, unsigned char *key, size_t keylen) {
+    if (N < 2 || (N & (N - 1)) || r == 0 || p == 0 || r > 32 || p > 16 || N > (1u << 24)) return 0;
+    size_t blk = 128 * (size_t)r;                       /* bytes per block: r <= 32 keeps every product below small */
+    if ((uint64_t)blk * (N + p + 2) > maxmem) return 0;
+    size_t words = blk / 4;
+    unsigned char *B = malloc(blk * p);
+    uint32_t *V = malloc(blk * (size_t)N), *W = malloc(blk), *Y = malloc(blk);
+    int ok = 0;
+    if (!B || !V || !W || !Y) goto out;
+    if (PKCS5_PBKDF2_HMAC(pass, (int)passlen, salt, (int)saltlen, 1, EVP_sha256(), (int)(blk * p), B) != 1) goto out;
+    for (uint64_t i = 0; i < p; i++) {
+        unsigned char *b = B + i * blk;
+        for (size_t k = 0; k < words; k++)              /* words are little-endian whatever the host is */
+            W[k] = (uint32_t)b[4 * k] | (uint32_t)b[4 * k + 1] << 8 | (uint32_t)b[4 * k + 2] << 16 | (uint32_t)b[4 * k + 3] << 24;
+        for (uint64_t n = 0; n < N; n++) {
+            memcpy(&V[n * words], W, blk);
+            blockmix(W, Y, r);
+        }
+        for (uint64_t n = 0; n < N; n++) {
+            uint64_t j = W[(2 * r - 1) * 16] & (N - 1);
+            for (size_t k = 0; k < words; k++) W[k] ^= V[j * words + k];
+            blockmix(W, Y, r);
+        }
+        for (size_t k = 0; k < words; k++) {
+            b[4 * k] = (unsigned char)W[k]; b[4 * k + 1] = (unsigned char)(W[k] >> 8);
+            b[4 * k + 2] = (unsigned char)(W[k] >> 16); b[4 * k + 3] = (unsigned char)(W[k] >> 24);
+        }
+    }
+    ok = PKCS5_PBKDF2_HMAC(pass, (int)passlen, B, (int)(blk * p), 1, EVP_sha256(), (int)keylen, key) == 1;
+out:
+    if (B) { OPENSSL_cleanse(B, blk * p); free(B); }
+    if (V) { OPENSSL_cleanse(V, blk * (size_t)N); free(V); }
+    if (W) { OPENSSL_cleanse(W, blk); free(W); }
+    if (Y) { OPENSSL_cleanse(Y, blk); free(Y); }
+    return ok;
+}
+#define EVP_PBE_scrypt EVP_PBE_scrypt_compat
+#endif
+
 static int hexval(char c) {
     if (c >= '0' && c <= '9') return c - '0';
     if (c >= 'a' && c <= 'f') return c - 'a' + 10;
