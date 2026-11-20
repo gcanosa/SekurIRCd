@@ -847,6 +847,51 @@ static void test_spam_filters_and_check(void) {
     client_free(cl);
 }
 
+/* Global rules other servers sent: replaced as a set per origin, checked behind ours, and enforced with [spam] off. */
+static void test_spam_global_rules(void) {
+    config_t cfg;
+    config_defaults(&cfg);
+    cfg.spam.enabled = 0; /* this server has the module off */
+    cfg.spam.filters_file[0] = '\0';
+    server_t srv;
+    assert(server_init(&srv, &cfg) == 0);
+    client_t *cl = client_new(-1, &srv);
+    cl->fd = 99;
+    snprintf(cl->nick, sizeof cl->nick, "spammer");
+    snprintf(cl->ip, sizeof cl->ip, "203.0.113.6");
+    assert(spam_check_message(&srv, cl, "#c", "buyspam now", 0) == 0); /* nothing known yet */
+
+    spam_net_receive(&srv, "1HB", "ADD", "pc block - \"ad\" buyspam");
+    spam_net_receive(&srv, "1HB", "ADD", "pc nonsense - \"bad action\" x"); /* refused, the rest is kept */
+    spam_net_receive(&srv, "1HB", "ADD", "pc block - \"empty\" x*");        /* matches everything: refused */
+    spam_net_receive(&srv, "3XX", "ADD", "pc block - \"other\" otherword");
+    assert(spam_filter_count(&srv) == 2 && srv.spam_filters == NULL);
+    assert(spam_check_message(&srv, cl, "#c", "BUYSPAM now", 0) == 1);   /* enforced although [spam] enabled = false */
+    assert(spam_check_message(&srv, cl, "#c", "fine", 0) == 0);
+
+    srv.cfg.spam.enabled = 1;
+    spam_net_receive(&srv, "1HB", "CLEAR", NULL);                         /* only 1HB's rules go */
+    assert(spam_filter_count(&srv) == 1);
+    assert(spam_check_message(&srv, cl, "#c", "buyspam now", 0) == 0);
+    assert(spam_check_message(&srv, cl, "#c", "an otherword", 0) == 1);
+    spam_net_receive(&srv, "1HB", "ADD", "pc block - \"ad\" buyspam");
+    assert(spam_check_message(&srv, cl, "#c", "buyspam now", 0) == 1);
+
+    /* our own rule is checked first: allow lets the text through, while the other global rule still bites */
+    irc_message_t m;
+    memset(&m, 0, sizeof m);
+    const char *allow[] = {"ADD", "pc", "allow", "-", "ok", "buyspam"};
+    m.nparams = 6; for (int i = 0; i < 6; i++) m.params[i] = (char *)allow[i];
+    cmd_spamfilter(&srv, cl, &m);
+    assert(spam_check_message(&srv, cl, "#c", "buyspam now", 0) == 0);
+    assert(spam_check_message(&srv, cl, "#c", "an otherword", 0) == 1);
+
+    spam_free(&srv);
+    assert(srv.spam_filters == NULL && srv.spam_net == NULL);
+    cl->fd = -1;
+    client_free(cl);
+}
+
 static void test_proc_stats(void) {
     double cpu = -1;
     long rss = -1;
@@ -1319,6 +1364,7 @@ int main(void) {
     RUN(test_spam_config_defaults_and_template);
     RUN(test_spam_track_limits);
     RUN(test_spam_filters_and_check);
+    RUN(test_spam_global_rules);
     RUN(test_proc_stats);
     RUN(test_build_truncates_and_defangs);
     RUN(test_parse_token_cap_and_names);

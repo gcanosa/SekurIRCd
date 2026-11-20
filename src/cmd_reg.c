@@ -739,7 +739,7 @@ static client_t *svc_target(server_t *srv, const char *id, char *route, size_t r
     return c;
 }
 
-/* A line from services (its own link, or relayed by netsync): SVSLOGIN, SVSJOIN, SVSNICK, KILL, SVCSASL, SVCREGRESULT. Every one
+/* A line from services (its own link, or relayed by netsync): SVSLOGIN, SVSOPER, SVSJOIN, SVSNICK, KILL, SVCSASL, SVCREGRESULT. Every one
  * names its target first; one that isn't ours is passed on toward its server. `svc` is the bot it came from (NULL when
  * relayed -- the sending services' server already checked that). */
 void svc_command(server_t *srv, client_t *svc, irc_message_t *msg) {
@@ -769,8 +769,11 @@ void svc_command(server_t *srv, client_t *svc, irc_message_t *msg) {
         }
         cl->acct_created = msg->nparams > 2 ? atol(msg->params[2]) : 0;
         snprintf(cl->acct_created_for, sizeof cl->acct_created_for, "%s", msg->params[1]);
+        if (cl->oper_svc) cmd_deoper(srv, cl, "your account changed"); /* the old account's oper grant goes; services says if the new one has one */
         server_login(srv, cl, msg->params[1]);
         log_info("sasl", "%s logged in as %s", cl->nick[0] ? cl->nick : cl->ip, msg->params[1]);
+    } else if (!strcmp(c, "SVSOPER") && msg->nparams >= 2) {
+        if (cl->registered) cmd_svsoper(srv, cl, msg->nparams > 2 ? msg->params[2] : "?", msg->params[1]);
     } else if (!strcmp(c, "SVSJOIN") && msg->nparams >= 2) {
         if (cl->registered) cmd_svsjoin(srv, cl, msg->params[1]); /* not yet on the network: the SVCACCOUNT path retries */
     } else if (!strcmp(c, "SVSNICK") && msg->nparams >= 2) {

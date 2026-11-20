@@ -313,6 +313,7 @@ int server_rehash(server_t *srv, char *errbuf, size_t errbufsz) {
         NOTE("K/G/Z-lines: now kept in %s", new_klines[0] ? new_klines : "memory only");
     }
     netsync_oper_policy_resend(srv); /* a changed oper_scope / oper_deny reaches the linked leaves now, not at their next link-up */
+    link_svc_rehash(srv); /* services reload services.toml too: its [[opers]] and the rest */
     int n_deopered = cmd_opers_rehash(srv);
     if (n_deopered) NOTE("opers: %d logged out (their [[operators]] block is gone or no longer allows their host)", n_deopered);
     link_tls_cleanup(); /* the next dial reloads this server's certificate (and the new [tls] paths) */
@@ -748,6 +749,7 @@ void server_notify_far(server_t *srv, const char *message) {
 
 void server_logout(server_t *srv, client_t *cl) {
     if (!cl->account[0]) return;
+    if (cl->oper_svc) cmd_deoper(srv, cl, "you logged out"); /* an oper through services' grant is one only while logged in */
     char prefix[320];
     client_prefix(cl, prefix, sizeof prefix);
     cl->account[0] = '\0';

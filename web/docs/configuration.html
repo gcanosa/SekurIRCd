@@ -112,6 +112,8 @@ hosts = ["*@*"]                                       # or restrict, e.g. ["*@20
   +i users, +p channels, +H opers, idle times, channel keys, TRACE), <code>immune</code> (exempt from SHUN, spam filters and channel
   +f/+j limits) and <code>all</code>. NickServ SUSPEND/UNSUSPEND/FDROP/SASET are for services admins
   (<code>[nickserv] admins</code>, by account), not an oper privilege. <code>privileges = []</code> makes a helper oper with none of them.</p>
+<p>Opers can also come from services: an <code>[[opers]]</code> entry in <code>services.toml</code> makes an account an oper on whichever server it logs in to (see
+  <a href="chanserv.html#network-opers">network operators</a>). <code>[security] accept_services_opers = false</code> makes a server ignore those grants.</p>
 <p>An optional <code>modes</code> string (e.g. <code>"+oswH"</code>) replaces <code>[security] oper_modes</code> for that login. <code>o</code> is always included; the oper-only <code>H</code>, <code>q</code>, <code>W</code> and <code>F</code> are allowed too.</p>
 
 <h2 id="ipv6">IPv6</h2>

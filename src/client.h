@@ -123,6 +123,8 @@ typedef struct client {
 
     char oper_name[64];   /* "" if not opered */
     unsigned oper_privs;  /* OPER_PRIV_* granted by that login (see config.h) */
+    unsigned char oper_svc; /* the oper status came from services (SVSOPER), not from an [[operators]] block */
+    unsigned oper_svc_privs; /* what services granted, before the hub's oper_deny is taken off */
     int is_service;       /* introduced by a trusted link as a service bot (chanserv) */
     char account[64];     /* "" if not logged in (SASL or /REGISTER) -- see accounts.h */
     char acct_created_for[64]; /* account whose registration time (from services' SVSLOGIN) is in acct_created */

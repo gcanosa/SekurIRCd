@@ -999,6 +999,8 @@ static void cmd_mode_user(server_t *srv, client_t *cl, irc_message_t *msg, const
             cl->umodes &= ~UMODE_OPERONLY;
             cl->oper_name[0] = '\0';
             cl->oper_privs = 0;
+            cl->oper_svc = 0;
+            cl->oper_svc_privs = 0;
         }
         if (cursign != sign) { applied[ap++] = sign; cursign = sign; }
         applied[ap++] = c;

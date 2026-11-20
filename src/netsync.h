@@ -33,6 +33,9 @@
  *               :<sid> SVCRELAY <uid|sid.connid> :<line>   (account-services traffic, routed: see cmd_reg.c / link.h)
  *               :<uid> RQUERY <sid> WHOIS|VERSION|TIME|ADMIN|MOTD|INFO [args]   (run by that server, replies PUSHed back)
  *               :<sid> SHUN <mask> <setter> <expires|0> :<reason>  /  UNSHUN <mask>   (like GLINE; also in the burst)
+ *               :<sid> SPAMFILTER CLEAR  /  SPAMFILTER ADD :<rule>   (a server's whole set of global spam rules, replaced as a
+ *                                                     set; in the burst too; the rule is the spamfilters.conf line without "global")
+ *               :<sid> SPAMFILTER DEL <origin sid> :<rule>   (ask the server that owns a global rule to drop it; routed to it)
  * Channel state converges by timestamp (TS6-style): the older channel wins; the younger side drops its modes and
  * strips its members' ranks. A nick collision is settled by nick timestamp (older wins, a tie kills both).
  */
@@ -144,6 +147,11 @@ void netsync_gline(struct server *srv, const char *mask, const char *setter, lon
 void netsync_ungline(struct server *srv, const char *mask);
 void netsync_shun(struct server *srv, const char *mask, const char *setter, long expires, const char *reason);
 void netsync_unshun(struct server *srv, const char *mask);
+/* One line of `origin`'s (NULL = our own) global spam rule set: `rule` NULL is CLEAR. To one link (its burst), or to every
+ * link when `to` is NULL. A link that leads to the origin is skipped. */
+void netsync_spamfilter(struct server *srv, struct link_conn *to, const char *origin, const char *rule);
+/* Asks `origin` (a SID) to drop its global rule `rule`; routed toward it, nothing if it is not linked. */
+void netsync_spamfilter_del(struct server *srv, const char *origin, const char *rule);
 /* "VERSION other.server", "WHOIS nick nick" for a remote nick...: `verb` (with `args`) is run by `dest`, which sends its
  * replies back to `cl`. */
 void netsync_rquery(struct server *srv, struct client *cl, const netserver_t *dest, const char *verb, char **args, int nargs);

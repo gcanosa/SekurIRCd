@@ -2473,6 +2473,7 @@ static void process_line(char *line) {
         g_from_account[0] = '\0';
         return;
     }
+    if (strcasecmp(msg.command, "SVCREHASH") == 0) { g_hup = 1; return; } /* the hub was rehashed: services.toml again */
     if (st_event(&msg)) return;
     if (ns_event(&msg)) return;
     if (strcasecmp(msg.command, "SVCJOIN") == 0) { handle_svcjoin(&msg); return; }

@@ -729,6 +729,11 @@ void link_svc_user(server_t *srv, client_t *cl, int ev) {
         if (lc->watch_users && !lc->closing) send_svc_user(srv, lc, cl, ev);
 }
 
+void link_svc_rehash(server_t *srv) {
+    for (link_conn_t *lc = srv->links; lc; lc = lc->next)
+        if (lc->watch_users && !lc->closing) link_forward_line(lc, "SVCREHASH");
+}
+
 /* Returns -1 if `lc` was closed while handling this line, so the caller
  * (link_handle_readable) stops processing further lines from it. */
 static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
@@ -923,7 +928,7 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
         return 0;
     }
     if (strcasecmp(msg.command, "SVCSTATS") == 0) { lc->watch_stats = 1; send_svc_stats(srv, lc); return 0; }
-    if (!strcmp(msg.command, "SVSLOGIN") || !strcmp(msg.command, "SVSJOIN") || !strcmp(msg.command, "SVSNICK") || !strcmp(msg.command, "KILL") ||
+    if (!strcmp(msg.command, "SVSLOGIN") || !strcmp(msg.command, "SVSOPER") || !strcmp(msg.command, "SVSJOIN") || !strcmp(msg.command, "SVSNICK") || !strcmp(msg.command, "KILL") ||
         !strcmp(msg.command, "SVCSASL") || !strcmp(msg.command, "SVCREGRESULT")) {
         svc_command(srv, svc, &msg);
         return 0;

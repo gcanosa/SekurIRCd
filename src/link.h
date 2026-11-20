@@ -12,7 +12,7 @@
  *   SVCWATCH USERS                          -- subscribe to the user feed (link_svc_user)
  *   SVCSTATS [<since>]                      -- a network snapshot (SVCSTATNET/SVCSTATSRV.../SVCSTATEND) and, from then on,
  *                                              link/split/ban events (SVCSTATEV) and every server's stats line (SVCSTATLINE)
- *   SVSLOGIN/SVSJOIN/SVSNICK/KILL/SVCSASL/SVCREGRESULT <id> ...  -- account services (cmd_reg.c's svc_command)
+ *   SVSLOGIN/SVSOPER/SVSJOIN/SVSNICK/KILL/SVCSASL/SVCREGRESULT <id> ...  -- account services (cmd_reg.c's svc_command)
  *   PRIVMSG/NOTICE <target> :<text>         -- literal IRC lines, relayed verbatim
  *   PING / PONG                             -- keepalive
  * A pseudo-client (client_t with fd == -1) forwards client_send() over its link_conn's socket (see client.c).
@@ -131,6 +131,8 @@ void link_notify_merge_ranks(struct server *srv, struct channel *chan, struct cl
  * <server> on connect/update, SVCNICK <uid> <nick>, SVCQUIT <uid>, SVCACCOUNT <uid> <account|*>. Service bots are skipped. */
 enum { SVC_EV_USER, SVC_EV_NICK, SVC_EV_QUIT, SVC_EV_ACCOUNT };
 void link_svc_user(struct server *srv, struct client *cl, int ev);
+/* After a rehash: tell the services daemon(s) to reload their config (SVCREHASH; older services ignore it). */
+void link_svc_rehash(struct server *srv);
 
 /* link_close with a reason that becomes the netsplit's SQUIT reason (and the stats collector's). */
 void link_close_why(struct server *srv, link_conn_t *lc, const char *why);

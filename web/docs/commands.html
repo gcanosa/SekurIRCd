@@ -58,7 +58,7 @@
 <tr><td><code>SHUN</code> <code>UNSHUN</code></td><td><code>[&lt;mask&gt; [duration] [reason]]</code>. Silently drop a connected user's messages without disconnecting them, on every linked server. With no arguments, list active SHUNs.</td></tr>
 <tr><td><code>ELINE</code> <code>UNELINE</code></td><td><code>[&lt;mask&gt; [duration] [reason]]</code>. Exempt a mask from K/G-lines.</td></tr>
 <tr><td><code>TESTLINE</code></td><td><code>&lt;nick|user@host|ip&gt;</code>. Show which K/G/Z-lines, SHUNs and ELINEs match that address.</td></tr>
-<tr><td><code>SPAMFILTER</code></td><td><code>[LIST] | ADD &lt;targets&gt; &lt;action&gt; &lt;duration|-&gt; &lt;reason&gt; &lt;regex&gt; | DEL &lt;n&gt;</code>. Manage the <code>[spam]</code> content filters. See the <a href="protection.html">protection bundle</a> page.</td></tr>
+<tr><td><code>SPAMFILTER</code></td><td><code>[LIST] | ADD [GLOBAL] &lt;targets&gt; &lt;action&gt; &lt;duration|-&gt; &lt;reason&gt; &lt;regex&gt; | DEL &lt;n&gt;</code>. Manage the <code>[spam]</code> content filters. <code>GLOBAL</code> sends the rule to every linked server. See the <a href="protection.html">protection bundle</a> page.</td></tr>
 <tr><td><code>PROTECT</code></td><td><code>[SCAN &lt;ipv4&gt;]</code>. Server opers: show the Protection bundle status (blacklists, proxy scanner, limits), or scan an address now. See the <a href="protection.html">protection bundle</a> page.</td></tr>
 <tr><td><code>WALLOPS</code></td><td>Message every user with <code>+w</code>.</td></tr>
 <tr><td><code>GLOBOPS</code> <code>OPERWALL</code> <code>LOCOPS</code></td><td>Message every online operator on the network (<code>GLOBOPS</code>, <code>OPERWALL</code>), or only the operators on this server (<code>LOCOPS</code>).</td></tr>

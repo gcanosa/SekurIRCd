@@ -74,6 +74,7 @@ typedef struct {
     int host_masking_keep_labels; /* trailing real-hostname labels kept verbatim in {suffix}; 0 = never use the real host (old fully-opaque cloak) */
     char host_masking_secret[CFG_STR]; /* HMAC key for the cloak token; "" = a random one is generated at startup (see server_t.cloak_secret) */
     int oper_host_masking;
+    int accept_services_opers; /* services may grant oper to a logged-in account (SVSOPER, from [[opers]] in services.toml) */
     char oper_host_format[CFG_STR];
     char klines_file[CFG_PATH];
     char protection_file[CFG_PATH]; /* Protection bundle (config/protection.toml); "" = don't load one */

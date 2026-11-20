@@ -966,6 +966,8 @@ void net_detach_client(server_t *srv, client_t *cl, const char *why, int quiet) 
         cl->umodes &= ~(UMODE_O | UMODE_OPERONLY);
         cl->oper_name[0] = '\0';
         cl->oper_privs = 0;
+        cl->oper_svc = 0;
+        cl->oper_svc_privs = 0;
     }
     if (cl->umodes != before) netsync_user_modes(srv, cl);
     if (quiet) return;

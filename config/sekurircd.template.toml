@@ -211,6 +211,11 @@ host_masking_ip_ranges = false
 # every linked server) for stable cloaks. Keep it out of version control.
 host_masking_secret = ""
 
+# Services can make an account an IRC operator on whichever server it logs in
+# to ([[opers]] in services.toml, see the template there). false = this server
+# ignores those grants (and takes back the ones it gave on /REHASH).
+accept_services_opers = true
+
 # Give opers a recognizable host after /OPER, e.g. netadmin.<network>.
 oper_host_masking = false
 oper_host_format = "netadmin.{network}"

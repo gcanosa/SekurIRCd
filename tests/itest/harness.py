@@ -78,6 +78,7 @@ class Server:
                 self.cfg.setdefault(sec, {}).update(body)
         self.proc = None
         self.services = None
+        self.services_tail = ""  # extra services.toml text (after [storage]) for the daemon this server starts
         self.auto_services = True  # [accounts] enabled -> also run bin/services (NickServ) linked to this server
 
     def wants_services(self):
@@ -98,7 +99,7 @@ class Server:
             if k in acc:
                 ns.append(f"{k} = {toml_value(acc[k])}")
         store = os.path.join(self.dir, acc.get("store_file", "accounts.json"))
-        self.services = Services(self, self.cfg["links"]["port"], nickserv="\n".join(ns), store=store)
+        self.services = Services(self, self.cfg["links"]["port"], nickserv="\n".join(ns), store=store, tail=self.services_tail)
         self.services.start()
         self.wait_services()
 
@@ -318,15 +319,21 @@ def ws_parse(buf):
 class Services:
     """bin/services (ChanServ + NickServ) linked to `srv`. `nickserv` / `chanserv_extra` are extra lines for those sections."""
 
-    def __init__(self, srv, link_port, peer_name=SVC_NAME, password=SVC_PW, extra="", nickserv="", store=None):
+    def __init__(self, srv, link_port, peer_name=SVC_NAME, password=SVC_PW, extra="", nickserv="", store=None, tail=""):
         self.dir = tempfile.mkdtemp(prefix="itest-svc-")
         self.pidfile = os.path.join(self.dir, "services.pid")
+        self.conf = os.path.join(self.dir, "services.toml")
         store_line = f'store_file = "{store}"\n' if store else ""
-        with open(os.path.join(self.dir, "services.toml"), "w") as f:
-            f.write(f'[link]\nhost = "127.0.0.1"\nport = {link_port}\nname = "{peer_name}"\npassword = "{password}"\n'
-                    f'[chanserv]\nnick = "ChanServ"\n{extra}\n[nickserv]\n{store_line}{nickserv}\n'
-                    f'[storage]\npath = "cs.json"\nbackup_count = 1\n')
+        self.body = (f'[link]\nhost = "127.0.0.1"\nport = {link_port}\nname = "{peer_name}"\npassword = "{password}"\n'
+                     f'[chanserv]\nnick = "ChanServ"\n{extra}\n[nickserv]\n{store_line}{nickserv}\n'
+                     f'[storage]\npath = "cs.json"\nbackup_count = 1\n')
         self.proc = None
+        self.write(tail)
+
+    def write(self, tail=""):
+        """(Re)write services.toml: the usual sections, then `tail` (e.g. [[opers]] tables, which come after [storage])."""
+        with open(self.conf, "w") as f:
+            f.write(self.body + "\n" + tail)
 
     def start(self):
         self.proc = subprocess.Popen([SERVICES, "-c", "services.toml"], cwd=self.dir,

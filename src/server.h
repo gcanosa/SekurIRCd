@@ -136,6 +136,7 @@ typedef struct server {
     struct ipcount *ip_counts;
 
     struct spam_filter *spam_filters; /* spam.c: linked list, file order */
+    struct spam_filter *spam_net;     /* spam.c: global rules other servers sent us, checked after ours */
     long spam_hits;                   /* messages a spam rule/limit acted on */
 
     /* STATS m: per-command invocation counts. Linear array, fine at this

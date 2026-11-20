@@ -41,6 +41,28 @@
   <code>chanserv.json</code>. The old <code>[accounts]</code> section is ignored with a warning; move settings such as <code>enforce_nicks</code>,
   <code>max_accounts</code> and <code>email_command</code> to <code>[nickserv]</code>. Services admins (SUSPEND/FDROP/SASET) are now accounts listed
   in <code>[nickserv] admins</code>, not an oper privilege.</p>
+<h3 id="network-opers">network operators</h3>
+<p>An <code>[[opers]]</code> entry in <code>services.toml</code> makes an account an IRC operator on whichever server it logs in to, with no
+  <code>[[operators]]</code> block on that server. Services sends the user's server an <code>SVSOPER</code> when they <code>IDENTIFY</code> or log in with SASL, and every other server
+  already trusts an oper from another server, so they reach the whole network. It ends when they log out or disconnect, or when you remove the entry.</p>
+<pre>[[opers]]
+account    = "youraccount"
+certfp     = "0123456789abcdef...64 hex digits"   # SHA-256 of the TLS client certificate they connect with
+privileges = ["all"]                              # or: kill, kline, sa, host, wallops, rehash, die, link, override, auspex, immune
+
+[[opers]]
+account       = "helper"
+password_only = true                              # no certificate needed (the account password alone is enough)
+privileges    = ["kill", "kline"]</pre>
+<ul>
+<li><strong>The certificate is required by default.</strong> Without <code>password_only</code> the account must log in on a TLS connection whose client certificate has the
+  <code>certfp</code> (the server they connect to needs <code>[tls] request_client_cert = true</code>, as for SASL EXTERNAL). The right password with another certificate, or none, gets no oper status. Add a certificate to an account with <code>NickServ CERT ADD</code>.</li>
+<li><strong>Change them live.</strong> Edit <code>services.toml</code> and run <code>/REHASH</code> on the hub (it tells services to reload; <code>services --rehash</code> does the same). New entries apply to users
+  already logged in, and a removed one takes oper status away from them at once. A file with a mistake is refused and the old list stays.</li>
+<li><strong>Each server decides.</strong> <code>[security] accept_services_opers = false</code> on a server ignores these grants and takes back the ones it gave, on its next <code>/REHASH</code>. On the hub,
+  a leaf's <code>oper_scope</code> and <code>oper_deny</code> still limit what these opers can do from that leaf.</li>
+<li><strong>Keep a local login too.</strong> Services is what grants this, so keep one <code>[[operators]]</code> block on the hub for when services is down.</li>
+</ul>
 
 <h2>enable it</h2>
 <h3>1. ircd side: turn on linking and add a peer</h3>

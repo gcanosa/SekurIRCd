@@ -9,7 +9,8 @@
  *   SVCNICK <uid> <newnick>    SVCQUIT <uid>    SVCACCOUNT <uid> <account|*>
  *   SVCSASL <cid> S <mech> <certfp|*> <ip>  |  SVCSASL <cid> C <data>  |  SVCSASL <cid> D A
  *   SVCREGISTER <cid> <ip> <account> <email|*> :<password>
- * What we send: SVSLOGIN <id> <account|*> [regts [always-on secs]], SVSJOIN <id> <#chan,...> (SET AJOIN, after a login), SVSNICK <id> <nick>,
+ * What we send: SVSLOGIN <id> <account|*> [regts [always-on secs]], SVSOPER <uid> <privileges|-> <account> ([[opers]]: IRC operator
+ * status for a logged-in account, or "-" to take it back), SVSJOIN <id> <#chan,...> (SET AJOIN, after a login), SVSNICK <id> <nick>,
  * KILL <id> :reason, SVCSASL <cid> C|D ...,
  * SVCREGRESULT <cid> SUCCESS|FAIL <code> <account> :text. <id> is a UID or a SASL client id (see link.h). */
 #include "svc.h"
@@ -38,6 +39,15 @@
 #include <openssl/evp.h>
 
 #define NS_MAX_ADMINS 32
+#define NS_MAX_OPERS 32
+
+/* [[opers]]: an account whose logged-in users get IRC operator status (SVSOPER) on whichever server they are on. */
+typedef struct {
+    char account[64];
+    char privs[96];     /* OPER_PRIV names, comma-separated, as the ircd's oper_priv_from_csv reads them */
+    char certfp[72];    /* SHA-256 hex of the TLS client certificate that must come with the login ("" with password_only) */
+    int password_only;  /* no certificate needed: the account's password is enough */
+} ns_oper_t;
 
 typedef struct {
     int enabled;
@@ -53,10 +63,13 @@ typedef struct {
     long always_on_expire; /* seconds a detached always-on nick is kept (0 = never expires) */
     char admins[NS_MAX_ADMINS][64];
     int n_admins;
+    ns_oper_t opers[NS_MAX_OPERS];
+    int n_opers;
 } ns_cfg_t;
 static ns_cfg_t C;
 
 static account_store_t g_acc;
+static void opers_resync(void); /* [[opers]] below */
 
 /* --- config ---------------------------------------------------------------------------------------------------- */
 
@@ -108,6 +121,7 @@ void ns_rehashed(void *old, char *kept, size_t keptsz) {
 #undef KEEP
     if (!C.network_set) memcpy(C.network, o->network, sizeof C.network); /* the one the hub's SVCINFO named */
     free(o);
+    opers_resync(); /* [[opers]] entries added or removed: logged-in users get (or lose) oper status now */
 }
 
 int ns_config(toml_node_t *raw, const char *config_path, char *err, size_t errsz) {
@@ -142,6 +156,43 @@ int ns_config(toml_node_t *raw, const char *config_path, char *err, size_t errsz
     for (int i = 0; ad && i < tx_len(ad) && C.n_admins < NS_MAX_ADMINS; i++) {
         toml_node_t *d = tx_at(ad, i, TOML_STRING);
         if (d) snprintf(C.admins[C.n_admins++], sizeof C.admins[0], "%s", d->u.s);
+    }
+    /* [[opers]]: keep the names in step with config.c's OPER_PRIV_NAMES */
+    static const char *const PRIVS[] = {"kill", "kline", "sa", "host", "wallops", "rehash", "die", "link", "override", "auspex", "immune", "all"};
+    toml_node_t *ol = tx_array(raw, "opers");
+    for (int i = 0; ol && i < tx_len(ol); i++) {
+        toml_node_t *o = tx_at(ol, i, TOML_TABLE);
+        if (!o) continue;
+        if (C.n_opers >= NS_MAX_OPERS) { snprintf(err, errsz, "too many [[opers]] entries (max %d)", NS_MAX_OPERS); return -1; }
+        ns_oper_t *e = &C.opers[C.n_opers];
+        t_str(o, "account", e->account, sizeof e->account);
+        if (!e->account[0]) { snprintf(err, errsz, "[[opers]] entry %d needs an account", i + 1); return -1; }
+        toml_node_t *pr = tx_array(o, "privileges");
+        if (!pr) snprintf(e->privs, sizeof e->privs, "all");
+        for (int k = 0; pr && k < tx_len(pr); k++) {
+            toml_node_t *d = tx_at(pr, k, TOML_STRING);
+            int known = 0;
+            for (size_t q = 0; d && q < sizeof PRIVS / sizeof *PRIVS; q++) known |= strcasecmp(d->u.s, PRIVS[q]) == 0;
+            if (!known) { snprintf(err, errsz, "[[opers]] %s: unknown privilege '%s' (kill, kline, sa, host, wallops, rehash, die, link, override, auspex, immune, all)", e->account, d ? d->u.s : "?"); return -1; }
+            size_t l = strlen(e->privs);
+            snprintf(e->privs + l, sizeof e->privs - l, "%s%s", l ? "," : "", d->u.s);
+        }
+        if (!e->privs[0]) { snprintf(err, errsz, "[[opers]] %s: privileges is empty", e->account); return -1; }
+        e->password_only = t_bool(o, "password_only", 0);
+        char fp[160] = "";
+        t_str(o, "certfp", fp, sizeof fp);
+        size_t n = 0;
+        for (const char *c = fp; *c; c++) if (*c != ':' && *c != ' ' && n + 1 < sizeof e->certfp) e->certfp[n++] = (char)tolower((unsigned char)*c);
+        e->certfp[n] = '\0';
+        if (e->certfp[0] && (n != 64 || strspn(e->certfp, "0123456789abcdef") != 64)) {
+            snprintf(err, errsz, "[[opers]] %s: certfp must be the 64 hex digits of the certificate's SHA-256 fingerprint", e->account);
+            return -1;
+        }
+        if (!e->certfp[0] && !e->password_only) {
+            snprintf(err, errsz, "[[opers]] %s: needs certfp (the SHA-256 fingerprint of their TLS client certificate) or password_only = true", e->account);
+            return -1;
+        }
+        C.n_opers++;
     }
     if (!irc_valid_nick(C.nick, 30)) { snprintf(err, errsz, "[nickserv] nick is not a valid nickname"); return -1; }
     if (C.email_command[0] && C.email_command[0] != '/') { snprintf(err, errsz, "[nickserv] email_command must be an absolute path"); return -1; }
@@ -186,6 +237,7 @@ void ns_shutdown(void) {
 
 typedef struct nsuser {
     char uid[16], nick[64], cf[64], user[32], host[128], ip[64], account[64], certfp[72], server[128];
+    char oper_sent[96];    /* the SVSOPER privileges last sent for this user ("" = none): resent only when they change */
     time_t enforce_at;     /* rename deadline for an unidentified user on a registered nick (0 = none) */
     char enforce_owner[64];
     UT_hash_handle hh;     /* by uid */
@@ -266,6 +318,39 @@ static void ajoin_send(const char *uid, const char *account) {
     if (list && list[0]) wire("SVSJOIN", (const char *[]){uid, list}, 2, NULL);
 }
 
+/* What an [[opers]] entry makes of this user: the entry for the account they are logged in to, if its certificate condition holds. */
+static const ns_oper_t *oper_entry(const nsuser_t *u) {
+    if (!C.enabled || !u->account[0]) return NULL;
+    for (int i = 0; i < C.n_opers; i++) {
+        const ns_oper_t *e = &C.opers[i];
+        if (strcasecmp(e->account, u->account) != 0) continue;
+        if (e->password_only || (u->certfp[0] && strcasecmp(u->certfp, e->certfp) == 0)) return e;
+        return NULL; /* the right account without the right certificate: no oper */
+    }
+    return NULL;
+}
+
+/* Tell the user's server what oper status they should have (SVSOPER), when it differs from what we last said. "-" takes it back. */
+static void oper_sync(nsuser_t *u) {
+    const ns_oper_t *e = oper_entry(u);
+    const char *want = e ? e->privs : "";
+    if (strcmp(want, u->oper_sent) == 0) return;
+    wire("SVSOPER", (const char *[]){u->uid, want[0] ? want : "-", u->account[0] ? u->account : "-"}, 3, NULL);
+    snprintf(u->oper_sent, sizeof u->oper_sent, "%s", want);
+    if (want[0]) log_info("nickserv", "%s (account %s) is a network oper (%s)", u->nick, u->account, want);
+    else log_info("nickserv", "%s is no longer a network oper", u->nick);
+}
+
+/* After a reload: say it all again to everyone who should be an oper (a server that now takes grants, or that restarted, hears it;
+ * an unchanged one ignores it), and take it back from those whose entry is gone. */
+static void opers_resync(void) {
+    nsuser_t *u, *tmp;
+    HASH_ITER(hh, g_by_uid, u, tmp) {
+        if (oper_entry(u)) u->oper_sent[0] = '\0';
+        oper_sync(u);
+    }
+}
+
 /* Log `id` in as `account` (NULL = log out). The hub sets it on the user's own server, which announces it network-wide.
  * The 4th parameter is always-on: how many seconds the user's server keeps the nick after the connection drops (-1 =
  * until it restarts), "0" = off. Older servers ignore it. Sent again by SET ALWAYS-ON to update a live login. */
@@ -276,7 +361,12 @@ static void login(const char *id, const char *account) {
     if (account) wire("SVSLOGIN", (const char *[]){id, account, ts, ao}, 4, NULL);
     else wire("SVSLOGIN", (const char *[]){id, "*"}, 2, NULL);
     nsuser_t *u = user_by_uid(id);
-    if (u) { snprintf(u->account, sizeof u->account, "%s", account ? account : ""); if (account) u->enforce_at = 0; }
+    if (u) {
+        if (account && strcasecmp(u->account, account) != 0) u->oper_sent[0] = '\0'; /* the old account's grant went with the SVSLOGIN */
+        snprintf(u->account, sizeof u->account, "%s", account ? account : "");
+        if (account) u->enforce_at = 0;
+        oper_sync(u);
+    }
 }
 
 /* "Last login from: ..." to `u`, then record this login as the new last one. */
@@ -694,6 +784,7 @@ static void ev_user(irc_message_t *m) {
     snprintf(u->server, sizeof u->server, "%s", m->params[7]);
     if (renamed) enforce_check(u);
     if (fresh && sasl_seen_check(u)) ajoin_send(u->uid, u->account); /* SASL: no SVCACCOUNT follows */
+    oper_sync(u); /* a SASL login made before registration, or a user the hub resent after a services restart */
 }
 
 int ns_event(irc_message_t *m) {
@@ -712,9 +803,11 @@ int ns_event(irc_message_t *m) {
     if (!strcmp(c, "SVCACCOUNT")) {
         nsuser_t *u = m->nparams >= 2 ? user_by_uid(m->params[0]) : NULL;
         if (u) {
+            if (strcasecmp(u->account, strcmp(m->params[1], "*") ? m->params[1] : "") != 0) u->oper_sent[0] = '\0';
             snprintf(u->account, sizeof u->account, "%s", strcmp(m->params[1], "*") ? m->params[1] : "");
             if (u->account[0] && strcasecmp(u->account, u->enforce_owner) == 0) u->enforce_at = 0;
             if (u->account[0]) { cs_user_login(u->nick); sasl_seen_check(u); ajoin_send(u->uid, u->account); }
+            oper_sync(u);
         }
         return 1;
     }

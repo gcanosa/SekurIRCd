@@ -2,7 +2,8 @@
  * a new-connection PM restriction, and per-client recipient/repeat limits.
  * Master switch: [spam] enabled. Everything here is a no-op when it's off.
  * Rules and limits apply to local clients only; each server in a link
- * enforces its own copy of the filters file. */
+ * enforces its own copy of the filters file. A rule marked "global" in it (or added with SPAMFILTER ADD GLOBAL) is also
+ * sent to every linked server, which enforces it behind its own rules even with its [spam] switches off. */
 #ifndef SEKURIRCD_SPAM_H
 #define SEKURIRCD_SPAM_H
 
@@ -48,7 +49,14 @@ int spam_check_text(server_t *srv, client_t *cl, unsigned kind, const char *text
 void spam_track(client_t *cl, const char *target, const char *text, time_t now,
                 long window, int *distinct_targets, int *same_text_targets);
 
-/* SPAMFILTER [LIST] | ADD <targets> <action> <duration|-> <reason> :<regex>
+/* A server's SPAMFILTER line (netsync): `verb` CLEAR drops everything `origin` (its SID) sent before, ADD takes one rule. */
+void spam_net_receive(server_t *srv, const char *origin, const char *verb, const char *rule);
+/* A SPAMFILTER DEL routed to us: drop our own global rule that reads `rule`; `by` is the asking server. */
+void spam_global_del(server_t *srv, const char *rule, const char *by);
+/* A link came up: our global rules, then the ones we hold from other servers. */
+void spam_burst(server_t *srv, struct link_conn *lc);
+
+/* SPAMFILTER [LIST] | ADD [GLOBAL] <targets> <action> <duration|-> <reason> :<regex>
  *          | DEL <n> (server-oper only). */
 void cmd_spamfilter(server_t *srv, client_t *cl, irc_message_t *msg);
 /* STATS f: one 249 line per loaded filter rule. */

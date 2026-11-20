@@ -10,6 +10,7 @@
 #include "log.h"
 #include "proto.h"
 #include "server.h"
+#include "spam.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -285,6 +286,8 @@ static void send_burst(server_t *srv, link_conn_t *lc) {
         irc_build(line, sizeof line, NULL, 0, self_sid(srv), k->line_type[0] == 'G' ? "GLINE" : "SHUN", p, 3, k->reason);
         send_link(lc, line);
     }
+    /* 5. global spam rules (ours, then every other server's we hold) */
+    spam_burst(srv, lc);
     irc_build(line, sizeof line, NULL, 0, self_sid(srv), "EOB", NULL, 0, NULL);
     send_link(lc, line);
 }
@@ -1486,6 +1489,31 @@ static void handle_ungline(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     flood(srv, lc, fl);
 }
 
+/* :<sid> SPAMFILTER CLEAR | ADD :<rule> -- a server's global spam rules, as a set (spam.c keeps them). A leaf the hub limits to
+ * its own server (oper_scope = local) has no network-wide rules: what it sends is dropped here, like its GLINEs. */
+static void handle_spamfilter(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
+    if (msg->nparams < 1) return;
+    if (limited_link(srv, lc)) { log_debug("netsync", "SPAMFILTER from %s dropped (oper_scope = local)", lc->peer_name); return; }
+    netserver_t *s = src_server(srv, lc, msg->prefix);
+    if (!s && msg->prefix && lc->nserver && strcmp(msg->prefix, lc->nserver->sid) == 0) s = lc->nserver;
+    if (!s) return;
+    if (!strcasecmp(msg->params[0], "DEL")) { /* :<sid> SPAMFILTER DEL <origin> :<rule> -- the owner drops it; everyone else passes it on toward the owner */
+        if (msg->nparams < 3) return;
+        if (strcmp(msg->params[1], self_sid(srv)) == 0) { spam_global_del(srv, msg->params[2], s->name); return; }
+        netserver_t *o = netsync_find_sid(srv, msg->params[1]);
+        if (!o || !o->route || o->route == lc) return;
+        char fwd[800];
+        irc_build(fwd, sizeof fwd, NULL, 0, s->sid, "SPAMFILTER", (const char *[]){"DEL", o->sid}, 2, msg->params[2]);
+        send_link(o->route, fwd);
+        return;
+    }
+    const char *rule = msg->nparams > 1 ? msg->params[1] : NULL;
+    spam_net_receive(srv, s->sid, msg->params[0], rule);
+    char fl[800];
+    irc_build(fl, sizeof fl, NULL, 0, s->sid, "SPAMFILTER", (const char *[]){msg->params[0]}, 1, rule);
+    flood(srv, lc, fl);
+}
+
 /* :<sid> RSQUIT <sid> :reason -- somebody asked for a server to be squit. Executed by the server directly linked to it;
  * everyone else passes the request along toward it. */
 static void handle_rsquit(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
@@ -1553,7 +1581,15 @@ static void handle_svcrelay(server_t *srv, link_conn_t *lc, irc_message_t *msg) 
     char buf[1000];
     snprintf(buf, sizeof buf, "%s", line);
     irc_message_t m;
-    if (irc_parse_line(buf, &m) == 0) svc_command(srv, NULL, &m);
+    if (irc_parse_line(buf, &m) != 0) return;
+    if (!strcmp(m.command, "SVSOPER")) { /* makes an oper: only the server that runs services may say it, not just any linked server */
+        netserver_t *from = src_server(srv, lc, msg->prefix);
+        if (!from || strcasecmp(from->name, services_home(srv)) != 0) {
+            log_warn("netsync", "SVSOPER relayed by %s refused: services do not run there", from ? from->name : lc->peer_name);
+            return;
+        }
+    }
+    svc_command(srv, NULL, &m);
 }
 
 static void handle_rename(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
@@ -1692,6 +1728,7 @@ void netsync_handle(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     else if (!strcmp(c, "WALLOPS") || !strcmp(c, "GLOBOPS")) handle_wallops(srv, lc, msg);
     else if (!strcmp(c, "GLINE") || !strcmp(c, "SHUN")) handle_gline(srv, lc, msg);
     else if (!strcmp(c, "UNGLINE") || !strcmp(c, "UNSHUN")) handle_ungline(srv, lc, msg);
+    else if (!strcmp(c, "SPAMFILTER")) handle_spamfilter(srv, lc, msg);
     else if (!strcmp(c, "RQUERY")) handle_rquery(srv, lc, msg);
     else if (!strcmp(c, "SNOTE")) handle_snote(srv, lc, msg);
     else if (!strcmp(c, "RENAME")) handle_rename(srv, lc, msg);
@@ -1942,6 +1979,25 @@ void netsync_shun(server_t *srv, const char *mask, const char *setter, long expi
     snprintf(exp, sizeof exp, "%ld", expires);
     irc_build(line, sizeof line, NULL, 0, self_sid(srv), "SHUN", (const char *[]){mask, setter, exp}, 3, reason);
     flood(srv, NULL, line);
+}
+
+void netsync_spamfilter(server_t *srv, link_conn_t *to, const char *origin, const char *rule) {
+    if (!netsync_has_links(srv)) return;
+    if (to && origin) { /* its own rules, or those of a server behind it, are already there */
+        netserver_t *o = netsync_find_sid(srv, origin);
+        if (o && o->route == to) return;
+    }
+    char line[800];
+    irc_build(line, sizeof line, NULL, 0, origin ? origin : self_sid(srv), "SPAMFILTER", (const char *[]){rule ? "ADD" : "CLEAR"}, 1, rule);
+    if (to) send_link(to, line); else flood(srv, NULL, line);
+}
+
+void netsync_spamfilter_del(server_t *srv, const char *origin, const char *rule) {
+    netserver_t *o = netsync_find_sid(srv, origin);
+    if (!o || !o->route) return;
+    char line[800];
+    irc_build(line, sizeof line, NULL, 0, self_sid(srv), "SPAMFILTER", (const char *[]){"DEL", origin}, 2, rule);
+    send_link(o->route, line);
 }
 
 void netsync_unshun(server_t *srv, const char *mask) {

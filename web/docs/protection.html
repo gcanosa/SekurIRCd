@@ -209,7 +209,7 @@ trust_age = "0"              # connections older than this skip the limits (not 
 filters_enabled = true       # false keeps the file but stops using it
 filters_file = "spamfilters.conf"</pre>
 <h3>filter rules</h3>
-<p>One rule per line: <code>&lt;targets&gt; &lt;action&gt; &lt;duration|-&gt; "&lt;reason&gt;" &lt;regex&gt;</code>. Targets are letters:
+<p>One rule per line: <code>[global] &lt;targets&gt; &lt;action&gt; &lt;duration|-&gt; "&lt;reason&gt;" &lt;regex&gt;</code>. Targets are letters:
   <code>p</code> PRIVMSG to a user, <code>c</code> PRIVMSG to a channel, <code>n</code>/<code>N</code> NOTICE to a user/channel, <code>a</code> AWAY,
   <code>q</code> QUIT, <code>P</code> PART, <code>t</code> TOPIC. The first matching rule wins.</p>
 <div class="tablewrap"><table>
@@ -219,6 +219,7 @@ filters_file = "spamfilters.conf"</pre>
 <tr><td><code>kill</code></td><td>Disconnects the sender.</td></tr>
 <tr><td><code>zline</code></td><td>Disconnects the sender and Z-lines their IP for the rule's duration (<code>-</code> means <code>zline_duration</code>).</td></tr>
 <tr><td><code>hide</code></td><td>Silently drops the message: no notice to the sender, and echo-message clients get their own line back so it looks delivered. Opers are still notified.</td></tr>
+<tr><td><code>allow</code></td><td>Delivers the text untouched and skips every rule below it: an exception to a broader rule, or to a <a href="#global-rules">global</a> one.</td></tr>
 <tr><td><code>shun</code></td><td>Like <code>hide</code>, and also SHUNs <code>*@ip</code> network-wide for the rule's duration (<code>-</code> means <code>zline_duration</code>): the sender stays connected but nothing they send reaches anyone.</td></tr>
 </table></div>
 <pre>pcnN block - "advertisement" (buy|cheap) +(viagra|followers|likes)
@@ -227,11 +228,33 @@ qPt zline 1h "advertising in reason" https?://[^ ]+.*(casino|porn)</pre>
 <h3>managing rules live</h3>
 <pre>/SPAMFILTER                                   # list rules (with numbers) and the hit counter
 /SPAMFILTER ADD pc block - ad_spam :cheap +viagra
+/SPAMFILTER ADD GLOBAL pcnN shun 1d hosting_advert :vps.*promo
 /SPAMFILTER DEL 3</pre>
 <p><code>ADD</code> takes targets, action, duration, a reason (underscores become spaces) and the regex, and appends to the filters file. <code>DEL</code> removes the numbered
   rule from the file and leaves your comments alone. Regexes with backreferences, or that match the empty string, are refused. Editing the file by hand and running
   <code>/REHASH</code> reloads it; a line that fails to parse is skipped with a logged warning. If <code>filters_file = ""</code>, rules exist in memory only.</p>
-<p class="note"><strong>Scope:</strong> enforcement covers this server's own users, and each linked server keeps its own copy of the filters file. Every action sends opers with
+<h3 id="global-rules">global rules</h3>
+<p>Rules apply to the users connected to the server that runs them, so a spammer on a leaf that lacks a rule is not stopped by the hub having it. A rule that
+  starts with <code>global</code> in <code>spamfilters.conf</code>, or is added with <code>/SPAMFILTER ADD GLOBAL</code>, is sent to every linked server, and each
+  enforces it as if it were its own. Add them on the hub and every leaf has them.</p>
+<ul>
+<li><strong>The set follows its owner.</strong> A server sends all its global rules whenever they change (<code>/SPAMFILTER ADD GLOBAL</code>, <code>DEL</code>, or a
+  <code>/REHASH</code> after editing the file) and whenever a link comes up, so a leaf that was down or just restarted catches up on its own. Deleting a rule on
+  the hub deletes it everywhere. <code>/SPAMFILTER</code> lists a rule from another server as <code>[global from hub.example.org]</code>.</li>
+<li><strong>Several hubs share them.</strong> Rules travel along every link, hub to hub included, so any hub or leaf can add one and every server on the network gets it,
+  each hub passing it on to its own leaves. Any oper with the <code>kline</code> privilege can <code>DEL</code> a rule another server owns: it goes at once on the server
+  you are on, the owner is asked to delete it from its list and file, and it then sends its set again so every other server drops it too. If the owner is not linked, the
+  rule is removed here only and comes back when that server relinks.</li>
+<li><strong>They bind a server whose own <code>[spam]</code> is off.</strong> With <code>enabled = false</code> (or <code>filters_enabled = false</code>) a server ignores its own
+  rules, the new-connection restriction and the limits, but still enforces the global rules it received. Opers, services and (when enabled) identified accounts stay exempt.</li>
+<li><strong>A server's own rules come first.</strong> Rules are checked top to bottom, the server's own ahead of the global ones, so a leaf overrides one with a rule of
+  its own: <code>/SPAMFILTER ADD pc allow - ok :that text</code> lets it through there while every other global rule still applies.</li>
+<li><strong>A leaf the hub limits can't publish.</strong> If the hub's <code>[[links.peers]]</code> entry for a leaf has <code>oper_scope = "local"</code>, that leaf refuses
+  <code>ADD GLOBAL</code>, and the hub drops global rules it sends anyway. The same limit stops that leaf's opers from deleting another server's global rule. Its own local rules still work there.</li>
+</ul>
+<p>Global rules from other servers are kept in memory, not on disk, and come back with the link. If the hub is down when a leaf restarts, the leaf has none of them until it links
+  again. A server that has gone for good leaves its rules on the others until they restart; <code>/SPAMFILTER DEL</code> removes them from the server you are on.</p>
+<p class="note"><strong>Scope:</strong> enforcement covers this server's own users, with each linked server enforcing its own filters file plus the global rules it was sent. Every action sends opers with
   <code>+s</code> a notice that includes the offending text, which is the easiest way to tune rules and limits.</p>
 
 <h2>monitoring</h2>

@@ -6,12 +6,16 @@
  *   3. per-client limits: too many distinct recipients, or the same text to
  *      too many recipients, inside a sliding window.
  * Filter file format, one rule per line (# comments and blank lines ok):
- *   <targets> <action> <duration|-> "<reason>" <regex to end of line>
+ *   [global] <targets> <action> <duration|-> "<reason>" <regex to end of line>
  * e.g.  pcn block - "advertising" (buy|cheap) +viagra
+ * A "global" rule is also published to every linked server (netsync SPAMFILTER): they keep it in srv->spam_net, behind
+ * their own rules (first match wins, so a local rule or an `allow` overrides it) and replace the whole set whenever
+ * the origin sends it again. They live in memory there and come back with the link's burst.
  * Regexes are POSIX ERE, case-insensitive, matched against the text with
  * mIRC colour/formatting codes stripped. */
 #include "spam.h"
 #include "cmd.h"
+#include "link.h"
 #include "log.h"
 #include "netsync.h"
 
@@ -26,7 +30,7 @@
 #define SPAM_MAX_FILTERS 256
 #define SPAM_MIN_REPEAT_LEN 8 /* shorter texts ("hi", "lol") never count as a repeat */
 
-typedef enum { SPAM_BLOCK, SPAM_WARN, SPAM_KILL, SPAM_ZLINE, SPAM_HIDE, SPAM_SHUN } spam_action_t;
+typedef enum { SPAM_BLOCK, SPAM_WARN, SPAM_KILL, SPAM_ZLINE, SPAM_HIDE, SPAM_SHUN, SPAM_ALLOW } spam_action_t;
 
 typedef struct spam_filter {
     unsigned targets;
@@ -34,6 +38,8 @@ typedef struct spam_filter {
     long duration;
     char reason[128];
     char pattern[256];
+    unsigned char global; /* published to every linked server */
+    char origin[8];       /* SID of the server that published it; "" for a rule of ours */
     regex_t re;
     struct spam_filter *next;
 } spam_filter_t;
@@ -66,12 +72,13 @@ static int parse_action(const char *s, spam_action_t *out) {
     else if (!strcasecmp(s, "zline")) *out = SPAM_ZLINE;
     else if (!strcasecmp(s, "hide")) *out = SPAM_HIDE;
     else if (!strcasecmp(s, "shun")) *out = SPAM_SHUN;
+    else if (!strcasecmp(s, "allow")) *out = SPAM_ALLOW;
     else return -1;
     return 0;
 }
 
 static const char *action_name(spam_action_t a) {
-    static const char *names[] = {"block", "warn", "kill", "zline", "hide", "shun"};
+    static const char *names[] = {"block", "warn", "kill", "zline", "hide", "shun", "allow"};
     return names[a];
 }
 
@@ -80,6 +87,11 @@ static const char *action_name(spam_action_t a) {
 static int parse_line(const char *line, spam_filter_t *f, char *err, size_t errsz) {
     while (isspace((unsigned char)*line)) line++;
     if (*line == '\0' || *line == '#') return 1;
+    int global = 0;
+    if (!strncasecmp(line, "global", 6) && isspace((unsigned char)line[6])) {
+        global = 1;
+        for (line += 6; isspace((unsigned char)*line); line++) ;
+    }
     char tgt[16], act[16], dur[16];
     int n = 0;
     if (sscanf(line, "%15s %15s %15s %n", tgt, act, dur, &n) < 3 || n == 0) {
@@ -87,9 +99,10 @@ static int parse_line(const char *line, spam_filter_t *f, char *err, size_t errs
         return -1;
     }
     memset(f, 0, sizeof *f);
+    f->global = (unsigned char)global;
     f->targets = spam_parse_targets(tgt);
     if (!f->targets) { snprintf(err, errsz, "bad targets '%s' (letters from p c n N a q P t)", tgt); return -1; }
-    if (parse_action(act, &f->action) != 0) { snprintf(err, errsz, "bad action '%s' (block|warn|kill|zline|hide|shun)", act); return -1; }
+    if (parse_action(act, &f->action) != 0) { snprintf(err, errsz, "bad action '%s' (block|warn|kill|zline|hide|shun|allow)", act); return -1; }
     if (strcmp(dur, "-") == 0) f->duration = 0;
     else {
         f->duration = irc_parse_duration(dur);
@@ -150,12 +163,33 @@ static void format_rule(const spam_filter_t *f, char *out, size_t outsz) {
     snprintf(out, outsz, "%s %s %s \"%s\" %s", tg, action_name(f->action), dur, f->reason, f->pattern);
 }
 
+/* "[global] " for a rule we publish, "[global from hub.example.org] " for one we were sent. */
+static void rule_tag(server_t *srv, const spam_filter_t *f, char *out, size_t outsz) {
+    out[0] = '\0';
+    if (f->origin[0]) {
+        netserver_t *o = netsync_find_sid(srv, f->origin);
+        snprintf(out, outsz, "[global from %s] ", o ? o->name : f->origin);
+    } else if (f->global) snprintf(out, outsz, "[global] ");
+}
+
+/* Our rules, then the ones other servers sent: the order they are checked in, and the numbers SPAMFILTER DEL takes. */
+static void rule_line(server_t *srv, const spam_filter_t *f, int n, char *out, size_t outsz) {
+    char rule[600], tag[80];
+    format_rule(f, rule, sizeof rule);
+    rule_tag(srv, f, tag, sizeof tag);
+    snprintf(out, outsz, "#%d %s%s", n, tag, rule);
+}
+
 void spam_stats(server_t *srv, client_t *cl) {
     int n = 0;
     for (const spam_filter_t *f = srv->spam_filters; f; f = f->next) {
-        char rule[600], line[620];
-        format_rule(f, rule, sizeof rule);
-        snprintf(line, sizeof line, "#%d %s", ++n, rule);
+        char line[760];
+        rule_line(srv, f, ++n, line, sizeof line);
+        client_reply(cl, N_STATSDEBUG, (const char *[]){"f"}, 1, line);
+    }
+    for (const spam_filter_t *f = srv->spam_net; f; f = f->next) {
+        char line[760];
+        rule_line(srv, f, ++n, line, sizeof line);
         client_reply(cl, N_STATSDEBUG, (const char *[]){"f"}, 1, line);
     }
     char sum[160];
@@ -166,15 +200,20 @@ void spam_stats(server_t *srv, client_t *cl) {
 
 /* --- rule list --------------------------------------------------------------- */
 
-void spam_free(server_t *srv) {
-    spam_filter_t *f = srv->spam_filters;
+static void list_free(spam_filter_t **head) {
+    spam_filter_t *f = *head;
     while (f) {
         spam_filter_t *next = f->next;
         regfree(&f->re);
         free(f);
         f = next;
     }
-    srv->spam_filters = NULL;
+    *head = NULL;
+}
+
+void spam_free(server_t *srv) {
+    list_free(&srv->spam_filters);
+    list_free(&srv->spam_net);
 }
 
 static int list_count(const server_t *srv) {
@@ -183,21 +222,108 @@ static int list_count(const server_t *srv) {
     return n;
 }
 
-static void list_append(server_t *srv, spam_filter_t *f) {
-    spam_filter_t **pp = &srv->spam_filters;
+static void list_append(spam_filter_t **head, spam_filter_t *f) {
+    spam_filter_t **pp = head;
     while (*pp) pp = &(*pp)->next;
     f->next = NULL;
     *pp = f;
 }
 
+static void rewrite_without(const char *path, const spam_filter_t *victim);
+
+/* --- global rules: what we publish, and what other servers sent us -------------------------------------------- */
+
+/* The rule `f` as the wire carries it: format_rule's text (the file's "global" word is implied). */
+static void send_rules(server_t *srv, link_conn_t *to, const spam_filter_t *f, const char *origin) {
+    char rule[600];
+    format_rule(f, rule, sizeof rule);
+    netsync_spamfilter(srv, to, origin, rule);
+}
+
+/* Our own global rules, as a complete set: every server drops what it had from us first, so a deleted rule goes too.
+ * `to` NULL = every link (a change), a link = its burst. */
+static void send_own(server_t *srv, link_conn_t *to) {
+    netsync_spamfilter(srv, to, NULL, NULL);
+    for (const spam_filter_t *f = srv->spam_filters; f; f = f->next)
+        if (f->global) send_rules(srv, to, f, NULL);
+}
+
+static void publish_global(server_t *srv) { send_own(srv, NULL); }
+
+/* A new link: our set, then every set we hold from other servers (the link drops those that already lie behind it). */
+void spam_burst(server_t *srv, link_conn_t *lc) {
+    send_own(srv, lc);
+    for (const spam_filter_t *f = srv->spam_net; f; f = f->next) {
+        const spam_filter_t *e = srv->spam_net;
+        while (e != f && strcmp(e->origin, f->origin) != 0) e = e->next;
+        if (e != f) continue; /* this origin's set already went out with its first rule */
+        netsync_spamfilter(srv, lc, f->origin, NULL);
+        for (const spam_filter_t *g = f; g; g = g->next)
+            if (strcmp(g->origin, f->origin) == 0) send_rules(srv, lc, g, f->origin);
+    }
+}
+
+/* From a server's SPAMFILTER line: CLEAR drops everything `origin` sent, ADD takes one rule (same syntax as the file). */
+void spam_net_receive(server_t *srv, const char *origin, const char *verb, const char *rule) {
+    spam_filter_t **pp = &srv->spam_net;
+    if (!strcasecmp(verb, "CLEAR")) {
+        while (*pp) {
+            spam_filter_t *f = *pp;
+            if (strcmp(f->origin, origin) != 0) { pp = &f->next; continue; }
+            *pp = f->next;
+            regfree(&f->re);
+            free(f);
+        }
+        return;
+    }
+    if (strcasecmp(verb, "ADD") != 0 || !rule) return;
+    int n = 0;
+    for (const spam_filter_t *f = srv->spam_net; f; f = f->next) n++;
+    spam_filter_t *f = malloc(sizeof *f);
+    if (!f) return;
+    char err[160] = "";
+    if (n >= SPAM_MAX_FILTERS) snprintf(err, sizeof err, "too many global rules (max %d)", SPAM_MAX_FILTERS);
+    else if (parse_line(rule, f, err, sizeof err) != 0) { if (!err[0]) snprintf(err, sizeof err, "empty rule"); }
+    else compile_rule(f, err, sizeof err); /* leaves err empty when it compiles */
+    if (err[0]) {
+        log_warn("spam", "global rule from %s refused: %s", origin, err);
+        free(f);
+        return;
+    }
+    f->global = 1;
+    snprintf(f->origin, sizeof f->origin, "%s", origin);
+    list_append(&srv->spam_net, f);
+}
+
+/* A DEL routed here (netsync): drops our own global rule that reads `rule` -- from the file too -- and sends the set again. */
+void spam_global_del(server_t *srv, const char *rule, const char *by) {
+    spam_filter_t q;
+    char err[160];
+    if (parse_line(rule, &q, err, sizeof err) != 0) return;
+    for (spam_filter_t **pp = &srv->spam_filters; *pp; pp = &(*pp)->next) {
+        spam_filter_t *f = *pp;
+        if (!f->global || f->targets != q.targets || f->action != q.action || strcmp(f->pattern, q.pattern) != 0) continue;
+        *pp = f->next;
+        char path[CFG_PATH], note[500];
+        if (config_spamfilters_path(&srv->cfg, path, sizeof path)) rewrite_without(path, f);
+        snprintf(note, sizeof note, "%s removed global spam filter (%s's): %s", by, srv->cfg.server.name, f->pattern);
+        server_notify_network(srv, note);
+        regfree(&f->re);
+        free(f);
+        publish_global(srv);
+        return;
+    }
+}
+
 int spam_reload(server_t *srv) {
     char path[CFG_PATH];
-    if (!srv->cfg.spam.filters_enabled) { spam_free(srv); return -1; }
+    if (!srv->cfg.spam.filters_enabled) { list_free(&srv->spam_filters); publish_global(srv); return -1; }
     if (!config_spamfilters_path(&srv->cfg, path, sizeof path)) return -1; /* memory-only rules stay */
-    spam_free(srv);
+    list_free(&srv->spam_filters); /* ours only: what other servers sent stays until they send it again */
     FILE *fp = fopen(path, "r");
     if (!fp) {
         if (srv->cfg.spam.enabled) log_warn("spam", "cannot open filters_file %s -- no content filters loaded", path);
+        publish_global(srv);
         return -1;
     }
     char line[700], err[160];
@@ -214,11 +340,12 @@ int spam_reload(server_t *srv) {
             free(f);
             continue;
         }
-        list_append(srv, f);
+        list_append(&srv->spam_filters, f);
         loaded++;
     }
     fclose(fp);
     log_info("spam", "loaded %d spam filter(s) from %s", loaded, path);
+    publish_global(srv);
     return loaded;
 }
 
@@ -285,6 +412,7 @@ static int apply_action(server_t *srv, client_t *cl, spam_action_t act, long dur
     log_info("spam", "%s", note);
 
     switch (act) {
+        case SPAM_ALLOW: /* run_filters stops at an allow before getting here */
         case SPAM_WARN:
             return 0;
         case SPAM_BLOCK: {
@@ -349,24 +477,32 @@ static void strip_codes(char *dst, size_t dstsz, const char *src) {
 int spam_filter_count(server_t *srv) {
     int n = 0;
     for (spam_filter_t *f = srv->spam_filters; f; f = f->next) n++;
+    for (spam_filter_t *f = srv->spam_net; f; f = f->next) n++;
     return n;
 }
 
+/* Our rules (only while [spam] enabled and filters_enabled), then the global ones other servers sent: those apply here
+ * whatever this server's own switches say -- a leaf can't switch the hub's rules off, only override them with a rule of
+ * its own above them (`allow` lets the text through untouched). */
 static int run_filters(server_t *srv, client_t *cl, unsigned kind, const char *what,
                        const char *text, int quiet) {
-    if (!srv->cfg.spam.filters_enabled || !srv->spam_filters) return 0;
+    int own = srv->cfg.spam.enabled && srv->cfg.spam.filters_enabled;
+    if (!(own && srv->spam_filters) && !srv->spam_net) return 0;
     char clean[512];
     strip_codes(clean, sizeof clean, text);
-    for (spam_filter_t *f = srv->spam_filters; f; f = f->next) {
-        if (!(f->targets & kind)) continue;
-        if (regexec(&f->re, clean, 0, NULL, 0) != 0) continue;
-        return apply_action(srv, cl, f->action, f->duration, f->reason, what, text, quiet);
-    }
+    spam_filter_t *lists[2] = {own ? srv->spam_filters : NULL, srv->spam_net};
+    for (int i = 0; i < 2; i++)
+        for (spam_filter_t *f = lists[i]; f; f = f->next) {
+            if (!(f->targets & kind)) continue;
+            if (regexec(&f->re, clean, 0, NULL, 0) != 0) continue;
+            if (f->action == SPAM_ALLOW) return 0;
+            return apply_action(srv, cl, f->action, f->duration, f->reason, what, text, quiet);
+        }
     return 0;
 }
 
 int spam_check_text(server_t *srv, client_t *cl, unsigned kind, const char *text) {
-    if (!srv->cfg.spam.enabled || is_exempt(&srv->cfg.spam, cl)) return 0;
+    if ((!srv->cfg.spam.enabled && !srv->spam_net) || is_exempt(&srv->cfg.spam, cl)) return 0;
     const char *what = kind == SPAM_T_AWAY ? "AWAY" : kind == SPAM_T_QUIT ? "QUIT" : kind == SPAM_T_PART ? "PART" : "TOPIC";
     /* quit/part reasons are swapped for a blank one by the caller, silently */
     return run_filters(srv, cl, kind, what, text, kind == SPAM_T_QUIT || kind == SPAM_T_PART);
@@ -374,7 +510,7 @@ int spam_check_text(server_t *srv, client_t *cl, unsigned kind, const char *text
 
 int spam_check_message(server_t *srv, client_t *cl, const char *target, const char *text, int is_notice) {
     const cfg_spam_t *sp = &srv->cfg.spam;
-    if (!sp->enabled) return 0;
+    if (!sp->enabled && !srv->spam_net) return 0; /* off: only global rules from other servers still run */
     if (cl->fd < 0 || cl->is_service || (sp->exempt_opers && OPER_CAN(cl, OPER_PRIV_IMMUNE))) return 0;
 
     const char *t = target;
@@ -403,7 +539,7 @@ int spam_check_message(server_t *srv, client_t *cl, const char *target, const ch
     if (trusted_account) return 0;
 
     /* 1. fresh connections can't PM users */
-    if (!chan && sp->new_user_period > 0 && now - cl->signon_time < sp->new_user_period) {
+    if (sp->enabled && !chan && sp->new_user_period > 0 && now - cl->signon_time < sp->new_user_period) {
         char m[200];
         snprintf(m, sizeof m, "You must be connected %lds before messaging users (%lds to go)",
                  sp->new_user_period, sp->new_user_period - (long)(now - cl->signon_time));
@@ -419,6 +555,7 @@ int spam_check_message(server_t *srv, client_t *cl, const char *target, const ch
     if (verdict) return verdict;
 
     /* 3. recipient / repeat limits */
+    if (!sp->enabled) return 0;
     if (sp->max_targets == 0 && sp->max_repeat == 0) return 0;
     if (sp->trust_age > 0 && now - cl->signon_time >= sp->trust_age) return 0;
     char clean[512];
@@ -451,7 +588,7 @@ static void rewrite_without(const char *path, const spam_filter_t *victim) {
     int dropped = 0;
     while (fgets(line, sizeof line, in)) {
         spam_filter_t f;
-        if (!dropped && parse_line(line, &f, err, sizeof err) == 0 && f.targets == victim->targets &&
+        if (!dropped && parse_line(line, &f, err, sizeof err) == 0 && f.targets == victim->targets && f.global == victim->global &&
             f.action == victim->action && strcmp(f.pattern, victim->pattern) == 0) { dropped = 1; continue; }
         fputs(line, out);
     }
@@ -469,20 +606,20 @@ static void append_rule(const char *path, const spam_filter_t *f) {
     fseek(fp, 0, SEEK_END);
     char line[700];
     format_rule(f, line, sizeof line);
-    fprintf(fp, "%s\n", line);
+    fprintf(fp, "%s%s\n", f->global ? "global " : "", line);
     fclose(fp);
 }
 
 static void spamfilter_list(server_t *srv, client_t *cl) {
-    if (!srv->cfg.spam.enabled) notice_self(srv, cl, "Note: [spam] enabled = false -- rules are not being enforced");
-    else if (!srv->cfg.spam.filters_enabled) notice_self(srv, cl, "Note: [spam] filters_enabled = false -- rules are not being enforced");
+    if (!srv->cfg.spam.enabled) notice_self(srv, cl, "Note: [spam] enabled = false -- only the global rules from other servers are being enforced");
+    else if (!srv->cfg.spam.filters_enabled) notice_self(srv, cl, "Note: [spam] filters_enabled = false -- only the global rules from other servers are being enforced");
     int i = 0;
-    for (spam_filter_t *f = srv->spam_filters; f; f = f->next) {
-        char rule[600], m[700];
-        format_rule(f, rule, sizeof rule);
-        snprintf(m, sizeof m, "#%d %s", ++i, rule);
-        notice_self(srv, cl, m);
-    }
+    for (int pass = 0; pass < 2; pass++)
+        for (spam_filter_t *f = pass ? srv->spam_net : srv->spam_filters; f; f = f->next) {
+            char m[760];
+            rule_line(srv, f, ++i, m, sizeof m);
+            notice_self(srv, cl, m);
+        }
     if (!i) notice_self(srv, cl, "No spam filters");
     char m[120];
     snprintf(m, sizeof m, "Spam protection has acted on %ld message(s) since start", srv->spam_hits);
@@ -496,15 +633,39 @@ void cmd_spamfilter(server_t *srv, client_t *cl, irc_message_t *msg) {
     if (!strcasecmp(sub, "DEL")) {
         int n = msg->nparams > 1 ? atoi(msg->params[1]) : 0;
         spam_filter_t **pp = &srv->spam_filters;
-        for (int i = 1; *pp && i < n; i++) pp = &(*pp)->next;
+        int i = 1, remote = 0;
+        for (; *pp && i < n; i++) pp = &(*pp)->next;
+        if (n >= 1 && !*pp) { /* past our own rules: the global ones other servers sent, numbered on from ours */
+            remote = 1;
+            for (pp = &srv->spam_net; *pp && i < n; i++) pp = &(*pp)->next;
+        }
         if (n < 1 || !*pp) { notice_self(srv, cl, "No such filter number (see SPAMFILTER LIST)"); return; }
+        if (remote) { /* another server's global rule: gone here now, and the owner is asked to drop it (its next set confirms) */
+            if (netsync_scope_refuse(srv, cl, "SPAMFILTER DEL of another server's global rule")) return;
+            spam_filter_t *gone = *pp;
+            char rule[600], origin[8], pat[256], note[500], m[300];
+            format_rule(gone, rule, sizeof rule);
+            snprintf(origin, sizeof origin, "%s", gone->origin);
+            snprintf(pat, sizeof pat, "%s", gone->pattern);
+            netserver_t *o = netsync_find_sid(srv, origin);
+            *pp = gone->next;
+            regfree(&gone->re);
+            free(gone);
+            netsync_spamfilter_del(srv, origin, rule);
+            snprintf(note, sizeof note, "%s removed global spam filter from %s: %s", cl->nick, o ? o->name : origin, pat);
+            server_notify_opers(srv, note);
+            snprintf(m, sizeof m, o ? "Spam filter removed; %s was asked to remove it at the source" : "Spam filter removed here only (%s is not linked)",
+                     o ? o->name : origin);
+            notice_self(srv, cl, m);
+            return;
+        }
         spam_filter_t *dead = *pp;
         *pp = dead->next;
         char path[CFG_PATH];
         if (config_spamfilters_path(&srv->cfg, path, sizeof path)) rewrite_without(path, dead);
         char note[400];
-        snprintf(note, sizeof note, "%s removed spam filter: %s", cl->nick, dead->pattern);
-        server_notify_opers(srv, note);
+        snprintf(note, sizeof note, "%s removed %sspam filter: %s", cl->nick, dead->global ? "global " : "", dead->pattern);
+        if (dead->global) { publish_global(srv); server_notify_network(srv, note); } else server_notify_opers(srv, note);
         regfree(&dead->re);
         free(dead);
         notice_self(srv, cl, "Spam filter removed");
@@ -513,20 +674,23 @@ void cmd_spamfilter(server_t *srv, client_t *cl, irc_message_t *msg) {
 
     if (!strcasecmp(sub, "ADD")) {
         if (!srv->cfg.spam.filters_enabled) { notice_self(srv, cl, "Filters are disabled ([spam] filters_enabled = false)"); return; }
-        if (msg->nparams < 6) {
-            notice_self(srv, cl, "Usage: SPAMFILTER ADD <targets> <block|warn|kill|zline|hide|shun> <duration|-> <reason_with_underscores> <regex>");
+        int gl = msg->nparams > 1 && !strcasecmp(msg->params[1], "GLOBAL"); /* ADD GLOBAL <targets> ...: every linked server enforces it */
+        const char **a = (const char **)msg->params + (gl ? 1 : 0);        /* a[1..] = targets action duration reason regex */
+        if (msg->nparams < (gl ? 7 : 6)) {
+            notice_self(srv, cl, "Usage: SPAMFILTER ADD [GLOBAL] <targets> <block|warn|kill|zline|hide|shun|allow> <duration|-> <reason_with_underscores> <regex>");
             return;
         }
+        if (gl && netsync_scope_refuse(srv, cl, "SPAMFILTER ADD GLOBAL (a network-wide rule; leave out GLOBAL for this server)")) return;
         if (list_count(srv) >= SPAM_MAX_FILTERS) { notice_self(srv, cl, "Too many spam filters"); return; }
         char reason[128], pattern[256], rule[600], err[160];
-        snprintf(reason, sizeof reason, "%s", msg->params[4]);
+        snprintf(reason, sizeof reason, "%s", a[4]);
         for (char *c = reason; *c; c++) { if (*c == '_') *c = ' '; else if (*c == '"') *c = '\''; }
         pattern[0] = '\0';
-        for (int i = 5; i < msg->nparams; i++) { /* tolerate a forgotten ':' on a regex containing spaces */
+        for (int i = 5; i < msg->nparams - (gl ? 1 : 0); i++) { /* tolerate a forgotten ':' on a regex containing spaces */
             size_t l = strlen(pattern);
-            snprintf(pattern + l, sizeof pattern - l, "%s%s", i > 5 ? " " : "", msg->params[i]);
+            snprintf(pattern + l, sizeof pattern - l, "%s%s", i > 5 ? " " : "", a[i]);
         }
-        snprintf(rule, sizeof rule, "%s %s %s \"%s\" %s", msg->params[1], msg->params[2], msg->params[3], reason, pattern);
+        snprintf(rule, sizeof rule, "%s%s %s %s \"%s\" %s", gl ? "global " : "", a[1], a[2], a[3], reason, pattern);
         spam_filter_t *f = malloc(sizeof *f);
         if (!f) return;
         if (parse_line(rule, f, err, sizeof err) != 0 || compile_rule(f, err, sizeof err) != 0) {
@@ -536,15 +700,16 @@ void cmd_spamfilter(server_t *srv, client_t *cl, irc_message_t *msg) {
             free(f);
             return;
         }
-        list_append(srv, f);
+        list_append(&srv->spam_filters, f);
         char path[CFG_PATH];
         if (config_spamfilters_path(&srv->cfg, path, sizeof path)) append_rule(path, f);
         char note[500];
-        snprintf(note, sizeof note, "%s added spam filter #%d: %s", cl->nick, list_count(srv), pattern);
-        server_notify_opers(srv, note);
-        notice_self(srv, cl, srv->cfg.spam.enabled ? "Spam filter added"
-                                                   : "Spam filter added (note: [spam] enabled = false, not enforced yet)");
+        snprintf(note, sizeof note, "%s added %sspam filter #%d: %s", cl->nick, gl ? "global " : "", list_count(srv), pattern);
+        if (gl) { publish_global(srv); server_notify_network(srv, note); } else server_notify_opers(srv, note);
+        notice_self(srv, cl, gl ? "Global spam filter added (every linked server enforces it)"
+                                : srv->cfg.spam.enabled ? "Spam filter added"
+                                                        : "Spam filter added (note: [spam] enabled = false, not enforced yet)");
         return;
     }
-    notice_self(srv, cl, "Usage: SPAMFILTER [LIST] | ADD <targets> <action> <duration|-> <reason> <regex> | DEL <n>");
+    notice_self(srv, cl, "Usage: SPAMFILTER [LIST] | ADD [GLOBAL] <targets> <action> <duration|-> <reason> <regex> | DEL <n>");
 }

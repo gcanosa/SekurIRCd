@@ -35,52 +35,54 @@ int cmd_opers_rehash(server_t *srv) {
     client_t *c, *tmp;
     HASH_ITER(hh, srv->users, c, tmp) {
         if (c->remote || !(c->umodes & UMODE_O) || !c->oper_name[0]) continue;
+        if (c->oper_svc) { /* granted by services: it stays while this server still takes grants, minus what the hub denies now */
+            if (srv->cfg.security.accept_services_opers) { c->oper_privs = c->oper_svc_privs & ~srv->oper_deny; continue; }
+            cmd_deoper(srv, c, "this server no longer takes oper grants from services ([security] accept_services_opers)");
+            n++;
+            continue;
+        }
         const cfg_operator_t *op = NULL;
         for (int i = 0; i < srv->cfg.n_operators && !op; i++)
             if (strcmp(srv->cfg.operators[i].name, c->oper_name) == 0) op = &srv->cfg.operators[i];
         int host_ok = 0;
         for (int j = 0; op && j < op->n_hosts && !host_ok; j++) host_ok = irc_host_mask_match(c->user, c->ip, op->hosts[j]);
         if (op && host_ok) { c->oper_privs = (op->privs ? op->privs : OPER_PRIV_ALL) & ~srv->oper_deny; continue; }
-        char prefix[320], line[200];
-        client_prefix(c, prefix, sizeof prefix);
-        c->umodes &= ~(UMODE_O | UMODE_OPERONLY);
-        c->oper_name[0] = '\0';
-        c->oper_privs = 0;
-        irc_build(line, sizeof line, NULL, 0, prefix, "MODE", (const char *[]){c->nick, "-o"}, 2, NULL);
-        client_send(c, line);
-        netsync_user_modes(srv, c);
-        notice_self(srv, c, "You are no longer an IRC operator: your oper login was removed or changed in the server config");
+        cmd_deoper(srv, c, "your oper login was removed or changed in the server config");
         n++;
     }
     return n;
 }
 
-static void finish_oper(server_t *srv, client_t *cl, const char *op_name, int pw_ok) {
-    if (!pw_ok) {
-        cl->oper_fails++;
-        char snote[300];
-        snprintf(snote, sizeof snote, "Failed OPER attempt by %s (%s@%s)", cl->nick, cl->user, cl->realhost[0] ? cl->realhost : cl->host);
-        server_notify_opers(srv, snote);
-        if (cl->oper_fails >= MAX_OPER_FAILS) {
-            snprintf(cl->quit_reason, sizeof cl->quit_reason, "Too many failed OPER attempts");
-            client_mark_quit(cl);
-            log_warn("oper", "%s disconnected: too many failed OPER attempts", cl->nick);
-            return;
-        }
-        client_reply(cl, N_PASSWDMISMATCH, NULL, 0, "Password incorrect");
-        return;
-    }
+/* -o and the oper-only modes, to the user and the network. */
+void cmd_deoper(server_t *srv, client_t *cl, const char *why) {
+    char prefix[320], line[200], note[300];
+    client_prefix(cl, prefix, sizeof prefix);
+    cl->umodes &= ~(UMODE_O | UMODE_OPERONLY);
+    cl->oper_name[0] = '\0';
+    cl->oper_privs = 0;
+    cl->oper_svc = 0;
+    cl->oper_svc_privs = 0;
+    irc_build(line, sizeof line, NULL, 0, prefix, "MODE", (const char *[]){cl->nick, "-o"}, 2, NULL);
+    client_send(cl, line);
+    netsync_user_modes(srv, cl);
+    snprintf(note, sizeof note, "You are no longer an IRC operator: %s", why);
+    notice_self(srv, cl, note);
+}
 
-    cl->oper_fails = 0;
+/* The part of becoming an oper that both /OPER and services' SVSOPER share: privileges, +o and the oper-only modes, the
+ * oper host, the notices. cl->oper_svc says which of the two it is. */
+static void grant_oper(server_t *srv, client_t *cl, const char *op_name) {
     snprintf(cl->oper_name, sizeof cl->oper_name, "%s", op_name);
     cl->oper_privs = OPER_PRIV_ALL; /* a login without `privileges` keeps today's all-powerful behaviour */
     const char *om = srv->cfg.security.oper_modes;
-    for (int i = 0; i < srv->cfg.n_operators; i++) {
-        const cfg_operator_t *op = &srv->cfg.operators[i];
-        if (strcmp(op->name, op_name) != 0) continue;
-        if (op->privs) cl->oper_privs = op->privs;
-        if (op->modes[0]) om = op->modes;
-    }
+    if (cl->oper_svc) cl->oper_privs = cl->oper_svc_privs; /* granted by services: exactly what it named */
+    else
+        for (int i = 0; i < srv->cfg.n_operators; i++) {
+            const cfg_operator_t *op = &srv->cfg.operators[i];
+            if (strcmp(op->name, op_name) != 0) continue;
+            if (op->privs) cl->oper_privs = op->privs;
+            if (op->modes[0]) om = op->modes;
+        }
     cl->oper_privs &= ~srv->oper_deny; /* what the hub we link to takes off our opers */
     /* "+o" plus whichever configured modes weren't already on ("+" in om is a login's explicit "just o") */
     char added[32] = "+o";
@@ -125,6 +127,50 @@ static void finish_oper(server_t *srv, client_t *cl, const char *op_name, int pw
     char snote[128];
     snprintf(snote, sizeof snote, "%s is now an IRC operator (%s)", cl->nick, op_name);
     server_notify_opers(srv, snote);
+}
+
+static void finish_oper(server_t *srv, client_t *cl, const char *op_name, int pw_ok) {
+    if (!pw_ok) {
+        cl->oper_fails++;
+        char snote[300];
+        snprintf(snote, sizeof snote, "Failed OPER attempt by %s (%s@%s)", cl->nick, cl->user, cl->realhost[0] ? cl->realhost : cl->host);
+        server_notify_opers(srv, snote);
+        if (cl->oper_fails >= MAX_OPER_FAILS) {
+            snprintf(cl->quit_reason, sizeof cl->quit_reason, "Too many failed OPER attempts");
+            client_mark_quit(cl);
+            log_warn("oper", "%s disconnected: too many failed OPER attempts", cl->nick);
+            return;
+        }
+        client_reply(cl, N_PASSWDMISMATCH, NULL, 0, "Password incorrect");
+        return;
+    }
+
+    cl->oper_fails = 0;
+    cl->oper_svc = 0;
+    grant_oper(srv, cl, op_name);
+}
+
+/* SVSOPER from services (cmd_reg.c's svc_command): `privs` is the OPER_PRIV names its [[opers]] entry gives the account the user
+ * is logged in to, or "-" when it gives none (any more). Nothing happens when this server does not take grants from services,
+ * or for a user who already is an oper through an [[operators]] block here. */
+void cmd_svsoper(server_t *srv, client_t *cl, const char *account, const char *privs) {
+    if (cl->remote) return;
+    if (!privs[0] || !strcmp(privs, "-")) {
+        if (cl->oper_svc) cmd_deoper(srv, cl, "services no longer lists your account as an operator");
+        return;
+    }
+    if (!srv->cfg.security.accept_services_opers) return;
+    if ((cl->umodes & UMODE_O) && !cl->oper_svc) return;
+    unsigned bits = oper_priv_from_csv(privs);
+    if (!bits) return;
+    if (cl->oper_svc && cl->oper_svc_privs == bits && (cl->umodes & UMODE_O)) return; /* sent again after a services restart or a rehash */
+    int fresh = !cl->oper_svc || !(cl->umodes & UMODE_O);
+    cl->oper_svc = 1;
+    cl->oper_svc_privs = bits;
+    if (!fresh) { cl->oper_privs = bits & ~srv->oper_deny; return; } /* only the privileges changed */
+    char name[sizeof cl->oper_name];
+    snprintf(name, sizeof name, "services:%s", account);
+    grant_oper(srv, cl, name);
 }
 
 void cmd_oper(server_t *srv, client_t *cl, irc_message_t *msg) {

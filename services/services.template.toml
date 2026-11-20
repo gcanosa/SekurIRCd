@@ -83,6 +83,37 @@ realname = "Channel Registration Service"
 # Accounts allowed SUSPEND, UNSUSPEND, FDROP, SASET PASSWORD and full INFO.
 #admins = ["youraccount"]
 
+# --- network operators ---
+
+# An account that gets IRC operator status on whichever server it is logged in
+# to, with no [[operators]] block on that server: services tells the user's
+# server (SVSOPER) when they IDENTIFY or log in with SASL. Every other server
+# trusts an oper, so they reach the whole network. It ends when they log out or
+# disconnect, or when you remove the entry and reload (/REHASH on the hub, or
+# `services --rehash`): no restart.
+#
+# The login needs the account's TLS client certificate as well, so a stolen
+# password alone gets nothing (the server they connect to needs [tls]
+# request_client_cert = true, as for SASL EXTERNAL). certfp is the SHA-256 fingerprint of the
+# certificate they connect with (NickServ CERT INFO shows it once it is added;
+# colons are fine). password_only = true drops that requirement. privileges are
+# the [[operators]] names: kill, kline, sa, host, wallops, rehash, die, link,
+# override, auspex, immune, all (the default).
+#
+# Each server can refuse these grants with [security] accept_services_opers =
+# false, and a hub's oper_scope / oper_deny for a leaf still apply to them.
+# Keep one [[operators]] block on the hub too, for when services is down.
+#
+#[[opers]]
+#account    = "youraccount"
+#certfp     = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+#privileges = ["all"]
+#
+#[[opers]]
+#account       = "helper"
+#password_only = true
+#privileges    = ["kill", "kline"]
+
 # --- nick ownership ---
 
 # Someone using a registered nick must log in within enforce_grace seconds

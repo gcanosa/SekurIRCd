@@ -481,6 +481,7 @@ void config_defaults(config_t *out) {
     snprintf(out->security.host_masking_format, CFG_STR, "{token}.users.{network}");
     out->security.host_masking_token_bytes = 4;
     out->security.oper_host_masking = 0;
+    out->security.accept_services_opers = 1;
     snprintf(out->security.oper_host_format, CFG_STR, "netadmin.{network}");
     snprintf(out->security.oper_modes, sizeof out->security.oper_modes, "sw");
     for (int i = 0; i < N_DEFAULT_RESERVED_NICKS; i++)
@@ -687,6 +688,7 @@ static int build_config(toml_node_t *raw, const char *path, config_t *out,
     if (cfg_get_bool(sec, "host_masking_ip_ranges", 0, &out->security.host_masking_ip_ranges, errbuf, errbufsz, "security.host_masking_ip_ranges")) return -1;
     if (cfg_get_int(sec, "host_masking_keep_labels", 0, &out->security.host_masking_keep_labels, errbuf, errbufsz, "security.host_masking_keep_labels")) return -1;
     if (cfg_get_str(sec, "host_masking_secret", "", out->security.host_masking_secret, CFG_STR, errbuf, errbufsz, "security.host_masking_secret")) return -1;
+    if (cfg_get_bool(sec, "accept_services_opers", 1, &out->security.accept_services_opers, errbuf, errbufsz, "security.accept_services_opers")) return -1;
     if (cfg_get_bool(sec, "oper_host_masking", 0, &out->security.oper_host_masking, errbuf, errbufsz, "security.oper_host_masking")) return -1;
     if (cfg_get_str(sec, "oper_host_format", "netadmin.{network}", out->security.oper_host_format, CFG_STR, errbuf, errbufsz, "security.oper_host_format")) return -1;
     if (cfg_get_str(sec, "klines_file", "", out->security.klines_file, CFG_PATH, errbuf, errbufsz, "security.klines_file")) return -1;
