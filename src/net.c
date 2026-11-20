@@ -52,19 +52,21 @@ static void on_hup(int sig) { (void)sig; g_hup = 1; }
  * Returns 0 on success, -1 if `pid` doesn't exist or ps didn't report it. */
 int proc_stats(pid_t pid, double *cpu_pct, long *rss_kb) {
 #ifdef __CYGWIN__
-    /* Cygwin's own ps has no -o. Its /proc has the resident size, and no per-process CPU, so that reads 0. */
-    char path[48], line[128];
-    long rss = -1;
-    snprintf(path, sizeof path, "/proc/%d/status", (int)pid);
-    FILE *f = fopen(path, "r");
-    if (!f) return -1;
-    while (fgets(line, sizeof line, f))
-        if (sscanf(line, "VmRSS: %ld", &rss) == 1) break;
-    fclose(f);
-    if (rss < 0) return -1;
-    *rss_kb = rss;
-    *cpu_pct = 0;
-    return 0;
+    {
+        /* Cygwin's own ps has no -o. Its /proc has the resident size, and no per-process CPU, so that reads 0. */
+        char path[48], line[128];
+        long rss = -1;
+        snprintf(path, sizeof path, "/proc/%d/status", (int)pid);
+        FILE *f = fopen(path, "r");
+        if (!f) return -1;
+        while (fgets(line, sizeof line, f))
+            if (sscanf(line, "VmRSS: %ld", &rss) == 1) break;
+        fclose(f);
+        if (rss < 0) return -1;
+        *rss_kb = rss;
+        *cpu_pct = 0;
+        return 0;
+    }
 #endif
     char cmd[64];
     snprintf(cmd, sizeof cmd, "ps -o rss= -o %%cpu= -p %d 2>/dev/null", (int)pid);
