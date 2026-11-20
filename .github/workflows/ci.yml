@@ -11,7 +11,7 @@ permissions:
   contents: read
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false  # ponytail: off while the matrix is brought up (a run is 30+ min); back to true after
 
 jobs:
   # Linux x86-64, Linux arm64, macOS arm64: the runner's own toolchain.
