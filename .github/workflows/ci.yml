@@ -1,0 +1,80 @@
+name: CI
+# Every platform the website says SekurIRCd supports builds here and passes the unit tests and the integration suite.
+# A release (v* tag) needs all of these green.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Linux x86-64, Linux arm64, macOS arm64: the runner's own toolchain.
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - run: make -j4
+      - run: make check
+      - run: make itest
+
+  # FreeBSD, OpenBSD, NetBSD in a VM. The BSDs' own make is not GNU make, so these use gmake.
+  bsd:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: cpa.sh {0}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: freebsd
+            version: "15.1"
+            deps: sudo pkg install -y gmake python3
+          - os: openbsd
+            version: "8.0"
+            deps: sudo pkg_add -I gmake python%3
+          - os: netbsd
+            version: "11.1"
+            deps: sudo pkgin -y install gmake python313 && sudo ln -sf /usr/pkg/bin/python3.13 /usr/pkg/bin/python3
+    steps:
+      - uses: actions/checkout@v6
+      - uses: cross-platform-actions/action@v1.8.0
+        with:
+          operating_system: ${{ matrix.os }}
+          version: ${{ matrix.version }}
+      - run: ${{ matrix.deps }}
+      - run: gmake -j2
+      - run: gmake check
+      - run: gmake itest
+
+  # Windows: the Cygwin build (cygwin1.dll + the same code), the same tests.
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: C:\cygwin\bin\bash.exe --login -eo pipefail -o igncr '{0}'
+    env:
+      CHERE_INVOKING: "1"
+    steps:
+      - run: git config --global core.autocrlf input
+        shell: pwsh
+      - uses: actions/checkout@v6
+      - uses: cygwin/cygwin-install-action@v7
+        with:
+          packages: gcc-core make libssl-devel python312 procps-ng
+      - run: make -j4
+      - run: make check
+      - run: make itest
