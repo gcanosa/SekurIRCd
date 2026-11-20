@@ -188,7 +188,7 @@ def _refused(s, nick, host):
     try:
         s.client(nick, host=host)
         return False
-    except AssertionError:
+    except (AssertionError, ConnectionError):  # Cygwin delivers the refusal as a reset before the ERROR line
         return True
 
 

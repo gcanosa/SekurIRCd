@@ -41,7 +41,7 @@ jobs:
         include:
           - os: freebsd
             version: "15.1"
-            deps: sudo pkg install -y gmake python3
+            deps: sudo pkg install -y gmake python3 && sudo pkg install -y py$(python3 -c 'import sys; print("%d%d" % sys.version_info[:2])')-sqlite3
           - os: openbsd
             version: "8.0"
             deps: sudo pkg_add -I gmake python%3
