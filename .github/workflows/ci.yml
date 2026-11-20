@@ -3,7 +3,7 @@ name: CI
 # A release (v* tag) needs all of these green.
 on:
   push:
-    branches: [main]
+    branches: [main, ci-platforms]  # ci-platforms: temporary, while the matrix is brought up
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
