@@ -800,6 +800,13 @@ static void whois_one(server_t *srv, client_t *cl, const char *nick) {
         const char *p3z[] = {target->nick};
         client_reply(cl, N_WHOISSECURE, p3z, 1, "is using a secure connection");
     }
+    if (target->certfp[0]) { /* the fingerprint is a stable identifier (same across nicks, IPs, networks): the user and auspex opers only */
+        const char *pcf[] = {target->nick};
+        char m[160];
+        if (self_or_oper) snprintf(m, sizeof m, "has client certificate fingerprint %s", target->certfp);
+        else snprintf(m, sizeof m, "is using a TLS client certificate");
+        client_reply(cl, N_WHOISCERTFP, pcf, 1, m);
+    }
     if (target->account[0]) {
         const char *p3a[] = {target->nick, target->account};
         client_reply(cl, N_WHOISACCOUNT, p3a, 2, "is logged in as");

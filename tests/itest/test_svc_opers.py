@@ -166,3 +166,24 @@ def test_always_on_resume_tells_services_the_new_certificate():
         time.sleep(0.8)
         nocert = resume()
         assert not is_oper(nocert), "resumed without the certificate: the grant must go"
+
+
+def test_whois_shows_the_certificate_and_the_fingerprint_only_to_the_user_and_auspex():
+    d = tempfile.mkdtemp(prefix="itest-whoiscert-")
+    scrt, skey = make_cert(d)
+    sub = os.path.join(d, "u"); os.mkdir(sub)
+    ucrt, ukey = make_cert(sub)
+    fp = hashlib.sha256(ssl.PEM_cert_to_DER_cert(open(ucrt).read())).hexdigest()
+    s = Server(cfg=dict(BOSS, tls={"enabled": True, "port": 0, "cert_file": scrt, "key_file": skey, "request_client_cert": True}))
+    s.cfg["tls"]["port"] = s.tls_port
+    with s:
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname, ctx.verify_mode = False, ssl.CERT_NONE
+        ctx.load_cert_chain(ucrt, ukey)
+        certy = Client(0, "certy", sock=ctx.wrap_socket(socket.create_connection(("127.0.0.1", s.tls_port), timeout=3), server_hostname="x"))
+        plain, b = s.client("plain"), boss(s)
+        certline = lambda c, nick: [l for l in c.say(f"WHOIS {nick}", 0.5) if " 276 " in l]
+        assert [l.split(" :", 1)[1] for l in certline(plain, "certy")] == ["is using a TLS client certificate"], "others: the fact only"
+        assert fp in " ".join(certline(certy, "certy")), "the user sees their own fingerprint"
+        assert fp in " ".join(certline(b, "certy")), "an auspex oper sees it"
+        assert certline(certy, "plain") == [], "no certificate: no line"

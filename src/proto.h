@@ -270,6 +270,7 @@ size_t irc_time_tag_insert(const char *line, char *tag, size_t tagsz, size_t *at
 #define N_ENDOFMOTD        "376"
 #define N_WHOISHOST        "378"
 #define N_WHOISSECURE      "671"
+#define N_WHOISCERTFP      "276"
 #define N_WHOISBOT         "335"
 #define N_TIME             "391"
 

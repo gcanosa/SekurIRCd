@@ -1030,6 +1030,7 @@
     if (c === "301") return n + " is away: " + p[2];
     if (c === "313") return n + " is an IRC operator";
     if (c === "671") return n + " is using a secure connection";
+    if (c === "276") return n + " " + p[p.length - 1]; // "is using a TLS client certificate", or the fingerprint to the user and auspex opers
     if (c === "318") return "\u2500\u2500 end of whois \u2500\u2500";
     return p.slice(1).join(" ");
   }
