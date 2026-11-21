@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SekurIRCd upgrade assistant (git-clone installs; Python 3.8+, stdlib only).
+"""SekurIRCd upgrade assistant (git checkouts; Python 3.8+, stdlib only).
 
 Pick the latest release or the latest main, review what changes (versions,
 changelog, new config options), back everything up, build safely, install,
@@ -8,11 +8,15 @@ is only touched with your OK: before the restart it offers tools/confcheck.py
 --fix (settings moved to where they live now, the same behaviour, backups kept).
 Every run writes logs/SekurIRCd-upgrade-<date>.log.
 
+An install from a source tarball (no .git) isn't a checkout: the interactive run offers to make it one (only a .git
+folder is written, no file of yours is touched; undo with rm -rf .git). --check and --rollback just say so (exit 11).
+
   tools/upgrade.py                    interactive
-  tools/upgrade.py --check            report new releases/commits only (exit 10 = updates)
+  tools/upgrade.py --check            report new releases/commits only (exit 10 = updates, 11 = not a git checkout)
   tools/upgrade.py --dry-run          show everything, change nothing
   tools/upgrade.py --channel release --yes --backup-dir /srv/backups
   tools/upgrade.py --rollback         undo the last upgrade
+  tools/upgrade.py --convert --yes    turn a tarball install into a checkout without asking (--yes alone never does)
 """
 import argparse, collections, getpass, glob, hashlib, json, os, platform, re
 import shutil, socket, subprocess, sys, tarfile, textwrap, time, urllib.request
@@ -22,6 +26,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TTY = sys.stdout.isatty()
 ANSI = re.compile(r"\033\[[0-9;]*m")
 STATE_FILE = "logs/upgrade-state.json"
+DEFAULT_ORIGIN = "https://github.com/gcanosa/SekurIRCd.git"
+NOT_A_CLONE = 11  # exit status when there is no git checkout to work on (--check, --rollback, --yes without --convert)
 TEMPLATES = {  # template -> the live file an admin copied it to
     "config/sekurircd.template.toml": "config/sekurircd.toml",
     "config/protection.template.toml": "config/protection.toml",
@@ -453,8 +459,9 @@ def full_backup(dest, cur):
 
 
 # ---------------------------------------------------------------- source switch / build / install
-def dirty_files():
-    p = run(["git", "status", "--porcelain", "--untracked-files=no"])
+def dirty_files(modes=True):
+    """Tracked files that differ from HEAD; modes=False compares content only (a zip that lost the exec bits is still the same files)."""
+    p = run(["git", *([] if modes else ["-c", "core.fileMode=false"]), "status", "--porcelain", "--untracked-files=no"])
     return [l[3:] for l in p.stdout.splitlines()]  # not git(): its strip() would eat the first line's leading space
 
 
@@ -647,12 +654,98 @@ def current_state():
     return cur
 
 
+def has_head(): return run(["git", "rev-parse", "--verify", "--quiet", "HEAD^{commit}"], check=False).returncode == 0
+def has_origin(): return bool(git("remote", "get-url", "origin", check=False))
+
+
+def clone_problem():
+    """Why ROOT is not a git checkout of its own, or None. The .git must be HERE: a tarball unpacked inside some other
+    repository (a git-managed home directory) passes `git rev-parse --is-inside-work-tree`, and git would then answer,
+    and an upgrade would check out and reset, in the wrong repository."""
+    if not os.path.exists(".git"): return "it has no .git (a source tarball, or a plain copy)"
+    if not has_head(): return "its git repository has no commits"
+    if not has_origin(): return "its git repository has no 'origin' remote"
+    return None
+
+
+def require_clone():
+    """Every mode works on a git checkout. Without one --check and --rollback say so (exit 11); an upgrade offers to
+    convert the install, and only when asked to (--yes alone does not)."""
+    if not shutil.which("git"): die("git is required: the upgrader works on a git checkout. Install git, then run this again.")
+    if not os.path.exists("src/version.h"): die("This isn't a SekurIRCd source tree (src/version.h is missing).")
+    why = clone_problem()
+    if not why: return
+    out(); warn(bold("Not a git checkout: ") + why + ".")
+    if ARGS.check or ARGS.rollback:
+        die(f"Nothing to compare against. Run {bold('tools/upgrade.py')} without options to convert this install.", NOT_A_CLONE)
+    info("Upgrading works on a git checkout. This install can become one, fetched from " + bold(ARGS.origin) + ":")
+    info(dim("  · only .git is written; none of your files, config or binaries is touched"))
+    info(dim("  · the commit your files match best (the release named by version.h, or main) becomes the starting point"))
+    info(dim("  · undo any time with: rm -rf .git"))
+    if ARGS.dry_run:
+        out(); warn(bold("DRY RUN -- nothing was changed.")); LOG.w("RESULT: DRY RUN"); sys.exit(0)
+    if ARGS.yes and not ARGS.convert:
+        die("Not converting on --yes alone (creating .git is not something to do unattended). Add --convert, or run without --yes.", NOT_A_CLONE)
+    if not ARGS.convert and not ask("Convert it now?", True):
+        die("Cancelled -- nothing was changed.", 0)
+    convert_to_clone()
+
+
+def convert_to_clone():
+    """Make this install a checkout of upstream without touching a working file: only .git is written. HEAD goes to
+    whichever of the release tag named by version.h and the default branch the files match best (a tarball of main still
+    reports the last release's version); upgrade's switch() then keeps whatever differs, as it does for any checkout."""
+    made = not os.path.exists(".git")
+    unborn = made or not has_head()
+    try:
+        if made: git("init", "-q")
+        if not has_origin(): git("remote", "add", "origin", ARGS.origin)
+        info(f"fetching {git('remote', 'get-url', 'origin')} ...")
+        git("fetch", "--tags", "origin")
+    except RunError as e:
+        if made: shutil.rmtree(".git", ignore_errors=True)
+        die("Could not fetch upstream -- nothing was changed. " + (e.p.stderr.strip().splitlines() or [""])[0])
+    git("remote", "set-head", "origin", "-a", check=False)
+    branch = (git("symbolic-ref", "--short", "refs/remotes/origin/HEAD", check=False) or "origin/main").split("/", 1)[1]
+    if not unborn:
+        ok("added the origin remote"); return
+
+    def undo():
+        if made: shutil.rmtree(".git", ignore_errors=True)
+        else: git("update-ref", "-d", git("symbolic-ref", "HEAD"), check=False)
+
+    git("symbolic-ref", "HEAD", f"refs/heads/{branch}")  # before any reset, so no stray master is created
+    ver = version_of(open("src/version.h").read())
+    best = None
+    for ref in (f"v{ver}" if ver else None, f"origin/{branch}"):  # the release first: it wins a tie
+        if ref and describe(ref):
+            git("reset", "-q", "--mixed", ref)  # index only; the working files are never written
+            n = len(dirty_files(modes=False))
+            if best is None or n < best[0]: best = (n, ref)
+    if not best:
+        undo(); die(f"upstream has neither v{ver} nor origin/{branch} -- nothing was changed.")
+    git("reset", "-q", "--mixed", best[1])
+    git("branch", "--set-upstream-to", f"origin/{branch}", check=False)
+    d, dirty = describe(best[1]), dirty_files(modes=False)
+    many = len(dirty) > 10
+    out(); info(f"These files match {bold(d['ref'])} ({d['short']}, v{d['full']}, {d['date']}).")
+    if dirty:
+        warn(f"{len(dirty)} tracked file(s) differ from it:")
+        for l in dirty[:8]: info(dim("  " + l))
+        if len(dirty) > 8: info(dim(f"  ... and {len(dirty) - 8} more"))
+        info("They stay exactly as they are; an upgrade keeps them and saves upstream's new copy beside each as <file>.upstream-<version>.")
+    if many:
+        warn("That is not a close match to any release (a snapshot between releases?). Keeping all of those would mix old and")
+        info("new code. A fresh " + bold("git clone " + ARGS.origin) + " is the clean way.")
+    if not ask("Use this as the starting point?", not many):
+        undo(); die("Cancelled -- nothing was changed.", NOT_A_CLONE if ARGS.yes else 0)  # --yes refusing is not a success
+    ok(f"now a git checkout on {branch}, at {d['short']}")
+
+
 def preflight():
     step("Preflight")
     for tool in ("git", "make", os.environ.get("CC", "cc")):
         if not shutil.which(tool): die(f"required tool not found: {tool}")
-    if run(["git", "rev-parse", "--is-inside-work-tree"], check=False).returncode:
-        die("This upgrader needs a git clone of SekurIRCd.")
     p = run(["git", "fetch", "--tags", "origin"], check=False)
     (ok if p.returncode == 0 else warn)("fetched latest refs from origin" if p.returncode == 0
                                         else "could not reach origin -- using what's already fetched")
@@ -1036,6 +1129,8 @@ def main():
     ap.add_argument("--systemd", choices=("skip", "update", "enable"), help="systemd user units: skip, rewrite them, or rewrite + enable (default: ask; --yes = skip)")
     ap.add_argument("--rollback", action="store_true", help="undo the last upgrade")
     ap.add_argument("--check", action="store_true", help="only report new releases/commits (exit 10 if any)")
+    ap.add_argument("--convert", action="store_true", help="a source tarball becomes a git checkout without asking (--yes alone never does that)")
+    ap.add_argument("--origin", default=DEFAULT_ORIGIN, help="where --convert fetches upstream from (default: GitHub)")
     ap.add_argument("--selftest", action="store_true")
     ARGS = ap.parse_args()
     if ARGS.selftest: return selftest()
@@ -1050,6 +1145,7 @@ def main():
     out(bold(cyan("  Upgrade assistant")) + (yellow("  [DRY RUN]") if ARGS.dry_run else ""))
     out(dim(f"  {ROOT}\n  log: {LOG.path}"))
     try:
+        require_clone()
         if ARGS.check:
             check()
         elif ARGS.rollback:

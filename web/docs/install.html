@@ -108,9 +108,15 @@ QUIT</pre>
 <p>For a git-clone install, <code>tools/upgrade.py</code> picks the latest release or the latest <code>main</code>, shows what changes (versions, changelog,
   new config options), backs everything up, builds, installs and optionally restarts, and can roll back.</p>
 <pre>tools/upgrade.py              # interactive
-tools/upgrade.py --check      # only report new releases/commits (exit 10 = updates available)
+tools/upgrade.py --check      # only report new releases/commits (exit 10 = updates available, 11 = not a git checkout)
 tools/upgrade.py --dry-run    # show everything, change nothing
 tools/upgrade.py --rollback   # undo the last upgrade</pre>
+<p>Installed from a source tarball (<code>.tar.gz</code> or zip) instead of <code>git clone</code>? There is no <code>.git</code> to upgrade from, so the
+  interactive run offers to make one: it fetches upstream into a new <code>.git</code> and points it at the commit your files match best (the release
+  <code>src/version.h</code> names, or <code>main</code>), shows any files that differ, and carries on with the upgrade. Only <code>.git</code> is
+  written; none of your files, config or binaries is touched, and <code>rm -rf .git</code> undoes it. <code>--yes</code> alone never converts (use
+  <code>--convert</code> for that, and <code>--origin URL</code> to fetch from a mirror or fork). If the files match no release closely, it advises a fresh
+  <code>git clone</code> instead and defaults to no.</p>
 <p>Your live config is only changed with your OK: before restarting it offers <code>tools/confcheck.py --fix</code>, which moves settings to where they
   live now. Locally edited files are kept. If upstream rewrote its history with the same code, it moves the checkout onto it. It also warns
   when what's running is older than the checkout (a stale build, or a daemon started before the last build) and offers to rebuild and restart.
