@@ -5,6 +5,7 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore: ["web/**", "**.md"]  # docs can't change a build or a test; tags and pull requests always run
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
