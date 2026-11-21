@@ -175,13 +175,13 @@ def test_link_allowed_ips_rejects_other_sources():
     with s:
         sk = socket.create_connection(("127.0.0.1", s.link_port), timeout=2)
         sk.settimeout(1.0)
-        sk.sendall(b"PASS pw\r\nSERVER leaf1 1 :x\r\n")
         try:
+            sk.sendall(b"PASS pw\r\nSERVER leaf1 1 :x\r\n")
             data = sk.recv(200)
         except socket.timeout:
             data = b"timeout"
-        except ConnectionResetError:
-            data = b""  # closed with our unread bytes still queued -> RST: also a rejection
+        except ConnectionError:
+            data = b""  # closed with our unread bytes still queued -> a reset (Cygwin: "aborted"): also a rejection
         assert data in (b"", b"timeout") and b"SERVER" not in data, data
 
 
