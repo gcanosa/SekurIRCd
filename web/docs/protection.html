@@ -247,8 +247,9 @@ qPt zline 1h "advertising in reason" https?://[^ ]+.*(casino|porn)</pre>
   rule is removed here only and comes back when that server relinks.</li>
 <li><strong>They bind a server whose own <code>[spam]</code> is off.</strong> With <code>enabled = false</code> (or <code>filters_enabled = false</code>) a server ignores its own
   rules, the new-connection restriction and the limits, but still enforces the global rules it received. Opers, services and (when enabled) identified accounts stay exempt.</li>
-<li><strong>A server's own rules come first.</strong> Rules are checked top to bottom, the server's own ahead of the global ones, so a leaf overrides one with a rule of
-  its own: <code>/SPAMFILTER ADD pc allow - ok :that text</code> lets it through there while every other global rule still applies.</li>
+<li><strong>The hub's rules come first.</strong> A server checks the global rules it received before its own, and the first match wins, so a leaf can't undo the hub's rule.
+  A leaf's own rules still add to them. <code>/SPAMFILTER</code> lists them in that order. For an exception to a global rule, put a global <code>allow</code> rule above it
+  in the hub's file (or delete the rule, add <code>/SPAMFILTER ADD GLOBAL pc allow - ok :that text</code>, and add the rule back): the exception then holds on every server.</li>
 <li><strong>A leaf the hub limits can't publish.</strong> If the hub's <code>[[links.peers]]</code> entry for a leaf has <code>oper_scope = "local"</code>, that leaf refuses
   <code>ADD GLOBAL</code>, and the hub drops global rules it sends anyway. The same limit stops that leaf's opers from deleting another server's global rule. Its own local rules still work there.</li>
 </ul>

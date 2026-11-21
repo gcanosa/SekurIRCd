@@ -1,6 +1,7 @@
 """Global spam filters: a rule added on one server (SPAMFILTER ADD GLOBAL, or a `global` line in spamfilters.conf) is enforced
-on every linked server, even where [spam] is off; a server's own rules and `allow` override it; a relink restores it; a
-leaf the hub limits to its own server (oper_scope = local) can't publish one."""
+on every linked server, even where [spam] is off; the global rules are checked before a server's own, so a leaf can't undo
+one (the exception is a global `allow` ahead of it on the hub); a relink restores them; a leaf the hub limits to its own
+server (oper_scope = local) can't publish one."""
 import re, time
 from harness import Server, Client
 
@@ -59,7 +60,7 @@ def test_a_global_rule_binds_a_leaf_that_has_spam_off():
         hub.stop(); leaf.stop()
 
 
-def test_the_leaf_can_override_with_its_own_rules_and_a_relink_restores_the_set():
+def test_global_rules_come_first_a_leaf_cannot_undo_them_and_a_relink_restores_the_set():
     hub, leaf = pair(ON)
     try:
         hop, lop = oper(hub, "hop"), oper(leaf, "lop")
@@ -70,13 +71,24 @@ def test_the_leaf_can_override_with_its_own_rules_and_a_relink_restores_the_set(
         time.sleep(0.5)
         assert not delivered(u, rx, "buyspam here")
         assert not delivered(u, rx, "cheapstuff here")
-        # a rule of the leaf's own, ahead of the global ones, lets that text through; the other rule still bites
+        # the leaf's own `allow` does not undo the hub's rule: the hub's rules are checked first
         lop.say("SPAMFILTER ADD c allow - ok :buyspam", 0.6)
-        assert delivered(u, rx, "buyspam here"), "local allow overrides the global rule"
-        assert not delivered(u, rx, "cheapstuff here"), "the other global rule still applies"
+        assert not delivered(u, rx, "buyspam here"), "a leaf's allow can't override the hub's rule"
+        assert not delivered(u, rx, "cheapstuff here")
         out = lop.say("SPAMFILTER", 0.6)
-        assert any("#1 " in l and "allow" in l for l in out) and any("#2 [global from hub.test.net]" in l for l in out), out
-        # the leaf restarts: the hub's burst brings the set back (the local allow is in the leaf's file)
+        assert any("#1 [global from hub.test.net]" in l for l in out) and any("#3 " in l and "allow" in l for l in out), \
+            ("listed in the order they are checked: the hub's rules, then the leaf's own", out)
+        # its own rules still add to the hub's
+        lop.say("SPAMFILTER ADD c block - mine :localword", 0.6)
+        assert not delivered(u, rx, "a localword here"), "the leaf's own rule works next to the global ones"
+        # the exception is made on the hub: a global allow ahead of the block (delete the block, add allow, add the block back)
+        hop.say("SPAMFILTER DEL 1", 0.6)
+        hop.say("SPAMFILTER ADD GLOBAL c allow - friends :buyspam for friends", 0.6)
+        hop.say("SPAMFILTER ADD GLOBAL c block - ad :buyspam", 0.6)
+        time.sleep(0.6)
+        assert delivered(u, rx, "buyspam for friends"), "the hub's allow lets that text through on the leaf"
+        assert not delivered(u, rx, "buyspam here"), "and the block still bites the rest"
+        # the leaf restarts: the hub's burst brings the set back, in order (the leaf's own rules are in its file)
         u.close(); lop.close()
         leaf.restart()
         time.sleep(2.5)
@@ -84,7 +96,9 @@ def test_the_leaf_can_override_with_its_own_rules_and_a_relink_restores_the_set(
         u.say("JOIN #h")
         time.sleep(0.5)
         assert not delivered(u, rx, "cheapstuff after relink"), "global rule back after the leaf restarted"
-        assert delivered(u, rx, "buyspam after relink"), "and the leaf's own allow came back from its file"
+        assert delivered(u, rx, "buyspam for friends"), "the hub's allow came back too"
+        assert not delivered(u, rx, "buyspam after relink")
+        assert not delivered(u, rx, "a localword after relink"), "and the leaf's own rule came back from its file"
     finally:
         hub.stop(); leaf.stop()
 

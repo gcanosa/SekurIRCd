@@ -118,8 +118,8 @@ zline_duration = "1h"
 
 # Relative to this file. "" = no file: /SPAMFILTER rules live in memory only.
 # These two switch this server's OWN rules. Global rules that other servers send
-# keep applying when they are off, and `allow` rules of your own can override
-# them.
+# keep applying when they are off, and they are checked before the server's own
+# (a leaf's rules can't undo the hub's).
 filters_enabled = true
 filters_file = "spamfilters.conf"
 

@@ -877,14 +877,25 @@ static void test_spam_global_rules(void) {
     spam_net_receive(&srv, "1HB", "ADD", "pc block - \"ad\" buyspam");
     assert(spam_check_message(&srv, cl, "#c", "buyspam now", 0) == 1);
 
-    /* our own rule is checked first: allow lets the text through, while the other global rule still bites */
+    /* the global rules come first: an `allow` of our own can't undo the hub's rule, and our other rules still add to them */
     irc_message_t m;
     memset(&m, 0, sizeof m);
     const char *allow[] = {"ADD", "pc", "allow", "-", "ok", "buyspam"};
     m.nparams = 6; for (int i = 0; i < 6; i++) m.params[i] = (char *)allow[i];
     cmd_spamfilter(&srv, cl, &m);
-    assert(spam_check_message(&srv, cl, "#c", "buyspam now", 0) == 0);
+    assert(spam_check_message(&srv, cl, "#c", "buyspam now", 0) == 1);
     assert(spam_check_message(&srv, cl, "#c", "an otherword", 0) == 1);
+    const char *own[] = {"ADD", "pc", "block", "-", "mine", "localword"};
+    for (int i = 0; i < 6; i++) m.params[i] = (char *)own[i];
+    cmd_spamfilter(&srv, cl, &m);
+    assert(spam_check_message(&srv, cl, "#c", "a localword", 0) == 1);
+
+    /* the exception to a global rule is a global allow ahead of it, from the server that owns the rule */
+    spam_net_receive(&srv, "1HB", "CLEAR", NULL);
+    spam_net_receive(&srv, "1HB", "ADD", "pc allow - \"friends\" buyspam for friends");
+    spam_net_receive(&srv, "1HB", "ADD", "pc block - \"ad\" buyspam");
+    assert(spam_check_message(&srv, cl, "#c", "buyspam for friends", 0) == 0);
+    assert(spam_check_message(&srv, cl, "#c", "buyspam now", 0) == 1);
 
     spam_free(&srv);
     assert(srv.spam_filters == NULL && srv.spam_net == NULL);

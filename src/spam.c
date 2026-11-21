@@ -8,9 +8,10 @@
  * Filter file format, one rule per line (# comments and blank lines ok):
  *   [global] <targets> <action> <duration|-> "<reason>" <regex to end of line>
  * e.g.  pcn block - "advertising" (buy|cheap) +viagra
- * A "global" rule is also published to every linked server (netsync SPAMFILTER): they keep it in srv->spam_net, behind
- * their own rules (first match wins, so a local rule or an `allow` overrides it) and replace the whole set whenever
- * the origin sends it again. They live in memory there and come back with the link's burst.
+ * A "global" rule is also published to every linked server (netsync SPAMFILTER): they keep it in srv->spam_net, checked
+ * AHEAD of their own rules (first match wins, so a leaf can't undo the hub's rule; the exception to one is a global
+ * `allow` above it in the same file) and replace the whole set whenever the origin sends it again. They live in memory
+ * there and come back with the link's burst.
  * Regexes are POSIX ERE, case-insensitive, matched against the text with
  * mIRC colour/formatting codes stripped. */
 #include "spam.h"
@@ -219,6 +220,12 @@ void spam_free(server_t *srv) {
 static int list_count(const server_t *srv) {
     int n = 0;
     for (const spam_filter_t *f = srv->spam_filters; f; f = f->next) n++;
+    return n;
+}
+
+static int net_count(const server_t *srv) {
+    int n = 0;
+    for (const spam_filter_t *f = srv->spam_net; f; f = f->next) n++;
     return n;
 }
 
@@ -481,16 +488,16 @@ int spam_filter_count(server_t *srv) {
     return n;
 }
 
-/* Our rules (only while [spam] enabled and filters_enabled), then the global ones other servers sent: those apply here
- * whatever this server's own switches say -- a leaf can't switch the hub's rules off, only override them with a rule of
- * its own above them (`allow` lets the text through untouched). */
+/* The global rules other servers sent come first, then ours (only while [spam] enabled and filters_enabled): the global
+ * ones apply here whatever this server's own switches say, and a rule of ours can't undo one -- the hub's word is final.
+ * Ours still add to them. An exception to a global rule is a global `allow` ahead of it on the server that owns it. */
 static int run_filters(server_t *srv, client_t *cl, unsigned kind, const char *what,
                        const char *text, int quiet) {
     int own = srv->cfg.spam.enabled && srv->cfg.spam.filters_enabled;
     if (!(own && srv->spam_filters) && !srv->spam_net) return 0;
     char clean[512];
     strip_codes(clean, sizeof clean, text);
-    spam_filter_t *lists[2] = {own ? srv->spam_filters : NULL, srv->spam_net};
+    spam_filter_t *lists[2] = {srv->spam_net, own ? srv->spam_filters : NULL};
     for (int i = 0; i < 2; i++)
         for (spam_filter_t *f = lists[i]; f; f = f->next) {
             if (!(f->targets & kind)) continue;
@@ -614,8 +621,8 @@ static void spamfilter_list(server_t *srv, client_t *cl) {
     if (!srv->cfg.spam.enabled) notice_self(srv, cl, "Note: [spam] enabled = false -- only the global rules from other servers are being enforced");
     else if (!srv->cfg.spam.filters_enabled) notice_self(srv, cl, "Note: [spam] filters_enabled = false -- only the global rules from other servers are being enforced");
     int i = 0;
-    for (int pass = 0; pass < 2; pass++)
-        for (spam_filter_t *f = pass ? srv->spam_net : srv->spam_filters; f; f = f->next) {
+    for (int pass = 0; pass < 2; pass++) /* in the order they are checked: the global rules first */
+        for (spam_filter_t *f = pass ? srv->spam_filters : srv->spam_net; f; f = f->next) {
             char m[760];
             rule_line(srv, f, ++i, m, sizeof m);
             notice_self(srv, cl, m);
@@ -632,13 +639,9 @@ void cmd_spamfilter(server_t *srv, client_t *cl, irc_message_t *msg) {
 
     if (!strcasecmp(sub, "DEL")) {
         int n = msg->nparams > 1 ? atoi(msg->params[1]) : 0;
-        spam_filter_t **pp = &srv->spam_filters;
-        int i = 1, remote = 0;
-        for (; *pp && i < n; i++) pp = &(*pp)->next;
-        if (n >= 1 && !*pp) { /* past our own rules: the global ones other servers sent, numbered on from ours */
-            remote = 1;
-            for (pp = &srv->spam_net; *pp && i < n; i++) pp = &(*pp)->next;
-        }
+        int nnet = net_count(srv), remote = n >= 1 && n <= nnet; /* numbered as LIST shows them: other servers' rules first, then ours */
+        spam_filter_t **pp = remote ? &srv->spam_net : &srv->spam_filters;
+        for (int i = remote ? 1 : nnet + 1; n >= 1 && *pp && i < n; i++) pp = &(*pp)->next;
         if (n < 1 || !*pp) { notice_self(srv, cl, "No such filter number (see SPAMFILTER LIST)"); return; }
         if (remote) { /* another server's global rule: gone here now, and the owner is asked to drop it (its next set confirms) */
             if (netsync_scope_refuse(srv, cl, "SPAMFILTER DEL of another server's global rule")) return;
@@ -704,7 +707,7 @@ void cmd_spamfilter(server_t *srv, client_t *cl, irc_message_t *msg) {
         char path[CFG_PATH];
         if (config_spamfilters_path(&srv->cfg, path, sizeof path)) append_rule(path, f);
         char note[500];
-        snprintf(note, sizeof note, "%s added %sspam filter #%d: %s", cl->nick, gl ? "global " : "", list_count(srv), pattern);
+        snprintf(note, sizeof note, "%s added %sspam filter #%d: %s", cl->nick, gl ? "global " : "", net_count(srv) + list_count(srv), pattern);
         if (gl) { publish_global(srv); server_notify_network(srv, note); } else server_notify_opers(srv, note);
         notice_self(srv, cl, gl ? "Global spam filter added (every linked server enforces it)"
                                 : srv->cfg.spam.enabled ? "Spam filter added"
