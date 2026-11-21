@@ -99,6 +99,16 @@ td.n,th.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
 #tip .row{display:flex;align-items:center;gap:6px}
 .tag{font-size:11px;font-weight:600;padding:1px 6px;border-radius:4px;background:var(--surface-2);box-shadow:inset 0 0 0 1px var(--ring)}
 footer{color:var(--muted);font-size:12px;padding:32px 0 40px;text-align:center}
+.acts{display:flex;flex-direction:column;gap:10px}
+.act{display:flex;align-items:center;gap:12px;justify-content:space-between}
+.act form{margin:0;flex:none}
+.act span{color:var(--ink-2);font-size:13px}
+.btn.danger{color:var(--crit)}
+.msg{background:var(--surface);border-radius:10px;box-shadow:inset 0 0 0 1px var(--axis);padding:10px 14px;margin:0 0 14px;font-size:13px}
+.fform{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:0}
+.fform input:not([type=checkbox]),.fform select{font:inherit;font-size:13px;color:var(--ink);background:var(--surface-2);border:0;box-shadow:inset 0 0 0 1px var(--ring);border-radius:8px;padding:5px 8px;min-width:0}
+.fform input:focus,.fform select:focus{outline:2px solid var(--accent)}
+.fform label{font-size:13px;color:var(--ink-2);display:inline-flex;gap:5px;align-items:center}
 .lock{font-size:11px;color:var(--muted);font-weight:500;margin-left:6px}
 </style>
 </head>
@@ -121,7 +131,7 @@ footer{color:var(--muted);font-size:12px;padding:32px 0 40px;text-align:center}
     </div>
     <div class="navrow">
     <nav class="sec">
-      <a href="#overview">Overview</a><a href="#links">Links</a><a href="#servers">Servers</a><a href="#users">Users</a><a href="#services">Services</a><a href="#security" data-admin>Security</a><a href="#health">Health checks</a>
+      <a href="#overview">Overview</a><a href="#links">Links</a><a href="#servers">Servers</a><a href="#users">Users</a><a href="#services">Services</a><a href="#security" data-admin>Security</a><a href="#health">Health checks</a><a href="#maintenance" data-admin>Maintenance</a>
     </nav>
     <div id="auth"></div>
     </div>
@@ -129,6 +139,7 @@ footer{color:var(--muted);font-size:12px;padding:32px 0 40px;text-align:center}
 </header>
 
 <main class="wrap">
+<div class="msg" id="banner" role="status" hidden style="margin-top:20px"></div>
 <section id="overview">
   <h2>Overview</h2><p class="sub">The whole network, as the hub reports it to services.</p>
   <div class="grid g6" id="tiles"></div>
@@ -192,6 +203,20 @@ footer{color:var(--muted);font-size:12px;padding:32px 0 40px;text-align:center}
   <h2>Health checks</h2><p class="sub">Probed from outside the network by netstats, so they work even when services can't see a server.</p>
   <div class="card"><div class="tablewrap"><table id="healthTable"></table></div></div>
 </section>
+
+<section id="maintenance" data-admin>
+  <h2>Maintenance <span class="lock">admin only</span></h2><p class="sub">Tidy up what the panel keeps. This changes the panel's own database only: nothing here touches the servers or the network.</p>
+  <div class="msg" id="maintMsg" role="status" hidden></div>
+  <div class="grid g11">
+    <div class="card"><h3>Servers no longer linked</h3><p class="note">They stay on the map and in the tables as split until forgotten (or for the retention period). A server that links again comes back on its own.</p><div class="tablewrap"><table id="goneTable"></table></div></div>
+    <div class="card"><h3>History and checks</h3><p class="note" id="dbNote"></p><div id="maintActions"></div></div>
+  </div>
+  <div class="grid g11" style="margin-top:14px">
+    <div class="card"><h3>Planned maintenance</h3><p class="note">Splits that start inside a window show as maintenance and don't count against uptime; alerts stay quiet. Windows in the next 7 days are announced at the top of every page, public one included.</p><div class="tablewrap"><table id="winTable"></table></div><div id="winForm"></div></div>
+    <div class="card"><h3>Admin activity</h3><p class="note">Logins, failed logins and every action here, newest first (also in the panel's log)</p><div class="tablewrap" style="max-height:340px;overflow-y:auto"><table id="auditTable"></table></div></div>
+  </div>
+  <div class="card" style="margin-top:14px"><h3>Server settings</h3><p class="note">Map position and location label (empty = stats.toml or GeoIP), and whether a server is shown at all. These override stats.toml <span class="mono">[[servers]]</span>.</p><div class="tablewrap"><table id="srvCfgTable"></table></div></div>
+</section>
 </main>
 <footer id="foot"></footer>
 
@@ -210,7 +235,7 @@ if(!D){document.body.innerHTML='<p class="empty">This is the netstats template; 
 const NOW=D.now*1000, T=s=>s*1000;
 const ago=t=>dur((NOW-t)/1000)+' ago';
 const utc=(t,o={})=>new Date(t).toLocaleString('en-GB',{timeZone:'UTC',day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit',...o})+' UTC';
-const ADMIN=D.role==='admin';
+const ADMIN=D.role==='admin',PUB=D.role==='public',CSRF=/*@CSRF@*/"";
 if(!ADMIN)document.querySelectorAll('[data-admin]').forEach(e=>e.remove());
 
 /* ---------- tooltip + svg helpers ---------- */
@@ -280,7 +305,7 @@ const byName=Object.fromEntries(SERVERS.map(s=>[s.name,s]));
 const linkOf=n=>LINKS.find(l=>l.a===n);
 const isDown=l=>l&&!l.present;
 const lastOut=l=>l&&l.outages.length?l.outages[l.outages.length-1]:null;
-const downFor=(l,t0,t1)=>l.outages.reduce((a,[s,e])=>a+Math.max(0,Math.min(t1,e?T(e):NOW)-Math.max(t0,T(s))),0);
+const downFor=(l,t0,t1)=>l.outages.reduce((a,[s,e,,m])=>m?a:a+Math.max(0,Math.min(t1,e?T(e):NOW)-Math.max(t0,T(s))),0); /* planned maintenance isn't downtime */
 const since=()=>Math.max(NOW-RANGE*DAY,T(D.first));
 const tile=(k,v,d)=>`<div class="card tile"><div class="k">${k}</div><div class="v">${v}</div><div class="d">${d}</div></div>`;
 const statusPill=(ok,label)=>`<span class="pill" style="font-size:14px"><span class="dot ${ok?'good':'crit'}"></span>${label}</span>`;
@@ -294,7 +319,7 @@ function tiles(){
     tile('Servers linked',`${up}/${leaves}`,down.length?`<span class="pill"><span class="dot crit"></span>${esc(short(down[0].name))} split${down.length>1?' +'+(down.length-1):''}</span>`:'all linked'),
     tile('Link availability',pct(D.avail30),T(D.first)>NOW-30*DAY?'since '+day(T(D.first)):'all links, last 30 days'),
     tile('Channels',fmt(cur.channels),cur.regchans!=null?`${fmt(cur.regchans)} registered`:''),
-    tile('Services',statusPill(svc.up,svc.up?'Online':'No data'),svc.up&&svc.start?`up ${dur(D.now-svc.start)} · v${esc(svc.version)}`:'collector not reporting'),
+    tile('Services',statusPill(svc.up,svc.up?'Online':'No data'),svc.up&&svc.start?`up ${dur(D.now-svc.start)}${svc.version?' · v'+esc(svc.version):''}`:'collector not reporting'),
   ].join('');
 }
 
@@ -350,7 +375,7 @@ function mapView(){
 /* ---------- tables ---------- */
 function incidents(){
   const t0=NOW-RANGE*DAY,rows=D.incidents.filter(i=>(i.end?T(i.end):NOW)>=t0);
-  const what=i=>i.kind==='services'?['warn',i.end?'Services outage':'Services down']:i.end?(i.end===i.start?['serious','Relinked']:['serious','Split, relinked']):['crit','Split, still down'];
+  const what=i=>i.maint?['none',i.end?'Planned maintenance':'Maintenance, still down']:i.kind==='services'?['warn',i.end?'Services outage':'Services down']:i.end?(i.end===i.start?['serious','Relinked']:['serious','Split, relinked']):['crit','Split, still down'];
   $('#incidents').innerHTML=`<tr><th>When</th><th>Link</th><th>What</th><th class="n">Duration</th><th>Reason</th></tr>`+
    (rows.length?rows.map(i=>{const [c,l]=what(i);return `<tr><td>${utc(T(i.start))}</td><td class="mono">${esc(short(i.a))} ↔ ${esc(short(i.b))}</td><td><span class="pill"><span class="dot ${c}"></span>${l}</span></td><td class="n">${dur((i.end||D.now)-i.start)}${i.end?'':'+'}</td><td>${esc(i.reason)}</td></tr>`}).join(''):`<tr><td colspan="5" style="color:var(--muted)">No incidents in this range.</td></tr>`);
 }
@@ -358,8 +383,8 @@ function strip(l,t0,t1){
   const W=260,Hh=14,x=t=>(t-t0)/(t1-t0)*W;
   let s=`<svg viewBox="0 0 ${W} ${Hh}" width="${W}" height="${Hh}" style="display:block"><rect width="${W}" height="${Hh}" rx="3" fill="var(--good)" opacity=".85"/>`;
   if(T(D.first)>t0)s+=`<rect width="${Math.max(0,x(T(D.first)))}" height="${Hh}" rx="3" fill="var(--axis)" data-tip="No data before ${esc(utc(T(D.first)))}"/>`;
-  l.outages.forEach(([a,b,r])=>{const A=Math.max(t0,T(a)),B=Math.min(t1,b?T(b):NOW);if(B<t0||A>t1)return;const xa=x(A),wd=Math.max(3,x(B)-xa);
-    s+=`<rect x="${Math.min(xa,W-3)}" width="${wd}" height="${Hh}" fill="var(--crit)" data-tip="${esc(`<b>Down ${utc(T(a))}</b><br>${dur(((b?T(b):NOW)-T(a))/1000)}${b?'':' and counting'}<br>${esc(r)}`)}"/>`});
+  l.outages.forEach(([a,b,r,m])=>{const A=Math.max(t0,T(a)),B=Math.min(t1,b?T(b):NOW);if(B<t0||A>t1)return;const xa=x(A),wd=Math.max(3,x(B)-xa);
+    s+=`<rect x="${Math.min(xa,W-3)}" width="${wd}" height="${Hh}" fill="var(${m?'--axis':'--crit'})" data-tip="${esc(`<b>${m?'Maintenance':'Down'} ${utc(T(a))}</b><br>${dur(((b?T(b):NOW)-T(a))/1000)}${b?'':' and counting'}<br>${esc(r)}`)}"/>`});
   return s+'</svg>';
 }
 function linkTable(){
@@ -374,13 +399,13 @@ function linkTable(){
 }
 function serverTable(){
   const total=SERVERS.reduce((a,s)=>a+s.users,0)||1,max=Math.max(1,...SERVERS.map(s=>s.users));
-  $('#serverTable').innerHTML=`<tr><th>Server</th><th>Role</th><th>Location</th>${ADMIN?'<th>Address</th>':''}<th class="n">Users</th><th style="width:14%"></th><th class="n">Share</th><th>Version</th><th class="n">Up / linked</th><th class="n">Memory</th><th class="n">CPU</th></tr>`+
+  $('#serverTable').innerHTML=`<tr><th>Server</th><th>Role</th><th>Location</th>${ADMIN?'<th>Address</th>':''}<th class="n">Users</th><th style="width:14%"></th><th class="n">Share</th>${PUB?'':'<th>Version</th>'}<th class="n">Up / linked</th>${PUB?'':'<th class="n">Memory</th><th class="n">CPU</th>'}</tr>`+
    [...SERVERS].sort((a,b)=>b.hub-a.hub||b.users-a.users).map(s=>{const down=!s.present;
     return `<tr><td class="mono" data-tip="${esc(esc(s.desc))}">${esc(s.name)}</td><td><span class="tag">${s.hub?'hub':'leaf'}</span></td><td>${esc(s.loc)||'<span style="color:var(--muted)">—</span>'}</td>${ADMIN?`<td class="mono">${esc(s.ip)}</td>`:''}
     <td class="n">${down?'<span class="down">split</span>':fmt(s.users)}</td>
     <td>${down?'':`<div class="hbar" style="width:${s.users/max*100}%"></div>`}</td>
-    <td class="n">${down?'—':pct(s.users/total,1)}</td><td>${esc(s.version)||'<span style="color:var(--muted)">—</span>'}</td>
-    <td class="n">${down?'—':dur(D.now-s.linked_at)}</td><td class="n">${s.mem!=null?s.mem+' MB':'—'}</td><td class="n">${s.cpu!=null?s.cpu.toFixed(1)+'%':'—'}</td></tr>`}).join('');
+    <td class="n">${down?'—':pct(s.users/total,1)}</td>${PUB?'':`<td>${esc(s.version)||'<span style="color:var(--muted)">—</span>'}</td>`}
+    <td class="n">${down?'—':dur(D.now-s.linked_at)}</td>${PUB?'':`<td class="n">${s.mem!=null?s.mem+' MB':'—'}</td><td class="n">${s.cpu!=null?s.cpu.toFixed(1)+'%':'—'}</td>`}</tr>`}).join('');
 }
 function heat(){
   const host=$('#heat');host.innerHTML='';
@@ -433,6 +458,37 @@ function healthTable(){
     const t=Math.max(0,...s.probes.map(p=>p.t));
     return `<tr><td class="mono">${esc(s.name)}</td>${ports.map(p=>cell(by[p])).join('')}<td>${cd}</td><td style="color:var(--muted);font-size:12px">${t?ago(T(t)):'—'}</td></tr>`}).join('');
 }
+function maint(){
+  if(!ADMIN)return;const M=D.maint;
+  if(!D.live||!CSRF){$('#maintActions').innerHTML='<p class="note">These actions work on the live panel after logging in, or from a shell: <span class="mono">netstats.py admin ACTION [SERVER]</span>.</p>'}
+  const live=D.live&&CSRF;
+  const fx=(a,inner,name,ask)=>`<form class="fform" method="post" action="/admin/action"${ask?` data-confirm="${esc(ask)}"`:''}><input type="hidden" name="csrf" value="${esc(CSRF)}"><input type="hidden" name="action" value="${a}"><input type="hidden" name="name" value="${esc(name||'')}">${inner}</form>`;
+  const form=(a,label,name,ask,danger)=>!D.live||!CSRF?'':`<form method="post" action="/admin/action"${ask?` data-confirm="${esc(ask)}"`:''}><input type="hidden" name="csrf" value="${esc(CSRF)}"><input type="hidden" name="action" value="${a}"><input type="hidden" name="name" value="${esc(name||'')}"><button class="btn${danger?' danger':''}">${label}</button></form>`;
+  $('#goneTable').innerHTML=M.gone.length?`<tr><th>Server</th><th>Uplink</th><th>Last seen</th><th class="n">Outages</th><th></th><th></th></tr>`+
+    M.gone.map(g=>`<tr><td class="mono">${esc(g.name)}</td><td class="mono">${esc(short(g.uplink))}</td><td>${ago(T(g.last_seen))}</td><td class="n">${fmt(g.outages)}</td><td>${form('forget','Forget',g.name,`Forget ${g.name} and all its history?`,true)}</td><td>${live?fx('merge',`<select name="new" aria-label="Merge into" required><option value="">renamed to…</option>${M.servers.filter(x=>x.name!==g.name).map(x=>`<option>${esc(x.name)}</option>`).join('')}</select><button class="btn">Merge</button>`,g.name,`Move ${g.name}'s history onto the server picked, then forget ${g.name}?`):''}</td></tr>`).join('')+
+    (M.gone.length>1?`<tr><td colspan="6">${form('forget-gone',`Forget all ${M.gone.length}`,'',`Forget all ${M.gone.length} servers that are not linked, with their history?`,true)}</td></tr>`:'')
+    :'<tr><td class="empty">Every server the panel knows is linked.</td></tr>';
+  const r=M.rows;
+  $('#dbNote').textContent=`Database ${(M.size/1048576).toFixed(1)} MB · ${fmt(r.net)} samples · ${fmt(r.statline)} stats lines · ${fmt(M.past_incidents)} past outages · ${fmt(r.bans)} bans recorded`;
+  if(D.live&&CSRF)$('#maintActions').innerHTML='<div class="acts">'+[
+    ['reprobe','Run health checks now','Ports and certificates, without waiting for the next round.'],
+    ['relocate','Look up locations again','After moving a server or updating the GeoIP database.'],
+    ['clear-incidents','Clear past incidents',`${fmt(M.past_incidents)} past link splits and the services outage history. Uptime starts over.`,'Delete every past incident? Uptime figures start over.',true],
+    ['clear-bans','Clear ban history',`${fmt(r.bans)} recorded bans. The bans themselves stay on the servers.`,'Delete the ban history?',true],
+    ['vacuum','Compact the database','Gives the space of deleted rows back to the disk.'],
+    ...(M.alerts?[['alert-test','Send a test alert','Alerts go to the [alerts] webhook in stats.toml: links down, services silent, ports failing, certificates expiring.']]:[]),
+  ].map(([a,l,d,ask,danger])=>`<div class="act"><span>${d}</span>${form(a,l,'',ask,danger)}</div>`).join('')+'</div>';
+  if(!M.alerts)$('#maintActions').insertAdjacentHTML('beforeend','<p class="note" style="margin:12px 0 0">Alerts are off: set <span class="mono">[alerts] webhook</span> in stats.toml to hear about splits, services, failing ports and expiring certificates.</p>');
+  $('#winTable').innerHTML=M.windows.length?'<tr><th>When (UTC)</th><th>What</th><th>By</th><th></th></tr>'+M.windows.map(w=>`<tr><td>${utc(T(w.start))} – ${utc(T(w.end),{day:undefined,month:undefined})}${T(w.end)<NOW?' <span class="tag">past</span>':T(w.start)<=NOW?' <span class="tag">now</span>':''}</td><td>${esc(w.note)}${w.announce?`<div class="note" style="margin:2px 0 0">IRC: ${(n=>w.sent.includes('new')?'told'+(n?`, ${n} reminder${n>1?'s':''} sent`:''):'pending')(w.sent.filter(x=>x[0]==='r').length)}</div>`:''}</td><td>${esc(w.by)}</td><td>${form('window-del','Remove','',`Remove this window? Splits in it count as outages again${w.announce&&T(w.start)>NOW?' and users on IRC are told it is cancelled':''}.`,true).replace('name="name" value=""',`name="id" value="${w.id}"`)}</td></tr>`).join(''):'<tr><td class="empty">No maintenance planned.</td></tr>';
+  if(live){const d=new Date(NOW+H);d.setUTCMinutes(0);
+    $('#winForm').innerHTML='<div style="margin-top:12px">'+fx('window-add',`<input type="datetime-local" name="start" value="${d.toISOString().slice(0,16)}" required aria-label="Start (UTC)"><input name="minutes" type="number" min="1" max="10080" value="30" required aria-label="Minutes" style="width:5.5em"><span class="note" style="margin:0">min</span><input name="note" placeholder="What: hub upgrade" aria-label="What" size="22"><label title="${M.collector?'':'needs [collector] enabled = true: services send the notices'}"><input type="checkbox" name="announce" value="1"${M.collector?'':' disabled'}> tell users on IRC</label><button class="btn">Plan</button>`)+
+      `<p class="note" style="margin:8px 0 0">Tell users on IRC: a notice to everyone connected now, then reminders ${M.reminders.map(r=>dur(r).replace(/ 0m$| 0s$/,'')).join(' and ')} before it starts ([announce] reminders in stats.toml); removing the window tells them it's cancelled.${M.collector?'':' Needs the collector on ([collector] enabled = true): services send the notices.'}</p></div>`}
+  $('#auditTable').innerHTML=M.audit.length?M.audit.map(([t,who,a,d])=>`<tr><td style="white-space:nowrap">${ago(T(t))}</td><td>${esc(who)}</td><td><span class="tag">${esc(a)}</span></td><td style="color:var(--ink-2);font-size:12px">${esc(d)}</td></tr>`).join(''):'<tr><td class="empty">Nothing yet.</td></tr>';
+  $('#srvCfgTable').innerHTML='<tr><th>Server</th><th>Location label · latitude · longitude</th></tr>'+M.servers.map(x=>`<tr><td class="mono">${esc(x.name)}${x.toml?' <span class="tag" title="has a stats.toml [[servers]] entry">toml</span>':''}</td><td>${live?fx('server-set',`<input name="location" value="${esc(x.location)}" placeholder="location label" aria-label="Location" size="16"><input name="lat" value="${x.lat??''}" placeholder="lat" aria-label="Latitude" size="7"><input name="lon" value="${x.lon??''}" placeholder="lon" aria-label="Longitude" size="7"><label><input type="checkbox" name="hide" value="1"${x.hide?' checked':''}> hidden</label><button class="btn">Save</button>`,x.name):esc([x.location,x.lat,x.lon].filter(v=>v!=null&&v!=='').join(' · '))}</td></tr>`).join('');
+  document.querySelectorAll('form[data-confirm]').forEach(f=>f.onsubmit=e=>{if(!confirm(f.dataset.confirm))e.preventDefault()});
+  const msg=new URLSearchParams(location.search).get('msg');
+  if(msg){const m=$('#maintMsg');m.textContent=msg;m.hidden=false;history.replaceState(null,'',location.pathname+location.hash)}
+}
 function charts(){
   let data=D.series[RANGE]||[],res=RANGE;
   if(data.length<6&&RANGE>1)for(const r of [7,1])if(r<RANGE&&(D.series[r]||[]).length>data.length){data=D.series[r];res=r} /* a new install: show the finer series */
@@ -455,7 +511,9 @@ $('#gen').textContent=`Updated ${utc(NOW)} · ${SERVERS.length} servers · sampl
 /* the served page only (not the exported files): logged in lives under /admin/, which asks for a login */
 $('#auth').innerHTML=!D.live?'':location.pathname.startsWith('/admin')?`<span class="badge">${ADMIN?'Admin':'Viewer'}</span><form method="post" action="/logout"><button class="btn">Log out</button></form>`:'<a class="btn" href="/login">Log in</a>';
 $('#foot').innerHTML=`SekurIRCd netstats · map data Natural Earth${D.geoip?' · IP geolocation by <a href="https://db-ip.com">DB-IP</a>':''}`;
-tiles();incidents();linkTable();serverTable();clients();svcTiles();security();healthTable();charts();
+if(D.windows.length){const b=$('#banner'),w=D.windows[0],on=T(w.start)<=NOW;
+  b.innerHTML=`<b>${on?'Maintenance now':'Planned maintenance'}:</b> ${esc(w.note)} · ${utc(T(w.start))} – ${utc(T(w.end),{day:undefined,month:undefined})}${D.windows.length>1?` (+${D.windows.length-1} more)`:''}`;b.hidden=false}
+tiles();incidents();linkTable();serverTable();clients();svcTiles();security();healthTable();maint();charts();
 document.querySelectorAll('[data-range]').forEach(b=>b.onclick=()=>{RANGE=+b.dataset.range;document.querySelectorAll('[data-range]').forEach(x=>x.setAttribute('aria-pressed',x===b));incidents();linkTable();charts()});
 document.querySelectorAll('[data-region]').forEach(b=>b.onclick=()=>{REGION=b.dataset.region;document.querySelectorAll('[data-region]').forEach(x=>x.setAttribute('aria-pressed',x===b));mapView()});
 const theme=t=>{document.documentElement.dataset.theme=t;document.querySelectorAll('[data-theme-btn]').forEach(x=>x.setAttribute('aria-pressed',x.dataset.themeBtn===t));try{localStorage.setItem('netstats-theme',t)}catch(e){}};

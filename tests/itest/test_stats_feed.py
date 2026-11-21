@@ -146,3 +146,45 @@ def test_collector_config_beside_services_toml():
             svc.wait(5)
         net.stop()
         shutil.rmtree(base, ignore_errors=True)
+
+
+def test_maintenance_announcement_reaches_every_user():
+    """netstats queues a notice (announce.queue) -> services sends SVCGLOBAL -> the hub tells its users and GNOTICEs the leaf."""
+    sys.path.insert(0, f"{REPO}/stats")
+    import netstats
+    base = tempfile.mkdtemp(prefix="itest-announce-")
+    os.makedirs(f"{base}/services")
+    os.makedirs(f"{base}/stats")
+    with open(f"{base}/stats/stats.toml", "w") as f:
+        f.write('[collector]\nenabled = true\n[http]\nnetwork_name = "TestNet"\n')
+    net = Network(cfg=OPERS)
+    hub = net.add("hub")
+    net.add("leaf", parent="hub")
+    for s in net.servers.values():
+        s.auto_services = False
+    hub.cfg["links.peers"].append({"name": SVC_NAME, "password": SVC_PW})
+    svc = None
+    try:
+        net.start()
+        with open(f"{base}/services/services.toml", "w") as f:
+            f.write(f'[link]\nhost = "127.0.0.1"\nport = {hub.link_port}\nname = "{SVC_NAME}"\npassword = "{SVC_PW}"\n'
+                    '[chanserv]\nnick = "ChanServ"\n[nickserv]\nstore_file = "accounts.json"\n[storage]\npath = "cs.json"\n')
+        svc = subprocess.Popen([SERVICES, "-c", "services/services.toml"], cwd=base,
+                               stdout=open(f"{base}/svc.out", "w"), stderr=subprocess.STDOUT)
+        on_hub, on_leaf = net.client("hub", "hubber"), net.client("leaf", "leafer")
+        wait_for(f"{base}/stats/events.log", lambda r: any(x["k"] == "session" for x in r), "services link")
+        c = netstats.load_config(f"{base}/stats/stats.toml")
+        db = netstats.open_db(c)
+        start = netstats.datetime.fromtimestamp(time.time() + 7200, netstats.timezone.utc).strftime("%Y-%m-%dT%H:%M")
+        netstats.admin_action(c, db, "window-add", f={"start": start, "minutes": "30", "note": "hub upgrade", "announce": "1"})
+        for u in (on_hub, on_leaf):
+            u.expect(r"NOTICE \S+ :\[TestNet\] Planned maintenance: hub upgrade\.", 15)
+        recs = wait_for(f"{base}/stats/events.log", lambda r: any(x["k"] == "announced" for x in r), "announced record")
+        assert not os.path.getsize(f"{base}/stats/announce.queue"), "services emptied the queue"
+        assert [x["id"] for x in recs if x["k"] == "announced"] == [1]
+    finally:
+        if svc:
+            svc.terminate()
+            svc.wait(5)
+        net.stop()
+        shutil.rmtree(base, ignore_errors=True)

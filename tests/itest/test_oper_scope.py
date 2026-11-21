@@ -138,6 +138,8 @@ def test_hub_drops_what_a_limited_leaf_sends_anyway():
             if sid == "7FK": assert "OPERSCOPE local -" in burst, burst[-400:]
             else: assert "OPERSCOPE global -" in burst, burst[-400:]
             target = uid_of(burst, "hubby" + sid.lower())
+            s.sendall(f":9ZZAAAAAA KILL {target} :spoofed\r\n:9ZZ UNGLINE *@203.0.113.1\r\n".encode())  # a source not behind this link
+            assert not hubby.saw("spoofed", 0.6), "a KILL from a source the link can't speak for is dropped"
             s.sendall((f":{uid} ENCAP {target} SANICK renamed\r\n"
                        f":{sid} GLINE *@192.0.2.77 fop 0 :lined\r\n"
                        f":{uid} RQUERY 1HB REHASH\r\n"

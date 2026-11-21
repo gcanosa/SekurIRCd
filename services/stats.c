@@ -11,6 +11,7 @@
  *   ban      type by dur mask reason                                           (SVCSTATEV BAN)
  *   statline name text                                                         (SVCSTATLINE: a server's stats line)
  *   session  ev=up|down               svc  ev=start|stop version               (this daemon and its hub link)
+ *   announced id                                                               (an announce.queue entry went out)
  * The writer and netstats.py take a POSIX lock (fcntl here, fcntl.lockf there) on the file, so netstats can rename it
  * away between our appends. */
 #include "svc.h"
@@ -135,8 +136,45 @@ void st_session_end(void) {
     note("session", "down");
 }
 
+/* announce.queue, next to events.log: one JSON object per line, {"id": n, "text": "..."}, appended by netstats.py (the planned
+ * maintenance notices). Sent to the hub as SVCGLOBAL and reported back as an "announced" record. Left in place while the hub
+ * link is down, so nothing is lost. */
+static void send_announcements(void) {
+    char path[600], dir[512];
+    dir_of(S.log, dir, sizeof dir);
+    snprintf(path, sizeof path, "%s/announce.queue", dir);
+    int fd = open(path, O_RDWR);
+    if (fd < 0) return;
+    struct flock lk = {.l_type = F_WRLCK, .l_whence = SEEK_SET};
+    (void)fcntl(fd, F_SETLKW, &lk);
+    char buf[16384];
+    ssize_t n = read(fd, buf, sizeof buf - 1);
+    if (n > 0 && ftruncate(fd, 0) != 0) n = 0; /* can't empty it: send nothing rather than twice */
+    close(fd);
+    if (n <= 0) return;
+    buf[n] = '\0';
+    for (char *save = NULL, *line = strtok_r(buf, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
+        cJSON *j = cJSON_Parse(line);
+        const cJSON *t = cJSON_GetObjectItem(j, "text"), *id = cJSON_GetObjectItem(j, "id");
+        if (cJSON_IsString(t) && t->valuestring[0]) {
+            char text[420], out[440];
+            size_t k = 0;
+            for (const char *p = t->valuestring; *p && k + 1 < sizeof text; p++) text[k++] = (unsigned char)*p < 32 ? ' ' : *p;
+            text[k] = '\0';
+            snprintf(out, sizeof out, "SVCGLOBAL :%s", text);
+            svc_queue_line(out);
+            cJSON *o = cJSON_CreateObject();
+            cJSON_AddNumberToObject(o, "id", cJSON_IsNumber(id) ? id->valuedouble : 0);
+            emit("announced", o);
+        }
+        cJSON_Delete(j);
+    }
+}
+
 void st_tick(void) {
     time_t now = time(NULL);
+    static time_t last_ann;
+    if (S.enabled && S.session && now - last_ann >= 5) { last_ann = now; send_announcements(); }
     if (now - S.last_check >= 30) { /* turned on/off in stats.toml: picked up within 30s, no restart */
         S.last_check = now;
         struct stat sb;

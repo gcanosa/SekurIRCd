@@ -10,6 +10,9 @@ page: served live with admin/viewer logins, or written to files for a website (c
   netstats.py --stop [--pidfile P]             stop a --daemon
   netstats.py render                           load the log, write the [export] html files (for cron)
   netstats.py ingest                           just load the log into the database
+  netstats.py admin ACTION [SERVER]            maintenance, as on the panel's Maintenance section: forget SERVER,
+                                               forget-gone, merge OLD NEW, clear-incidents, clear-bans, relocate,
+                                               reprobe, vacuum, alert-test
   netstats.py --user --admin|--viewer --add NAME   add a login to stats.toml (asks for the password)
   netstats.py --user --admin|--viewer --del NAME   remove it
   netstats.py --user [--admin|--viewer] --status   list the logins
@@ -64,13 +67,29 @@ a{color:var(--accent)}
 </body></html>
 """
 RAW_DAYS, HOURLY_DAYS, STATLINE_DAYS = 7, 90, 35
-ROLES = ("admin", "viewer")
+ROLES = ("admin", "viewer")  # logins
+PAGES = ROLES + ("public",)   # + what anyone gets without one (public = true, [export] public_html): less detail
 
 
 # --- config ----------------------------------------------------------------------------------------------------------
 
 class ConfigError(Exception):
     pass
+
+
+def parse_span(v, what):
+    """ "24h", "90m", "2d" -> seconds."""
+    m = re.fullmatch(r"(\d{1,4})([mhd])", str(v).strip())
+    if not m:
+        raise ConfigError(f"{what}: {v!r} is not a time like 30m, 1h or 2d")
+    return int(m.group(1)) * {"m": 60, "h": HOUR, "d": DAY}[m.group(2)]
+
+
+def span_text(secs):
+    for unit, n in (("day", DAY), ("hour", HOUR), ("minute", 60)):
+        if secs >= n and secs % n == 0:
+            return f"{secs // n} {unit}{'s' if secs // n != 1 else ''}"
+    return f"{secs // 60} minutes"
 
 
 def load_config(path):
@@ -83,10 +102,11 @@ def load_config(path):
         raise ConfigError(f"invalid TOML in {path}: {e}")
     base = os.path.dirname(os.path.abspath(path))
     rel = lambda p: p if not p or os.path.isabs(p) else os.path.join(base, p)
-    col, sto, web, exp, geo, hea = (raw.get(k, {}) for k in ("collector", "storage", "http", "export", "geoip", "health"))
+    col, sto, web, exp, geo, hea, ale = (raw.get(k, {}) for k in ("collector", "storage", "http", "export", "geoip", "health", "alerts"))
     c = {
         "path": os.path.abspath(path),
         "network": str(web.get("network_name", "") or "IRC network"),
+        "collector": bool(col.get("enabled", False)),
         "sample": int(col.get("sample_seconds", 60)),
         "log": rel(col.get("log", "events.log")),
         "db": rel(sto.get("database", "stats.db")),
@@ -103,7 +123,17 @@ def load_config(path):
                    "tls_ports": [int(p) for p in hea.get("tls_ports", [6697])],
                    "interval": int(hea.get("interval", 300)), "timeout": float(hea.get("timeout", 5))},
         "users": [], "servers": {},
+        "announce": [parse_span(x, "[announce] reminders") for x in raw.get("announce", {}).get("reminders", ["24h", "1h"])],
+        "alerts": {"webhook": str(ale.get("webhook", "")), "format": str(ale.get("format", "json")),
+                   "down_minutes": int(ale.get("down_minutes", 5)), "cert_days": int(ale.get("cert_days", 14))},
     }
+    a = c["alerts"]
+    if a["webhook"] and not re.fullmatch(r"https?://\S+", a["webhook"]):
+        raise ConfigError("[alerts] webhook must be an http(s):// URL")
+    if a["format"] not in ("json", "text"):
+        raise ConfigError('[alerts] format must be "json" (Discord, Slack, Mattermost...) or "text" (ntfy, plain POST)')
+    if not 1 <= a["down_minutes"] <= 1440 or not 1 <= a["cert_days"] <= 90:
+        raise ConfigError("[alerts] down_minutes must be 1..1440 and cert_days 1..90")
     if not 7 <= c["retention"] <= 3650:
         raise ConfigError("[storage] retention_days must be 7..3650")
     if not 1 <= c["http"]["port"] <= 65535:
@@ -173,6 +203,9 @@ CREATE TABLE IF NOT EXISTS probes(name TEXT, port INT, t INT, ok INT, ms REAL, e
                                   PRIMARY KEY(name, port));
 CREATE TABLE IF NOT EXISTS geo(host TEXT PRIMARY KEY, ip TEXT, city TEXT, country TEXT, lat REAL, lon REAL, t INT);
 CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
+CREATE TABLE IF NOT EXISTS windows(id INTEGER PRIMARY KEY, start INT, end INT, note TEXT, by TEXT);
+CREATE TABLE IF NOT EXISTS server_cfg(name TEXT PRIMARY KEY, location TEXT, lat REAL, lon REAL, hide INT);
+CREATE TABLE IF NOT EXISTS audit(t INT, who TEXT, action TEXT, detail TEXT);
 """
 
 
@@ -185,6 +218,10 @@ def open_db(c):
     for col in STATLINE_COLS:  # a database from before these columns
         if col not in have:
             db.execute(f"ALTER TABLE statline ADD COLUMN {col} INT")
+    have = {r[1] for r in db.execute("PRAGMA table_info(windows)")}
+    if "announce" not in have:  # a database from before IRC announcements
+        db.execute("ALTER TABLE windows ADD COLUMN announce INT DEFAULT 0")
+        db.execute("ALTER TABLE windows ADD COLUMN sent TEXT DEFAULT ''")
     return db
 
 
@@ -311,6 +348,8 @@ def ingest_records(db, recs):
                            (t, r["name"], float(cpu), int(mem), int(conns), int(dnsbl), int(kl), int(gl), int(zl),
                             int(local), ver or "", int(dnsbl_bans), int(scan_bans), num(scanned), num(proxies), num(spam),
                             num(rules)))
+        elif k == "announced":
+            db.execute("INSERT INTO audit VALUES(?,?,?,?)", (t, "services", "announced", f"maintenance window {r.get('id', '?')}: sent to every user"))
         elif k in ("svc", "session"):
             ev = r.get("ev", "")
             db.execute("INSERT INTO svc VALUES(?,?,?)", (t, ev if k == "svc" else "link-" + ev, r.get("version", "")))
@@ -331,6 +370,8 @@ def retention(db, c, now):
         db.execute(f"DELETE FROM {table} WHERE t<?", (now - days * DAY,))
     db.execute("DELETE FROM outages WHERE end IS NOT NULL AND end<?", (now - c["retention"] * DAY,))
     db.execute("DELETE FROM servers WHERE present=0 AND last_seen<?", (now - c["retention"] * DAY,))
+    db.execute("DELETE FROM audit WHERE t<?", (now - c["retention"] * DAY,))
+    db.execute("DELETE FROM windows WHERE end<?", (now - 366 * DAY,))
 
 
 def ingest(c, db=None):
@@ -352,6 +393,20 @@ def ingest(c, db=None):
 def server_host(c, name):
     o = c["servers"].get(name.lower(), {})
     return o.get("host") or name
+
+
+def srv_opts(c, db, name):
+    """stats.toml's [[servers]] entry for `name`, with what an admin set on the panel (Maintenance) on top."""
+    o = dict(c["servers"].get(name.lower(), {}))
+    r = db.execute("SELECT location, lat, lon, hide FROM server_cfg WHERE name=?", (name,)).fetchone()
+    if r:
+        if r[0]:
+            o["location"] = r[0]
+        if r[1] is not None:
+            o["lat"], o["lon"] = r[1], r[2]
+        if r[3] is not None:
+            o["hide"] = bool(r[3])
+    return o
 
 
 def cert_days_left(der):
@@ -396,7 +451,7 @@ def probe(host, port, use_tls, timeout):
 def run_probes(c, db):
     names = [r[0] for r in db.execute("SELECT name FROM servers WHERE last_seen>=?", (time.time() - 30 * DAY,))]
     for name in names:
-        o = c["servers"].get(name.lower(), {})
+        o = srv_opts(c, db, name)
         if o.get("hide"):
             continue
         host = server_host(c, name)
@@ -443,8 +498,8 @@ def geoip_lookup(path, ips):
 def resolve_locations(c, db):
     """Fill the geo table for servers that have no cached or configured location."""
     todo = {}
-    for (name,) in db.execute("SELECT name FROM servers"):
-        o = c["servers"].get(name.lower(), {})
+    for (name,) in db.execute("SELECT name FROM servers").fetchall():
+        o = srv_opts(c, db, name)
         if "lat" in o:
             continue
         host = server_host(c, name)
@@ -475,7 +530,299 @@ def geoip_update(c):
         while chunk := r.read(1 << 20):
             f.write(chunk)
     os.replace(tmp, c["geoip"])
-    print("done -- locations are looked up again within a week, or now with: rm the geo cache (DELETE FROM geo)")
+    print("done -- locations are looked up again within a week, or now with: netstats.py admin relocate")
+
+
+# --- admin maintenance: the panel's Maintenance section and `netstats.py admin <action> [name]` ----------------------
+
+ADMIN_ACTIONS = {
+    "forget": "forget one server that is no longer linked: its history, outages, health checks and location",
+    "forget-gone": "forget every server that is not linked right now",
+    "clear-incidents": "delete past link splits and services outages (an outage still going on stays)",
+    "clear-bans": "delete the ban history (the bans themselves stay on the servers)",
+    "relocate": "look every server's location up again",
+    "reprobe": "run the health checks now",
+    "vacuum": "compact the database file",
+    "merge": "a server that was renamed: move OLD's history onto NEW (admin merge OLD NEW), then forget OLD",
+    "server-set": "a server's map position, location label and whether it is hidden (the panel's Maintenance section)",
+    "window-add": "plan a maintenance window: splits in it are shown as maintenance and don't count against uptime",
+    "window-del": "remove a maintenance window",
+    "alert-test": "send a test alert to [alerts] webhook",
+}
+
+
+def audit(c, who, action, detail=""):
+    """The admin activity log (Maintenance): who did what, when. Its own short connection, from any thread."""
+    try:
+        db = sqlite3.connect(c["db"], timeout=10)
+        with db:
+            db.execute("INSERT INTO audit VALUES(?,?,?,?)", (int(time.time()), who, action, detail[:300]))
+        db.close()
+    except sqlite3.Error:
+        pass  # the action itself already happened; the panel log still has it
+
+
+def num_in(v, lo, hi, what):
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        raise ValueError(f"{what} must be a number")
+    if not lo <= x <= hi:
+        raise ValueError(f"{what} must be {lo}..{hi}")
+    return x
+
+
+def forget_server(c, db, name):
+    for table in ("servers", "srv", "statline", "probes", "outages"):
+        db.execute(f"DELETE FROM {table} WHERE name=?", (name,))
+    db.execute("DELETE FROM geo WHERE host=?", (server_host(c, name),))
+
+
+def admin_action(c, db, action, name="", f=None):
+    """One maintenance action on the database; returns what it did. ValueError: a request that can't be done.
+    relocate/reprobe do their (slow, network) part here too -- the panel hands those to its worker instead.
+    `f`: the other form fields (strings) the newer actions take."""
+    f = f or {}
+    if action not in ADMIN_ACTIONS:
+        raise ValueError(f"unknown action {action!r} (one of: {', '.join(ADMIN_ACTIONS)})")
+    if action == "merge":
+        new = f.get("new", "")
+        old = db.execute("SELECT present FROM servers WHERE name=?", (name,)).fetchone()
+        if old is None or not db.execute("SELECT 1 FROM servers WHERE name=?", (new,)).fetchone() or name == new:
+            raise ValueError(f"merge needs two different servers the panel knows ({name!r} -> {new!r})")
+        if old[0]:
+            raise ValueError(f"{name} is linked right now: only a server that is gone can be merged into another")
+        with db:
+            for table in ("srv", "statline", "outages"):  # where both have a row for the same moment, NEW's stays
+                db.execute(f"UPDATE OR IGNORE {table} SET name=? WHERE name=?", (new, name))
+            db.execute("UPDATE servers SET first_seen=MIN(first_seen, (SELECT first_seen FROM servers WHERE name=?)) WHERE name=?",
+                       (name, new))
+            forget_server(c, db, name)
+            db.execute("DELETE FROM server_cfg WHERE name=?", (name,))
+        return f"Merged {name}'s history into {new}."
+    if action == "server-set":
+        if not db.execute("SELECT 1 FROM servers WHERE name=?", (name,)).fetchone():
+            raise ValueError(f"no server named {name!r}")
+        loc = re.sub(r"[\x00-\x1f\x7f]", "", f.get("location", "")).strip()[:80]
+        lat, lon = f.get("lat", "").strip(), f.get("lon", "").strip()
+        if bool(lat) != bool(lon):
+            raise ValueError("latitude and longitude go together (or leave both empty for GeoIP)")
+        lat = num_in(lat, -90, 90, "latitude") if lat else None
+        lon = num_in(lon, -180, 180, "longitude") if lon else None
+        hide = 1 if f.get("hide") else None
+        with db:
+            if not loc and lat is None and hide is None:
+                db.execute("DELETE FROM server_cfg WHERE name=?", (name,))
+                return f"{name}: back to stats.toml and GeoIP."
+            db.execute("INSERT OR REPLACE INTO server_cfg VALUES(?,?,?,?,?)", (name, loc or None, lat, lon, hide))
+        return f"{name}: " + ", ".join(x for x in (f"location {loc!r}" if loc else "", f"position {lat}, {lon}" if lat is not None else "",
+                                                     "hidden" if hide else "shown") if x) + "."
+    if action == "window-add":
+        try:
+            start = int(datetime.strptime(f.get("start", ""), "%Y-%m-%dT%H:%M").replace(tzinfo=timezone.utc).timestamp())
+        except ValueError:
+            raise ValueError("start must be a date and time (UTC)")
+        minutes = int(num_in(f.get("minutes", ""), 1, 7 * 24 * 60, "length in minutes"))
+        note = re.sub(r"[\x00-\x1f\x7f]", "", f.get("note", "")).strip()[:120] or "Planned maintenance"
+        if start + minutes * 60 < time.time() - 30 * DAY:
+            raise ValueError("that window is over a month in the past")
+        tell = bool(f.get("announce"))
+        now = int(time.time())
+        if tell and start <= now:
+            raise ValueError("users can only be told about maintenance that is still to come")
+        # reminders whose time has already passed are not sent late, right after the first notice
+        sent = ",".join(["new"] + [f"x{r}" for r in c["announce"] if start - r <= now]) if tell else ""  # x: skipped, r: sent
+        with db:
+            wid = db.execute("INSERT INTO windows(start, end, note, by, announce, sent) VALUES(?,?,?,?,?,?)",
+                             (start, start + minutes * 60, note, f.get("by", ""), int(tell), sent)).lastrowid
+        if tell:
+            queue_announcement(c, wid, announce_text(c, "new", start, minutes * 60, note))
+        return (f"Planned: {note}, {datetime.fromtimestamp(start, timezone.utc):%d %b %H:%M} UTC for {minutes} minutes."
+                + (" Every user on IRC is being told now, and reminded before it starts." if tell else ""))
+    if action == "window-del":
+        wid = int(num_in(f.get("id", ""), 1, 1e12, "window"))
+        w = db.execute("SELECT start, end, note, announce FROM windows WHERE id=?", (wid,)).fetchone()
+        if not w:
+            raise ValueError("no such maintenance window")
+        with db:
+            db.execute("DELETE FROM windows WHERE id=?", (wid,))
+        if w[3] and w[0] > time.time():  # users were told it's coming: tell them it isn't
+            queue_announcement(c, wid, announce_text(c, "cancel", w[0], w[1] - w[0], w[2]))
+            return "Maintenance window removed; users on IRC are told it's cancelled."
+        return "Maintenance window removed."
+    if action == "alert-test":
+        if not c["alerts"]["webhook"]:
+            raise ValueError("no [alerts] webhook in stats.toml")
+        send_alert(c, "Test alert from the stats panel: alerts reach you.")
+        return "Test alert sent."
+    if action == "forget":
+        r = db.execute("SELECT present FROM servers WHERE name=?", (name,)).fetchone()
+        if r is None:
+            raise ValueError(f"no server named {name!r}")
+        if r[0]:
+            raise ValueError(f"{name} is linked right now: only a server that is gone can be forgotten")
+        with db:
+            forget_server(c, db, name)
+        return f"Forgot {name}."
+    if action == "forget-gone":
+        names = [n for n, in db.execute("SELECT name FROM servers WHERE present=0 ORDER BY name")]
+        with db:
+            for n in names:
+                forget_server(c, db, n)
+        return f"Forgot {len(names)} server(s) no longer linked" + (f": {', '.join(names)}." if names else ".")
+    if action == "clear-incidents":
+        # services events only make outages and the restart count; while services are down, keep from the drop on
+        last_down = db.execute("SELECT MAX(t) FROM svc WHERE ev IN ('stop','link-down')").fetchone()[0] or 0
+        last_up = db.execute("SELECT MAX(t) FROM svc WHERE ev IN ('start','link-up')").fetchone()[0] or 0
+        with db:
+            n = db.execute("DELETE FROM outages WHERE end IS NOT NULL").rowcount
+            n += db.execute("DELETE FROM svc WHERE t<?", (last_down if last_down > last_up else time.time() + 1,)).rowcount
+        return f"Cleared {n} past incident record(s)."
+    if action == "clear-bans":
+        with db:
+            n = db.execute("DELETE FROM bans").rowcount
+        return f"Cleared {n} ban record(s)."
+    if action == "relocate":
+        with db:
+            db.execute("DELETE FROM geo")
+        resolve_locations(c, db)
+        return "Looked every server's location up again."
+    if action == "reprobe":
+        run_probes(c, db)
+        return "Ran the health checks."
+    before = os.path.getsize(c["db"])
+    db.execute("VACUUM")
+    return f"Compacted the database: {before // 1024} KB -> {os.path.getsize(c['db']) // 1024} KB."
+
+
+def maint_data(c, db):
+    """The Maintenance section: servers that are gone, and what the database holds."""
+    gone = [{"name": n, "uplink": u, "last_seen": ls, "outages": db.execute("SELECT COUNT(*) FROM outages WHERE name=?", (n,)).fetchone()[0]}
+            for n, u, ls in db.execute("SELECT name, uplink, last_seen FROM servers WHERE present=0 ORDER BY last_seen DESC")]
+    rows = {t: db.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+            for t in ("net", "net_h", "net_d", "srv", "servers", "outages", "bans", "svc", "statline", "probes", "geo")}
+    size = sum(os.path.getsize(p) for p in (c["db"], c["db"] + "-wal") if os.path.exists(p))
+    servers = []
+    for (n,) in db.execute("SELECT name FROM servers ORDER BY hop, name").fetchall():
+        r = db.execute("SELECT location, lat, lon, hide FROM server_cfg WHERE name=?", (n,)).fetchone() or (None,) * 4
+        servers.append({"name": n, "location": r[0] or "", "lat": r[1], "lon": r[2], "hide": bool(r[3]),
+                        "toml": bool(c["servers"].get(n.lower()))})
+    return {"gone": gone, "rows": rows, "size": size, "servers": servers,
+            "audit": [list(r) for r in db.execute("SELECT t, who, action, detail FROM audit ORDER BY t DESC LIMIT 40")],
+            "alerts": bool(c["alerts"]["webhook"]),
+            "past_incidents": db.execute("SELECT COUNT(*) FROM outages WHERE end IS NOT NULL").fetchone()[0]}
+
+
+# --- maintenance announcements to every IRC user, sent by services (services/stats.c reads announce.queue) ----------
+
+def announce_text(c, stage, start, length, note):
+    when = f"{datetime.fromtimestamp(start, timezone.utc):%a %d %b, %H:%M} UTC"
+    if stage == "cancel":
+        return f"[{c['network']}] Cancelled: the maintenance planned for {when} ({note}) will not happen."
+    head = "Planned maintenance" if stage == "new" else f"Reminder, maintenance in {span_text(stage)}"
+    return f"[{c['network']}] {head}: {note}. {when}, for about {span_text(length)}; you may be disconnected for a moment."
+
+
+def queue_announcement(c, wid, text):
+    """Appended under the lock services/stats.c takes to read and empty the file; services sends it within seconds."""
+    path = os.path.join(os.path.dirname(c["log"]), "announce.queue")
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o640)
+    try:
+        fcntl.lockf(fd, fcntl.LOCK_EX)
+        os.write(fd, (json.dumps({"id": wid, "text": text}) + "\n").encode())
+    finally:
+        os.close(fd)
+
+
+def check_announcements(c, db, now=None):
+    """Once a minute: the reminders ([announce] reminders before the start) of every window users are being told about."""
+    now = int(now or time.time())
+    out = []
+    for wid, start, end, note, sent in db.execute(
+            "SELECT id, start, end, note, sent FROM windows WHERE announce=1 AND start>?", (now,)).fetchall():
+        done = set((sent or "").split(","))
+        due = [r for r in c["announce"] if start - r <= now and f"r{r}" not in done and f"x{r}" not in done]
+        if not due:
+            continue
+        r = min(due)  # several due at once (the panel was down): only the nearest one
+        text = announce_text(c, r, start, end - start, note)
+        queue_announcement(c, wid, text)
+        done |= {f"r{r}"} | {f"x{x}" for x in due if x != r}  # the farther ones that came due at the same time are skipped
+        db.execute("UPDATE windows SET sent=? WHERE id=?", (",".join(sorted(done - {""})), wid))
+        out.append(text)
+    db.commit()
+    return out
+
+
+# --- alerts: a webhook post when something needs a human -----------------------------------------------------------
+
+def send_alert(c, text):
+    a = c["alerts"]
+    text = f"[{c['network']}] {text}"
+    body = json.dumps({"text": text, "content": text}).encode() if a["format"] == "json" else text.encode()
+    req = urllib.request.Request(a["webhook"], data=body, headers={
+        "Content-Type": "application/json" if a["format"] == "json" else "text/plain; charset=utf-8", "User-Agent": "netstats"})
+    with urllib.request.urlopen(req, timeout=10) as r:
+        r.read()
+
+
+def check_alerts(c, db, log, now=None):
+    """Once a minute: a link down for down_minutes, services silent, a port failing, a certificate running out -- each one
+    alerted once, and again when it is fine. Quiet during a maintenance window. Returns the texts sent."""
+    a = c["alerts"]
+    if not a["webhook"]:
+        return []
+    now = int(now or time.time())
+    wait = a["down_minutes"] * 60
+    in_window = db.execute("SELECT 1 FROM windows WHERE start<=? AND end>=?", (now, now)).fetchone() is not None
+    state = {k[6:]: v for k, v in db.execute("SELECT k, v FROM meta WHERE k LIKE 'alert:%'")}
+    problems = {}  # key -> (text when it starts, text when it ends)
+    for oid, name, uplink, start, reason in db.execute(
+            "SELECT id, name, uplink, start, reason FROM outages WHERE end IS NULL AND start<=?", (now - wait,)):
+        if not reason.startswith("Behind "):  # the server that split is alerted, not everything behind it
+            problems[f"out:{oid}"] = (f"DOWN: {name} lost its link to {uplink} {(now - start) // 60} minutes ago ({reason})",
+                                      f"UP: {name} is linked again")
+    last = int(meta_get(db, "last_snapshot", 0) or 0)
+    if last and last < now - max(3 * c["sample"], 180, wait):
+        problems["svc"] = (f"DOWN: no data from services for {(now - last) // 60} minutes", "UP: services report again")
+    for name, port, ok, days, tls, present in db.execute(
+            "SELECT p.name, p.port, p.ok, p.cert_days, p.tls, s.present FROM probes p JOIN servers s ON s.name=p.name"):
+        fail = f"fail:{name}:{port}"
+        if ok or not present:  # a split server is alerted as a split
+            db.execute("DELETE FROM meta WHERE k=?", ("alert:" + fail + ":since",))
+        else:
+            since = int(state.get(fail + ":since") or now)
+            meta_set(db, "alert:" + fail + ":since", since)
+            if now - since >= wait:
+                problems[fail] = (f"DOWN: {name} port {port} has not answered for {(now - since) // 60} minutes",
+                                  f"UP: {name} port {port} answers again")
+        if tls and days is not None and days < a["cert_days"]:
+            problems[f"cert:{name}:{port}:{now // DAY}"] = (f"CERTIFICATE: {name} port {port} expires in {days} days", None)
+    sent = []
+    for key, (bad, _) in problems.items():
+        if key not in state and not in_window:
+            sent.append(bad)
+            meta_set(db, "alert:" + key, now)
+    for key in state:
+        if key.endswith(":since") or key in problems:
+            continue
+        db.execute("DELETE FROM meta WHERE k=?", ("alert:" + key,))
+        if key.startswith(("out:", "svc", "fail:")):
+            good = {"svc": "UP: services report again"}.get(key)
+            if key.startswith("out:"):
+                r = db.execute("SELECT name FROM outages WHERE id=?", (int(key[4:]),)).fetchone()
+                good = f"UP: {r[0]} is linked again" if r else None
+            elif key.startswith("fail:"):
+                good = f"UP: {key.split(':')[1]} port {key.split(':')[2]} answers again"
+            if good:
+                sent.append(good)
+    db.commit()
+    for text in sent:
+        try:
+            send_alert(c, text)
+        except (OSError, ValueError) as e:
+            log(f"alert not sent ({e}): {text}")
+    return sent
 
 
 # --- page data -------------------------------------------------------------------------------------------------------
@@ -490,8 +837,10 @@ def series(db, since, bucket, table="net", col="users"):
 
 def build(c, db, role, now=None):
     now = int(now or time.time())
-    admin = role == "admin"
+    admin, pub = role == "admin", role == "public"
     d30 = now - 30 * DAY
+    wins = db.execute("SELECT id, start, end, note, by FROM windows WHERE end>=? ORDER BY start", (now - 366 * DAY,)).fetchall()
+    in_window = lambda t: any(s <= t <= e for _, s, e, _, _ in wins)
     last = db.execute("SELECT * FROM net ORDER BY t DESC LIMIT 1").fetchone()
     cols = ["t", "users", "channels", "regchans", "opers", "away", "tls", "logged", "peak", "accounts", "regchans_cs"]
     cur = dict(zip(cols, last)) if last else None
@@ -504,7 +853,7 @@ def build(c, db, role, now=None):
     uplinks = {r[2] for r in rows}
     servers = []
     for name, sid, uplink, hop, descr, fs, ls, linked_at, present, users in rows:
-        o = c["servers"].get(name.lower(), {})
+        o = srv_opts(c, db, name)
         if o.get("hide"):
             continue
         host = server_host(c, name)
@@ -523,8 +872,8 @@ def build(c, db, role, now=None):
             "name": name, "uplink": uplink, "hop": hop, "desc": descr, "present": bool(present),
             "hub": hop == 0 or name in uplinks, "users": users if present else 0, "linked_at": linked_at,
             "loc": loc, "lat": lat, "lon": lon, "ip": ip if admin else "",
-            "cpu": sl[1] if fresh else None, "mem": sl[2] if fresh else None,
-            "version": (sl[3] if sl else "") or "",
+            "cpu": sl[1] if fresh and not pub else None, "mem": sl[2] if fresh and not pub else None,
+            "version": "" if pub else (sl[3] if sl else "") or "",
             "probes": [{"port": p, "ok": bool(ok), "ms": ms, "err": err if admin or ok else "unreachable", "tls": bool(tls),
                         "cert_days": days, "t": pt}
                        for p, ok, ms, err, tls, days, pt in db.execute(
@@ -534,7 +883,7 @@ def build(c, db, role, now=None):
     hub0 = next((s["name"] for s in servers if s["hop"] == 0), None)
 
     def outages_of(name, since):
-        return [[a, b, r] for a, b, r in db.execute(
+        return [[a, b, r, int(in_window(a))] for a, b, r in db.execute(
             "SELECT start, end, reason FROM outages WHERE name=? AND (end IS NULL OR end>=?) ORDER BY start", (name, since))]
 
     links = [{"a": s["name"], "b": s["uplink"], "kind": "hub" if s["hub"] and s["uplink"] in names and
@@ -552,12 +901,12 @@ def build(c, db, role, now=None):
             if ev == "start":
                 restarts += t >= d30
             if down_at is not None:
-                svc_out.append([down_at, t, "Services restart" if ev == "start" else "Services link lost"])
+                svc_out.append([down_at, t, "Services restart" if ev == "start" else "Services link lost", int(in_window(down_at))])
                 down_at = None
     last_snap = int(meta_get(db, "last_snapshot", 0) or 0)
     svc_up = last_snap >= now - max(3 * c["sample"], 180)
     if not svc_up:
-        svc_out.append([down_at or last_snap or now, None, "No data from services"])
+        svc_out.append([down_at or last_snap or now, None, "No data from services", int(in_window(down_at or last_snap or now))])
     if hub0:
         links.insert(0, {"a": "services", "b": hub0, "kind": "services", "outages": svc_out, "present": svc_up})
 
@@ -567,15 +916,19 @@ def build(c, db, role, now=None):
             return None
         down = 0
         for l in links:
-            for a, b, _ in l["outages"]:
-                down += max(0, min(b or now, now) - max(a, since))
+            for a, b, _, maint in l["outages"]:
+                if not maint:  # planned maintenance doesn't count against uptime
+                    down += max(0, min(b or now, now) - max(a, since))
         return max(0.0, 1 - down / (span * len(links)))
 
+    if pub:  # the public page says what kind of outage it was, not who typed what (SQUIT reasons, oper nicks)
+        for l in links:
+            l["outages"] = [[a, b, public_reason(r), m] for a, b, r, m in l["outages"]]
     incidents = []
     for l in links:
-        for a, b, r in l["outages"]:
+        for a, b, r, m in l["outages"]:
             if (b or now) >= now - 365 * DAY:
-                incidents.append({"a": l["a"], "b": l["b"], "start": a, "end": b, "reason": r, "kind": l["kind"]})
+                incidents.append({"a": l["a"], "b": l["b"], "start": a, "end": b, "reason": r, "kind": l["kind"], "maint": m})
     incidents.sort(key=lambda x: -x["start"])
 
     # connections per hour of the week, from the per-server "connections" counters in the stats lines
@@ -606,9 +959,10 @@ def build(c, db, role, now=None):
                    "30": series(db, now - 30 * DAY, 2 * HOUR, "net_h"), "365": series(db, now - 365 * DAY, DAY, "net_d")},
         "servers": servers, "links": links, "incidents": incidents[:200],
         "avail30": avail(d30), "heat": heat,
-        "services": {"up": svc_up, "version": meta_get(db, "svc_version", ""), "start": int(meta_get(db, "svc_start", 0) or 0),
+        "services": {"up": svc_up, "version": "" if pub else meta_get(db, "svc_version", ""), "start": int(meta_get(db, "svc_start", 0) or 0),
                      "restarts30": restarts, "accounts": [[d, a] for d, a in daily_acc], "regs": regs},
         "geoip": os.path.exists(c["geoip"]),
+        "windows": [{"start": s, "end": e, "note": n} for _, s, e, n, _ in wins if e >= now and s <= now + 7 * DAY],
     }
     if admin:
         bans = db.execute("SELECT (t/86400)*86400 AS d, type, by, COUNT(*) FROM bans WHERE t>=? GROUP BY d, type, by",
@@ -647,7 +1001,27 @@ def build(c, db, role, now=None):
             "today": db.execute("SELECT COUNT(*) FROM bans WHERE t>=?", (now - now % DAY,)).fetchone()[0],
             "servers": sorted(prot, key=lambda p: p["name"]),
         }
+        data["maint"] = maint_data(c, db)
+        data["maint"]["windows"] = [{"id": i, "start": s, "end": e, "note": n, "by": b, "announce": a, "sent": [x for x in (sent or "").split(",") if x]}
+                                    for i, s, e, n, b, a, sent in db.execute("SELECT id, start, end, note, by, announce, sent FROM windows "
+                                                                             "WHERE end>=? ORDER BY start", (now - 30 * DAY,))]
+        data["maint"]["reminders"] = c["announce"]
+        data["maint"]["collector"] = c["collector"]
     return data
+
+
+def public_reason(r):
+    """An outage reason as the public page shows it: what kind, never an oper's nick or the text they typed."""
+    r = r or ""
+    if r.startswith("Ping timeout"):
+        return "Ping timeout"
+    if r.startswith(("SQUIT by", "Link removed", "Link no longer allowed")):
+        return "Closed by an operator"
+    if r.startswith("Behind "):
+        return r.split(":", 1)[0]
+    if r in ("Services restart", "Services link lost", "No data from services", "Relinked (split not seen)", "Missing from the network"):
+        return r
+    return "Connection lost"
 
 
 def render(c, db, role, now=None, live=False):
@@ -673,7 +1047,7 @@ def write_atomic(path, text):
 
 def export(c, db):
     out = []
-    for key, role in (("public_html", "viewer"), ("admin_html", "admin")):
+    for key, role in (("public_html", "public"), ("admin_html", "admin")):
         if c["export"][key]:
             write_atomic(c["export"][key], render(c, db, role))
             out.append(c["export"][key])
@@ -689,9 +1063,11 @@ class Panel:
         self.fails = {}  # ip -> [timestamps of failed logins]
         self.good = {}   # sha256(header) -> (role, expires): skip scrypt on every reload
         self.sessions = {}  # cookie token -> (login name, its password hash, expires): a logged-in browser
+        self.csrf_key = secrets.token_bytes(32)  # a form's token is derived from its session's cookie, so nothing to store
+        self.wake, self.todo = threading.Event(), set()  # admin actions the worker does (network): "reprobe", "relocate"
 
     def refresh(self, db):
-        pages = {r: render(self.c, db, r, live=True).encode() for r in ROLES}
+        pages = {r: render(self.c, db, r, live=True).encode() for r in PAGES}
         with self.lock:
             self.pages = pages
 
@@ -699,9 +1075,17 @@ class Panel:
         db = open_db(self.c)
         last_probe = last_geo = 0
         while True:
+            with self.lock:
+                todo, self.todo = self.todo, set()
             try:
                 ingest(self.c, db)
                 now = time.time()
+                if "relocate" in todo:
+                    with db:
+                        db.execute("DELETE FROM geo")
+                    last_geo = 0
+                if "reprobe" in todo:
+                    last_probe = 0
                 if now - last_geo >= 6 * HOUR or not db.execute("SELECT 1 FROM geo").fetchone():
                     resolve_locations(self.c, db)
                     last_geo = now
@@ -709,9 +1093,12 @@ class Panel:
                     run_probes(self.c, db)
                     last_probe = now
                 self.refresh(db)
+                check_alerts(self.c, db, self.log)
+                check_announcements(self.c, db)
             except Exception as e:  # keep serving the last good page
                 self.log(f"refresh failed: {e!r}")
-            time.sleep(60)
+            self.wake.wait(60)
+            self.wake.clear()
 
     def reload_users(self):
         """--user --add/--del edits stats.toml: take its logins over without a restart (a bad edit keeps the old ones)."""
@@ -728,11 +1115,16 @@ class Panel:
                 self.log(f"stats.toml changed but can't be loaded, keeping the old logins: {e}")
         self.conf_mtime = m
 
+    DUMMY_HASH = hash_password(secrets.token_hex(8))
+
     def check(self, name, pw, ip):
-        """The [[users]] entry for a good name + password, else None (counted against `ip`)."""
-        for u in self.c["users"]:
-            if hmac.compare_digest(u["name"].encode(), name.encode()) and check_password(pw, u["password"]):
-                return u
+        """The [[users]] entry for a good name + password, else None (counted against `ip`). An unknown name costs the
+        same scrypt as a known one, so the time taken doesn't tell which names exist."""
+        u = next((u for u in self.c["users"] if hmac.compare_digest(u["name"].encode(), name.encode())), None)
+        if check_password(pw, u["password"] if u else self.DUMMY_HASH) and u:
+            return u
+        if len(self.fails) > 10000:  # many addresses: forget the ones that stopped
+            self.fails = {k: v for k, v in self.fails.items() if v and v[-1] > time.time() - 600}
         self.fails.setdefault(ip, []).append(time.time())
         self.log(f"failed login for '{name[:40]}' from {ip}")
         return None
@@ -781,16 +1173,43 @@ class Panel:
         m = re.search(r"(?:^|;\s*)netstats_session=([\w-]+)", cookie or "")
         return m.group(1) if m else None
 
-    def session_role(self, cookie):
-        """The role of the browser's login session, None when it has none (or its login was removed / changed password)."""
+    def session_login(self, cookie):
+        """The [[users]] entry of the browser's login session, None when it has none (or its login was removed / changed password)."""
         self.reload_users()
         s = self.sessions.get(self.session_token(cookie))
         if not s or s[2] <= time.time():
             return None
-        for u in self.c["users"]:
-            if u["name"] == s[0] and u["password"] == s[1]:
-                return u["role"]
-        return None
+        return next((u for u in self.c["users"] if u["name"] == s[0] and u["password"] == s[1]), None)
+
+    def session_role(self, cookie):
+        u = self.session_login(cookie)
+        return u["role"] if u else None
+
+    def csrf(self, cookie):
+        """The admin forms' token: bound to the session cookie, which another site can neither read nor send (SameSite)."""
+        tok = self.session_token(cookie)
+        return hmac.new(self.csrf_key, tok.encode(), "sha256").hexdigest()[:32] if tok else ""
+
+    def run_action(self, u, action, name, form=None):
+        """An admin action from the panel: the database ones now (and the page redrawn), probes/locations by the worker."""
+        if action in ("reprobe", "relocate"):
+            with self.lock:
+                self.todo.add(action)
+            self.wake.set()
+            msg = "Health checks started" if action == "reprobe" else "Locations are being looked up again"
+            msg += ": the page shows the results within a minute."
+        else:
+            db = open_db(self.c)
+            try:
+                msg = admin_action(self.c, db, action, name, dict(form or {}, by=u["name"]))
+                audit(self.c, u["name"], action, msg)  # before the redraw, so the activity log on the new page has it
+                self.refresh(db)
+            finally:
+                db.close()
+        self.log(f"admin {u['name']}: {action}{' ' + name if name else ''} -- {msg}")
+        if action in ("reprobe", "relocate"):
+            audit(self.c, u["name"], action, msg)
+        return msg
 
     def client_ip(self, peer, xff):
         """The visitor's address: the proxy's X-Forwarded-For entry when the request comes from a trusted proxy (Caddy,
@@ -805,13 +1224,26 @@ class Panel:
 
     def throttled(self, ip):
         recent = [t for t in self.fails.get(ip, []) if t > time.time() - 600]
-        self.fails[ip] = recent
+        if recent:
+            self.fails[ip] = recent
+        else:
+            self.fails.pop(ip, None)
         return len(recent) >= 10
 
     def handler(panel):
         class H(http.server.BaseHTTPRequestHandler):
             server_version = "netstats"
             sys_version = ""
+            timeout = 30  # a client that stops sending (slowloris) gives its thread back
+
+            def same_origin(self):
+                """POSTs from our own pages only: a browser always says where a form came from. (SameSite already keeps
+                the session cookie off other sites' requests; this is the second lock.)"""
+                o = self.headers.get("Origin")
+                if not o or o == "null":
+                    return o is None
+                host = urllib.parse.urlsplit(o).netloc.lower()
+                return host in {(self.headers.get("Host") or "").lower(), panel.c["http"]["hostname"]}
 
             def log_message(self, format, *args):  # noqa: A002 -- the base class's name
                 pass
@@ -823,7 +1255,7 @@ class Panel:
                 self.send_header("Cache-Control", "no-store")
                 self.send_header("X-Content-Type-Options", "nosniff")
                 self.send_header("X-Frame-Options", "DENY")
-                self.send_header("Referrer-Policy", "no-referrer")
+                self.send_header("Referrer-Policy", "same-origin")  # same-origin, not no-referrer: under that a browser sends "Origin: null" even for our own forms
                 self.send_header("Content-Security-Policy", "default-src 'none'; script-src 'unsafe-inline'; "
                                  "style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'self'")
                 for k, v in extra:
@@ -865,9 +1297,11 @@ class Panel:
                 if role is None and (path == "/admin/" or not panel.c["http"]["public"]):
                     return self.go("/login")
                 with panel.lock:
-                    page = panel.pages.get(role or "viewer")
+                    page = panel.pages.get(role or "public")
                 if page is None:
                     return self.send(503, b"Starting up, reload in a moment\n")
+                if session == "admin":  # only a login session gets the admin forms' token (HTTP Basic is for reading)
+                    page = page.replace(b'/*@CSRF@*/""', json.dumps(panel.csrf(self.headers.get("Cookie"))).encode(), 1)
                 self.send(200, page, "text/html; charset=utf-8")
 
             def do_POST(self):
@@ -877,12 +1311,31 @@ class Panel:
                     n = int(self.headers.get("Content-Length") or 0)
                 except ValueError:
                     return self.send(400, b"Bad request\n")
+                if n < 0:
+                    return self.send(400, b"Bad request\n")
+                if not self.same_origin():
+                    return self.send(403, b"Cross-site request refused\n")
                 if n > 4096:
                     return self.send(413, b"Too big\n")
                 form = urllib.parse.parse_qs(self.rfile.read(n).decode("utf-8", "replace"))
                 if path == "/logout":  # POST only: a link or image on another site can't log anyone out
                     panel.sessions.pop(panel.session_token(self.headers.get("Cookie")), None)
                     return self.go("/" if panel.c["http"]["public"] else "/login", 303, [("Set-Cookie", panel.cookie("", 0))])
+                if path == "/admin/action":
+                    cookie = self.headers.get("Cookie")
+                    u = panel.session_login(cookie)
+                    if not u or u["role"] != "admin":
+                        return self.send(403, b"Admin login required\n")
+                    if not hmac.compare_digest(form.get("csrf", [""])[0], panel.csrf(cookie)):
+                        return self.send(403, b"Stale or missing form token: reload the page\n")
+                    action, name = form.get("action", [""])[0], form.get("name", [""])[0]
+                    try:
+                        msg = panel.run_action(u, action, name, {k: v[0] for k, v in form.items() if k not in ("csrf", "action", "name")})
+                    except ValueError as e:
+                        msg = f"Not done: {e}"
+                    except sqlite3.Error as e:
+                        msg = f"Database error: {e}"
+                    return self.go("/admin/?msg=" + urllib.parse.quote(msg[:600]) + "#maintenance", 303)
                 if path != "/login":
                     return self.send(404, b"Not found\n")
                 if panel.throttled(ip):
@@ -890,8 +1343,11 @@ class Panel:
                 panel.reload_users()
                 u = panel.check(form.get("user", [""])[0], form.get("password", [""])[0], ip)
                 if not u:
+                    audit(panel.c, form.get("user", [""])[0][:40] or "?", "login failed", f"from {ip}")
                     # 200, not 401: a 401 must carry WWW-Authenticate, which would pop up the browser's own login box
                     return self.send(200, panel.login_page("Wrong name or password."), "text/html; charset=utf-8")
+                audit(panel.c, u["name"], "login", f"{u['role']}, from {ip}")
+                panel.wake.set()  # redraw now, so the activity log shows it
                 self.go("/admin/", 303, [("Set-Cookie", panel.cookie(panel.session_start(u)))])
         return H
 
@@ -1152,6 +1608,120 @@ def selftest():
     assert viewer["links"][0]["kind"] == "services" and viewer["links"][1]["outages"][0][2].startswith("Ping")
     page = render(c, db, "admin", now)
     assert "x<\\/script>" in page and "x</script>" not in page, "JSON can't close the script tag"
+    # maintenance: a server gone for good is listed and can be forgotten; a linked one can't
+    db.execute("INSERT INTO servers VALUES('old.test','9OL','hub.test',1,'',?,?,?,0,0)", (t0 - 40 * DAY, t0 - 35 * DAY, t0 - 40 * DAY))
+    db.execute("INSERT INTO outages(name, uplink, start, end, reason) VALUES('old.test','hub.test',?,NULL,'gone')", (t0 - 35 * DAY,))
+    db.commit()
+    assert [g["name"] for g in build(c, db, "admin", now)["maint"]["gone"]] == ["old.test"]
+    assert "maint" not in build(c, db, "viewer", now)
+    for bad in (("forget", "leaf.test"), ("forget", "nope.test"), ("drop-tables", "")):
+        try:
+            admin_action(c, db, *bad)
+            raise AssertionError(f"{bad} should have been refused")
+        except ValueError:
+            pass
+    assert admin_action(c, db, "forget", "old.test") == "Forgot old.test."
+    assert not db.execute("SELECT 1 FROM outages WHERE name='old.test' UNION SELECT 1 FROM servers WHERE name='old.test'").fetchone()
+    admin_action(c, db, "clear-incidents")
+    assert db.execute("SELECT COUNT(*) FROM outages").fetchone()[0] == 0 and db.execute("SELECT COUNT(*) FROM svc").fetchone()[0] == 0
+    assert admin_action(c, db, "clear-bans") == "Cleared 1 ban record(s)." and admin_action(c, db, "vacuum").startswith("Compacted")
+    # the public page: no versions, CPU or memory, and outage reasons by kind only
+    db.execute("INSERT INTO outages(name, uplink, start, end, reason) VALUES('leaf.test','hub.test',?,?,'SQUIT by opernick: moving it')",
+               (t0 + 100, t0 + 200))
+    db.commit()
+    pub, view = build(c, db, "public", now), build(c, db, "viewer", now)
+    reasons = lambda d: [i["reason"] for i in d["incidents"] if i["a"] == "leaf.test"]
+    assert reasons(pub) == ["Closed by an operator"] and "opernick" in reasons(view)[0]
+    assert all(s["version"] == "" and s["cpu"] is None for s in pub["servers"]) and pub["services"]["version"] == ""
+    assert view["services"]["version"] == "1.5.0" and "opernick" not in render(c, db, "public", now)
+    assert public_reason("Ping timeout: 180 seconds") == "Ping timeout" and public_reason("Read error: x") == "Connection lost"
+    # a maintenance window: that split is maintenance and costs no uptime
+    before = build(c, db, "viewer", now)["avail30"]
+    start = datetime.fromtimestamp(t0 + 60, timezone.utc).strftime("%Y-%m-%dT%H:%M")
+    assert admin_action(c, db, "window-add", f={"start": start, "minutes": "10", "note": "hub upgrade", "by": "alice"}).startswith("Planned")
+    after = build(c, db, "viewer", now)
+    assert after["avail30"] > before and [i["maint"] for i in after["incidents"] if i["a"] == "leaf.test"] == [1] and after["windows"] == []
+    wid = build(c, db, "admin", now)["maint"]["windows"][0]["id"]
+    assert admin_action(c, db, "window-del", f={"id": str(wid)}) == "Maintenance window removed."
+    for bad in ({"start": "tomorrow", "minutes": "10"}, {"start": start, "minutes": "0"}):
+        try:
+            admin_action(c, db, "window-add", f=bad); raise AssertionError(bad)
+        except ValueError:
+            pass
+    # telling users on IRC: the notice at once, reminders when due (not the ones already past), a cancellation on removal
+    q = os.path.join(os.path.dirname(c["log"]), "announce.queue")
+    soon = datetime.fromtimestamp(time.time() + 3 * HOUR, timezone.utc).strftime("%Y-%m-%dT%H:%M")
+    assert "being told" in admin_action(c, db, "window-add", f={"start": soon, "minutes": "45", "note": "hub upgrade", "announce": "1"})
+    sent = [json.loads(l)["text"] for l in open(q)]
+    assert len(sent) == 1 and sent[0].startswith("[Test<Net>] Planned maintenance: hub upgrade.") and "about 45 minutes" in sent[0], sent
+    w = db.execute("SELECT id, start, sent FROM windows WHERE announce=1").fetchone()
+    assert w[2] == f"new,x{DAY}", "the 24h reminder is already past: never sent late"
+    assert check_announcements(c, db, w[1] - 2 * HOUR) == [], "nothing due yet"
+    assert check_announcements(c, db, w[1] - HOUR + 5)[0].startswith("[Test<Net>] Reminder, maintenance in 1 hour: hub upgrade.")
+    assert check_announcements(c, db, w[1] - 60) == [], "each reminder once"
+    assert "told it's cancelled" in admin_action(c, db, "window-del", f={"id": str(w[0])})
+    sent = [json.loads(l)["text"] for l in open(q)]
+    assert len(sent) == 3 and "Cancelled" in sent[2], sent
+    past = datetime.fromtimestamp(time.time() - HOUR, timezone.utc).strftime("%Y-%m-%dT%H:%M")
+    try:
+        admin_action(c, db, "window-add", f={"start": past, "minutes": "10", "announce": "1"}); raise AssertionError("past + announce")
+    except ValueError:
+        pass
+    os.unlink(q)
+    ingest_records(db, [{"t": now, "k": "announced", "id": w[0]}])
+    assert db.execute("SELECT who, action FROM audit WHERE action='announced'").fetchone() == ("services", "announced")
+    # per-server settings from the panel override stats.toml; empty means back to the defaults
+    assert "hidden" in admin_action(c, db, "server-set", "leaf.test", {"location": "Paris", "lat": "48.85", "lon": "2.35", "hide": "1"})
+    assert "leaf.test" not in [x["name"] for x in build(c, db, "viewer", now)["servers"]]
+    admin_action(c, db, "server-set", "leaf.test", {"location": "Paris", "lat": "48.85", "lon": "2.35"})
+    lf = next(x for x in build(c, db, "viewer", now)["servers"] if x["name"] == "leaf.test")
+    assert (lf["loc"], lf["lat"]) == ("Paris", 48.85)
+    for bad in ({"lat": "91", "lon": "0"}, {"lat": "10"}, {"lat": "x", "lon": "1"}):
+        try:
+            admin_action(c, db, "server-set", "leaf.test", bad); raise AssertionError(bad)
+        except ValueError:
+            pass
+    assert "back to" in admin_action(c, db, "server-set", "leaf.test", {})
+    # merge: a renamed server's history moves onto the new name
+    db.execute("INSERT INTO servers VALUES('leaf-old.test','2LF','hub.test',1,'',?,?,?,0,0)", (t0 - 9 * DAY, t0 - DAY, t0 - 9 * DAY))
+    db.execute("INSERT INTO srv VALUES(?, 'leaf-old.test', 3)", (t0 - 2 * DAY,))
+    db.commit()
+    assert admin_action(c, db, "merge", "leaf-old.test", {"new": "leaf.test"}).startswith("Merged")
+    assert db.execute("SELECT COUNT(*) FROM srv WHERE name='leaf.test' AND t=?", (t0 - 2 * DAY,)).fetchone()[0] == 1
+    assert db.execute("SELECT first_seen FROM servers WHERE name='leaf.test'").fetchone()[0] == t0 - 9 * DAY
+    assert not db.execute("SELECT 1 FROM servers WHERE name='leaf-old.test'").fetchone()
+    # alerts: once when it starts, once when it ends, nothing during a maintenance window
+    got = []
+
+    class Hook(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            got.append(json.loads(self.rfile.read(int(self.headers["Content-Length"])))["text"])
+            self.send_response(204); self.end_headers()
+
+        def log_message(self, *a):
+            pass
+    hook = http.server.HTTPServer(("127.0.0.1", 0), Hook)
+    threading.Thread(target=hook.serve_forever, daemon=True).start()
+    c["alerts"]["webhook"] = f"http://127.0.0.1:{hook.server_address[1]}/"
+    db.execute("INSERT INTO outages(name, uplink, start, end, reason) VALUES('leaf.test','hub.test',?,NULL,'Ping timeout: 180 seconds')",
+               (now - 600,))
+    db.execute("UPDATE servers SET present=0 WHERE name='leaf.test'")
+    meta_set(db, "last_snapshot", now)
+    db.commit()
+    assert len(check_alerts(c, db, print, now)) == 1 and check_alerts(c, db, print, now + 60) == [], "once, not every minute"
+    db.execute("UPDATE outages SET end=? WHERE end IS NULL", (now + 100,))
+    db.commit()
+    assert check_alerts(c, db, print, now + 120) == ["UP: leaf.test is linked again"]
+    db.execute("INSERT INTO windows(start, end, note, by) VALUES(?,?,'x','y')", (now, now + 3600))
+    db.execute("INSERT INTO outages(name, uplink, start, end, reason) VALUES('leaf.test','hub.test',?,NULL,'Ping timeout')", (now - 900,))
+    db.commit()
+    assert check_alerts(c, db, print, now + 200) == [], "quiet during maintenance"
+    db.execute("DELETE FROM windows"); db.execute("DELETE FROM outages WHERE end IS NULL"); db.commit()
+    assert admin_action(c, db, "alert-test") == "Test alert sent."
+    time.sleep(0.2)
+    assert len(got) == 3 and got[0].startswith("[Test<Net>] DOWN: leaf.test") and "Test alert" in got[2], got
+    hook.shutdown()
+    c["alerts"]["webhook"] = ""
     assert "/*@DATA@*/" not in page and "/*@MAP@*/" not in page
     h = hash_password("pw")
     assert check_password("pw", h) and not check_password("px", h)
@@ -1192,7 +1762,7 @@ def selftest():
     c2 = load_config(conf)  # bob (viewer, password "pw")
     c2["http"]["public"] = True
     pn = Panel(c2, lambda m: None)
-    pn.pages = {r: b"page-" + r.encode() for r in ROLES}
+    pn.pages = {r: b"page-" + r.encode() for r in PAGES}
     httpd = http.server.HTTPServer(("127.0.0.1", 0), pn.handler())
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
 
@@ -1200,8 +1770,8 @@ def selftest():
         def redirect_request(self, *a, **k):
             return None
 
-    def req(path, data=None, cookie=None):
-        r = urllib.request.Request(f"http://127.0.0.1:{httpd.server_address[1]}{path}", headers={"Cookie": cookie or ""},
+    def req(path, data=None, cookie=None, headers=None):
+        r = urllib.request.Request(f"http://127.0.0.1:{httpd.server_address[1]}{path}", headers=dict({"Cookie": cookie or ""}, **(headers or {})),
                                    data=None if data is None else data.encode())
         try:
             with urllib.request.build_opener(NoRedirect).open(r) as x:
@@ -1210,7 +1780,7 @@ def selftest():
             return e.code, e.headers, e.read()
 
     assert req("/admin/")[0] == 302 and req("/admin/")[1]["Location"] == "/login"
-    assert req("/")[2] == b"page-viewer" and b'name="password"' in req("/login")[2]
+    assert req("/")[2] == b"page-public" and b'name="password"' in req("/login")[2]
     st, hd, body = req("/login", "user=bob&password=nope")
     assert st == 200 and b"Wrong name or password" in body and "Set-Cookie" not in hd
     st, hd, _ = req("/login", "user=bob&password=pw")
@@ -1224,6 +1794,28 @@ def selftest():
     user_del(conf, "bob", "viewer")
     os.utime(conf, (now + 10, now + 10))  # coarse file systems: make the change visible
     assert req("/admin/", cookie=ck)[0] == 302  # a login that was removed loses its sessions at once
+    # admin actions: an admin session with its page's token only
+    user_add(conf, "carol", "admin", hash_password("pw"))
+    user_add(conf, "dave", "viewer", hash_password("pw"))
+    os.utime(conf, (now + 20, now + 20))
+    pn.pages["admin"] = b'page-admin /*@CSRF@*/""'
+    ckv = req("/login", "user=dave&password=pw")[1]["Set-Cookie"].split(";")[0]
+    assert req("/admin/action", "action=vacuum&csrf=", ckv)[0] == 403, "a viewer can't"
+    cka = req("/login", "user=carol&password=pw")[1]["Set-Cookie"].split(";")[0]
+    tok = json.loads(req("/admin/", cookie=cka)[2].split(b" ", 1)[1])
+    assert len(tok) == 32 and tok != pn.csrf(ckv)
+    assert req("/admin/action", "action=vacuum&csrf=" + pn.csrf(ckv), cka)[0] == 403, "another session's token doesn't work"
+    assert [r[2] for r in sqlite3.connect(c2["db"]).execute("SELECT * FROM audit ORDER BY t")][-2:] == ["login", "login"]
+    st, hd, _ = req("/admin/action", "action=clear-bans&csrf=" + tok, cka)
+    assert st == 303 and hd["Location"].startswith("/admin/?msg=Cleared%200%20ban") and hd["Location"].endswith("#maintenance")
+    st, hd, _ = req("/admin/action", "action=forget&name=hub.test&csrf=" + tok, cka)
+    assert "Not%20done" in hd["Location"], "a linked server is not forgotten"
+    assert b"page-admin" not in pn.pages["admin"], "the page was drawn again after the action"
+    # hardening: another site's form, a negative length
+    assert req("/admin/action", "action=vacuum&csrf=" + tok, cka, {"Origin": "https://evil.example"})[0] == 403
+    assert req("/admin/action", "action=vacuum&csrf=" + tok, cka, {"Origin": f"http://127.0.0.1:{httpd.server_address[1]}"})[0] == 303
+    assert req("/login", "x", None, {"Content-Length": "-1"})[0] == 400
+    assert "unknown%20action" in req("/admin/action", "action=ban-add&csrf=" + tok, cka)[1]["Location"]
     httpd.shutdown()
     httpd.server_close()
     print("netstats selftest: ok")
@@ -1235,7 +1827,8 @@ def selftest():
 def main():
     ap = argparse.ArgumentParser(description="SekurIRCd network stats panel", formatter_class=argparse.RawDescriptionHelpFormatter,
                                  epilog=__doc__.split("\n\n", 1)[1])
-    ap.add_argument("command", nargs="?", choices=["serve", "render", "ingest", "geoip-update", "check", "selftest"])
+    ap.add_argument("command", nargs="?", choices=["serve", "render", "ingest", "geoip-update", "check", "selftest", "admin"])
+    ap.add_argument("args", nargs="*", help="admin: ACTION [SERVER] -- " + "; ".join(f"{k}: {v}" for k, v in ADMIN_ACTIONS.items()))
     ap.add_argument("-c", "--config", default=os.path.join(HERE, "stats.toml"))
     ap.add_argument("--daemon", action="store_true", help="serve: run in the background")
     ap.add_argument("--pidfile", default=os.path.join(HERE, "netstats.pid"))
@@ -1292,6 +1885,26 @@ def main():
             print(f"netstats: configuration OK ({a.config})")
             for n in exposure_notes(c["http"]):
                 print("netstats: " + n)
+            return 0
+        if a.command == "admin":
+            if not a.args:
+                ap.error("admin needs an action: " + ", ".join(ADMIN_ACTIONS))
+            takes = {"forget": 1, "merge": 2}.get(a.args[0], 0)
+            if a.args[0] in ("server-set", "window-add", "window-del"):
+                ap.error(f"{a.args[0]} is on the panel's Maintenance section (or stats.toml [[servers]] for server settings)")
+            if len(a.args) != 1 + takes:
+                ap.error("admin forget takes SERVER, admin merge takes OLD NEW; the other actions take nothing")
+            db = open_db(c)
+            try:
+                ingest(c, db)  # what the collector wrote since: a server must be judged on its latest state
+                msg = admin_action(c, db, a.args[0], a.args[1] if len(a.args) > 1 else "", {"new": a.args[2] if len(a.args) > 2 else ""})
+                audit(c, "shell:" + getpass.getuser(), a.args[0], msg)
+                print("netstats: " + msg)
+            except ValueError as e:
+                print(f"netstats: {e}", file=sys.stderr)
+                return 2
+            finally:
+                db.close()
             return 0
         if a.command == "geoip-update":
             geoip_update(c)

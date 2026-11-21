@@ -78,6 +78,8 @@ typedef struct netserver {
 /* --- table / identity ------------------------------------------------------------------------------- */
 void netsync_init(struct server *srv);                 /* creates the self entry; call after the config is loaded */
 void netsync_free(struct server *srv);
+int netsync_valid_sid(const char *sid);
+void netsync_global_notice(struct server *srv, const char *text); /* every user on the network, as a server notice */
 netserver_t *netsync_find_sid(struct server *srv, const char *sid);
 netserver_t *netsync_find_name(struct server *srv, const char *name);
 /* Is `s` equal to, or behind (in the tree), `ancestor`? */

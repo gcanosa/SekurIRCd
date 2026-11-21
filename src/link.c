@@ -317,6 +317,7 @@ static int dial_peer(server_t *srv, int peer_idx) {
         goto fail;
     }
     int server_link = got_capab && msg.nparams >= 4;
+    if (server_link && !netsync_valid_sid(msg.params[2])) { log_warn("link", "peer '%s' sent a bad SID '%s'", up->name, msg.params[2]); goto fail; }
     if (server_link && netsync_check_peer(srv, lc, up->name) != 0) {
         write_line_blocking(lc, "ERROR :Incompatible link protocol");
         goto fail;
@@ -832,9 +833,7 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
             lc->authenticated = 1;
             if (lc->peer_capab_sekurnet && msg.nparams >= 4) { /* a server link: answer in kind, then burst */
                 const char *sid = msg.params[2];
-                int sid_ok = strlen(sid) == 3 && isdigit((unsigned char)sid[0]);
-                for (int k = 1; k < 3 && sid_ok; k++) sid_ok = isdigit((unsigned char)sid[k]) || (sid[k] >= 'A' && sid[k] <= 'Z');
-                if (!sid_ok) { link_forward_line(lc, "ERROR :Bad SID"); link_close(srv, lc); return -1; }
+                if (!netsync_valid_sid(sid)) { link_forward_line(lc, "ERROR :Bad SID"); link_close(srv, lc); return -1; }
                 if (netsync_find_sid(srv, sid) || netsync_find_name(srv, name)) { /* refuse before answering, or the dialer thinks it's up */
                     log_warn("netsync", "refusing link to '%s' (%s): name or SID already on the network", name, sid);
                     link_forward_line(lc, "ERROR :Server or SID already exists on this network");
@@ -965,6 +964,12 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
         return 0;
     }
     if (strcasecmp(msg.command, "SVCSTATS") == 0) { lc->watch_stats = 1; send_svc_stats(srv, lc); return 0; }
+    if (strcasecmp(msg.command, "SVCGLOBAL") == 0) { /* SVCGLOBAL :<text> -- a network announcement (the stats panel's maintenance notices) */
+        if (msg.nparams < 1 || !msg.params[msg.nparams - 1][0]) return 0;
+        log_info("link", "network announcement from %s: %s", lc->peer_name, msg.params[msg.nparams - 1]);
+        netsync_global_notice(srv, msg.params[msg.nparams - 1]);
+        return 0;
+    }
     if (!strcmp(msg.command, "SVSLOGIN") || !strcmp(msg.command, "SVSOPER") || !strcmp(msg.command, "SVSJOIN") || !strcmp(msg.command, "SVSNICK") || !strcmp(msg.command, "KILL") ||
         !strcmp(msg.command, "SVCSASL") || !strcmp(msg.command, "SVCREGRESULT")) {
         svc_command(srv, svc, &msg);

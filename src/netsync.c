@@ -31,6 +31,13 @@ void netsync_default_sid(const char *name, char *out) {
     out[3] = '\0';
 }
 
+/* A digit, then two of [0-9A-Z]: the shape every SID-prefixed UID and routing decision relies on. */
+int netsync_valid_sid(const char *sid) {
+    if (strlen(sid) != SID_LEN || !isdigit((unsigned char)sid[0])) return 0;
+    for (int k = 1; k < SID_LEN; k++) if (!isdigit((unsigned char)sid[k]) && !(sid[k] >= 'A' && sid[k] <= 'Z')) return 0;
+    return 1;
+}
+
 netserver_t *netsync_find_sid(server_t *srv, const char *sid) {
     netserver_t *s;
     HASH_FIND_STR(srv->servers, sid, s);
@@ -578,6 +585,12 @@ static void handle_server(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     if (!from || msg->nparams < 4) return;
     const char *name = msg->params[0], *sid = msg->params[2], *desc = msg->params[3];
     int hop = atoi(msg->params[1]);
+    if (!netsync_valid_sid(sid) || !name[0] || strlen(name) >= sizeof ((netserver_t *)0)->name || !strchr(name, '.')) {
+        log_error("netsync", "link '%s' introduced a bad server '%s' (%s) -- dropping the link", lc->peer_name, name, sid);
+        link_forward_line(lc, "ERROR :Bad server name or SID");
+        link_close(srv, lc);
+        return;
+    }
     if (netsync_find_sid(srv, sid) || netsync_find_name(srv, name)) { /* a loop or a duplicate: refuse the whole link */
         log_error("netsync", "link '%s' introduced %s (%s) which already exists -- dropping the link", lc->peer_name, name, sid);
         link_forward_line(lc, "ERROR :Server loop or duplicate detected");
@@ -896,6 +909,10 @@ static void handle_account(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
 
 static void handle_kill(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     if (msg->nparams < 1) return;
+    /* A link speaks only for users and servers behind it: a made-up or far-side prefix used to pass (and slip past the
+     * oper_scope check below, which only knew real UIDs). No prefix = the peer itself. */
+    if (msg->prefix && !src_user(srv, lc, msg->prefix) && !src_server(srv, lc, msg->prefix) &&
+        !(lc->nserver && strcmp(msg->prefix, lc->nserver->sid) == 0)) return;
     if (msg->prefix && limited_link(srv, lc) && netsync_find_uid(srv, msg->prefix)) { /* an oper's KILL; a server's (collision, session resume) passes */
         scope_deny(srv, lc, src_user(srv, lc, msg->prefix), "KILL");
         return;
@@ -1065,7 +1082,7 @@ static void handle_sjoin(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
         const char *p = tok;
         int rank = rank_from_prefix(&p);
         client_t *u = netsync_find_uid(srv, p);
-        if (!u || !u->remote) continue;
+        if (!u || !u->remote || !u->nserver || !netsync_is_behind(u->nserver, lc->nserver)) continue; /* never someone else's users */
         if (channel_find_member(chan, u)) continue;
         member_t *m = channel_add_member(chan, u);
         if (!m) continue;
@@ -1483,6 +1500,7 @@ static void handle_gline(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
 static void handle_ungline(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     if (msg->nparams < 1) return;
     if (limited_link(srv, lc)) { log_debug("netsync", "%s %s from %s dropped (oper_scope = local)", msg->command, msg->params[0], lc->peer_name); return; }
+    if (!src_server(srv, lc, msg->prefix) && !(msg->prefix && lc->nserver && strcmp(msg->prefix, lc->nserver->sid) == 0)) return;
     server_kline_remove_typed(srv, msg->params[0], !strcmp(msg->command, "UNSHUN") ? 'S' : 'G'); /* never a local K/Z with that mask */
     char fl[300];
     irc_build(fl, sizeof fl, NULL, 0, msg->prefix, msg->command, (const char *[]){msg->params[0]}, 1, NULL);
@@ -1606,6 +1624,7 @@ static void handle_rename(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
 /* :<uid> RQUERY <sid> <VERB> [args] -- a user elsewhere asked this server (WHOIS of one of ours, VERSION <us>...); client_reply
  * sends the answers back to them as PUSH lines. */
 static void handle_snote(server_t *srv, link_conn_t *lc, irc_message_t *msg);
+static void handle_gnotice(server_t *srv, link_conn_t *lc, irc_message_t *msg);
 
 static void handle_rquery(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     static const struct { const char *name; void (*fn)(server_t *, client_t *, irc_message_t *); } CMDS[] = {
@@ -1731,6 +1750,7 @@ void netsync_handle(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     else if (!strcmp(c, "SPAMFILTER")) handle_spamfilter(srv, lc, msg);
     else if (!strcmp(c, "RQUERY")) handle_rquery(srv, lc, msg);
     else if (!strcmp(c, "SNOTE")) handle_snote(srv, lc, msg);
+    else if (!strcmp(c, "GNOTICE")) handle_gnotice(srv, lc, msg);
     else if (!strcmp(c, "RENAME")) handle_rename(srv, lc, msg);
     else if (!strcmp(c, "REDACT")) handle_redact(srv, lc, msg);
     else if (!strcmp(c, "MLINE")) handle_mline(srv, lc, msg);
@@ -2005,6 +2025,33 @@ void netsync_unshun(server_t *srv, const char *mask) {
     char line[300];
     irc_build(line, sizeof line, NULL, 0, self_sid(srv), "UNSHUN", (const char *[]){mask}, 1, NULL);
     flood(srv, NULL, line);
+}
+
+/* A network announcement (services' SVCGLOBAL, from the stats panel's planned maintenance) to every user connected here,
+ * as a server notice. Service bots and always-on sessions with no connection are skipped. */
+static void global_notice_local(server_t *srv, const char *text) {
+    client_t *u, *tmp;
+    HASH_ITER(hh, srv->users, u, tmp)
+        if (!u->remote && u->registered && !u->is_service && u->fd >= 0) notice_self(srv, u, text);
+}
+
+void netsync_global_notice(server_t *srv, const char *text) {
+    global_notice_local(srv, text);
+    if (!netsync_has_links(srv)) return;
+    char line[700];
+    irc_build(line, sizeof line, NULL, 0, self_sid(srv), "GNOTICE", NULL, 0, text);
+    flood(srv, NULL, line);
+}
+
+/* :<sid> GNOTICE :<text> -- every server tells its own users and passes it on. Older servers ignore the verb. */
+static void handle_gnotice(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
+    netserver_t *from = src_server(srv, lc, msg->prefix);
+    if (!from || msg->nparams < 1) return;
+    const char *text = msg->params[msg->nparams - 1];
+    global_notice_local(srv, text);
+    char fl[700];
+    irc_build(fl, sizeof fl, NULL, 0, from->sid, "GNOTICE", NULL, 0, text);
+    flood(srv, lc, fl);
 }
 
 /* :<sid> SNOTE <kind> :<text> -- an oper notice ('s': +s opers) or a debug-channel line ('d') for every server, each

@@ -43,6 +43,17 @@
   active K/G/Z-lines and the latest bans with their masks and reasons.</td></tr>
 <tr><td>Health checks</td><td>netstats connects to every server from outside: each client port open or closed, how long the TLS handshake took, and
   how many days the TLS certificate has left.</td></tr>
+<tr><td>Maintenance <small>(admin only)</small></td><td>Tidying and running the panel (the servers and the network are never touched):
+  <strong>forget a server</strong> that was retired (its history, outages, health checks and location go; one that links again comes back on its own), or
+  every server that isn't linked at once; <strong>merge</strong> a renamed server's history into its new name; clear past incidents (uptime starts over) or the
+  ban history; run the health checks or look the locations up again right now; compact the database; <strong>plan maintenance</strong> (splits that start in a
+  window show as maintenance, cost no uptime and send no alert, and the next 7 days' windows are announced at the top of every page; tick
+  <em>tell users on IRC</em> and every user connected gets a notice now, reminders before it starts (<code>[announce] reminders</code>, 24 h and 1 h
+  by default) and a cancellation if you remove the window); set a server's
+  <strong>map position, location label</strong> or hide it (these override stats.toml <code>[[servers]]</code>); send a test alert; and the <strong>admin activity</strong>
+  log: logins, failed logins and every action, with who did it. From a shell: <code>stats/netstats.py admin forget old.example.net</code>,
+  <code>forget-gone</code>, <code>merge OLD NEW</code>, <code>clear-incidents</code>, <code>clear-bans</code>, <code>reprobe</code>, <code>relocate</code>, <code>vacuum</code>,
+  <code>alert-test</code>.</td></tr>
 </table></div>
 
 <h2>how it works</h2>
@@ -96,6 +107,22 @@ stats/netstats.py --mkpasswd                     # just print a hash, for a [[us
   then anyone gets the viewer page there, with a <em>Log in</em> button for the rest. Once logged in, the button on the right of the section bar (under the
   Light/Dark toggle) says <em>Log out</em>: it ends the session at once. A session lasts 12 hours, and removing a login with <code>--user --del</code> (or changing its
   password) ends its sessions too. Scripts can still use HTTP Basic: <code>curl -u alice:password http://127.0.0.1:8089/admin/</code>.</p>
+
+<h2>who sees what</h2>
+<div class="tablewrap"><table>
+<tr><th></th><th>Public (no login)</th><th>Viewer login</th><th>Admin login</th></tr>
+<tr><td>Users, map, links and uptime, servers, services, health checks</td><td>yes</td><td>yes</td><td>yes</td></tr>
+<tr><td>Software versions, CPU and memory per server</td><td>no</td><td>yes</td><td>yes</td></tr>
+<tr><td>Why a link split</td><td>the kind only (<em>Ping timeout</em>, <em>Closed by an operator</em>, <em>Connection lost</em>)</td><td>in full, e.g. <code>SQUIT by &lt;oper&gt;: &lt;reason&gt;</code></td><td>in full</td></tr>
+<tr><td>Server IPs, probe errors, Security, Maintenance</td><td>no</td><td>no</td><td>yes</td></tr>
+</table></div>
+<p>"Public" is the page at <code>/</code> with <code>public = true</code>, and the <code>[export] public_html</code> file.</p>
+
+<h2>alerts</h2>
+<p>Set <code>[alerts] webhook</code> in <code>stats.toml</code> to a Discord, Slack, Mattermost or Rocket.Chat webhook (<code>format = "json"</code>) or an ntfy
+  topic (<code>format = "text"</code>) and the panel posts when a link has been down for <code>down_minutes</code>, services stop reporting, a probed port stops
+  answering, or a TLS certificate has fewer than <code>cert_days</code> left. Each problem is posted once, and once more when it's fixed; nothing is posted
+  during a planned maintenance window. <em>Send a test alert</em> on the Maintenance section checks the setup.</p>
 
 <h2>putting it online</h2>
 <p>By default the panel listens on <code>127.0.0.1:8089</code> only. To reach it from outside, either:</p>

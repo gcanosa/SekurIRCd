@@ -43,11 +43,29 @@ hostname = ""
 # trusted_proxies = ["127.0.0.1", "::1"]
 
 # Logins: managed with  netstats.py --user --admin|--viewer --add|--del NAME  and  --user --status.
-# admin = everything; viewer = no Security section, no server IPs.
+# admin = everything; viewer = no Security or Maintenance section, no server IPs. Without a login (public = true, and
+# [export] public_html) the page also leaves out versions, CPU and memory, and says only what kind of outage each one was.
 # [[users]]
 # name = "yourname"
 # password = "scrypt$..."        # netstats.py --mkpasswd
 # role = "admin"
+
+[announce]
+# Planned maintenance on the panel can be told to every user on IRC (a "tell users on IRC" box per window, off by
+# default): a notice when it is planned, then these reminders before it starts, and a "cancelled" notice if the window
+# is removed. services sends them as server notices to everyone connected, so it needs [collector] enabled = true.
+reminders = ["24h", "1h"]
+
+[alerts]
+# A post to a webhook when something needs a human: a link down for down_minutes, no data from services, a port that
+# stops answering, a TLS certificate with fewer than cert_days left. Each is sent once when it starts and once when it is
+# fine again (certificates: once a day), and nothing during a maintenance window planned on the panel. "" = off.
+# format "json" posts {"text": ..., "content": ...} (Discord, Slack, Mattermost, Rocket.Chat); "text" a plain body (ntfy).
+# The panel's Maintenance section has a "Send a test alert" button once this is set.
+webhook = ""
+format = "json"
+down_minutes = 5
+cert_days = 14
 
 [export]
 # Written by "netstats.py render" (run it from cron, e.g. every 5 minutes) -- static files for a website.
