@@ -22,7 +22,7 @@ container/setup.sh install
 `setup.sh` is a single file; you can also download just that file (it carries its own unit files). It:
 
 1. **checks the machine**: podman 5.0+, a systemd user session, x86-64 or arm64, and that you are not root (the containers are rootless);
-2. **pulls the image** (`ghcr.io/gcanosa/sekurircd:latest`; `--image …:edge` for the newest, or `--build` to build from this checkout);
+2. **pulls the image** (`ghcr.io/gcanosa/sekurircd:latest`, the newest release; `--image …:edge` for the newest commit, or `--build` to build from this checkout; see [Choosing the image](#choosing-the-image));
 3. asks **where to keep your data** (default `~/sekurircd`) and creates it;
 4. runs the **config wizard** in the container: a few questions, then it writes `sekurircd.toml`, `services.toml`, the
    Protection bundle, a self-signed TLS certificate and optionally the stats panel, and checks all of them before saving;
@@ -45,6 +45,60 @@ container/setup.sh uninstall               # remove the units (your data stays)
 ```
 
 `SEKURIRCD_DATA` and `SEKURIRCD_IMAGE` set the defaults; `install --data DIR --image IMAGE` overrides them.
+
+## Choosing the image
+
+All three containers run the same image, `ghcr.io/gcanosa/sekurircd`, and the **tag** decides which code you get:
+
+| Tag | What it is | Use it for |
+|---|---|---|
+| `latest` | the newest release (a `v*` tag). The default | a production server |
+| `1.3` | the newest patch release of 1.3 (1.3.5, then 1.3.6, ...) | production, bug fixes only |
+| `1.3.5` | exactly that release, it never changes | production you want pinned, and rolling back |
+| `edge` | the newest commit on `main` whose CI passed on every platform; it may be ahead of the last release | trying what is coming |
+
+Right after a release `edge` and `latest` hold the same code, but they are different builds: `edge` reports `1.3.5-git.20261121`,
+the release reports `1.3.5`. Nothing updates by itself: your machine keeps the copy of the tag it pulled until you run `upgrade`.
+
+**Which one am I running?** `container/setup.sh status` prints the image and the version. `podman ps` shows the image per container.
+
+**Where it is set.** At install with `--image` (or `SEKURIRCD_IMAGE`), then in the `Image=` line of the three units,
+`~/.config/containers/systemd/sekurircd-{ircd,services,stats}.container`. `setup.sh` reads it back from there, so to change tag
+edit all three, then pull and restart (do not use `upgrade` for this, see below):
+
+```sh
+NEW=ghcr.io/gcanosa/sekurircd:latest                  # or :1.3, :1.3.5, :edge
+sed -i "s|^Image=.*|Image=$NEW|" ~/.config/containers/systemd/sekurircd-*.container
+systemctl --user daemon-reload
+podman pull $NEW
+container/setup.sh restart services                   # nobody is disconnected
+container/setup.sh restart stats
+container/setup.sh restart ircd                       # this one drops everyone: pick your moment
+```
+
+## Start, stop and restart
+
+```sh
+container/setup.sh status                       # what runs, the image, the version
+container/setup.sh start                        # all three; stop and restart work the same way
+container/setup.sh restart ircd                 # or one of them: ircd | services | stats
+container/setup.sh rehash                       # re-read the config, nobody is disconnected
+container/setup.sh logs ircd                    # follow a log (ircd | services | stats)
+```
+
+| Container | What happens when you stop or restart it |
+|---|---|
+| `ircd` | a graceful shutdown: **every user is disconnected** and linked servers see a split. Always-on sessions come back with it. Services reconnect to it by themselves |
+| `services` | NickServ and ChanServ are gone for a few seconds (no registering or identifying meanwhile). **Nobody is disconnected** |
+| `stats` | only the dashboard stops. The network is not affected |
+
+* Restarting keeps the same image. It does not pull a newer one: that is `upgrade`.
+* `services` and `stats` only start when their config exists (`services/services.toml`, `stats/stats.toml`), so on a leaf, or when you
+  said no in the wizard, `start` quietly does nothing for them.
+* **Prefer a rehash to a restart** for config changes. Only `[server] name` and `sid` need a restart.
+* They are ordinary systemd user units, so `systemctl --user stop sekurircd-ircd` and `journalctl --user -u sekurircd-ircd -f` work too.
+  Linger keeps them running after you log out and starts them at boot.
+* Docker Compose: `docker compose restart ircd`, `docker compose stop`, `docker compose logs -f ircd` (add `--profile services --profile stats` for those two).
 
 ## Where everything lives
 
@@ -121,12 +175,21 @@ copy the new `fullchain.pem` and `privkey.pem` into `~/sekurircd/config/tls/`, t
 
 ## Upgrading, backups, moving
 
-* **Upgrade:** `container/setup.sh upgrade`. Services and the panel restart at once without disconnecting anyone; restarting the
-  ircd drops its clients (always-on sessions come back), so it asks first. To roll back, set `Image=` to a release tag
-  (`…/sekurircd:1.3.4`) in `~/.config/containers/systemd/sekurircd-*.container`, then
-  `systemctl --user daemon-reload && container/setup.sh restart`.
-* **Tags:** `latest` is the newest release, `1.3.4` / `1.3` pin one, `edge` is the newest commit on `main` (every platform's CI was green).
-  Updates are never automatic: an IRC server restart is your call.
+* **Upgrade:** `container/setup.sh backup`, then `container/setup.sh upgrade`. It pulls the tag your units use (see
+  [Choosing the image](#choosing-the-image)) and, if that brought a newer image:
+  1. restarts **services and the stats panel** at once, without disconnecting anyone;
+  2. **asks** before restarting the ircd, because that drops every user (always-on sessions come back, linked servers reconnect).
+     Say no and the ircd keeps running the old version until `container/setup.sh restart ircd`.
+
+  If the pull brought nothing it says "already up to date" and restarts nothing. That is also why `upgrade` is not the way to
+  *switch* tags: it compares the new tag with itself. Switch with the recipe above. Updates are never automatic: an IRC server
+  restart is your call. Check the result with `container/setup.sh status`.
+* **Roll back:** set the tag to the previous release (`…/sekurircd:1.3.4`) with the recipe above. The data directory is shared, so
+  read the changelog first if a release says it changes a file format.
+* **Compose:** `docker compose pull`, then `docker compose --profile services --profile stats up -d --no-deps services stats`
+  (no disconnects), then `docker compose up -d ircd` when you are ready to drop everyone. Set `SEKURIRCD_IMAGE` to change the tag.
+* **By hand** (plain `podman run`): `podman pull $IMG`, then `podman rm -f sekurircd-services` and run it again with the same
+  options, the ircd last. A running container never changes its image, so only a fresh one picks up the pull.
 * **Backup:** `container/setup.sh backup` (a tar.gz of `config/`, `services/` and `stats/`; keep it private, it holds password hashes and your TLS key).
 * **Moving to another machine:** install there, stop, copy the data directory over, start. The SID and cloak secret travel with it.
 

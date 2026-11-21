@@ -4,10 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Install · SekurIRCd docs</title>
-<meta name="description" content="Build SekurIRCd from source, run it as a daemon or as a systemd user service.">
+<meta name="description" content="Build SekurIRCd from source, run it as a daemon or a systemd user service, or in a podman or Docker container.">
 <link rel="canonical" href="https://gcanosa.github.io/SekurIRCd/docs/install.html">
 <meta property="og:title" content="Install · SekurIRCd docs">
-<meta property="og:description" content="Build SekurIRCd from source, run it as a daemon or as a systemd user service.">
+<meta property="og:description" content="Build SekurIRCd from source, run it as a daemon or a systemd user service, or in a podman or Docker container.">
 <meta property="og:image" content="https://gcanosa.github.io/SekurIRCd/img/og.png">
 <meta property="og:type" content="website">
 <meta name="twitter:card" content="summary_large_image">
@@ -162,18 +162,101 @@ systemctl --user enable --now netstats</pre>
   for <strong>x86-64 and arm64</strong> (a Raspberry Pi 3, 4 or 5 on a 64-bit OS pulls it instead of compiling). CI builds it on both architectures,
   runs a smoke test in it (config wizard, ircd + services + panel, restart, rehash, graceful stop) and publishes it only after every platform above passes.
   32-bit ARM (armv7) is not supported.</p>
+<ul>
+<li><a href="#container-install">install</a>, <a href="#container-image">choosing the image</a>, <a href="#container-run">start, stop and restart</a>,
+  <a href="#container-upgrade">upgrade</a>, <a href="#container-data">your data and the network</a>, <a href="#container-docker">docker and compose</a>.</li>
+</ul>
+
+<h3 id="container-install">install with podman</h3>
 <pre>git clone https://github.com/gcanosa/SekurIRCd.git &amp;&amp; cd SekurIRCd
 container/setup.sh install</pre>
-<p><code>setup.sh</code> (podman 5.0 or newer, rootless, on a systemd Linux) pulls the image, asks where to keep your data (default <code>~/sekurircd</code>),
-  runs the config wizard inside the container, installs systemd user units and turns on linger, so it starts at boot. Afterwards
-  <code>container/setup.sh status | logs | rehash | restart | upgrade | backup | uninstall</code>.</p>
+<p><code>setup.sh</code> needs podman 5.0 or newer and a systemd Linux, and runs as your own user (the containers are rootless). It:</p>
+<ol>
+<li>checks the machine, then pulls the image (<code>latest</code> unless you pass <code>--image</code>, see <a href="#container-image">choosing the image</a>);</li>
+<li>asks where to keep your data (default <code>~/sekurircd</code>);</li>
+<li>runs the config wizard inside the container and checks what it wrote before saving it;</li>
+<li>installs three systemd user units (ircd, services, stats panel) and starts them;</li>
+<li>turns on linger, so they start at boot and keep running after you log out, and checks that the ircd answers on its port.</li>
+</ol>
+
+<h3 id="container-image">choosing the image</h3>
+<p>All three containers run the same image, <code>ghcr.io/gcanosa/sekurircd</code>. The <strong>tag</strong> decides which code you get:</p>
+<div class="tablewrap"><table>
+<tr><th>Tag</th><th>What it is</th><th>Use it for</th></tr>
+<tr><td><code>latest</code></td><td>the newest release. The default</td><td>a production server</td></tr>
+<tr><td><code>1.3</code></td><td>the newest patch release of 1.3 (1.3.5, then 1.3.6, ...)</td><td>production, bug fixes only</td></tr>
+<tr><td><code>1.3.5</code></td><td>exactly that release, it never changes</td><td>production you want pinned, and rolling back</td></tr>
+<tr><td><code>edge</code></td><td>the newest commit on <code>main</code> whose CI passed on every platform; it can be ahead of the last release</td><td>trying what is coming</td></tr>
+</table></div>
+<p>Right after a release, <code>edge</code> and <code>latest</code> hold the same code but are different builds: <code>edge</code> reports
+  <code>1.3.5-git.20261121</code>, the release reports <code>1.3.5</code>. Nothing updates by itself: your machine keeps the copy of the tag it pulled until you
+  run <code>upgrade</code>. <code>container/setup.sh status</code> prints the image and version in use; <code>podman ps</code> shows the image of each container.</p>
+<p>The tag is set at install (<code>--image</code>, or <code>SEKURIRCD_IMAGE</code>) and then lives in the <code>Image=</code> line of the three units in
+  <code>~/.config/containers/systemd/</code>. To change it, edit all three, pull the new tag and restart:</p>
+<pre>NEW=ghcr.io/gcanosa/sekurircd:latest                  # or :1.3, :1.3.5, :edge
+sed -i "s|^Image=.*|Image=$NEW|" ~/.config/containers/systemd/sekurircd-*.container
+systemctl --user daemon-reload
+podman pull $NEW
+container/setup.sh restart services                   # nobody is disconnected
+container/setup.sh restart stats
+container/setup.sh restart ircd                       # this one drops everyone: pick your moment</pre>
+
+<h3 id="container-run">start, stop and restart</h3>
+<pre>container/setup.sh status                       # what runs, the image, the version
+container/setup.sh start                        # all three; stop and restart work the same way
+container/setup.sh restart ircd                 # or one of them: ircd | services | stats
+container/setup.sh rehash                       # re-read the config, nobody is disconnected
+container/setup.sh logs ircd                    # follow a log (ircd | services | stats)</pre>
+<div class="tablewrap"><table>
+<tr><th>Container</th><th>What happens when you stop or restart it</th></tr>
+<tr><td><code>ircd</code></td><td>A graceful shutdown: <strong>every user is disconnected</strong> and linked servers see a split. Always-on sessions come back with it, and services reconnect to it by themselves.</td></tr>
+<tr><td><code>services</code></td><td>NickServ and ChanServ are gone for a few seconds (no registering or identifying meanwhile). <strong>Nobody is disconnected.</strong></td></tr>
+<tr><td><code>stats</code></td><td>Only the dashboard stops. The network is not affected.</td></tr>
+</table></div>
 <ul>
-<li><strong>One data directory</strong> holds everything you own (config, TLS, accounts, bans, logs, the stats database), laid out like the repository root. Rebuilding or upgrading the containers never touches it.</li>
-<li><strong>Host network.</strong> Clients keep their real addresses, which K-lines, per-IP limits, cloaks and the DNSBL depend on. Open the ports in your firewall; check once that <code>/WHOIS</code> from another machine shows that machine's address.</li>
-<li><strong>Tags.</strong> <code>latest</code> is the newest release, <code>1.3.4</code> pins one, <code>edge</code> is the newest commit on <code>main</code>. Updates are never automatic: restarting an IRC server is your call.</li>
-<li><strong>Docker</strong>, older podman, or no systemd user session: <code>container/compose.yaml</code> runs the same three containers.</li>
+<li>Restarting keeps the same image. It does not pull a newer one: that is <a href="#container-upgrade">upgrade</a>.</li>
+<li><code>services</code> and <code>stats</code> only start when their config exists (<code>services/services.toml</code>, <code>stats/stats.toml</code>), so on a leaf, or when you said no in the wizard, <code>start</code> quietly does nothing for them.</li>
+<li><strong>Prefer a rehash to a restart</strong> for config changes. Only <code>[server] name</code> and <code>sid</code> need a restart.</li>
+<li>They are ordinary systemd user units, so <code>systemctl --user stop sekurircd-ircd</code> and <code>journalctl --user -u sekurircd-ircd -f</code> work too.</li>
 </ul>
-<p>The step-by-step guide (the same steps by hand, where each file lives, TLS, upgrades, backups, troubleshooting) is
+
+<h3 id="container-upgrade">upgrade</h3>
+<pre>container/setup.sh backup
+container/setup.sh upgrade</pre>
+<p><code>upgrade</code> pulls the tag your units use and, if that brought a newer image:</p>
+<ol>
+<li>restarts <strong>services and the stats panel</strong> at once, without disconnecting anyone;</li>
+<li><strong>asks</strong> before restarting the ircd, because that drops every user (always-on sessions come back, linked servers reconnect). Say no and the ircd keeps running the old version until you run <code>container/setup.sh restart ircd</code>.</li>
+</ol>
+<p>Check the result with <code>container/setup.sh status</code>. Updates are never automatic: restarting an IRC server is your call.</p>
+<div class="note"><strong>Switching tags is not an upgrade.</strong> If the pull brings nothing new, <code>upgrade</code> says "already up to date" and restarts nothing. It compares the tag in your
+  units with itself, so after changing the tag use the recipe under <a href="#container-image">choosing the image</a>.</div>
+<ul>
+<li><strong>Roll back:</strong> set the tag to the previous release (<code>ghcr.io/gcanosa/sekurircd:1.3.4</code>) with the same recipe. The data directory is shared, so read the changelog first if a release says it changes a file format.</li>
+<li><strong>Plain <code>podman run</code></strong> (no <code>setup.sh</code>): <code>podman pull</code>, then <code>podman rm -f sekurircd-services</code> and run it again with the same options, the ircd last. A running container never changes its image, so only a fresh one picks up the pull.</li>
+</ul>
+
+<h3 id="container-data">your data and the network</h3>
+<ul>
+<li><strong>One data directory</strong> holds everything you own (config, TLS, accounts, bans, logs, the stats database), laid out like the repository root. Rebuilding or upgrading the containers never touches it. <code>container/setup.sh backup</code> packs <code>config/</code>, <code>services/</code> and <code>stats/</code> into a private archive.</li>
+<li><strong>Host network.</strong> Clients keep their real addresses, which K-lines, per-IP limits, cloaks and the DNSBL depend on. Open the ports in your firewall; check once that <code>/WHOIS</code> from another machine shows that machine's address.</li>
+<li><strong>Linger</strong> keeps the units running after you log out. <code>setup.sh</code> turns it on; if it is off, run <code>sudo loginctl enable-linger $USER</code>, or the ircd stops when your last session closes.</li>
+</ul>
+
+<h3 id="container-docker">docker and compose</h3>
+<p>Docker, podman older than 5.0, or a machine with no systemd user session: <code>container/compose.yaml</code> runs the same three containers (services and the panel are Compose profiles). Run these in the <code>container/</code> directory:</p>
+<pre>export SEKURIRCD_UID=$(id -u) SEKURIRCD_GID=$(id -g)     # the containers run as you, so the data directory stays yours
+mkdir -p data
+docker compose run --rm -it ircd makeconf                # the config wizard
+docker compose up -d                                     # the ircd
+docker compose --profile services --profile stats up -d  # add services and the stats panel
+
+docker compose restart ircd                              # restart one (the ircd drops everyone)
+docker compose pull                                      # upgrade: pull the new image ...
+docker compose --profile services --profile stats up -d --no-deps services stats   # ... services and the panel first
+docker compose up -d ircd                                # ... the ircd when you are ready</pre>
+<p><code>SEKURIRCD_IMAGE</code> (shell or a <code>.env</code> file next to <code>compose.yaml</code>) sets the tag and <code>SEKURIRCD_DATA</code> the data directory (default <code>./data</code>).</p>
+<p>The step-by-step guide (the same steps by hand, where each file lives, TLS certificates, troubleshooting) is
   <a href="https://github.com/gcanosa/SekurIRCd/blob/main/container/README.md">container/README.md</a>.</p>
 
 <h2 id="windows">windows</h2>
