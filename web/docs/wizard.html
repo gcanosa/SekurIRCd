@@ -156,6 +156,7 @@
     <div data-if="ns">
       <label class="chk"><input type="checkbox" name="enforce"> Enforce nick ownership (rename to Guest after a grace period)</label>
       <label>Services admins <small>account names, comma-separated</small><input name="svc_admins" placeholder="youraccount"></label>
+      <label>Expire accounts nobody logs in to after days <small>0 = never</small><input name="ns_expire" type="number" min="0" max="3650" value="0"></label>
     </div>
     <div class="row">
       <label>Founder rank<select name="founder"><option value="o">o: channel op (@)</option><option value="q">q: channel owner (~)</option></select></label>
@@ -348,7 +349,7 @@
       if (c("ns")) {
         S.push('nick = "NickServ"', "network = " + q(v("network")));
         if (v("svc_admins")) S.push("admins = " + arr(list(v("svc_admins"))));
-        S.push("enforce_nicks = " + tf(c("enforce")), "enforce_grace = 60");
+        S.push("enforce_nicks = " + tf(c("enforce")), "enforce_grace = 60", "expire_days = " + +v("ns_expire"));
       }
       S.push("", "[storage]", "# Relative to the directory bin/services runs from.", 'path = "chanserv.json"', "backup_count = 5");
     }

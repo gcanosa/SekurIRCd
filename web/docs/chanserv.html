@@ -89,7 +89,10 @@ password_hash = "scrypt$16384$8$1$&lt;salt-hex&gt;$&lt;digest-hex&gt;"   # from 
 
 <h2 id="nickserv">NickServ</h2>
 <pre>[nickserv]
-#admins        = ["youraccount"]   # SUSPEND/UNSUSPEND/FDROP/SASET PASSWORD, full INFO
+#admins        = ["youraccount"]   # SUSPEND/UNSUSPEND/NOEXPIRE/FDROP/SASET PASSWORD, full INFO
+#expire_days   = 0                 # drop accounts nobody logged in to for this long (0 = never); admins, [[opers]],
+                                   # suspended and NOEXPIRE accounts never expire; their channels lose them as founder/access
+#expire_warn_days = 0              # mail the verified address this long before (email_command gets purpose "expire")
 #enforce_nicks = false             # rename unidentified users of registered nicks...
 #enforce_grace = 60                # ...after this many seconds
 #always_on     = true              # false = SET ALWAYS-ON is off on this network

@@ -118,10 +118,25 @@ realname = "Channel Registration Service"
 #always_on = true
 #always_on_expire_days = 30
 
+# --- account expiry ---
+
+# Drop an account nobody has logged in to for this many days (with its grouped
+# nicks; its channels lose it as founder, access entry and successor, so whoever
+# registers the name later inherits nothing). An account logged in right now
+# counts as used. Never expire: [nickserv] admins, [[opers]] accounts, suspended
+# accounts, and any an admin marks with /msg NickServ NOEXPIRE <account> ON.
+# 0 = never expire. Checked hourly, at most 32 drops an hour.
+#expire_days = 0
+# Email the account's verified address this many days before it expires,
+# through email_command with purpose "expire" and the days left as <code>
+# (make your script handle it first). 0 = no warning.
+#expire_warn_days = 0
+
 # --- email verification and password resets ---
 
 # SET EMAIL and RESETPASS run, without a shell:
 #   <email_command> <address> <code> <account> <network> verify|reset
+# (and "expire" with the days left as <code>, when expire_warn_days is set)
 # Point it at a small script that mails the code. Empty = no mail (addresses
 # stay unverified, no self-service reset). network defaults to the ircd's
 # [server] network.

@@ -61,6 +61,8 @@ typedef struct {
     int enforce_nicks, enforce_grace;
     int always_on;         /* SET ALWAYS-ON allowed on this network */
     long always_on_expire; /* seconds a detached always-on nick is kept (0 = never expires) */
+    int expire_days;       /* drop an account nobody logged in to for this long (0 = never) */
+    int expire_warn_days;  /* email its verified address this long before (0 = no warning; needs email_command) */
     char admins[NS_MAX_ADMINS][64];
     int n_admins;
     ns_oper_t opers[NS_MAX_OPERS];
@@ -152,6 +154,11 @@ int ns_config(toml_node_t *raw, const char *config_path, char *err, size_t errsz
     C.always_on = t_bool(t, "always_on", 1);
     int days = t_int(t, "always_on_expire_days", 30);
     C.always_on_expire = days > 0 ? (long)days * 86400 : 0;
+    C.expire_days = t_int(t, "expire_days", 0);
+    if (C.expire_days < 0) C.expire_days = 0;
+    if (C.expire_days > 3650) C.expire_days = 3650;
+    C.expire_warn_days = t_int(t, "expire_warn_days", 0);
+    if (C.expire_warn_days < 0 || C.expire_warn_days >= C.expire_days) C.expire_warn_days = 0;
     toml_node_t *ad = t ? tx_array(t, "admins") : NULL;
     for (int i = 0; ad && i < tx_len(ad) && C.n_admins < NS_MAX_ADMINS; i++) {
         toml_node_t *d = tx_at(ad, i, TOML_STRING);
@@ -832,8 +839,58 @@ void ns_session_start(void) {
     svc_queue_line("SVCWATCH USERS");
 }
 
+/* --- expiry ([nickserv] expire_days) --------------------------------------------------------------------------------- */
+
+static int expire_exempt(const char *account) {
+    for (int i = 0; i < C.n_admins; i++) if (strcasecmp(C.admins[i], account) == 0) return 1;
+    for (int i = 0; i < C.n_opers; i++) if (strcasecmp(C.opers[i].account, account) == 0) return 1;
+    return accounts_noexpire(&g_acc, account) || accounts_suspended(&g_acc, account, NULL, NULL); /* a suspension can't be waited out */
+}
+
+/* Hourly: accounts in use are stamped, an account nobody logged in to for expire_days is dropped (with its ChanServ founder
+ * and access entries), and with expire_warn_days its verified address is mailed first. An account with no time on record
+ * (an older store) starts its clock now, so upgrading can't expire anything at once. At most 32 drops an hour. */
+static void expire_sweep(void) {
+    static time_t last;
+    time_t now = time(NULL);
+    if (C.expire_days <= 0 || now - last < 3600) return;
+    last = now;
+    nsuser_t *u, *tmp;
+    HASH_ITER(hh, g_by_uid, u, tmp) if (u->account[0]) accounts_touch(&g_acc, u->account, (long)now);
+    long limit = (long)C.expire_days * 86400, warn = (long)C.expire_warn_days * 86400;
+    char dead[32][64], warned[32][64];
+    int nd = 0, nw = 0;
+    cJSON *rec;
+    cJSON_ArrayForEach(rec, g_acc.data) {
+        const cJSON *nm = cJSON_GetObjectItemCaseSensitive(rec, "name");
+        const char *name = cJSON_IsString(nm) ? nm->valuestring : rec->string;
+        if (!name || expire_exempt(name)) continue;
+        long seen = accounts_seen_at(&g_acc, name);
+        if (!seen) { accounts_touch(&g_acc, name, (long)now); continue; }
+        if (now - seen > limit) { if (nd < 32) snprintf(dead[nd++], sizeof dead[0], "%s", name); }
+        else if (warn && C.email_command[0] && now - seen > limit - warn && accounts_expire_warned(&g_acc, name) < seen &&
+                 accounts_email_verified(&g_acc, name) && nw < 32)
+            snprintf(warned[nw++], sizeof warned[0], "%s", name);
+    }
+    for (int i = 0; i < nw; i++) {
+        long left = (accounts_seen_at(&g_acc, warned[i]) + limit - (long)now + 86399) / 86400;
+        char days[16];
+        snprintf(days, sizeof days, "%ld", left);
+        spawn_email(accounts_email(&g_acc, warned[i]), days, warned[i], "expire");
+        accounts_set_expire_warned(&g_acc, warned[i], (long)now);
+        log_info("nickserv", "account %s expires in %ld day(s): warning mailed", warned[i], left);
+    }
+    for (int i = 0; i < nd; i++) {
+        accounts_drop(&g_acc, dead[i]);
+        int ch = cs_account_dropped(dead[i]);
+        log_info("nickserv", "account %s expired after %d days without a login%s", dead[i], C.expire_days,
+                 ch ? " (removed from its channels' founder/access lists)" : "");
+    }
+}
+
 void ns_tick(void) {
     if (!C.enabled) return;
+    expire_sweep();
     time_t now = time(NULL);
     nsuser_t *u, *tmp;
     HASH_ITER(hh, g_by_uid, u, tmp) {
@@ -975,6 +1032,13 @@ static void cmd_info(nsuser_t *u, const char *a) {
         strftime(lw, sizeof lw, "%b %d %H:%M:%S %Y +0000", gmtime(&t));
         sayf(u->nick, "Last login from: %s on %s", last, lw);
     }
+    if (C.expire_days > 0) {
+        if (expire_exempt(who)) say(u->nick, "Expires: never");
+        else {
+            long seen = accounts_seen_at(&g_acc, who), left = seen ? seen + (long)C.expire_days * 86400 - (long)time(NULL) : (long)C.expire_days * 86400;
+            sayf(u->nick, "Expires: in %ld day(s) without a login (after %d days unused)", left > 0 ? (left + 86399) / 86400 : 0, C.expire_days);
+        }
+    }
 }
 
 static void cmd_cert(nsuser_t *u, const char *sub) {
@@ -993,13 +1057,13 @@ static void cmd_cert(nsuser_t *u, const char *sub) {
     } else say(u->nick, "Syntax: CERT ADD|DEL|INFO");
 }
 
-/* SUSPEND/UNSUSPEND/FDROP/SASET PASSWORD -- services admins ([nickserv] admins, by account) only. */
+/* SUSPEND/UNSUSPEND/NOEXPIRE/FDROP/SASET PASSWORD -- services admins ([nickserv] admins, by account) only. */
 static void cmd_admin(nsuser_t *u, const char *cmd, const char *a, const char *b, const char *c3, const char *text) {
     if (!is_admin(u)) { say(u->nick, "Permission denied -- that needs a services admin account ([nickserv] admins)"); return; }
     int saset = strcasecmp(cmd, "SASET") == 0;
     const char *name = saset ? b : a;
     if (saset && (!a || strcasecmp(a, "PASSWORD") != 0 || !b || !c3)) { say(u->nick, "Syntax: SASET PASSWORD <account> <new password>"); return; }
-    if (!name) { sayf(u->nick, "Syntax: %s <account>%s", cmd, strcasecmp(cmd, "SUSPEND") == 0 ? " [reason]" : ""); return; }
+    if (!name) { sayf(u->nick, "Syntax: %s <account>%s", cmd, strcasecmp(cmd, "SUSPEND") == 0 ? " [reason]" : strcasecmp(cmd, "NOEXPIRE") == 0 ? " ON|OFF" : ""); return; }
     const char *owner = accounts_owner_of_nick(&g_acc, name);
     if (!owner) { say(u->nick, "No such account"); return; }
     char account[64], m[400];
@@ -1013,9 +1077,14 @@ static void cmd_admin(nsuser_t *u, const char *cmd, const char *a, const char *b
         if (!accounts_suspended(&g_acc, account, NULL, NULL)) { say(u->nick, "That account is not suspended"); return; }
         accounts_set_suspended(&g_acc, account, NULL, NULL);
         snprintf(m, sizeof m, "%s unsuspended account %s", u->nick, account);
+    } else if (strcasecmp(cmd, "NOEXPIRE") == 0) {
+        if (!b || (strcasecmp(b, "ON") != 0 && strcasecmp(b, "OFF") != 0)) { say(u->nick, "Syntax: NOEXPIRE <account> ON|OFF"); return; }
+        accounts_set_noexpire(&g_acc, account, strcasecmp(b, "ON") == 0);
+        snprintf(m, sizeof m, "%s set NOEXPIRE %s on account %s", u->nick, strcasecmp(b, "ON") == 0 ? "on" : "off", account);
     } else if (strcasecmp(cmd, "FDROP") == 0) {
         logout_all(account);
         accounts_drop(&g_acc, account);
+        cs_account_dropped(account);
         snprintf(m, sizeof m, "%s force-dropped account %s", u->nick, account);
     } else {
         if (strlen(c3) < 6 || strlen(c3) >= 200) { say(u->nick, "The new password must be 6-199 characters"); return; }
@@ -1222,6 +1291,11 @@ static const svc_help_t NS_HELP[] = {
     {"UNSUSPEND", "(admin) lift a suspension",
      "Syntax: UNSUSPEND <account>\n"
      "Example: /msg NickServ UNSUSPEND spammer", 1},
+    {"NOEXPIRE", "(admin) keep an account from expiring",
+     "Syntax: NOEXPIRE <account> ON|OFF\n"
+     "With [nickserv] expire_days set, an account nobody logs in to for that long is dropped. ON keeps this one\n"
+     "forever. Services admins, [[opers]] accounts and suspended accounts never expire anyway.\n"
+     "Example: /msg NickServ NOEXPIRE oldfounder ON", 1},
     {"FDROP", "(admin) delete an account",
      "Syntax: FDROP <account>\n"
      "Deletes an account without its password. Cannot be undone.\n"
@@ -1289,7 +1363,7 @@ int ns_privmsg(const char *target, const char *from_nick, const char *text) {
         if (!a) say(u->nick, "Syntax: REGAIN <nick>");
         else cmd_regain(u, a);
     } else if (strcasecmp(cmd, "RESETPASS") == 0) cmd_resetpass(u, a, b, c3);
-    else if (strcasecmp(cmd, "SUSPEND") == 0 || strcasecmp(cmd, "UNSUSPEND") == 0 || strcasecmp(cmd, "FDROP") == 0 ||
+    else if (strcasecmp(cmd, "SUSPEND") == 0 || strcasecmp(cmd, "UNSUSPEND") == 0 || strcasecmp(cmd, "FDROP") == 0 || strcasecmp(cmd, "NOEXPIRE") == 0 ||
              strcasecmp(cmd, "SASET") == 0) cmd_admin(u, cmd, a, b, c3, text);
     else if (strcasecmp(cmd, "INFO") == 0) cmd_info(u, a);
     else if (strcasecmp(cmd, "STATUS") == 0 || strcasecmp(cmd, "ACC") == 0) cmd_status(u, cmd, a);
@@ -1335,6 +1409,7 @@ int ns_privmsg(const char *target, const char *from_nick, const char *text) {
             snprintf(account, sizeof account, "%s", u->account);
             logout_all(account);
             accounts_drop(&g_acc, account);
+            cs_account_dropped(account);
             say(u->nick, "Your account has been dropped");
             log_info("nickserv", "account %s dropped by %s", account, u->nick);
         }

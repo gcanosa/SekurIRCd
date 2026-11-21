@@ -52,6 +52,9 @@ void svc_help(const char *svc, const char *intro, const svc_help_t *t, size_t n,
 
 /* chanserv.c: registered channels. */
 int cs_registered_count(void);
+/* An account was dropped (DROP, FDROP, expiry): it is no channel's founder, access entry or successor any more, so whoever
+ * registers that name next inherits nothing. Returns how many channels changed. */
+int cs_account_dropped(const char *account);
 
 /* stats.c -- the stats collector (stats/stats.toml [collector]); every call is a no-op while it's off. */
 void st_config(const char *services_config_path); /* finds stats.toml (beside it, or ../stats/); re-read on change */

@@ -366,6 +366,33 @@ static void store_del(const char *cf) {
 
 int cs_registered_count(void) { return (int)HASH_COUNT(g_store_idx); }
 
+static const char *rec_str(cJSON *rec, const char *key);
+static void rec_set_str(cJSON *rec, const char *key, const char *val);
+
+int cs_account_dropped(const char *account) {
+    int changed = 0;
+    cJSON *rec;
+    cJSON_ArrayForEach(rec, g_store) {
+        if (!cJSON_IsObject(rec)) continue;
+        int hit = 0;
+        if (strcasecmp(rec_str(rec, "founder"), account) == 0) { rec_set_str(rec, "founder", ""); hit = 1; }
+        const char *succ = rec_str(rec, "successor");
+        if (succ[0] == '=' && strcasecmp(succ + 1, account) == 0) { rec_set_str(rec, "successor", ""); hit = 1; }
+        cJSON *access = cJSON_GetObjectItemCaseSensitive(rec, "access"), *e = access ? access->child : NULL;
+        while (e) { /* "=account" entries; AKICKs on it stay (a ban on a name only protects) */
+            cJSON *next = e->next;
+            if (e->string && e->string[0] == '=' && strcasecmp(e->string + 1, account) == 0) { cJSON_Delete(cJSON_DetachItemViaPointer(access, e)); hit = 1; }
+            e = next;
+        }
+        if (hit) {
+            changed++;
+            log_info("chanserv", "%s: account %s is gone -- removed as founder/access/successor", rec_str(rec, "name"), account);
+        }
+    }
+    if (changed) store_save();
+    return changed;
+}
+
 static cJSON *store_get(const char *chan) {
     char cf[128];
     irc_casefold(cf, sizeof cf, chan);

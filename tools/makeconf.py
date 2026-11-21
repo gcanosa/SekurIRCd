@@ -94,11 +94,12 @@ def render(a):
          "# Must match the [[links.peers]] entry in sekurircd.toml, and stay plain here (this side sends it).",
          f"name = {q(a['svc_name'])}", f"password = {q(a['svc_pass'])}",
          "", "[chanserv]", 'nick = "ChanServ"', 'user = "ChanServ"', f"host = {q(a['svc_name'])}",
-         'realname = "Channel Registration Service"', f"founder_mode = {q(a['founder'])}",
+         'realname = "Channel Registration Service"', f"founder_mode = {q(a['founder'])}", f"expire_days = {a.get('cs_expire', 0)}",
          "", "[nickserv]", f"enabled = {str(a['ns']).lower()}"]
     if a["ns"]:
         S += ['nick = "NickServ"', f"network = {q(a['network'])}", f"enforce_nicks = {str(a['enforce']).lower()}", "enforce_grace = 60"]
         if a.get("admins"): S.append(f"admins = {arr(a['admins'])}")
+        S += ["# Drop accounts nobody logged in to for this many days (0 = never).", f"expire_days = {a.get('ns_expire', 0)}"]
     S += ["", "[storage]", "# Relative to the directory bin/services runs from.", 'path = "chanserv.json"', "backup_count = 5"]
     return "\n".join(L) + "\n", "\n".join(S) + "\n"
 
@@ -288,6 +289,9 @@ def interview():
         a["ns"] = yes("NickServ (accounts and SASL)?", True)
         a["enforce"] = a["ns"] and yes("Enforce nick ownership (rename to Guest after 60s)?", False)
         a["admins"] = split(ask("Services admins, by account name (empty = none)", "")) if a["ns"] else []
+        days = lambda s: None if s.isdigit() and int(s) <= 3650 else "a number of days, 0..3650"
+        a["ns_expire"] = int(ask("Drop accounts nobody logged in to for how many days? (0 = never)", "0", days)) if a["ns"] else 0
+        a["cs_expire"] = int(ask("Drop channel registrations unused for how many days? (0 = never)", "0", days))
         a["founder"] = ["o", "q"][pick("Channel founder rank", ["o: channel op (@)", "q: channel owner (~)"], 1)]
 
         section("stats panel (stats/stats.toml)")
@@ -406,7 +410,7 @@ def selftest():
              klines=True, umodes="iw", omodes="+osw", autojoin=["#lobby"], hist=50,
              opers=[{"name": "admin", "hash": scrypt_hash("pw"), "hosts": ["*@*"]}], operjoin="#opers", dbg="#dbg",
              email="a@b.c", loglevel="INFO", svc=True, link_port=7000, svc_name="services.test.org", svc_pass="p1",
-             svc_hash=scrypt_hash("p1"), other_links=False, ns=True, enforce=True, admins=["alice"], founder="q",
+             svc_hash=scrypt_hash("p1"), other_links=False, ns=True, enforce=True, admins=["alice"], founder="q", ns_expire=365, cs_expire=90,
              stats=True, statsline=True, stats_port=8089, stats_bind="0.0.0.0", stats_cert="../config/tls/cert.pem",
              stats_key="../config/tls/key.pem", stats_public=True, tls_port=6697,
              stats_users=[{"name": "admin", "hash": scrypt_hash("pw"), "role": "admin"}])

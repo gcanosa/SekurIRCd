@@ -85,6 +85,15 @@ int accounts_drop(account_store_t *st, const char *name);
 const char *accounts_last_login(account_store_t *st, const char *name, long *at);
 void accounts_set_last_login(account_store_t *st, const char *name, const char *mask);
 
+/* Expiry ([nickserv] expire_days): seen_at is the newest of the last login and the last time services saw it logged in
+ * (accounts_touch, hourly while in use); 0 = never recorded. NOEXPIRE (admin) keeps an account forever. expire_warned is
+ * when the "about to expire" email went out (0 = never). */
+long accounts_seen_at(account_store_t *st, const char *name);
+void accounts_touch(account_store_t *st, const char *name, long at);
+int accounts_noexpire(account_store_t *st, const char *name);
+void accounts_set_noexpire(account_store_t *st, const char *name, int on);
+long accounts_expire_warned(account_store_t *st, const char *name);
+void accounts_set_expire_warned(account_store_t *st, const char *name, long at);
 /* Channels joined at every login (NickServ SET AJOIN): comma-separated, NULL = none. set_ajoin("" or NULL) clears it. */
 const char *accounts_ajoin(account_store_t *st, const char *name);
 void accounts_set_ajoin(account_store_t *st, const char *name, const char *list);

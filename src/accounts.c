@@ -415,6 +415,41 @@ void accounts_set_ajoin(account_store_t *st, const char *name, const char *list)
     commit(st, rec);
 }
 
+static long rec_num(cJSON *rec, const char *k) {
+    cJSON *v = cJSON_GetObjectItemCaseSensitive(rec, k);
+    return cJSON_IsNumber(v) ? (long)v->valuedouble : 0;
+}
+
+static void rec_set_num(account_store_t *st, const char *name, const char *k, long v) {
+    cJSON *rec = find(st, name);
+    if (!rec) return;
+    cJSON_DeleteItemFromObjectCaseSensitive(rec, k);
+    if (v) cJSON_AddNumberToObject(rec, k, (double)v);
+    save(st);
+}
+
+long accounts_seen_at(account_store_t *st, const char *name) {
+    cJSON *rec = find(st, name);
+    long a = rec_num(rec, "last_login_at"), b = rec_num(rec, "seen_at");
+    return a > b ? a : b;
+}
+
+void accounts_touch(account_store_t *st, const char *name, long at) { rec_set_num(st, name, "seen_at", at); }
+long accounts_expire_warned(account_store_t *st, const char *name) { return rec_num(find(st, name), "expire_warned"); }
+void accounts_set_expire_warned(account_store_t *st, const char *name, long at) { rec_set_num(st, name, "expire_warned", at); }
+
+int accounts_noexpire(account_store_t *st, const char *name) {
+    return cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(find(st, name), "noexpire"));
+}
+
+void accounts_set_noexpire(account_store_t *st, const char *name, int on) {
+    cJSON *rec = find(st, name);
+    if (!rec) return;
+    cJSON_DeleteItemFromObjectCaseSensitive(rec, "noexpire");
+    if (on) cJSON_AddTrueToObject(rec, "noexpire");
+    save(st);
+}
+
 int accounts_always_on(account_store_t *st, const char *name) {
     return cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(find(st, name), "always_on"));
 }
