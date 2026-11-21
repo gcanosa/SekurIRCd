@@ -11,6 +11,25 @@ SVC_NAME, SVC_PW = "services.test.net", "svcsecret"
 
 _ports = set()
 
+# Every directory a test makes with tempfile.mkdtemp (certs, mail spools, daemon dirs...) is removed when the test ends: run.py
+# calls cleanup_temp() after each one. The tests that made their own used to leave one in the temp folder per run.
+_made = []
+_mkdtemp = tempfile.mkdtemp
+
+
+def _tracked_mkdtemp(*a, **kw):
+    d = _mkdtemp(*a, **kw)
+    _made.append(d)
+    return d
+
+
+tempfile.mkdtemp = _tracked_mkdtemp
+
+
+def cleanup_temp():
+    while _made:
+        shutil.rmtree(_made.pop(), ignore_errors=True)
+
 
 def free_port():
     """A port nobody is listening on, and never the same one twice in a row of servers: the kernel can hand a just-closed port

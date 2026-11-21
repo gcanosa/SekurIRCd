@@ -5,6 +5,7 @@ import glob, importlib.util, os, sys, time, traceback
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+import harness  # first, so every test's tempfile.mkdtemp is tracked (harness.cleanup_temp)
 
 
 def main():
@@ -27,6 +28,8 @@ def main():
             except Exception:
                 failed.append(full)
                 print(f"  FAIL  {full}\n" + "".join("      " + l for l in traceback.format_exc().splitlines(True)), flush=True)
+            finally:
+                harness.cleanup_temp()
     print(f"\n{passed} passed, {len(failed)} failed")
     for f in failed:
         print("  FAILED:", f)

@@ -654,6 +654,9 @@ static void test_links_allowed_ips_config(void) {
     /* The glob check link_accept() runs is the same irc_glob_match already
      * covered by test_glob_and_masks -- nothing link-specific to re-test
      * beyond confirming the config actually gets there. */
+    char cmd[128];
+    snprintf(cmd, sizeof cmd, "rm -rf %s", dir);
+    if (system(cmd) != 0) { /* best effort */ }
 }
 
 /* An IPv6 glob written with zero-padded groups ("00c8") is read the way the server spells clients ("c8"): it used to match nothing. */
