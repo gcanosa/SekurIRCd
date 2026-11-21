@@ -1097,6 +1097,8 @@ int net_takeover(server_t *srv, client_t *cl) {
     }
     unsigned old_modes = g->umodes;
     int was_away = g->is_away, was_detached = g->detached_at != 0;
+    char old_fp[sizeof g->certfp];
+    snprintf(old_fp, sizeof old_fp, "%s", g->certfp);
 
     client_t *found;
     if (cl->casefold_nick[0]) { HASH_FIND_STR(srv->users, cl->casefold_nick, found); if (found == cl) HASH_DEL(srv->users, cl); }
@@ -1141,6 +1143,13 @@ int net_takeover(server_t *srv, client_t *cl) {
 
     cl->registered = 1;
     if (!cl->certfp[0]) client_cert_fingerprint(cl, cl->certfp, sizeof cl->certfp);
+    /* The uid is the old session's, so the network and services still had the old connection's certificate (or none):
+     * services saw "no certificate" after one was added, and could keep a certfp-bound [[opers]] grant for a connection
+     * that never showed it. Say what this connection presents; services re-check the oper grant on it. */
+    if (strcmp(old_fp, cl->certfp) != 0) {
+        netsync_user_certfp(srv, cl);
+        link_svc_user(srv, cl, SVC_EV_USER);
+    }
     char snote[400];
     snprintf(snote, sizeof snote, "Client reattached (always-on): %s (%s@%s) [%s]", cl->nick, cl->user, cl->realhost, cl->ip);
     server_notify_opers(srv, snote);

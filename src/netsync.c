@@ -1550,13 +1550,15 @@ static void handle_rsquit(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     (void)lc;
 }
 
+/* :<uid> CERTFP <fingerprint|*> -- the user's TLS client certificate, or "*" for none (an always-on session resumed by a
+ * connection without one). */
 static void handle_certfp(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     client_t *u = src_user(srv, lc, msg->prefix);
     if (!u || msg->nparams < 1 || strlen(msg->params[0]) >= sizeof u->certfp) return;
-    snprintf(u->certfp, sizeof u->certfp, "%s", msg->params[0]);
+    snprintf(u->certfp, sizeof u->certfp, "%s", strcmp(msg->params[0], "*") ? msg->params[0] : "");
     link_svc_user(srv, u, SVC_EV_USER);
     char fl[200];
-    irc_build(fl, sizeof fl, NULL, 0, u->uid, "CERTFP", (const char *[]){u->certfp}, 1, NULL);
+    irc_build(fl, sizeof fl, NULL, 0, u->uid, "CERTFP", (const char *[]){u->certfp[0] ? u->certfp : "*"}, 1, NULL);
     flood(srv, lc, fl);
 }
 
@@ -1826,6 +1828,13 @@ void netsync_resume_kill(server_t *srv, client_t *target) {
     snprintf(reason, sizeof reason, "Session resumed on %s", srv->cfg.server.name);
     irc_build(line, sizeof line, NULL, 0, self_sid(srv), "KILL", (const char *[]){target->uid}, 1, reason);
     route_to(srv, target->nserver, line);
+}
+
+void netsync_user_certfp(server_t *srv, client_t *cl) {
+    if (!cl->uid[0] || !netsync_has_links(srv)) return;
+    char line[200];
+    irc_build(line, sizeof line, NULL, 0, cl->uid, "CERTFP", (const char *[]){cl->certfp[0] ? cl->certfp : "*"}, 1, NULL);
+    flood(srv, NULL, line);
 }
 
 void netsync_user_away(server_t *srv, client_t *cl) {

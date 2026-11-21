@@ -117,3 +117,52 @@ def test_a_server_can_refuse_grants_and_accept_them_after_a_rehash():
         s.reload()
         time.sleep(0.5)
         assert not is_oper(c), "and taken back when the server stops accepting them"
+
+
+def test_always_on_resume_tells_services_the_new_certificate():
+    """An always-on session keeps its uid when a new connection resumes it, so services must hear that connection's
+    certificate: first resumed WITH one (CERT ADD works, the certfp-bound oper grant arrives), then WITHOUT one (the grant
+    goes -- it must never stay on a connection that didn't show the certificate)."""
+    import base64
+    d = tempfile.mkdtemp(prefix="itest-aocert-")
+    scrt, skey = make_cert(d)
+    sub = os.path.join(d, "good"); os.mkdir(sub)
+    gcrt, gkey = make_cert(sub)
+    fp = hashlib.sha256(ssl.PEM_cert_to_DER_cert(open(gcrt).read())).hexdigest()
+    s = Server(cfg=dict(BOSS, tls={"enabled": True, "port": 0, "cert_file": scrt, "key_file": skey, "request_client_cert": True}, **ACC))
+    s.cfg["tls"]["port"] = s.tls_port
+    s.services_tail = f'[[opers]]\naccount = "gera"\ncertfp = "{fp}"\nprivileges = ["all"]\n'
+
+    def resume(crt=None, key=None):
+        """A new connection that SASLs in as gera (and so takes the detached session over), with or without the certificate."""
+        sock = None
+        if crt:
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            ctx.check_hostname, ctx.verify_mode = False, ssl.CERT_NONE
+            ctx.load_cert_chain(crt, key)
+            sock = ctx.wrap_socket(socket.create_connection(("127.0.0.1", s.tls_port), timeout=3), server_hostname="localhost")
+        c = Client(0 if sock else s.port, "gera", register=False, sock=sock,  # another nick: the session's own comes back with it
+                   extra=["CAP LS 302", "CAP REQ :sasl", "NICK resumer", "USER gera 0 * :gera"])
+        c.send("AUTHENTICATE PLAIN")
+        c.expect(r"AUTHENTICATE \+")
+        c.send("AUTHENTICATE " + base64.b64encode(b"\0gera\0password1").decode())
+        c.expect(r" 903 ", 3)
+        c.send("CAP END")
+        c.expect(r"Resumed your always-on session", 5)
+        time.sleep(1.0)  # services hear the new certificate and settle the oper grant
+        return c
+
+    with s:
+        first = register(s, "gera", "gera", "password1")  # plain connection, no certificate
+        assert any("Always-on enabled" in l for l in ns(first, "SET ALWAYS-ON ON"))
+        assert not is_oper(first, 0.3)
+        first.close()
+        time.sleep(0.8)
+        withcert = resume(gcrt, gkey)
+        got = " ".join(ns(withcert, "CERT ADD", 1.0))
+        assert fp in got and "bound" in got, ("services see the resuming connection's certificate", got)
+        assert is_oper(withcert), "the certfp-bound grant follows the certificate"
+        withcert.close()
+        time.sleep(0.8)
+        nocert = resume()
+        assert not is_oper(nocert), "resumed without the certificate: the grant must go"
