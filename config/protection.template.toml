@@ -79,7 +79,9 @@ window = 1.0
 #   3. limits on how many targets one client messages, and on repeated text
 # Opers with +s see every action, message included. Start with "warn" as the
 # limit_action and in filter rules, then tighten. Each server applies its own
-# copy to its own users.
+# copy to its own users -- except filter rules marked `global`: those are sent
+# over the links to every server, which enforces them even where enabled =
+# false (see layer 2 below).
 [spam]
 
 enabled = false
@@ -115,6 +117,9 @@ zline_duration = "1h"
 # --- layer 2: content filters ---
 
 # Relative to this file. "" = no file: /SPAMFILTER rules live in memory only.
+# These two switch this server's OWN rules. Global rules that other servers send
+# keep applying when they are off, and `allow` rules of your own can override
+# them.
 filters_enabled = true
 filters_file = "spamfilters.conf"
 

@@ -14,9 +14,24 @@
 #  Or let tools/makeconf.py write both files with matching settings.
 #  Without services there is no NickServ, no ChanServ and no SASL.
 #
-#  bin/services --rehash (SIGHUP) reloads this file. [link], the bots'
-#  nick/user/host/realname and the database paths need a restart; the rest
-#  applies at once.
+#  bin/services --rehash (SIGHUP) reloads this file, and so does /REHASH on the
+#  hub (the server services link to). [link], the bots' nick/user/host/realname
+#  and the database paths need a restart; the rest applies at once. A file with a
+#  mistake is refused and the running settings stay.
+#
+#  Every key is optional unless noted: the value shown (commented out or not)
+#  is the built-in default.
+#
+#  Related files:
+#    ../stats/stats.toml    the network stats collector (optional; see
+#                           stats/stats.template.toml)
+#
+#  Sections:
+#    LINK        [link]
+#    CHANSERV    [chanserv]
+#    NICKSERV    [nickserv]
+#    OPERATORS   [[opers]]   network-wide IRC operators
+#    STORAGE     [storage]
 # =============================================================================
 
 
@@ -61,10 +76,12 @@ realname = "Channel Registration Service"
 
 # false = ChanServ only (then nothing offers accounts or SASL).
 #enabled = true
-#nick = "NickServ"
 
-# Defaults to [chanserv] host.
+# The bot's identity. A change needs a restart. host defaults to [chanserv] host.
+#nick = "NickServ"
+#user = "NickServ"
 #host = "services.sekurircd.local"
+#realname = "Nickname and Account Service"
 
 # --- account database ---
 
@@ -76,48 +93,19 @@ realname = "Channel Registration Service"
 #backup_count = 5
 
 # Most accounts allowed. 0 = unlimited.
-#max_accounts = 10000
+#max_accounts = 0
 
 # --- administration ---
 
-# Accounts allowed SUSPEND, UNSUSPEND, FDROP, SASET PASSWORD and full INFO.
+# Services admins: accounts allowed SUSPEND, UNSUSPEND, FDROP, SASET PASSWORD
+# and full INFO. This is about the services themselves; it makes nobody an IRC
+# operator (that is [[opers]] below).
 #admins = ["youraccount"]
-
-# --- network operators ---
-
-# An account that gets IRC operator status on whichever server it is logged in
-# to, with no [[operators]] block on that server: services tells the user's
-# server (SVSOPER) when they IDENTIFY or log in with SASL. Every other server
-# trusts an oper, so they reach the whole network. It ends when they log out or
-# disconnect, or when you remove the entry and reload (/REHASH on the hub, or
-# `services --rehash`): no restart.
-#
-# The login needs the account's TLS client certificate as well, so a stolen
-# password alone gets nothing (the server they connect to needs [tls]
-# request_client_cert = true, as for SASL EXTERNAL). certfp is the SHA-256 fingerprint of the
-# certificate they connect with (NickServ CERT INFO shows it once it is added;
-# colons are fine). password_only = true drops that requirement. privileges are
-# the [[operators]] names: kill, kline, sa, host, wallops, rehash, die, link,
-# override, auspex, immune, all (the default).
-#
-# Each server can refuse these grants with [security] accept_services_opers =
-# false, and a hub's oper_scope / oper_deny for a leaf still apply to them.
-# Keep one [[operators]] block on the hub too, for when services is down.
-#
-#[[opers]]
-#account    = "youraccount"
-#certfp     = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-#privileges = ["all"]
-#
-#[[opers]]
-#account       = "helper"
-#password_only = true
-#privileges    = ["kill", "kline"]
 
 # --- nick ownership ---
 
 # Someone using a registered nick must log in within enforce_grace seconds
-# or is renamed to Guest<number>, on every server of the network.
+# (5 to 600) or is renamed to Guest<number>, on every server of the network.
 #enforce_nicks = false
 #enforce_grace = 60
 
@@ -139,6 +127,48 @@ realname = "Channel Registration Service"
 # [server] network.
 #email_command = "/usr/local/bin/send-verification"
 #network = "SekurNet"
+
+
+# -----------------------------------------------------------------------------
+#  OPERATORS -- network-wide IRC operators
+# -----------------------------------------------------------------------------
+# An account that gets IRC operator status on whichever server it is logged in
+# to, with no [[operators]] block in that server's sekurircd.toml: services tells
+# the user's server (SVSOPER) when they IDENTIFY or log in with SASL. Every other
+# server trusts an oper, so they reach the whole network. It ends when they log
+# out or disconnect, or when you remove the entry and reload (/REHASH on the
+# hub, or `bin/services --rehash`): no restart. Up to 32 entries.
+#
+#   account        the NickServ account (required)
+#   certfp         SHA-256 fingerprint of their TLS client certificate (colons
+#                  are fine). Required unless password_only. `NickServ CERT
+#                  INFO` shows it once the certificate is added.
+#   password_only  true = the account login alone is enough (no certificate)
+#   privileges     what they may do, the same names as an [[operators]] login:
+#                  kill, kline, sa, host, wallops, rehash, die, link, override,
+#                  auspex, immune, all.  Default: all.
+#
+# With a certfp the login needs the certificate as well as the password, so a
+# stolen password alone gets nothing. The server they connect to must ask for
+# one: [tls] request_client_cert = true in its sekurircd.toml (as for SASL
+# EXTERNAL), or services never sees a fingerprint.
+#
+# Each server can refuse these grants with [security] accept_services_opers =
+# false, and a hub's oper_scope / oper_deny for a leaf still apply to them. Keep
+# one [[operators]] block on the hub too, for when services is down.
+#
+# [[opers]] is its own top-level table, not part of [nickserv]: keep it after
+# the [nickserv] keys above, never in between.
+#
+#[[opers]]
+#account    = "youraccount"
+#certfp     = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+#privileges = ["all"]
+#
+#[[opers]]
+#account       = "helper"
+#password_only = true
+#privileges    = ["kill", "kline"]
 
 
 # -----------------------------------------------------------------------------

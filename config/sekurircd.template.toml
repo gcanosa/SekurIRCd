@@ -24,7 +24,12 @@
 #                                       their templates on first start)
 #    protection.toml                    the Protection bundle (optional; copy
 #                                       config/protection.template.toml)
-#    ../services/services.toml          NickServ + ChanServ
+#    spamfilters.conf                   regex spam rules, named by protection.toml
+#                                       [spam] filters_file (config/
+#                                       spamfilters.template.conf); `global`
+#                                       rules reach every linked server
+#    ../services/services.toml          NickServ + ChanServ, and network-wide
+#                                       opers ([[opers]])
 #
 #  Sections:
 #    SERVER       [server]
@@ -211,15 +216,6 @@ host_masking_ip_ranges = false
 # every linked server) for stable cloaks. Keep it out of version control.
 host_masking_secret = ""
 
-# Services can make an account an IRC operator on whichever server it logs in
-# to ([[opers]] in services.toml, see the template there). false = this server
-# ignores those grants (and takes back the ones it gave on /REHASH).
-accept_services_opers = true
-
-# Give opers a recognizable host after /OPER, e.g. netadmin.<network>.
-oper_host_masking = false
-oper_host_format = "netadmin.{network}"
-
 # --- lookups on connect ---
 
 # Reverse DNS of the client IP. Needed for hostname bans and
@@ -249,6 +245,10 @@ reserved_nicks = ["nickserv", "chanserv", "operserv", "memoserv", "hostserv", "b
 # +o can never be given this way.
 default_user_modes = "iw"
 
+# --- operators ---
+# The logins themselves are [[operators]] below; these settings apply to every
+# oper, however they became one.
+
 # Modes every /OPER gets. o is always included; others allowed: the ones
 # above plus the oper-only H, q, W and F (connects/exits on other servers).
 # An [[operators]] login's own `modes` replaces this for that login.
@@ -257,6 +257,16 @@ oper_modes = "+osw"
 # Channel opers are joined to after /OPER. Not locked down automatically: use
 # channel modes (+i, +k) to keep others out.
 #oper_auto_join = "#opers"
+
+# Give opers a recognizable host after /OPER, e.g. netadmin.<network>.
+oper_host_masking = false
+oper_host_format = "netadmin.{network}"
+
+# Network operators: services can make an account an IRC operator on whichever
+# server it logs in to, with no [[operators]] block here ([[opers]] in
+# services.toml, see the template there). true = this server accepts those
+# grants; false = it ignores them, and takes back the ones it gave on /REHASH.
+accept_services_opers = true
 
 # --- /DIE and /RESTART ---
 
@@ -357,7 +367,10 @@ auto_join = []
 #                    immune   exempt from SHUN, spam filters, +f/+j limits
 #                    all      everything;  [] = none of these (a helper)
 #   modes          replaces [security] oper_modes for this login
-# Add or change one, then /REHASH. Services admins are set in services.toml.
+# Add or change one, then /REHASH. These logins work on THIS server only: for
+# someone who should be an oper on every server of the network, use [[opers]] in
+# services.toml instead (they log in to NickServ, no /OPER). Keep one login here
+# anyway, for when services is down.
 #
 #[[operators]]
 #name = "admin"
