@@ -312,6 +312,8 @@ int server_rehash(server_t *srv, char *errbuf, size_t errbufsz) {
         srv->klines_dirty = 1, srv->kline_gen++;
         NOTE("K/G/Z-lines: now kept in %s", new_klines[0] ? new_klines : "memory only");
     }
+    int n_links = link_reconcile(srv); /* a removed [[links.peers]] entry (or an address it no longer allows) drops its link now */
+    if (n_links) NOTE("links: %d closed (the [[links.peers]] entry is gone, or no longer allows the peer's address)", n_links);
     netsync_oper_policy_resend(srv); /* a changed oper_scope / oper_deny reaches the linked leaves now, not at their next link-up */
     link_svc_rehash(srv); /* services reload services.toml too: its [[opers]] and the rest */
     int n_deopered = cmd_opers_rehash(srv);

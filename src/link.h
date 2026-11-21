@@ -80,6 +80,10 @@ int link_start_hub(struct server *srv);
  * one peer (/CONNECT). An authenticated link joins srv->links. Returns how many links came up. */
 int link_dial_peers(struct server *srv, int force, const char *only_name);
 
+/* After a rehash: closes every link whose [[links.peers]] entry is gone, or (accepted links) whose address the entry's
+ * allowed_ips no longer lists -- the links a new handshake would be refused for. Returns how many it closed. */
+int link_reconcile(struct server *srv);
+
 /* net.c's periodic tick for leaf mode: reconnects with backoff
  * (links.reconnect_delay doubling to reconnect_delay_max) whenever there's
  * no currently-authenticated uplink. No-op unless mode=leaf+enabled. */

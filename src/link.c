@@ -592,6 +592,36 @@ void link_close_why(server_t *srv, link_conn_t *lc, const char *why) {
     link_close(srv, lc);
 }
 
+/* After a rehash: a link whose [[links.peers]] entry is gone -- or, on the accepting side, whose address the entry's
+ * allowed_ips no longer lists -- would be refused if it connected now, so it is closed now instead of staying up until it
+ * happens to drop. A changed password or fingerprint doesn't close it (they can't be checked again on an open link, and
+ * rotating one shouldn't split the network): /SQUIT does that. Returns how many links were closed. */
+int link_reconcile(server_t *srv) {
+    int n = 0;
+    for (link_conn_t *lc = srv->links; lc; lc = lc->next) {
+        if (!lc->authenticated || lc->closing) continue;
+        const cfg_link_peer_t *p = NULL;
+        for (int i = 0; i < srv->cfg.links.n_peers && !p; i++)
+            if (strcasecmp(srv->cfg.links.peers[i].name, lc->peer_name) == 0) p = &srv->cfg.links.peers[i];
+        const char *why = NULL, *reason = NULL;
+        if (!p) { why = "its [[links.peers]] entry was removed"; reason = "Link removed from the configuration"; }
+        else if (!p->host[0] && lc->ip[0] && !peer_ip_allowed(p, lc->ip)) { /* an accepted link; a dialed one has no ip here */
+            why = "its address is no longer in the entry's allowed_ips";
+            reason = "Link no longer allowed by allowed_ips";
+        }
+        if (!why) continue;
+        char m[300], line[200];
+        snprintf(m, sizeof m, "Link with %s closed: %s", lc->peer_name, why);
+        log_warn("link", "%s", m);
+        server_notify_opers(srv, m);
+        snprintf(line, sizeof line, "ERROR :Closing link: %s", why);
+        link_forward_line(lc, line); /* link_reap sends it on the way out, so the peer's log says why */
+        link_close_why(srv, lc, reason);
+        n++;
+    }
+    return n;
+}
+
 void link_svc_stats(server_t *srv, const char *line) {
     for (link_conn_t *lc = srv->links; lc; lc = lc->next)
         if (lc->watch_stats && !lc->closing) link_forward_line(lc, line);
@@ -757,10 +787,11 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
             if (msg.nparams < 1) { link_close(srv, lc); return -1; }
             const char *name = msg.params[0];
             cfg_link_peer_t *matched = NULL;
+            int known = 0; /* an entry for this name exists (so a refusal is about its password or certificate, not a missing entry) */
             for (int i = 0; i < srv->cfg.links.n_peers; i++) {
                 cfg_link_peer_t *p = &srv->cfg.links.peers[i];
                 if (p->host[0]) continue; /* leaf-role entries never accept inbound */
-                if (strcmp(p->name, name) == 0) { matched = p; break; }
+                if (strcmp(p->name, name) == 0) { matched = p; known = 1; break; }
             }
             int ok = 0;
             if (matched && matched->fingerprint[0] && !fingerprint_ok(lc, name, matched->fingerprint)) {
@@ -791,7 +822,9 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
                 }
             }
             if (!ok) {
-                log_warn("link", "rejected link handshake from '%s' (bad name/password, or already linked)", name);
+                log_warn("link", "rejected link handshake from '%s' (%s)", name,
+                         known ? "bad password or certificate, not from an allowed address, or already linked"
+                               : "no [[links.peers]] entry has that name");
                 link_close(srv, lc);
                 return -1;
             }
@@ -837,6 +870,10 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
     }
 
     if (lc->closing) return 0; /* e.g. a services link just refused: the rest of this read is moot */
+    if (strcasecmp(msg.command, "ERROR") == 0) { /* the peer's parting words, e.g. "Closing link: its [[links.peers]] entry was removed" */
+        log_warn("link", "'%s' is closing the link: %s", lc->peer_name, msg.nparams ? msg.params[msg.nparams - 1] : "no reason given");
+        return 0;
+    }
     if (lc->is_server) { /* state-sync link: keepalives here, everything else is netsync's (its NICK is a nick change, not a service intro) */
         if (strcasecmp(msg.command, "PING") == 0) { link_forward_line(lc, "PONG"); return 0; }
         if (strcasecmp(msg.command, "PONG") == 0) return 0;

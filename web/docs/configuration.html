@@ -227,6 +227,18 @@ fingerprint = "sha256:&lt;the hub's certificate&gt;"</pre>
   and the pinned TLS above, or <code>[links] bind</code> on a private network address (WireGuard, your provider's private network) so it isn't public at all.
   Changing the port needs a restart of the listening server.</p>
 
+<h2>starting and stopping a link</h2>
+<p>The side whose peer entry has a <code>host</code> dials; the other side accepts. Normally a leaf dials its hub (a <code>mode = "hub"</code> server never dials
+  out), at start and again after every drop, waiting <code>reconnect_delay</code> and doubling up to <code>reconnect_delay_max</code>. An oper with the
+  <code>link</code> privilege uses <code>/CONNECT [name]</code> on a server that dials out (to start a link now) and <code>/SQUIT name</code> (to close one; a server
+  further away is asked through the server it hangs off). A SQUIT only bounces a leaf that has <code>autoconnect</code> on: it dials again after its delay.</p>
+<p>To keep a leaf away, take its entry out of the hub's <code>sekurircd.toml</code> and <code>/REHASH</code> the hub. The link is closed at once (opers see
+  "Link with &hellip; closed: its [[links.peers]] entry was removed") and every later attempt is refused, with "no [[links.peers]] entry has that name" in the log.
+  The same happens when you edit the entry's <code>allowed_ips</code> so that it no longer lists the address the peer is connected from, and to the services
+  link when its entry goes. A changed <code>password</code>, <code>password_hash</code> or <code>fingerprint</code> does not close an open link (it can't be
+  checked again, and a rotation shouldn't split the network): <code>/SQUIT</code> it. A hub must keep at least one entry that accepts a leaf: a rehash with none
+  is refused and changes nothing. The same rule works on a leaf: remove the hub's entry and its uplink closes and isn't dialed again.</p>
+
 <h2>limiting a leaf's opers</h2>
 <p>By default an IRC operator on any server of the network can use what their <code>privileges</code> allow on every server: KILL a user anywhere, set a
   network-wide G-line, SAJOIN a user on another server, REHASH the hub. When a leaf is run by someone else, or you just want its opers to look after

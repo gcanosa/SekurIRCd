@@ -588,6 +588,13 @@ reconnect_delay_max = 300.0
 #                  A leaf running an older version ignores oper_deny; the
 #                  hub still drops what oper_scope forbids when it arrives.
 
+#   Removing an entry and running /REHASH closes that peer's link at once and refuses it
+#   from then on; the same when allowed_ips no longer lists the address it is connected
+#   from. (A hub must keep at least one entry that accepts a leaf: a rehash with none is
+#   refused.) Changing a password or fingerprint does not close an open link: /SQUIT it.
+#   A leaf that is SQUITed dials again after reconnect_delay unless its own autoconnect
+#   is off, so to keep it out, remove its entry.
+
 # Hub side: a leaf that connects in.
 #[[links.peers]]
 #name = "leaf1"
