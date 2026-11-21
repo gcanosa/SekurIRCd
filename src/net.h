@@ -40,6 +40,9 @@ void net_set_cloak(struct server *srv, struct client *cl);
  * and reload the TLS certificate. A bind failure keeps the old listener (logged) -- never leaves it dead. */
 void net_apply_listeners(struct server *srv);
 int net_run(struct server *srv);
+/* Called once, when the listeners are up and the signal handlers are installed, just before the event loop starts:
+ * main.c uses it to tell the first parent of a --daemon start that the daemon is ready (see daemonize()). */
+extern void (*net_ready_hook)(void);
 
 int net_flood_charge(struct server *srv, struct client *cl);
 /* Always-on (see client.h): keep `cl` on the network without its connection / resume a kept session into `cl`. */

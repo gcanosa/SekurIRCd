@@ -2596,8 +2596,34 @@ static int run_session(void) {
 
 /* --- CLI: -d/--daemon, --pidfile, --stop (mirrors sekurircd's own main.c) --- */
 
+static int g_ready_fd = -1; /* the daemon's end of the start-up handshake (see daemonize) */
+
+/* The daemon is up (pidfile written, store loaded, signal handlers installed): the first parent, still waiting in
+ * daemonize(), may now exit. A daemon that dies before this makes the parent exit non-zero. */
+static void daemon_ready(void) {
+    if (g_ready_fd < 0) return;
+    (void)!write(g_ready_fd, "1", 1);
+    close(g_ready_fd);
+    g_ready_fd = -1;
+}
+
 static void daemonize(void) {
-    if (fork() > 0) _exit(0);
+    int p[2];
+    if (pipe(p) != 0) p[0] = p[1] = -1; /* no pipe: the old behaviour, the parent just exits */
+    pid_t pid = fork();
+    if (pid > 0) { /* wait for the daemon to write its pidfile, or to die first: a Type=forking systemd unit (and the
+                    * ./sekurircd wrapper) looks for the pidfile the moment this command returns */
+        int ok = 1;
+        if (p[0] >= 0) {
+            char b;
+            struct pollfd pf = {p[0], POLLIN, 0};
+            close(p[1]);
+            int r = poll(&pf, 1, 60000);
+            ok = r == 0 || (r > 0 && read(p[0], &b, 1) == 1); /* a slow start still counts; only a daemon that died first fails */
+        }
+        _exit(ok ? 0 : 1);
+    }
+    if (p[0] >= 0) { close(p[0]); g_ready_fd = p[1]; }
     setsid();
     if (fork() > 0) _exit(0);
     umask(0022);
@@ -2771,6 +2797,7 @@ int main(int argc, char **argv) {
         log_warn("chanserv", "running as root is not recommended: services never need it; "
                              "use a dedicated unprivileged user");
 
+    daemon_ready(); /* the store and NickServ loaded and the signal handlers are in: a --daemon start may return */
     int backoff = 2;
     while (!g_term) {
         int rc = run_session();

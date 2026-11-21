@@ -143,14 +143,17 @@ make install
 cp ~/.config/sekurircd/sekurircd.template.toml ~/.config/sekurircd/sekurircd.toml
 cp ~/.config/sekurircd/protection.template.toml ~/.config/sekurircd/protection.toml   # optional: the Protection bundle
 systemctl --user enable --now sekurircd services   # services start, stop and restart with sekurircd
+loginctl enable-linger $(whoami)       # keep them running after you log out (see below)
 systemctl --user reload sekurircd      # same as --rehash
 journalctl --user -u sekurircd -f</pre>
 <p>The optional <a href="stats.html">stats panel</a> runs on the server with services (the hub) and has its own unit:</p>
 <pre>cp ~/.config/sekurircd/stats.template.toml ~/.config/sekurircd/stats.toml   # set [collector] enabled = true
 python3 ~/.local/lib/sekurircd/stats/netstats.py -c ~/.config/sekurircd/stats.toml --user --admin --add yourname
 systemctl --user enable --now netstats</pre>
-<p>A user unit stops when your last session ends. To keep it running after logout or start it at boot:
-  <code>loginctl enable-linger $(whoami)</code>. <code>make uninstall</code> removes binaries and units but leaves
+<p><strong>Turn linger on.</strong> A user unit only runs while its user has a login session. With linger off, the ircd and services stop 10 seconds after
+  your last SSH session closes (every user is disconnected, and an SSH client that reconnects does it again each time) and only start at your next login.
+  <code>loginctl enable-linger $(whoami)</code> once (some systems want <code>sudo</code>) and they keep running after logout and start at boot.
+  <code>tools/upgrade.py</code> checks it and says so when it is off. <code>make uninstall</code> removes binaries and units but leaves
   your config and state. Override <code>PREFIX</code>, <code>SYSCONFDIR</code>, <code>STATEDIR</code> or
   <code>UNITDIR</code> on the <code>make</code> command line to relocate any of it.</p>
 

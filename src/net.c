@@ -1837,6 +1837,8 @@ void net_apply_listeners(server_t *srv) {
     apply_extra_listeners(srv, 1);
 }
 
+void (*net_ready_hook)(void) = NULL;
+
 int net_run(server_t *srv) {
     install_signal_handlers();
     worker_pool_start();
@@ -1882,6 +1884,7 @@ int net_run(server_t *srv) {
     alwayson_restore(srv);
     if (srv->cfg.links.autoconnect) link_dial_peers(srv, 1, NULL); /* every dial-out peer, now (later attempts back off per peer in link_leaf_tick) */
     server_install_debug_log_hook(srv);
+    if (net_ready_hook) net_ready_hook();
     time_t last_tick = time(NULL);
 
     /* Readiness comes from kqueue/epoll (ev.c). Each fd's interest is registered once and changed only when it
