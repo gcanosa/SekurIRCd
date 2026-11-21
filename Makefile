@@ -109,6 +109,9 @@ VERSION_SUFFIX := $(shell if git rev-parse HEAD >/dev/null 2>&1 && ! git describ
 # Rebuild build.o when the id/suffix changes even if no source did (a commit, a new tag).
 BUILD_STAMP := $(OBJ_DIR)/build-id
 $(shell mkdir -p $(OBJ_DIR); echo '$(BUILD_ID)$(VERSION_SUFFIX)' | cmp -s - $(BUILD_STAMP) || echo '$(BUILD_ID)$(VERSION_SUFFIX)' > $(BUILD_STAMP))
+# The line above writes it when the id changed; this rule writes it again if it is gone by the time it is needed (make clean all).
+$(BUILD_STAMP):
+	@mkdir -p $(dir $@); echo '$(BUILD_ID)$(VERSION_SUFFIX)' > $@
 $(OBJ_DIR)/$(SRC_DIR)/build.o: CPPFLAGS += -DSEKURIRCD_BUILD='"$(BUILD_ID)"' -DSEKURIRCD_VERSION_SUFFIX='"$(VERSION_SUFFIX)"'
 $(OBJ_DIR)/$(SRC_DIR)/build.o: $(filter-out $(OBJ_DIR)/$(SRC_DIR)/build.o,$(ALL_OBJS)) $(BUILD_STAMP)
 build-debug/$(SRC_DIR)/build.o: CPPFLAGS += -DSEKURIRCD_BUILD='"$(BUILD_ID)-asan"' -DSEKURIRCD_VERSION_SUFFIX='"$(VERSION_SUFFIX)"'
