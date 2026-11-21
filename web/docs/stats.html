@@ -66,6 +66,9 @@
   <li><strong>Services</strong> (<code>bin/services</code>, next to the hub) write all of it to <code>stats/events.log</code>: a snapshot every minute, events as they come.</li>
   <li><strong>netstats</strong> loads that log every minute into <code>stats/stats.db</code>, probes the servers from outside, and shows the result.</li>
 </ol>
+<p>The other way round, for planned maintenance told to IRC users: netstats appends the notice to <code>stats/announce.queue</code>, services
+  (checking it every few seconds) send it to the hub (<code>SVCGLOBAL</code>), and the hub gives it to its users as a server notice and passes it to
+  every other server (<code>GNOTICE</code>), which does the same. A server older than this ignores <code>GNOTICE</code>, so its users don't get it.</p>
 <p>Since services run once per network, next to the hub, the panel runs there too. A leaf only needs <code>stats_interval</code>.</p>
 <p>History is kept per minute for 7 days, per hour for 90 days and per day for <code>retention_days</code> (365 by default), so the database stays small.</p>
 
@@ -118,7 +121,7 @@ stats/netstats.py --mkpasswd                     # just print a hash, for a [[us
 </table></div>
 <p>"Public" is the page at <code>/</code> with <code>public = true</code>, and the <code>[export] public_html</code> file.</p>
 
-<h2>alerts</h2>
+<h2 id="alerts">alerts</h2>
 <p>Set <code>[alerts] webhook</code> in <code>stats.toml</code> to a Discord, Slack, Mattermost or Rocket.Chat webhook (<code>format = "json"</code>) or an ntfy
   topic (<code>format = "text"</code>) and the panel posts when a link has been down for <code>down_minutes</code>, services stop reporting, a probed port stops
   answering, or a TLS certificate has fewer than <code>cert_days</code> left. Each problem is posted once, and once more when it's fixed; nothing is posted
@@ -209,6 +212,9 @@ lon = 4.90</pre></li>
 <tr><td><code>[export]</code></td><td><code>public_html</code>, <code>admin_html</code>: what <code>render</code> writes.</td></tr>
 <tr><td><code>[geoip]</code></td><td><code>file</code>: the DB-IP database <code>geoip-update</code> downloads.</td></tr>
 <tr><td><code>[health]</code></td><td><code>ports</code>, <code>tls_ports</code>, <code>interval</code>, <code>timeout</code>.</td></tr>
+<tr><td><code>[alerts]</code></td><td><code>webhook</code> (off when empty), <code>format</code> (<code>json</code> or <code>text</code>), <code>down_minutes</code> (5),
+  <code>cert_days</code> (14). See <a href="#alerts">alerts</a>.</td></tr>
+<tr><td><code>[announce]</code></td><td><code>reminders</code> (<code>["24h", "1h"]</code>): when users told about planned maintenance are reminded.</td></tr>
 <tr><td><code>[[users]]</code>, <code>[[servers]]</code></td><td>Logins (managed with <code>--user</code>) and per-server overrides.</td></tr>
 </table></div>
 <p><code>tools/confcheck.py</code> checks this file along with the others, <code>tools/backup-config.sh</code> backs it up with the database, and

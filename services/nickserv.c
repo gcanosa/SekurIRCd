@@ -63,6 +63,8 @@ typedef struct {
     long always_on_expire; /* seconds a detached always-on nick is kept (0 = never expires) */
     int expire_days;       /* drop an account nobody logged in to for this long (0 = never) */
     int expire_warn_days;  /* email its verified address this long before (0 = no warning; needs email_command) */
+    int require_email;     /* REGISTER needs an email, and the account works once it is verified */
+    long verify_window;    /* seconds an unverified registration waits for VERIFY before it is dropped */
     char admins[NS_MAX_ADMINS][64];
     int n_admins;
     ns_oper_t opers[NS_MAX_OPERS];
@@ -157,6 +159,9 @@ int ns_config(toml_node_t *raw, const char *config_path, char *err, size_t errsz
     C.expire_days = t_int(t, "expire_days", 0);
     if (C.expire_days < 0) C.expire_days = 0;
     if (C.expire_days > 3650) C.expire_days = 3650;
+    C.require_email = t_bool(t, "require_email", 0);
+    int vh = t_int(t, "verify_window_hours", 24);
+    C.verify_window = (long)(vh < 1 ? 1 : vh > 168 ? 168 : vh) * 3600;
     C.expire_warn_days = t_int(t, "expire_warn_days", 0);
     if (C.expire_warn_days < 0 || C.expire_warn_days >= C.expire_days) C.expire_warn_days = 0;
     toml_node_t *ad = t ? tx_array(t, "admins") : NULL;
@@ -203,6 +208,10 @@ int ns_config(toml_node_t *raw, const char *config_path, char *err, size_t errsz
     }
     if (!irc_valid_nick(C.nick, 30)) { snprintf(err, errsz, "[nickserv] nick is not a valid nickname"); return -1; }
     if (C.email_command[0] && C.email_command[0] != '/') { snprintf(err, errsz, "[nickserv] email_command must be an absolute path"); return -1; }
+    if (C.require_email && !C.email_command[0]) {
+        snprintf(err, errsz, "[nickserv] require_email = true needs email_command (the codes that activate new accounts are mailed)");
+        return -1;
+    }
 
     /* Where the accounts live. Unset = find the database the ircd's built-in NickServ kept (an upgrade then uses it in
      * place, nothing copied or converted): the git-clone layout first, then a make-install one, else a new file. */
@@ -522,6 +531,14 @@ static void spawn_email(const char *addr, const char *code, const char *account,
     waitpid(p1, NULL, 0);
 }
 
+/* A code for `email`, valid `ttl` seconds, mailed for VERIFY. */
+static void mail_code(const char *account, const char *email, long ttl) {
+    char code[12];
+    crypto_random_hex(code, sizeof code, 4);
+    accounts_set_pending_email(&g_acc, account, email, code, (long)time(NULL) + ttl);
+    spawn_email(email, code, account, "verify");
+}
+
 static void begin_email(const char *to, const char *account, const char *email) {
     if (!valid_email(email)) { say(to, "That does not look like a valid email address"); return; }
     if (!C.email_command[0]) {
@@ -561,10 +578,41 @@ static const char *do_register(const char *account, const char *password, const 
     return NULL;
 }
 
+/* VERIFY of a registration waiting for its email (require_email): the account becomes usable and its email verified.
+ * NULL = activated (*name set), else why not. Wrong codes count against the IP like wrong passwords. */
+static const char *activate(const char *account, const char *code, const char *ip, const char **name) {
+    if (fail_throttled(ip)) return "Too many attempts -- wait a minute";
+    const char *owner = accounts_owner_of_nick(&g_acc, account);
+    if (!owner || !accounts_unverified(&g_acc, owner)) return "No registration of that name is waiting for verification";
+    if (!accounts_check_verify(&g_acc, owner, code)) { fail_record(ip); return "That code is wrong or has expired"; }
+    accounts_set_unverified(&g_acc, owner, 0);
+    *name = accounts_display_name(&g_acc, owner);
+    log_info("nickserv", "account %s verified its email and is active (from %s)", *name, ip);
+    return NULL;
+}
+
+/* SVCVERIFY <cid> <ip> <account> :<code> -- the ircd's VERIFY (draft/account-registration). Answered as SVCREGRESULT VERIFIED
+ * or VERIFYFAIL (an older ircd shows those as a failed REGISTER). */
+static void ev_verify(irc_message_t *m) {
+    if (m->nparams < 4) return;
+    const char *cid = m->params[0], *name = NULL;
+    const char *why = activate(m->params[2], m->params[3], m->params[1], &name);
+    if (why) { wire("SVCREGRESULT", (const char *[]){cid, "VERIFYFAIL", "INVALID_CODE", m->params[2]}, 4, why); return; }
+    char keep[64], msg[200];
+    snprintf(keep, sizeof keep, "%s", name);
+    login(cid, keep);
+    snprintf(msg, sizeof msg, "Email verified -- account %s is active and you are logged in", keep);
+    wire("SVCREGRESULT", (const char *[]){cid, "VERIFIED", "*", keep}, 4, msg);
+}
+
 /* SVCREGISTER <cid> <ip> <account> <email|*> :<password> */
 static void ev_register(irc_message_t *m) {
     if (m->nparams < 5) return;
     const char *cid = m->params[0], *ip = m->params[1], *account = m->params[2], *email = m->params[3], *pw = m->params[4];
+    if (C.require_email && (strcmp(email, "*") == 0 || !valid_email(email))) {
+        wire("SVCREGRESULT", (const char *[]){cid, "FAIL", "INVALID_EMAIL", account}, 4, "This network needs a valid email address to register");
+        return;
+    }
     const char *why = do_register(account, pw, ip);
     if (why) {
         char code[40];
@@ -574,6 +622,16 @@ static void ev_register(irc_message_t *m) {
         return;
     }
     const char *name = accounts_display_name(&g_acc, account);
+    if (C.require_email) {
+        char keep[64], msg[300];
+        snprintf(keep, sizeof keep, "%s", name);
+        accounts_set_unverified(&g_acc, keep, 1);
+        mail_code(keep, email, C.verify_window);
+        snprintf(msg, sizeof msg, "A code was sent to %s -- the account works once you VERIFY %s <code> (within %ld hours)", email, keep,
+                 C.verify_window / 3600);
+        wire("SVCREGRESULT", (const char *[]){cid, "VERIFICATION_REQUIRED", "*", keep}, 4, msg);
+        return;
+    }
     login(cid, name);
     char msg[200];
     snprintf(msg, sizeof msg, "Account %s registered -- you are now logged in as it", name);
@@ -658,7 +716,7 @@ static void sasl_scram(sasl_t *s, const char *data) {
         const char *owner = accounts_owner_of_nick(&g_acc, user);
         const char *name = owner ? owner : user;
         const char *stored = accounts_scram(&g_acc, name);
-        if (accounts_suspended(&g_acc, name, NULL, NULL) || !stored || scram_verifier_from_string(stored, &s->v) != 0) { sasl_done(s, NULL); return; }
+        if (accounts_suspended(&g_acc, name, NULL, NULL) || accounts_unverified(&g_acc, name) || !stored || scram_verifier_from_string(stored, &s->v) != 0) { sasl_done(s, NULL); return; }
         snprintf(s->account, sizeof s->account, "%s", accounts_display_name(&g_acc, name));
         snprintf(s->first_bare, sizeof s->first_bare, "%s", bare);
         char snonce[24], saltb[64], out[500];
@@ -711,7 +769,7 @@ static void sasl_plain(sasl_t *s, const char *data) {
     OPENSSL_cleanse(blob, sizeof blob);
     const char *name = fail_throttled(s->ip) ? NULL : check_password(account, password);
     OPENSSL_cleanse(password, sizeof password);
-    if (name && accounts_suspended(&g_acc, name, NULL, NULL)) name = NULL;
+    if (name && (accounts_suspended(&g_acc, name, NULL, NULL) || accounts_unverified(&g_acc, name))) name = NULL;
     char keep[64] = "";
     if (name) snprintf(keep, sizeof keep, "%s", name);
     sasl_done(s, name ? keep : NULL);
@@ -737,7 +795,7 @@ static void ev_sasl(irc_message_t *m) {
     else if (strcasecmp(s->mech, "SCRAM-SHA-256") == 0) sasl_scram(s, data);
     else if (strcasecmp(s->mech, "EXTERNAL") == 0) {
         const char *acct = s->certfp[0] ? accounts_find_by_fingerprint(&g_acc, s->certfp) : NULL;
-        if (acct && accounts_suspended(&g_acc, acct, NULL, NULL)) acct = NULL;
+        if (acct && (accounts_suspended(&g_acc, acct, NULL, NULL) || accounts_unverified(&g_acc, acct))) acct = NULL;
         char keep[64] = "";
         if (acct) snprintf(keep, sizeof keep, "%s", acct);
         sasl_done(s, acct ? keep : NULL);
@@ -759,7 +817,7 @@ static void enforce_check(nsuser_t *u) {
     u->enforce_at = 0;
     if (!C.enabled || !C.enforce_nicks) return;
     const char *owner = accounts_owner_of_nick(&g_acc, u->nick);
-    if (!owner || (u->account[0] && strcasecmp(u->account, owner) == 0)) return;
+    if (!owner || (u->account[0] && strcasecmp(u->account, owner) == 0) || accounts_unverified(&g_acc, owner)) return; /* not active yet: protects nothing */
     snprintf(u->enforce_owner, sizeof u->enforce_owner, "%s", owner);
     u->enforce_at = time(NULL) + C.enforce_grace;
     sayf(u->nick, "This nickname is registered. Log in (SASL, or /msg %s IDENTIFY <password>) within %d seconds or you "
@@ -825,6 +883,7 @@ int ns_event(irc_message_t *m) {
     if (!C.enabled) return 0;
     if (!strcmp(c, "SVCSASL")) { ev_sasl(m); return 1; }
     if (!strcmp(c, "SVCREGISTER")) { ev_register(m); return 1; }
+    if (!strcmp(c, "SVCVERIFY")) { ev_verify(m); return 1; }
     return 0;
 }
 
@@ -888,9 +947,33 @@ static void expire_sweep(void) {
     }
 }
 
+/* Registrations that never verified their email within verify_window: dropped, so the name is free again. Every 5 minutes,
+ * whether or not require_email is still on (it may have been turned off with some waiting). */
+static void unverified_sweep(void) {
+    static time_t last;
+    time_t now = time(NULL);
+    if (now - last < 300) return;
+    last = now;
+    char dead[64][64];
+    int nd = 0;
+    cJSON *rec;
+    cJSON_ArrayForEach(rec, g_acc.data) {
+        if (!cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(rec, "unverified")) || nd >= 64) continue;
+        const cJSON *nm = cJSON_GetObjectItemCaseSensitive(rec, "name");
+        const char *name = cJSON_IsString(nm) ? nm->valuestring : rec->string;
+        if (name && accounts_created_at(&g_acc, name) + C.verify_window < (long)now) snprintf(dead[nd++], sizeof dead[0], "%s", name);
+    }
+    for (int i = 0; i < nd; i++) {
+        accounts_drop(&g_acc, dead[i]);
+        cs_account_dropped(dead[i]);
+        log_info("nickserv", "registration %s dropped: its email was never verified", dead[i]);
+    }
+}
+
 void ns_tick(void) {
     if (!C.enabled) return;
     expire_sweep();
+    unverified_sweep();
     time_t now = time(NULL);
     nsuser_t *u, *tmp;
     HASH_ITER(hh, g_by_uid, u, tmp) {
@@ -931,6 +1014,11 @@ static void cmd_identify(nsuser_t *u, const char *a, const char *b) {
     if (accounts_suspended(&g_acc, owner ? owner : account, NULL, NULL)) { say(u->nick, "That account is suspended -- contact a network operator"); return; }
     const char *name = check_password(account, password);
     if (!name) { fail_record(u->ip); say(u->nick, "Invalid account or password"); return; }
+    if (accounts_unverified(&g_acc, name)) {
+        sayf(u->nick, "Account %s is not active yet: confirm the email it was registered with -- /msg %s VERIFY %s <code from the mail>",
+             name, C.nick, name);
+        return;
+    }
     char keep[64];
     snprintf(keep, sizeof keep, "%s", name);
     login(u->uid, keep);
@@ -1002,6 +1090,10 @@ static void cmd_info(nsuser_t *u, const char *a) {
     char when[64];
     strftime(when, sizeof when, "%Y-%m-%d %H:%M:%S UTC", gmtime(&reg));
     sayf(u->nick, "Account %s, registered %s", who, when);
+    if (accounts_unverified(&g_acc, who)) {
+        long left = accounts_created_at(&g_acc, who) + C.verify_window - (long)time(NULL);
+        sayf(u->nick, "Not active yet: waiting for its email to be verified (dropped in %ld hour(s) otherwise)", left > 0 ? (left + 3599) / 3600 : 0);
+    }
     const char *sby, *sreason;
     if (accounts_suspended(&g_acc, who, &sby, &sreason)) {
         if (is_admin(u)) sayf(u->nick, "Suspended by %s%s%s", sby, sreason[0] ? ": " : "", sreason);
@@ -1057,7 +1149,7 @@ static void cmd_cert(nsuser_t *u, const char *sub) {
     } else say(u->nick, "Syntax: CERT ADD|DEL|INFO");
 }
 
-/* SUSPEND/UNSUSPEND/NOEXPIRE/FDROP/SASET PASSWORD -- services admins ([nickserv] admins, by account) only. */
+/* SUSPEND/UNSUSPEND/NOEXPIRE/ACTIVATE/FDROP/SASET PASSWORD -- services admins ([nickserv] admins, by account) only. */
 static void cmd_admin(nsuser_t *u, const char *cmd, const char *a, const char *b, const char *c3, const char *text) {
     if (!is_admin(u)) { say(u->nick, "Permission denied -- that needs a services admin account ([nickserv] admins)"); return; }
     int saset = strcasecmp(cmd, "SASET") == 0;
@@ -1077,6 +1169,10 @@ static void cmd_admin(nsuser_t *u, const char *cmd, const char *a, const char *b
         if (!accounts_suspended(&g_acc, account, NULL, NULL)) { say(u->nick, "That account is not suspended"); return; }
         accounts_set_suspended(&g_acc, account, NULL, NULL);
         snprintf(m, sizeof m, "%s unsuspended account %s", u->nick, account);
+    } else if (strcasecmp(cmd, "ACTIVATE") == 0) {
+        if (!accounts_unverified(&g_acc, account)) { say(u->nick, "That account is already active"); return; }
+        accounts_set_unverified(&g_acc, account, 0);
+        snprintf(m, sizeof m, "%s activated account %s without email verification", u->nick, account);
     } else if (strcasecmp(cmd, "NOEXPIRE") == 0) {
         if (!b || (strcasecmp(b, "ON") != 0 && strcasecmp(b, "OFF") != 0)) { say(u->nick, "Syntax: NOEXPIRE <account> ON|OFF"); return; }
         accounts_set_noexpire(&g_acc, account, strcasecmp(b, "ON") == 0);
@@ -1181,7 +1277,8 @@ static const svc_help_t NS_HELP[] = {
      "Syntax: REGISTER <password> [email]\n"
      "Registers the nick you are using as an account and logs you in to it. Password: 6-199 characters.\n"
      "With an email address, a code is mailed to you -- confirm it with VERIFY. A verified email is what\n"
-     "lets you RESETPASS a forgotten password.\n"
+     "lets you RESETPASS a forgotten password. Some networks need the email: then the account starts\n"
+     "working (and logs you in) once you VERIFY the code.\n"
      "Examples: /msg NickServ REGISTER s3cretpass\n"
      "          /msg NickServ REGISTER s3cretpass me@example.org", 0},
     {"IDENTIFY|ID", "log in (ID works too)",
@@ -1201,9 +1298,11 @@ static const svc_help_t NS_HELP[] = {
      "Examples: /msg NickServ INFO\n"
      "          /msg NickServ INFO alice", 0},
     {"VERIFY", "confirm your email address",
-     "Syntax: VERIFY <code>\n"
-     "Confirms your email address with the code REGISTER or SET EMAIL mailed you. Needs you logged in.\n"
-     "Example: /msg NickServ VERIFY 4f9a1c2e7b30", 0},
+     "Syntax: VERIFY [account] <code>\n"
+     "Confirms your email address with the code REGISTER or SET EMAIL mailed you. On a network that needs an\n"
+     "email to register, this is also what makes a new account work: then it needs no login, and the account\n"
+     "name can be left out when you use that nick.\n"
+     "Example: /msg NickServ VERIFY 4f9a1c2e", 0},
     {"RESETPASS", "forgot your password? reset it by email",
      "Syntax: RESETPASS <account>\n"
      "        RESETPASS <account> <code> <new password>\n"
@@ -1291,6 +1390,11 @@ static const svc_help_t NS_HELP[] = {
     {"UNSUSPEND", "(admin) lift a suspension",
      "Syntax: UNSUSPEND <account>\n"
      "Example: /msg NickServ UNSUSPEND spammer", 1},
+    {"ACTIVATE", "(admin) activate a registration without its email",
+     "Syntax: ACTIVATE <account>\n"
+     "With [nickserv] require_email, a new account works once its email is verified. ACTIVATE makes it work\n"
+     "now, for someone whose mail never arrives.\n"
+     "Example: /msg NickServ ACTIVATE newuser", 1},
     {"NOEXPIRE", "(admin) keep an account from expiring",
      "Syntax: NOEXPIRE <account> ON|OFF\n"
      "With [nickserv] expire_days set, an account nobody logs in to for that long is dropped. ON keeps this one\n"
@@ -1327,12 +1431,20 @@ int ns_privmsg(const char *target, const char *from_nick, const char *text) {
     char *c3 = cmd ? strtok_r(NULL, " ", &save) : NULL;
     if (!cmd || strcasecmp(cmd, "HELP") == 0) cmd_help(u, cmd ? text + strcspn(text, " ") : "");
     else if (strcasecmp(cmd, "REGISTER") == 0) {
-        if (!a) say(u->nick, "Syntax: REGISTER <password> [email]");
+        if (!a) say(u->nick, C.require_email ? "Syntax: REGISTER <password> <email>" : "Syntax: REGISTER <password> [email]");
         else if (u->account[0]) say(u->nick, "You are already logged in to an account");
+        else if (C.require_email && (!b || !valid_email(b))) say(u->nick, "This network needs an email address to register: REGISTER <password> <email>");
         else {
             const char *why = do_register(u->nick, a, u->ip);
             if (why) say(u->nick, strchr(why, ' ') + 1);
-            else {
+            else if (C.require_email) {
+                char keep[64];
+                snprintf(keep, sizeof keep, "%s", accounts_display_name(&g_acc, u->nick));
+                accounts_set_unverified(&g_acc, keep, 1);
+                mail_code(keep, b, C.verify_window);
+                sayf(u->nick, "A code was sent to %s. Your account starts working once you /msg %s VERIFY <code> (within %ld hours).",
+                     b, C.nick, C.verify_window / 3600);
+            } else {
                 const char *name = accounts_display_name(&g_acc, u->nick);
                 char keep[64];
                 snprintf(keep, sizeof keep, "%s", name);
@@ -1363,7 +1475,7 @@ int ns_privmsg(const char *target, const char *from_nick, const char *text) {
         if (!a) say(u->nick, "Syntax: REGAIN <nick>");
         else cmd_regain(u, a);
     } else if (strcasecmp(cmd, "RESETPASS") == 0) cmd_resetpass(u, a, b, c3);
-    else if (strcasecmp(cmd, "SUSPEND") == 0 || strcasecmp(cmd, "UNSUSPEND") == 0 || strcasecmp(cmd, "FDROP") == 0 || strcasecmp(cmd, "NOEXPIRE") == 0 ||
+    else if (strcasecmp(cmd, "SUSPEND") == 0 || strcasecmp(cmd, "UNSUSPEND") == 0 || strcasecmp(cmd, "FDROP") == 0 || strcasecmp(cmd, "NOEXPIRE") == 0 || strcasecmp(cmd, "ACTIVATE") == 0 ||
              strcasecmp(cmd, "SASET") == 0) cmd_admin(u, cmd, a, b, c3, text);
     else if (strcasecmp(cmd, "INFO") == 0) cmd_info(u, a);
     else if (strcasecmp(cmd, "STATUS") == 0 || strcasecmp(cmd, "ACC") == 0) cmd_status(u, cmd, a);
@@ -1395,10 +1507,20 @@ int ns_privmsg(const char *target, const char *from_nick, const char *text) {
         else if (!b) sayf(u->nick, "Always-on is %s. Syntax: SET ALWAYS-ON ON|OFF", accounts_always_on(&g_acc, u->account) && C.always_on ? "on" : "off");
         else cmd_set_always_on(u, b);
     } else if (strcasecmp(cmd, "VERIFY") == 0) {
-        if (!u->account[0]) say(u->nick, "You must IDENTIFY first");
-        else if (!a) say(u->nick, "Syntax: VERIFY <code>");
-        else if (accounts_check_verify(&g_acc, u->account, a)) say(u->nick, "Email verified");
-        else say(u->nick, "That code is wrong or has expired");
+        if (!a) say(u->nick, "Syntax: VERIFY [account] <code>");
+        else if (!u->account[0]) { /* a registration waiting for its email: VERIFY <code> (as that nick) or VERIFY <account> <code> */
+            const char *name = NULL, *why = activate(b ? a : u->nick, b ? b : a, u->ip, &name);
+            if (why) say(u->nick, why);
+            else if (strcasecmp(name, u->nick) == 0) {
+                char keep[64];
+                snprintf(keep, sizeof keep, "%s", name);
+                login(u->uid, keep);
+                sayf(u->nick, "Email verified -- account %s is active and you are logged in", keep);
+                last_login_note(u);
+            } else sayf(u->nick, "Email verified -- account %s is active. Log in with /msg %s IDENTIFY %s <password>", name, C.nick, name);
+        } else if (fail_throttled(u->ip)) say(u->nick, "Too many attempts -- wait a minute");
+        else if (accounts_check_verify(&g_acc, u->account, b ? b : a)) say(u->nick, "Email verified");
+        else { fail_record(u->ip); say(u->nick, "That code is wrong or has expired"); }
     } else if (strcasecmp(cmd, "DROP") == 0) {
         if (!u->account[0]) say(u->nick, "You must IDENTIFY first");
         else if (!a) say(u->nick, "Syntax: DROP <password> -- permanently deletes your account");

@@ -243,6 +243,9 @@ static const help_entry_t HELP_TABLE[] = {
                   "draft/account-registration; * means your nick). Also: /msg NickServ REGISTER <password> "
                   "and /msg NickServ IDENTIFY [account] <password>. Handled by NickServ in the network's "
                   "services -- unavailable while they are down."}},
+    {"VERIFY", {"VERIFY <account> <code>",
+                "Finish a registration that needs its email confirmed: the code was mailed to the address given to "
+                "REGISTER. The account works, and you are logged in, once it matches. Also: /msg NickServ VERIFY <code>."}},
     {"NS", {"NS <command> [args...]",
             "Shorthand for /msg NickServ <command> (also NICKSERV); CS and CHANSERV do the same for ChanServ. "
             "/NS HELP lists the NickServ commands: REGISTER, IDENTIFY, GHOST, REGAIN, RESETPASS, GROUP, SET, DROP and more."}},

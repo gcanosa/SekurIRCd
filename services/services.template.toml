@@ -118,6 +118,19 @@ realname = "Channel Registration Service"
 #always_on = true
 #always_on_expire_days = 30
 
+# --- registration needs a verified email ---
+
+# true: REGISTER (NickServ, or a client's draft/account-registration REGISTER)
+# needs an email address, and the new account does nothing -- no IDENTIFY, no
+# SASL, no nick protection -- until its owner sends the mailed code with
+# /msg NickServ VERIFY <code> (or the ircd's VERIFY <account> <code>); then
+# they are logged in. A registration nobody verifies within verify_window_hours
+# (1..168) is dropped and the name is free again. Accounts that already exist
+# are not affected. Admins can activate one by hand: ACTIVATE <account>.
+# Needs email_command (below); services refuse to start without it.
+#require_email = false
+#verify_window_hours = 24
+
 # --- account expiry ---
 
 # Drop an account nobody has logged in to for this many days (with its grouped
@@ -136,7 +149,9 @@ realname = "Channel Registration Service"
 
 # SET EMAIL and RESETPASS run, without a shell:
 #   <email_command> <address> <code> <account> <network> verify|reset
-# (and "expire" with the days left as <code>, when expire_warn_days is set)
+# (and "expire" with the days left as <code>, when expire_warn_days is set).
+# With require_email, the "verify" code of a new registration is valid for
+# verify_window_hours instead of one hour.
 # Point it at a small script that mails the code. Empty = no mail (addresses
 # stay unverified, no self-service reset). network defaults to the ircd's
 # [server] network.

@@ -450,6 +450,18 @@ void accounts_set_noexpire(account_store_t *st, const char *name, int on) {
     save(st);
 }
 
+int accounts_unverified(account_store_t *st, const char *name) {
+    return cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(find(st, name), "unverified"));
+}
+
+void accounts_set_unverified(account_store_t *st, const char *name, int on) {
+    cJSON *rec = find(st, name);
+    if (!rec) return;
+    cJSON_DeleteItemFromObjectCaseSensitive(rec, "unverified");
+    if (on) cJSON_AddTrueToObject(rec, "unverified");
+    save(st);
+}
+
 int accounts_always_on(account_store_t *st, const char *name) {
     return cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(find(st, name), "always_on"));
 }

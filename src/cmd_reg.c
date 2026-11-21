@@ -676,6 +676,23 @@ void cmd_register(server_t *srv, client_t *cl, irc_message_t *msg) {
     }
 }
 
+/* VERIFY <account> <code> (draft/account-registration): finishes a registration that services hold until its email is
+ * confirmed ([nickserv] require_email). Services answer as SVCREGRESULT VERIFIED / VERIFYFAIL. */
+void cmd_verify(server_t *srv, client_t *cl, irc_message_t *msg) {
+    if (!services_agent(srv)) { send_fail(srv, cl, "VERIFY", "TEMPORARILY_UNAVAILABLE", "Account services are unavailable right now -- try again later"); return; }
+    if (cl->account[0]) { send_fail(srv, cl, "VERIFY", "ALREADY_AUTHENTICATED", "You are already logged in to an account"); return; }
+    /* no REGISTER cooldown here: the mail can arrive within seconds; services limit wrong codes per IP like wrong passwords */
+    cl->auth_style = AUTH_STYLE_DRAFT;
+    char cid[40], line[600];
+    client_id(srv, cl, cid, sizeof cid);
+    irc_build(line, sizeof line, NULL, 0, NULL, "SVCVERIFY", (const char *[]){cid, cl->ip, msg->params[0]}, 3, msg->params[1]);
+    to_services(srv, line);
+    if (cl->label_capture) {
+        snprintf(cl->label_pending, sizeof cl->label_pending, "%s", cl->label);
+        cl->label_defer = 1;
+    }
+}
+
 /* CERT ADD|DEL|INFO -- kept as shorthand for /msg NickServ CERT ..., which owns certificate fingerprints now. */
 void cmd_cert(server_t *srv, client_t *cl, irc_message_t *msg) {
     char text[64];
@@ -794,7 +811,18 @@ void svc_command(server_t *srv, client_t *svc, irc_message_t *msg) {
         cl->auth_style = AUTH_STYLE_LEGACY;
         const char *text = msg->params[msg->nparams - 1];
         if (cl->label_pending[0]) client_label_begin(cl, cl->label_pending), cl->label_pending[0] = '\0';
-        if (strcmp(msg->params[1], "SUCCESS") != 0) send_fail(srv, cl, "REGISTER", msg->params[2], text);
+        const char *st = msg->params[1];
+        if (!strcmp(st, "VERIFICATION_REQUIRED") || !strcmp(st, "VERIFIED")) { /* require_email: held until VERIFY, then done */
+            int reg = !strcmp(st, "VERIFICATION_REQUIRED");
+            if (style == AUTH_STYLE_DRAFT) {
+                char line[500];
+                irc_build(line, sizeof line, NULL, 0, srv->cfg.server.name, reg ? "REGISTER" : "VERIFY",
+                          (const char *[]){reg ? "VERIFICATION_REQUIRED" : "SUCCESS", msg->params[3]}, 2, text);
+                client_send(cl, line);
+            } else notice_self(srv, cl, text);
+            if (!reg) log_info("main", "%s verified account %s", cl->nick[0] ? cl->nick : cl->ip, msg->params[3]);
+        } else if (!strcmp(st, "VERIFYFAIL")) send_fail(srv, cl, "VERIFY", msg->params[2], text);
+        else if (strcmp(st, "SUCCESS") != 0) send_fail(srv, cl, "REGISTER", msg->params[2], text);
         else {
             if (style == AUTH_STYLE_DRAFT) {
                 char line[500];

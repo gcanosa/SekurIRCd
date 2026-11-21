@@ -91,6 +91,10 @@ void accounts_set_last_login(account_store_t *st, const char *name, const char *
 long accounts_seen_at(account_store_t *st, const char *name);
 void accounts_touch(account_store_t *st, const char *name, long at);
 int accounts_noexpire(account_store_t *st, const char *name);
+/* [nickserv] require_email: a new account stays unverified -- no login, no nick protection -- until VERIFY (or an admin's
+ * ACTIVATE) clears it; one never verified is dropped after verify_window_hours. */
+int accounts_unverified(account_store_t *st, const char *name);
+void accounts_set_unverified(account_store_t *st, const char *name, int on);
 void accounts_set_noexpire(account_store_t *st, const char *name, int on);
 long accounts_expire_warned(account_store_t *st, const char *name);
 void accounts_set_expire_warned(account_store_t *st, const char *name, long at);

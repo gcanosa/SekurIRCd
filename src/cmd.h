@@ -105,6 +105,7 @@ void cmd_pong(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_quit(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_authenticate(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_register(server_t *srv, client_t *cl, irc_message_t *msg);
+void cmd_verify(server_t *srv, client_t *cl, irc_message_t *msg);
 /* Bind/clear/report the caller's own account's SASL EXTERNAL cert fingerprint. */
 void cmd_cert(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_service_alias(server_t *srv, client_t *cl, irc_message_t *msg); /* NS/NICKSERV/CS/CHANSERV */
