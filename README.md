@@ -25,7 +25,7 @@ You need a C11 compiler, `make` and OpenSSL 3 (macOS: `brew install openssl@3`; 
 
 ```bash
 git clone https://github.com/gcanosa/SekurIRCd.git && cd SekurIRCd
-make                  # builds bin/sekurircd and bin/services
+make                  # builds bin/sekurircd and bin/services, one job per core (make JOBS=2 to limit it)
 tools/makeconf.py     # answer a few questions: writes config/sekurircd.toml and services/services.toml
 ./sekurircd start     # starts both daemons (also: stop, restart, status)
 ```

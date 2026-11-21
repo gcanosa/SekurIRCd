@@ -5,6 +5,17 @@
 #   make debug      ASan+UBSan build -> bin/sekurircd-debug
 #   make check      build + run tests/unit.c
 #   make clean
+#
+# It compiles in parallel, one job per core. make -jN picks another number and make JOBS=N does too; make JOBS=1 builds one file
+# at a time. (GNU make 3.81, the one macOS ships, can't see a -j from the command line in here, so there only JOBS= works.)
+
+# Auto-parallel, unless -j was given or there are several goals (they could run side by side: make clean all).
+ifeq ($(filter -j% --jobs%,$(MAKEFLAGS)),)
+ifeq ($(word 2,$(MAKECMDGOALS)),)
+JOBS ?= $(shell n=$$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null); [ "$$n" -ge 1 ] 2>/dev/null && echo $$n || echo 1)
+MAKEFLAGS += -j$(JOBS)
+endif
+endif
 
 CC       ?= cc
 SRC_DIR  := src

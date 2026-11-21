@@ -47,6 +47,9 @@ make            # release build -> bin/sekurircd, bin/services
 make debug      # ASan+UBSan build -> bin/sekurircd-debug
 make check      # build and run tests/unit.c
 make clean</pre>
+<p><code>make</code> compiles in parallel, one job per core. <code>make -j4</code> picks another number, and <code>make JOBS=1</code> builds one file at a
+  time (<code>make -j1</code> does the same on GNU make 4, but the 3.81 that macOS ships cannot see a <code>-j</code> and would still use every core: use <code>JOBS=</code>
+  there). Several goals in one command, such as <code>make clean all</code>, stay serial.</p>
 
 <h2 id="makeconf">create the config</h2>
 <p>The quickest way is to let SekurIRCd ask. <code>tools/makeconf.py</code> asks about the server, TLS, cloaking, operators and services.
