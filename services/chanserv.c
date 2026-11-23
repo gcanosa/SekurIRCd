@@ -26,12 +26,14 @@
 #include "../src/tomlx.h"
 #include "../src/vendor/uthash.h"
 
+#include <arpa/inet.h>
 #include <ctype.h>
 #include <openssl/crypto.h>
 #include <errno.h>
 #include <limits.h>
 #include <fcntl.h>
 #include <netdb.h>
+#include <netinet/in.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdio.h>
@@ -54,6 +56,7 @@ typedef struct {
     int link_port;
     char link_name[128];
     char link_password[256];
+    svc_tls_cfg_t link_tls; /* [link] tls / fingerprint / ca_file / cert / key: services on another machine than the hub */
     char nick[64];
     char user[64];
     char host[256];
@@ -136,6 +139,33 @@ static int load_app_config(const char *path, app_cfg_t *cfg, char *errbuf, size_
     cfg->link_port = toml_int(link, "port", cfg->link_port);
     toml_str(link, "name", "", cfg->link_name, sizeof cfg->link_name);
     toml_str(link, "password", "", cfg->link_password, sizeof cfg->link_password);
+    { /* TLS to the hub; off unless asked, so an existing install links exactly as before */
+        toml_node_t *on = tx_bool(link, "tls");
+        cfg->link_tls.enabled = on && on->u.boolean;
+        toml_node_t *req = tx_bool(link, "require_tls");
+        cfg->link_tls.require = req && req->u.boolean;
+        char fp[160] = "", rel[512];
+        toml_str(link, "fingerprint", "", fp, sizeof fp);
+        if (fp[0] && crypto_parse_fingerprint(fp, cfg->link_tls.fingerprint, sizeof cfg->link_tls.fingerprint) != 0) {
+            snprintf(errbuf, errbufsz, "[link] fingerprint must be the hub certificate's SHA-256: 64 hex digits, ':' and a \"sha256:\" prefix allowed");
+            toml_free(res); return -1;
+        }
+        char *paths[3] = {cfg->link_tls.ca_file, cfg->link_tls.cert, cfg->link_tls.key};
+        const char *keys[3] = {"ca_file", "cert", "key"};
+        for (int i = 0; i < 3; i++) {
+            rel[0] = '\0';
+            toml_str(link, keys[i], "", rel, sizeof rel);
+            if (rel[0]) resolve_against_dir(path, rel, paths[i], 512);
+        }
+        if (!cfg->link_tls.enabled && (cfg->link_tls.fingerprint[0] || cfg->link_tls.ca_file[0] || cfg->link_tls.cert[0])) {
+            snprintf(errbuf, errbufsz, "[link] fingerprint / ca_file / cert / key do nothing without tls = true");
+            toml_free(res); return -1;
+        }
+        if (!cfg->link_tls.cert[0] != !cfg->link_tls.key[0]) {
+            snprintf(errbuf, errbufsz, "[link] cert and key go together: set both or neither");
+            toml_free(res); return -1;
+        }
+    }
 
     toml_node_t *cs = tx_table(raw, "chanserv");
     toml_str(cs, "nick", cfg->nick, cfg->nick, sizeof cfg->nick);
@@ -508,6 +538,7 @@ static const char *akick_matches(cJSON *rec, const char *nick, const char *user,
 /* --- link connection to the ircd hub -------------------------------------- */
 
 static int g_fd = -1;
+static struct ssl_st *g_ssl; /* the TLS session on g_fd, or NULL for a plain link ([link] tls) */
 static int g_refused; /* this session ended with "Services already running" */
 static char g_rbuf[RBUF_SZ];
 static size_t g_rbuf_len = 0;
@@ -526,6 +557,15 @@ static void queue_line(const char *line) {
 
 void svc_queue_line(const char *line) { queue_line(line); }
 
+static ssize_t link_read(void *buf, size_t len) { return g_ssl ? svc_tls_read(g_ssl, buf, len) : read(g_fd, buf, len); }
+static ssize_t link_write(const void *buf, size_t len) { return g_ssl ? svc_tls_write(g_ssl, buf, len) : write(g_fd, buf, len); }
+static void link_close(void) {
+    svc_tls_close(g_ssl);
+    g_ssl = NULL;
+    if (g_fd >= 0) close(g_fd);
+    g_fd = -1;
+}
+
 static void flush_sbuf(void) {
     /* Bounded by wall-clock time, not iteration count: if the hub stops
      * reading, this used to loop on EAGAIN + poll(1000) forever, ignoring
@@ -534,7 +574,7 @@ static void flush_sbuf(void) {
      * a write was stuck. */
     time_t deadline = time(NULL) + 5;
     while (g_sbuf_len > 0 && !g_term && time(NULL) < deadline) {
-        ssize_t n = write(g_fd, g_sbuf, g_sbuf_len);
+        ssize_t n = link_write(g_sbuf, g_sbuf_len);
         if (n > 0) {
             memmove(g_sbuf, g_sbuf + n, g_sbuf_len - (size_t)n);
             g_sbuf_len -= (size_t)n;
@@ -2250,6 +2290,21 @@ static void handle_svcmember(irc_message_t *msg) {
 
 /* --- link handshake + main loop --------------------------------------------- */
 
+/* connect() with a deadline: a hub on another machine that drops packets would otherwise hold the daemon for minutes. */
+static int connect_bounded(int fd, const struct sockaddr *sa, socklen_t len, int timeout_ms) {
+    int fl = fcntl(fd, F_GETFL, 0), rc = -1;
+    fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+    if (connect(fd, sa, len) == 0) rc = 0;
+    else if (errno == EINPROGRESS) {
+        struct pollfd pfd = {.fd = fd, .events = POLLOUT};
+        int e = 0;
+        socklen_t el = sizeof e;
+        if (poll(&pfd, 1, timeout_ms) == 1 && getsockopt(fd, SOL_SOCKET, SO_ERROR, &e, &el) == 0 && e == 0) rc = 0;
+    }
+    fcntl(fd, F_SETFL, fl);
+    return rc;
+}
+
 static int connect_hub(void) {
     struct addrinfo hints, *res;
     memset(&hints, 0, sizeof hints);
@@ -2262,21 +2317,64 @@ static int connect_hub(void) {
     int fd = -1;
     for (struct addrinfo *ai = res; ai && fd < 0; ai = ai->ai_next) {
         fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-        if (fd >= 0 && connect(fd, ai->ai_addr, ai->ai_addrlen) != 0) { close(fd); fd = -1; }
+        if (fd >= 0 && connect_bounded(fd, ai->ai_addr, ai->ai_addrlen, 10000) != 0) { close(fd); fd = -1; }
     }
     freeaddrinfo(res);
+    if (fd >= 0) { /* the handshake (TLS included) blocks, but never for long */
+        struct timeval tv = {10, 0};
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+    }
     return fd;
 }
 
-static int read_line_blocking(int fd, char *out, size_t outsz, int timeout_ms) {
+/* Is the hub on this machine? Judged by where the socket really connected, not by what [link] host says. */
+static int peer_is_loopback(int fd) {
+    struct sockaddr_storage ss;
+    socklen_t sl = sizeof ss;
+    if (getpeername(fd, (struct sockaddr *)&ss, &sl) != 0) return 0;
+    if (ss.ss_family == AF_INET) return (ntohl(((struct sockaddr_in *)&ss)->sin_addr.s_addr) >> 24) == 127;
+    if (ss.ss_family == AF_INET6) {
+        struct in6_addr *a = &((struct sockaddr_in6 *)&ss)->sin6_addr;
+        return IN6_IS_ADDR_LOOPBACK(a) || (IN6_IS_ADDR_V4MAPPED(a) && a->s6_addr[12] == 127);
+    }
+    return 0;
+}
+
+/* After the TCP connect: TLS if [link] tls is on (fingerprint / certificate checked before any password goes out); otherwise
+ * say once if the link is plain text to another machine. Not refused: installs that always ran it this way keep working. */
+static int link_secure(void) {
+    if (g_cfg.link_tls.enabled) {
+        g_ssl = svc_tls_connect(g_fd, g_cfg.link_host, &g_cfg.link_tls);
+        return g_ssl ? 0 : -1;
+    }
+    if (peer_is_loopback(g_fd)) return 0;
+    if (g_cfg.link_tls.require) { /* the operator asked for TLS or nothing: no password leaves in plain text */
+        log_error("services", "not linking to %s:%d: it is another machine, the link would be plain text and [link] require_tls is on -- "
+                              "set tls = true (and [links] tls on the hub)", g_cfg.link_host, g_cfg.link_port);
+        return -1;
+    }
+    static int warned;
+    if (!warned) {
+        warned = 1;
+        log_warn("services", "the link to %s:%d is plain text: IDENTIFY and SASL passwords cross the network unencrypted -- "
+                             "set tls = true in [link] (and [links] tls on the hub)", g_cfg.link_host, g_cfg.link_port);
+    }
+    return 0;
+}
+
+static int read_line_blocking(char *out, size_t outsz, int timeout_ms) {
     size_t len = 0;
     time_t deadline = time(NULL) + (timeout_ms / 1000) + 1;
     while (time(NULL) < deadline && len + 1 < outsz) {
-        struct pollfd pfd = {.fd = fd, .events = POLLIN};
-        int rc = poll(&pfd, 1, timeout_ms);
-        if (rc <= 0) return -1;
+        if (!svc_tls_pending(g_ssl)) { /* TLS may already hold the next bytes: poll() on the socket can't see them */
+            struct pollfd pfd = {.fd = g_fd, .events = POLLIN};
+            int rc = poll(&pfd, 1, timeout_ms);
+            if (rc <= 0) return -1;
+        }
         char c;
-        ssize_t n = read(fd, &c, 1);
+        ssize_t n = link_read(&c, 1);
+        if (n < 0 && errno == EAGAIN) continue;
         if (n <= 0) return -1;
         if (c == '\n') { out[len] = '\0'; return 0; }
         if (c != '\r') out[len++] = c;
@@ -2285,10 +2383,10 @@ static int read_line_blocking(int fd, char *out, size_t outsz, int timeout_ms) {
 }
 
 /* write(2) can accept fewer bytes than asked; loop until the whole string is out. */
-static int write_all(int fd, const char *s) {
+static int write_all(const char *s) {
     size_t left = strlen(s);
     while (left > 0) {
-        ssize_t n = write(fd, s, left);
+        ssize_t n = link_write(s, left);
         if (n < 0) { if (errno == EINTR) continue; return -1; }
         s += n; left -= (size_t)n;
     }
@@ -2298,21 +2396,21 @@ static int write_all(int fd, const char *s) {
 static int do_handshake(void) {
     char line[512];
     snprintf(line, sizeof line, "PASS %s", g_cfg.link_password);
-    if (write_all(g_fd, line) < 0 || write_all(g_fd, "\r\n") < 0) return -1;
+    if (write_all(line) < 0 || write_all("\r\n") < 0) return -1;
 
     const char *p[] = {g_cfg.link_name, "1"};
     irc_build(line, sizeof line, NULL, 0, NULL, "SERVER", p, 2, "ChanServ services (C port)");
-    if (write_all(g_fd, line) < 0 || write_all(g_fd, "\r\n") < 0) return -1;
+    if (write_all(line) < 0 || write_all("\r\n") < 0) return -1;
 
     char resp[512];
-    if (read_line_blocking(g_fd, resp, sizeof resp, 5000) != 0) return -1;
+    if (read_line_blocking(resp, sizeof resp, 5000) != 0) return -1;
     irc_message_t msg;
     if (irc_parse_line(resp, &msg) != 0 || strcasecmp(msg.command, "SERVER") != 0) return -1;
     log_info("chanserv", "linked to hub '%s'", msg.nparams > 0 ? msg.params[0] : "?");
 
     const char *np[] = {g_cfg.nick, g_cfg.user, g_cfg.host};
     irc_build(line, sizeof line, NULL, 0, NULL, "NICK", np, 3, g_cfg.realname);
-    if (write_all(g_fd, line) < 0 || write_all(g_fd, "\r\n") < 0) return -1;
+    if (write_all(line) < 0 || write_all("\r\n") < 0) return -1;
     return 0;
 }
 
@@ -2545,7 +2643,7 @@ static int run_session(void) {
     g_refused = 0;
     g_fd = connect_hub();
     if (g_fd < 0) return -1;
-    if (do_handshake() != 0) { close(g_fd); g_fd = -1; return -1; }
+    if (link_secure() != 0 || do_handshake() != 0) { link_close(); return -1; }
     int flags = fcntl(g_fd, F_GETFL, 0);
     fcntl(g_fd, F_SETFL, flags | O_NONBLOCK);
     g_rbuf_len = 0;
@@ -2573,13 +2671,15 @@ static int run_session(void) {
         struct pollfd pfd;
         pfd.fd = g_fd;
         pfd.events = POLLIN | (g_sbuf_len > 0 ? POLLOUT : 0);
-        int rc = poll(&pfd, 1, 1000);
+        int pend = svc_tls_pending(g_ssl); /* decrypted bytes already waiting: read them now, don't sleep on the socket */
+        int rc = poll(&pfd, 1, pend ? 0 : 1000);
         if (rc < 0) { if (errno == EINTR) continue; break; }
+        if (pend) { pfd.revents |= POLLIN; rc = 1; }
         if (rc > 0) {
             if ((pfd.revents & (POLLHUP | POLLERR)) && !(pfd.revents & POLLIN)) break; /* read a parting ERROR first */
             if (pfd.revents & POLLIN) {
                 char tmp[4096];
-                ssize_t n = read(g_fd, tmp, sizeof tmp);
+                ssize_t n = link_read(tmp, sizeof tmp);
                 if (n <= 0) { if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) { /* spurious */ } else break; }
                 else {
                     g_last_activity = time(NULL);
@@ -2617,7 +2717,7 @@ static int run_session(void) {
         if (difftime(time(NULL), g_last_activity) > 240) break; /* link keepalive timeout */
     }
     st_session_end();
-    if (g_fd >= 0) { close(g_fd); g_fd = -1; }
+    link_close();
     return g_refused ? 2 : 0;
 }
 
@@ -2674,8 +2774,8 @@ static void services_rehash(void) {
     }
 #define KEEP(cond, what, restore) do { if (cond) { restore; size_t l_ = strlen(kept); snprintf(kept + l_, sizeof kept - l_, "%s" what, l_ ? ", " : ""); } } while (0)
     KEEP(strcmp(n.link_host, g_cfg.link_host) || n.link_port != g_cfg.link_port || strcmp(n.link_name, g_cfg.link_name) ||
-         strcmp(n.link_password, g_cfg.link_password), "[link]",
-         (memcpy(n.link_host, g_cfg.link_host, sizeof n.link_host), n.link_port = g_cfg.link_port,
+         strcmp(n.link_password, g_cfg.link_password) || !svc_tls_cfg_equal(&n.link_tls, &g_cfg.link_tls), "[link]",
+         (n.link_tls = g_cfg.link_tls, memcpy(n.link_host, g_cfg.link_host, sizeof n.link_host), n.link_port = g_cfg.link_port,
           memcpy(n.link_name, g_cfg.link_name, sizeof n.link_name), memcpy(n.link_password, g_cfg.link_password, sizeof n.link_password)));
     KEEP(strcmp(n.nick, g_cfg.nick) || strcmp(n.user, g_cfg.user) || strcmp(n.host, g_cfg.host) || strcmp(n.realname, g_cfg.realname),
          "[chanserv] nick/user/host/realname",

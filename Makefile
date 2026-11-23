@@ -163,7 +163,7 @@ $(BIN_DIR)/unit: $(UNIT_SRCS) $(HEADERS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(UNIT_SRCS) $(LDLIBS)
 
 # The services daemon (NickServ + ChanServ). Shares the ircd's account store, SCRAM and crypto code, nothing else.
-SERVICES_SRCS := services/chanserv.c services/nickserv.c services/stats.c $(SRC_DIR)/proto.c $(SRC_DIR)/crypto.c $(SRC_DIR)/log.c \
+SERVICES_SRCS := services/chanserv.c services/nickserv.c services/stats.c services/tlslink.c $(SRC_DIR)/proto.c $(SRC_DIR)/crypto.c $(SRC_DIR)/log.c \
                  $(SRC_DIR)/accounts.c $(SRC_DIR)/scram.c $(VEND_SRCS)
 $(BIN_DIR)/services: $(SERVICES_SRCS) $(HEADERS) services/svc.h
 	@mkdir -p $(BIN_DIR)

@@ -23,7 +23,8 @@
 <main class="docs">
 <h1>wizard</h1>
 <p>Fill in the form and the wizard writes a complete <code>sekurircd.toml</code>. If you turn on services, it also writes
-  <code>services.toml</code> for NickServ and ChanServ, with both files' link settings already matching. With the Protection
+  <code>services.toml</code> for NickServ and ChanServ, with both files' link settings already matching. Services can also run on another machine
+  (this server is their hub, and the link uses TLS), or this machine can run only the services daemon: choose that under <em>services</em>. With the Protection
   bundle on, it writes <code>protection.toml</code> too, and with the <a href="stats.html">stats panel</a> on,
   <code>stats.toml</code>.
   The files are built in your browser and nothing is sent anywhere. Any setting you leave out uses its built-in default,
@@ -34,6 +35,7 @@
 
 <form id="wz" class="wz" autocomplete="off" onsubmit="return false">
 
+<div data-if="!only">
 <fieldset><legend>server</legend>
   <label>Server name <small>needs a dot, e.g. irc.example.org</small><input name="name" value="irc.example.org" required></label>
   <label>Network name<input name="network" value="ExampleNet"></label>
@@ -142,16 +144,49 @@
   </div>
 </fieldset>
 
+</div>
+
 <fieldset><legend>services (NickServ + ChanServ)</legend>
-  <label class="chk"><input type="checkbox" name="svc" checked> Run services: accounts, SASL, nick and channel registration</label>
-  <p class="note">One services daemon per network, normally next to the hub. On a leaf whose hub already runs them, untick this: the leaf reaches the hub's NickServ, ChanServ and SASL over the link, and a second services daemon would collide with the first.</p>
-  <div data-if="svc">
+  <label>Where do they run?
+    <select name="svc_where">
+      <option value="here">next to this server (the usual setup)</option>
+      <option value="remote">on another machine: this server is their hub</option>
+      <option value="only">this machine runs only the services daemon (the IRC server is elsewhere)</option>
+      <option value="leaf">not here: this is a leaf, its hub runs them</option>
+    </select></label>
+  <p class="note">One services daemon per network. A leaf reaches its hub's NickServ, ChanServ and SASL over the link, and a second services daemon would collide with the first.
+    Services on another machine link over TLS, because the link carries every IDENTIFY and SASL password.</p>
+  <div data-if="hasSvc">
     <div class="row">
-      <label>Link port <small>ircd link listener</small><input name="link_port" type="number" min="1" max="65535" value="7000"></label>
+      <label>Link port <small data-if="!only">the ircd's link listener</small><small data-if="only">the hub's link port</small><input name="link_port" type="number" min="1" max="65535" value="7000"></label>
       <label>Services name<input name="svc_name" value="services.sekurircd.local"></label>
     </div>
-    <label>Link password <small>shared by both files, generated for you</small><input name="svc_pass"></label>
-    <label class="chk"><input type="checkbox" name="other_links"> This server will also link to other servers (link listener on all interfaces)</label>
+    <label>Link password <small data-if="!only">shared by both files, generated for you</small><small data-if="only">the password in the hub's [[links.peers]] entry for this name</small><input name="svc_pass"></label>
+    <label class="chk" data-if="here"><input type="checkbox" name="other_links"> This server will also link to other servers (link listener on all interfaces)</label>
+    <div data-if="remote">
+      <div class="row">
+        <label>Link listener binds to <small>0.0.0.0 = all interfaces</small><input name="link_bind" value="0.0.0.0"></label>
+        <label>Services machine's IP address(es) <small>required, comma-separated: the hub only accepts these</small><input name="svc_ips" placeholder="203.0.113.9"></label>
+      </div>
+      <label>Fingerprint of the services machine's own certificate <small>optional: the hub then lets only that certificate in</small><input name="svc_client_pin" placeholder="sha256:..."></label>
+      <p class="note">This server links over TLS with its own certificate, so enable TLS above. With <code>[links] tls</code> on, every other server that links here has to use TLS too.
+        Open the link port in your firewall for the services machine only.</p>
+    </div>
+    <div data-if="!here">
+      <div class="row">
+        <label>Hub address <small data-if="remote">what the services machine dials</small><small data-if="only">the name or IP of the machine that runs sekurircd</small><input name="hub_host" placeholder="irc.example.org"></label>
+        <label data-if="only">Network name<input name="net_only" value="ExampleNet"></label>
+      </div>
+      <div class="row">
+        <label>The hub's certificate is checked by<select name="hub_check"><option value="pin">its SHA-256 fingerprint (a pin: best when self-signed)</option><option value="ca">a CA this machine trusts, and the hub's name</option></select></label>
+        <label data-if="pin">Hub certificate fingerprint <small>empty = a placeholder to fill in</small><input name="hub_pin" placeholder="sha256:..."></label>
+        <label data-if="!pin">CA bundle file <small>empty = the system CAs</small><input name="hub_ca"></label>
+      </div>
+      <div class="row">
+        <label>This daemon's certificate <small>optional, relative to services.toml: the hub can pin it</small><input name="svc_cert" placeholder="tls/services.crt"></label>
+        <label>Its key<input name="svc_key" placeholder="tls/services.key"></label>
+      </div>
+    </div>
     <label class="chk"><input type="checkbox" name="ns" checked> NickServ (accounts and SASL)</label>
     <div data-if="ns">
       <label class="chk"><input type="checkbox" name="enforce"> Enforce nick ownership (rename to Guest after a grace period)</label>
@@ -165,9 +200,9 @@
   </div>
 </fieldset>
 
-<fieldset><legend>stats panel</legend>
+<fieldset data-if="!only"><legend>stats panel</legend>
   <label class="chk"><input type="checkbox" name="statsline" checked> Report this server's numbers every 5 minutes (<code>[debug_channel] stats_interval</code>): users, bans, DNSBL, proxy scanner, spam filter, CPU and memory. Every server needs it for the network's panel.</label>
-  <div data-if="svc">
+  <div data-if="here">
     <label class="chk"><input type="checkbox" name="stats"> Run the <a href="stats.html">stats panel</a> here: a web page with a world map of the servers, users over time, splits and their reasons, uptime, services, protection, bans and health checks</label>
     <p class="note">The panel runs next to services, so only on the hub. A leaf just reports its numbers (the box above).</p>
     <div data-if="stats">
@@ -186,23 +221,25 @@
 
 <div id="wz-err" class="note" hidden></div>
 
+<div data-if="!only">
 <h2 id="out">sekurircd.toml</h2>
 <p><button type="button" class="btn primary" data-dl="ircd">download sekurircd.toml</button></p>
 <pre><code id="out-ircd"></code></pre>
+</div>
 
-<div data-if="svc">
-<h2>services.toml</h2>
+<div data-if="hasSvc">
+<h2 id="svc-title">services.toml</h2>
 <p><button type="button" class="btn primary" data-dl="svc">download services.toml</button></p>
 <pre><code id="out-svc"></code></pre>
 </div>
 
-<div data-if="protect">
+<div data-if="protect&!only">
 <h2>protection.toml</h2>
 <p><button type="button" class="btn primary" data-dl="prot">download protection.toml</button></p>
 <pre><code id="out-prot"></code></pre>
 </div>
 
-<div data-if="svc&stats">
+<div data-if="here&stats">
 <h2>stats.toml</h2>
 <p><button type="button" class="btn primary" data-dl="stats">download stats.toml</button></p>
 <pre><code id="out-stats"></code></pre>
@@ -224,7 +261,12 @@
     return btoa(String.fromCharCode.apply(null, b)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
   }
   var cloakSecret = rnd();
-  f.svc_pass.value = rnd();
+  var genPass = rnd();
+  f.svc_pass.value = genPass;
+  f.svc_where.addEventListener("change", function () { // "only": the password is the hub's, typed in; any other: ours
+    if (f.svc_where.value === "only" && f.svc_pass.value === genPass) f.svc_pass.value = "";
+    else if (f.svc_where.value !== "only" && !f.svc_pass.value) f.svc_pass.value = genPass;
+  });
 
   function addOper(n, h) {
     var d = document.createElement("div");
@@ -246,6 +288,16 @@
   var v = function (n) { return f[n].value.trim(); };
   var c = function (n) { return f[n].checked; };
   var tf = function (b) { return b ? "true" : "false"; };
+  var flags = {};  // derived conditions for data-if: here / remote / only / hasSvc / pin, on top of the checkboxes
+  var cond = function (n) {
+    var neg = n.charAt(0) === "!"; if (neg) n = n.slice(1);
+    var r = n in flags ? flags[n] : f[n].checked;
+    return neg ? !r : r;
+  };
+  var normFp = function (s) {  // "sha256:AB:CD..." or 64 hex digits -> "sha256:<lowercase hex>", "" if it is neither
+    var h = s.trim().replace(/^sha256:/i, "").replace(/:/g, "").toLowerCase();
+    return /^[0-9a-f]{64}$/.test(h) ? "sha256:" + h : "";
+  };
   var stHost = function () {  // only a valid host name, else "" (netstats check refuses anything else)
     var h = v("st_host").toLowerCase().replace(/\.$/, "");
     return /^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9-]{2,63}$/.test(h) ? h : "";
@@ -253,21 +305,36 @@
 
   function build() {
     var err = [], L = [], S = [];
-    document.querySelectorAll("[data-if]").forEach(function (el) { el.hidden = !el.dataset.if.split("&").every(c); });
+    var where = f.svc_where.value, here = where === "here", remote = where === "remote", only = where === "only";
+    flags = { here: here, remote: remote, only: only, hasSvc: here || remote || only, pin: f.hub_check.value === "pin" };
+    document.querySelectorAll("[data-if]").forEach(function (el) { el.hidden = !el.dataset.if.split("&").every(cond); });
 
-    var name = v("name"), sid = v("sid").toUpperCase(), svc = c("svc");
-    if (!/^[A-Za-z0-9.-]+\.[A-Za-z0-9.-]+$/.test(name)) err.push("Server name must be a hostname with a dot, e.g. irc.example.org.");
-    if (sid && !/^[0-9][0-9A-Z]{2}$/.test(sid)) err.push("Server ID must be 3 characters: a digit, then two of 0-9 A-Z.");
-    ["port", "tls_port", "ws_port", "link_port"].forEach(function (p) {
+    var name = v("name"), sid = v("sid").toUpperCase(), svc = here;  // svc: services next to this ircd (the original setup)
+    var hasSvc = here || remote || only, net = only ? v("net_only") : v("network");
+    if (!only && !/^[A-Za-z0-9.-]+\.[A-Za-z0-9.-]+$/.test(name)) err.push("Server name must be a hostname with a dot, e.g. irc.example.org.");
+    if (!only && sid && !/^[0-9][0-9A-Z]{2}$/.test(sid)) err.push("Server ID must be 3 characters: a digit, then two of 0-9 A-Z.");
+    (only ? ["link_port"] : ["port", "tls_port", "ws_port", "link_port"]).forEach(function (p) {
       var n = +v(p); if (!(n >= 1 && n <= 65535)) err.push(p.replace("_", " ") + " must be 1-65535.");
     });
-    if (c("ws") && c("ws_tls") && !c("tls")) err.push("wss:// needs the TLS listener enabled.");
+    if (!only && c("ws") && c("ws_tls") && !c("tls")) err.push("wss:// needs the TLS listener enabled.");
     if (svc && c("stats")) {
       var sp = +v("st_port"); if (!(sp >= 1 && sp <= 65535)) err.push("Panel port must be 1-65535.");
       if (c("st_tls") && !c("tls")) err.push("The panel's HTTPS uses the ircd's TLS certificate: enable TLS above.");
     }
-    if (svc && !v("svc_pass")) err.push("Services need a link password.");
-    if (svc && v("svc_name") === name) err.push("Services name must differ from the server name.");
+    if (hasSvc && !v("svc_pass")) err.push(only ? "Paste the link password from the hub's [[links.peers]] entry." : "Services need a link password.");
+    if (!only && hasSvc && v("svc_name") === name) err.push("Services name must differ from the server name.");
+    var hubPin = "", svcPin = "";
+    if (remote || only) {
+      if (!v("hub_host") || /\s/.test(v("hub_host"))) err.push(only ? "Enter the hub's address." : "Enter the address the services machine reaches this server at.");
+      if (flags.pin && v("hub_pin")) { hubPin = normFp(v("hub_pin")); if (!hubPin) err.push("The hub certificate fingerprint must be a SHA-256: 64 hex digits (\"sha256:\" and colons allowed)."); }
+      if (!v("svc_cert") !== !v("svc_key")) err.push("This daemon's certificate and key go together: set both or neither.");
+    }
+    if (remote) {
+      if (!c("tls")) err.push("Services on another machine link over TLS with this server's certificate: enable TLS above.");
+      if (!list(v("svc_ips")).length || !list(v("svc_ips")).every(function (x) { return /^[0-9A-Fa-f:.*?\/]+$/.test(x); }))
+        err.push("Enter the services machine's IP address(es).");
+      if (v("svc_client_pin")) { svcPin = normFp(v("svc_client_pin")); if (!svcPin) err.push("The services certificate fingerprint must be a SHA-256: 64 hex digits."); }
+    }
 
     L.push("# sekurircd.toml generated by the SekurIRCd config wizard", "# Every key not listed here uses its built-in default (see config/sekurircd.template.toml).", "");
     L.push("[server]", "name = " + q(name), "network = " + q(v("network")));
@@ -313,7 +380,7 @@
     L.push("", "[channels]", "restrict_creation = " + tf(c("restrict")), "default_modes = " + q(v("cmodes")), "auto_join = " + arr(list(v("autojoin"))));
 
     var plain = false, nops = 0;
-    opers.querySelectorAll(".oper").forEach(function (r) {
+    if (!only) opers.querySelectorAll(".oper").forEach(function (r) {
       var g = function (k) { return r.querySelector('[data-o="' + k + '"]').value.trim(); };
       if (!g("name") && !g("pw")) return;
       if (!g("name") || !g("pw") || !list(g("hosts")).length) { err.push("Each operator needs a login, a password and at least one host."); return; }
@@ -338,16 +405,40 @@
         "bind = " + q(open ? "0.0.0.0" : "127.0.0.1"), "port = " + +v("link_port"));
       L.push("", "# The services daemon. Its plain password must match [link] password in services.toml.",
         "[[links.peers]]", "name = " + q(v("svc_name")), "password = " + q(v("svc_pass")), 'allowed_ips = ["127.0.0.1"]');
-
-      S.push("# services.toml generated by the SekurIRCd config wizard (bin/services: NickServ + ChanServ)", "");
-      S.push("[link]", "# The ircd's link listener, not its client port.", 'host = "127.0.0.1"', "port = " + +v("link_port"),
-        "# Must match the [[links.peers]] entry in sekurircd.toml, and stay plain here (this side sends it).",
-        "name = " + q(v("svc_name")), "password = " + q(v("svc_pass")));
+    }
+    if (remote) {
+      L.push("", "# NickServ/ChanServ run on another machine and link over TLS: this link carries every IDENTIFY and SASL password.",
+        "# With [links] tls on, every other server that links here has to use TLS too (it reuses the [tls] certificate).",
+        "[links]", "enabled = true", 'mode = "hub"', "tls = true", "bind = " + q(v("link_bind") || "0.0.0.0"), "port = " + +v("link_port"));
+      L.push("", "# The services daemon. Its plain password must match [link] password in the services machine's services.toml.",
+        "[[links.peers]]", "name = " + q(v("svc_name")), "password = " + q(v("svc_pass")), "allowed_ips = " + arr(list(v("svc_ips"))));
+      if (svcPin) L.push("# Only the services daemon's own certificate gets in.", "fingerprint = " + q(svcPin));
+    }
+    if (hasSvc) {
+      S.push("# services.toml generated by the SekurIRCd config wizard (bin/services: NickServ + ChanServ)");
+      if (!here) S.push("# This daemon runs on its own machine and links to the hub over TLS: the link carries every IDENTIFY and SASL password.");
+      S.push("");
+      if (here) {
+        S.push("[link]", "# The ircd's link listener, not its client port.", 'host = "127.0.0.1"', "port = " + +v("link_port"),
+          "# Must match the [[links.peers]] entry in sekurircd.toml, and stay plain here (this side sends it).",
+          "name = " + q(v("svc_name")), "password = " + q(v("svc_pass")));
+      } else {
+        S.push("[link]", "# The hub's link listener ([links] port in its sekurircd.toml), not its client port.",
+          "host = " + q(v("hub_host")), "port = " + +v("link_port"),
+          "# Must match the hub's [[links.peers]] entry, and stay plain here (this side sends it).",
+          "name = " + q(v("svc_name")), "password = " + q(v("svc_pass")),
+          "tls = true", "# Never send a password in plain text to another machine.", "require_tls = true");
+        if (flags.pin && hubPin) S.push("# The hub's certificate, pinned; checked before the password is sent.", "fingerprint = " + q(hubPin));
+        else if (flags.pin) S.push("# FILL THIS IN: the hub's certificate fingerprint (on the hub: openssl x509 -in <its cert> -noout -fingerprint -sha256).", '#fingerprint = "sha256:..."');
+        else if (v("hub_ca")) S.push("# No pin: the hub's certificate must verify against this CA bundle, for the name in host.", "ca_file = " + q(v("hub_ca")));
+        else S.push("# No pin: the hub's certificate must verify against the system CAs, for the name in host.");
+        if (v("svc_cert")) S.push("# This daemon's own certificate: the hub can pin it.", "cert = " + q(v("svc_cert")), "key = " + q(v("svc_key")));
+      }
       S.push("", "[chanserv]", 'nick = "ChanServ"', 'user = "ChanServ"', "host = " + q(v("svc_name")),
         'realname = "Channel Registration Service"', "expire_days = " + +v("expire"), "founder_mode = " + q(f.founder.value));
       S.push("", "[nickserv]", "enabled = " + tf(c("ns")));
       if (c("ns")) {
-        S.push('nick = "NickServ"', "network = " + q(v("network")));
+        S.push('nick = "NickServ"', "network = " + q(net));
         if (v("svc_admins")) S.push("admins = " + arr(list(v("svc_admins"))));
         S.push("enforce_nicks = " + tf(c("enforce")), "enforce_grace = 60", "expire_days = " + +v("ns_expire"));
       }
@@ -355,7 +446,7 @@
     }
 
     var P = [];
-    if (c("protect")) {
+    if (c("protect") && !only) {
       var scanIp = v("p_scan_ip");
       if (c("p_scan") && !/^(\d{1,3}\.){3}\d{1,3}$/.test(scanIp)) err.push("The proxy scanner needs this server's public IPv4 address.");
       else if (c("p_scan") && /^(10|127)\.|^192\.168\.|^172\.(1[6-9]|2\d|3[01])\.|^169\.254\.|^0\./.test(scanIp))
@@ -401,6 +492,7 @@
       "# 1. save sekurircd.toml" + (c("protect") ? " and protection.toml" : "") + " into config/" + (svc ? ", services.toml into services/" : "") + (stats ? ", stats.toml into stats/" : ""),
       "# ircd.motd is made from its template on first start: edit it then"
     ];
+    if (remote) steps[0] = "# 1. save sekurircd.toml" + (c("protect") ? " and protection.toml" : "") + " into config/ on this server; services.toml goes to the SERVICES machine (services/services.toml there)";
     if (c("tls")) steps.push("tools/mkcert.sh --domain " + name + "    # or any PEM cert/key at the paths above");
     if (plain || svc) steps.push("", "# 2. replace plain passwords with scrypt hashes (same passwords keep working)", "tools/confcheck.py --fix --write    # run from the SekurIRCd checkout");
     steps.push("chmod 600 config/sekurircd.toml" + (c("protect") ? " config/protection.toml" : "") + (svc ? " services/services.toml" : "") + (stats ? " stats/stats.toml" : ""));
@@ -408,10 +500,19 @@
     steps.push("", "# 3. check, then start", "bin/sekurircd --config config/sekurircd.toml --check");
     if (svc) steps.push("bin/services --config services/services.toml --check");
     if (stats) steps.push("stats/netstats.py check");
-    if (!svc) steps.push("", "# a leaf: link it to the hub (run it here, paste what it prints on the hub), then start",
+    if (!svc && !remote) steps.push("", "# a leaf: link it to the hub (run it here, paste what it prints on the hub), then start",
                          "tools/linkmgmt.py add    # choose: this server dials the hub");
+    if (remote) {
+      steps.push("", "# the certificate this server shows the services machine (pinned by fingerprint, or checked by a CA and the name " + v("hub_host") + ")",
+                 "openssl x509 -in config/" + v("cert") + " -noout -fingerprint -sha256" + (hubPin ? "" : "    # put it in services.toml [link] fingerprint"),
+                 "", "# firewall: open TCP " + +v("link_port") + " for " + list(v("svc_ips")).join(", ") + " only",
+                 "", "# on the services machine: save services.toml as services/services.toml (it holds the link password), then",
+                 "chmod 600 services/services.toml", "bin/services --config services/services.toml --check", "./sekurircd start    # no config/sekurircd.toml there: it manages services only");
+      if (svcPin) steps.push("# its certificate " + v("svc_cert") + " / " + v("svc_key") + " must be the one with fingerprint " + svcPin);
+      steps.push("", "# here");
+    }
     steps.push("./sekurircd start");
-    if (!svc) steps.push("./sekurircd status    # services: \"not run here: this server is a leaf\" once it is linked as one");
+    if (!svc && !remote) steps.push("./sekurircd status    # services: \"not run here: this server is a leaf\" once it is linked as one");
     if (stats) steps.push("# the panel starts with ./sekurircd start: " + (c("st_tls") && c("tls") ? "https" : "http") + "://" + (v("st_bind") || "127.0.0.1") + ":" + +v("st_port") + "/admin/",
                           "# map positions: stats/netstats.py geoip-update (or lat/lon per server in stats.toml)");
     const stBind = v("st_bind") || "127.0.0.1", stPort = +v("st_port"), host = stHost();
@@ -430,8 +531,20 @@
       if (!(c("st_tls") && c("tls")))
         steps.push("# WARNING: no HTTPS: panel logins cross the network in clear text -- tick HTTPS, or bind 127.0.0.1 behind an HTTPS reverse proxy");
     }
-    if (!nops) steps.push("", "# note: no operators configured, so nobody can /OPER");
+    if (!nops && !only) steps.push("", "# note: no operators configured, so nobody can /OPER");
 
+    if (only) {
+      steps = ["# 1. save services.toml as services/services.toml (this machine runs no ircd, so there is no sekurircd.toml)",
+               "chmod 600 services/services.toml",
+               "", "# 2. the hub's operator adds this machine's address to allowed_ips on the [[links.peers]] entry named " + v("svc_name") + " and opens TCP " + +v("link_port") + " for it",
+               flags.pin ? "# the hub's certificate is pinned by fingerprint" + (hubPin ? "" : ": fill in services.toml [link] fingerprint (on the hub: openssl x509 -in <its cert> -noout -fingerprint -sha256)")
+                         : "# the hub's certificate must verify against " + (v("hub_ca") || "the system CAs") + ", for the name " + v("hub_host")];
+      if (v("svc_cert")) steps.push("", "# this daemon's own certificate, if the hub pins it (give the hub operator the fingerprint)",
+        "openssl req -x509 -newkey rsa:2048 -nodes -days 825 -keyout " + v("svc_key") + " -out " + v("svc_cert") + " -subj /CN=" + v("svc_name"),
+        "openssl x509 -in " + v("svc_cert") + " -noout -fingerprint -sha256");
+      steps.push("", "# 3. check, then start", "bin/services --config services/services.toml --check", "./sekurircd start    # no config/sekurircd.toml here, so it manages services only", "./sekurircd status");
+    }
+    document.getElementById("svc-title").textContent = remote ? "services.toml (for the services machine)" : "services.toml";
     document.getElementById("out-ircd").textContent = L.join("\n") + "\n";
     document.getElementById("out-svc").textContent = S.join("\n") + "\n";
     document.getElementById("out-prot").textContent = P.join("\n") + "\n";

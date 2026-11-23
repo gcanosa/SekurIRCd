@@ -45,6 +45,9 @@ say_ok()   { echo " ${C_OK}${M_OK}${C_OFF}  $1 ${C_OK}OK${C_OFF} -- $2"; }      
 say_fail() { echo " ${C_BAD}${M_BAD}${C_OFF}  $1 ${C_BAD}FAILED${C_OFF} -- $2" >&2; }
 
 services_configured() { [ -f "$SERVICES_CONFIG" ]; }
+# A box with services.toml but no config/sekurircd.toml runs the services daemon ALONE, linked to a hub on another machine
+# ([link] host/tls in services.toml): start/stop/restart/status then manage services (and the stats panel) only.
+services_only() { [ ! -f "$IRCD_CONFIG" ] && services_configured; }
 # The stats panel runs when stats/stats.toml exists with [http] enabled (the default); see stats/stats.template.toml.
 stats_configured() { [ -f "$STATS_CONFIG" ] && ! awk '/^[[:space:]]*\[/ { s = ($0 ~ /^[[:space:]]*\[http\]/) } s && /^[[:space:]]*enabled[[:space:]]*=[[:space:]]*false/ { f = 1 } END { exit !f }' "$STATS_CONFIG"; }
 SERVICES_DISABLED="$SERVICES_CONFIG.disabled" # what disable-services renames the config to
@@ -132,13 +135,17 @@ stop_old_chanserv() {
 
 cmd_start() {
     [ "$(id -u)" != 0 ] || say_bad "running as root is not recommended -- the daemons never need it (ports are >1024). Use an unprivileged user." >&2
-    require_bin "$IRCD_BIN"
-    # Don't bring services up against an ircd that refused to start (port in use, bad config...).
-    "$IRCD_BIN" --config "$IRCD_CONFIG" --daemon --pidfile "$IRCD_PIDFILE" || {
-        say_bad "sekurircd: failed to start (exit $?) -- see the message above"
-        return 1
-    }
-    confirm_up "sekurircd:" "$IRCD_PIDFILE" logs/sekurircd.log || return 1
+    if services_only; then
+        say_info "sekurircd: not run here ($IRCD_CONFIG missing) -- services only, linked to the hub named in $SERVICES_CONFIG"
+    else
+        require_bin "$IRCD_BIN"
+        # Don't bring services up against an ircd that refused to start (port in use, bad config...).
+        "$IRCD_BIN" --config "$IRCD_CONFIG" --daemon --pidfile "$IRCD_PIDFILE" || {
+            say_bad "sekurircd: failed to start (exit $?) -- see the message above"
+            return 1
+        }
+        confirm_up "sekurircd:" "$IRCD_PIDFILE" logs/sekurircd.log || return 1
+    fi
     if services_configured; then
         [ "$(links_mode)" = leaf ] && say_bad "services:  this server is a leaf (links.mode = \"leaf\") but $SERVICES_CONFIG exists -- a network runs ONE services daemon, next to the hub; if the hub runs them, this one is refused. '$0 disable-services' turns them off here"
         require_bin "$SERVICES_BIN"
@@ -221,7 +228,7 @@ cmd_stop() {
         stop_one "services: " "$SERVICES_BIN" "$SERVICES_PIDFILE"
         stop_old_chanserv
     fi
-    stop_one "sekurircd:" "$IRCD_BIN" "$IRCD_PIDFILE"
+    if ! services_only || pid_running "$IRCD_PIDFILE"; then stop_one "sekurircd:" "$IRCD_BIN" "$IRCD_PIDFILE"; fi
     true # a daemon that didn't stop is reported above; restart checks again before starting anything
 }
 
@@ -238,7 +245,7 @@ cmd_restart() {
         return 1
     fi
     cmd_start || { say_fail restart: "see the lines above"; return 1; }
-    say_ok restart: "$(what_happened sekurircd "$old_ircd" "$(pid_of "$IRCD_PIDFILE")")"
+    services_only || say_ok restart: "$(what_happened sekurircd "$old_ircd" "$(pid_of "$IRCD_PIDFILE")")"
     services_configured && say_ok restart: "$(what_happened services "$old_svc" "$(pid_of "$SERVICES_PIDFILE")")"
     true
 }
@@ -246,7 +253,7 @@ cmd_restart() {
 # Services only: users stay connected; NickServ/ChanServ leave and re-link (a few seconds without SASL/IDENTIFY).
 cmd_restart_services() {
     services_configured || { say_fail restart-services: "services are $(services_off_reason)"; return 1; }
-    pid_running "$IRCD_PIDFILE" || { say_fail restart-services: "sekurircd is not running, nothing was changed -- start everything with '$0 start'"; return 1; }
+    services_only || pid_running "$IRCD_PIDFILE" || { say_fail restart-services: "sekurircd is not running, nothing was changed -- start everything with '$0 start'"; return 1; }
     require_bin "$SERVICES_BIN"
     local old_svc
     old_svc=$(pid_of "$SERVICES_PIDFILE")
@@ -256,16 +263,18 @@ cmd_restart_services() {
     pid_running "$SERVICES_PIDFILE" && { say_fail restart-services: "services still running after 10s -- not starting a second copy"; return 1; }
     "$SERVICES_BIN" --config "$SERVICES_CONFIG" --daemon --pidfile "$SERVICES_PIDFILE" || {
         say_bad "services:  failed to start (exit $?) -- see services/services.log"
-        say_fail restart-services: "services are down, sekurircd is still running"
+        say_fail restart-services: "services are down$(services_only || echo ", sekurircd is still running")"
         return 1
     }
-    confirm_up "services: " "$SERVICES_PIDFILE" services/services.log || { say_fail restart-services: "services are down, sekurircd is still running"; return 1; }
+    confirm_up "services: " "$SERVICES_PIDFILE" services/services.log || { say_fail restart-services: "services are down$(services_only || echo ", sekurircd is still running")"; return 1; }
     say_ok restart-services: "$(what_happened services "$old_svc" "$(cat "$SERVICES_PIDFILE")")"
-    say_info "sekurircd was not touched (pid $(cat "$IRCD_PIDFILE")) -- nobody was disconnected"
+    services_only || say_info "sekurircd was not touched (pid $(cat "$IRCD_PIDFILE")) -- nobody was disconnected"
 }
 
 cmd_status() {
-    if pid_running "$IRCD_PIDFILE"; then
+    if services_only && ! pid_running "$IRCD_PIDFILE"; then
+        echo "sekurircd: not run here ($IRCD_CONFIG missing) -- this box runs services only"
+    elif pid_running "$IRCD_PIDFILE"; then
         echo "sekurircd: running (pid $(cat "$IRCD_PIDFILE"))"
     elif proc_running "sekurircd .*--daemon"; then
         echo "sekurircd: running, but pidfile $IRCD_PIDFILE is missing/stale -- found a matching process by scanning instead. stop/restart via this script won't work until it's started through here (or the pidfile is pointed at the right pid)."

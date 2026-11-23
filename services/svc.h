@@ -6,6 +6,7 @@
 #include "../src/tomlx.h"
 
 #include <stddef.h>
+#include <sys/types.h>
 
 #define SERVICES_VERSION "1.5.0"
 
@@ -55,6 +56,24 @@ int cs_registered_count(void);
 /* An account was dropped (DROP, FDROP, expiry): it is no channel's founder, access entry or successor any more, so whoever
  * registers that name next inherits nothing. Returns how many channels changed. */
 int cs_account_dropped(const char *account);
+
+/* tlslink.c -- TLS on the link to the hub ([link] tls = true), so services can run on another machine than the hub. */
+struct ssl_st;
+typedef struct {
+    int enabled;
+    int require; /* [link] require_tls: never send a password in plain text to a hub on another machine */
+    char fingerprint[65]; /* pin the hub's certificate (lowercase hex SHA-256); "" = verify it against ca_file / the system CAs */
+    char ca_file[512];
+    char cert[512], key[512]; /* a client certificate for the hub to pin; both or neither */
+} svc_tls_cfg_t;
+int svc_tls_cfg_equal(const svc_tls_cfg_t *a, const svc_tls_cfg_t *b);
+/* TLS client handshake on the connected, blocking `fd` to `host`. NULL (fd untouched) on failure or a certificate that
+ * isn't the hub's -- before any password is sent. */
+struct ssl_st *svc_tls_connect(int fd, const char *host, const svc_tls_cfg_t *c);
+ssize_t svc_tls_read(struct ssl_st *ssl, void *buf, size_t len);        /* read(2) semantics; EAGAIN = would block */
+ssize_t svc_tls_write(struct ssl_st *ssl, const void *buf, size_t len); /* write(2) semantics */
+int svc_tls_pending(struct ssl_st *ssl);                                /* decrypted bytes already buffered: poll() can't see them */
+void svc_tls_close(struct ssl_st *ssl);
 
 /* stats.c -- the stats collector (stats/stats.toml [collector]); every call is a no-op while it's off. */
 void st_config(const char *services_config_path); /* finds stats.toml (beside it, or ../stats/); re-read on change */

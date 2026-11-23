@@ -161,6 +161,39 @@ ipv6 = true
 ./sekurircd enable-services    # undo (then ./sekurircd restart-services)</pre>
 <p>The accounts and channel databases are left where they are. When a leaf is merged into a network, its own accounts are not copied to the hub.</p>
 
+<h3 id="remote-services">services on their own machine</h3>
+<p>The services daemon doesn't have to sit next to the hub. It reads nothing from the ircd's disk and only needs the hub's link address, so it can run on a
+  machine of its own, and then the accounts database is no longer on the internet-facing box. The link carries every <code>IDENTIFY</code> and SASL password,
+  so across a network it must use TLS: add <code>tls = true</code> to <code>[link]</code> in <code>services.toml</code>. Off by default, so a daemon that
+  links on <code>127.0.0.1</code> is unchanged.</p>
+<ol>
+  <li><strong>On the hub:</strong> <code>[links] tls = true</code> (with <code>[tls]</code> enabled), and a <code>[[links.peers]]</code> entry for the daemon (its
+    <code>name</code> and password; <code>allowed_ips</code> with the services machine's address). A hub whose link port uses TLS takes plain text from its own
+    machine only, so a daemon on another one can't link without it.</li>
+  <li><strong>On the services machine:</strong> <code>services/services.toml</code> with <code>[link] host</code>/<code>port</code> of the hub's link listener and:
+<pre>[link]
+host = "hub.example.net"
+port = 17000
+name = "services.example.net"
+password = "..."
+tls = true
+fingerprint = "sha256:..."   # pin the hub's certificate: openssl x509 -in hub.crt -noout -fingerprint -sha256</pre>
+    Without <code>fingerprint</code> the certificate is verified like a web server's: against <code>ca_file</code> (or the system CAs) and for the name in
+    <code>host</code>. Either way it is checked <em>before</em> the password is sent.</li>
+  <li><strong>Optional, pin the daemon too:</strong> <code>cert</code> and <code>key</code> in <code>[link]</code> make it present a certificate, and
+    <code>fingerprint = "sha256:..."</code> on the hub's <code>[[links.peers]]</code> entry for it only lets that certificate in.</li>
+  <li><strong>Run it alone:</strong> with no <code>config/sekurircd.toml</code> on that machine, <code>./sekurircd start</code>, <code>stop</code>,
+    <code>restart</code> and <code>status</code> manage the services daemon (and the stats panel, which belongs next to it) and nothing else. With systemd,
+    enable <code>services.service</code> only.</li>
+</ol>
+<p>Still one services daemon per network. A plain-text link to another machine is not refused by default, since installs that were set up that way keep
+  working, but both sides warn (services in its log, the hub to its opers). To refuse it, set <code>require_tls = true</code> in <code>[link]</code>: the daemon then
+  links to another machine over TLS or not at all, and says why. The hub's side of the same rule is <code>[links] tls = true</code>, which takes plain text from its
+  own machine only. <code>tools/makeconf.py</code> and the <a href="wizard.html">web wizard</a> ask where services run and write all of this for you, including
+  <code>require_tls</code> and the hub certificate's fingerprint. <code>/REHASH</code> on the hub still reloads the daemon over the link, and the
+  <code>[link]</code> TLS settings take a restart like the rest of <code>[link]</code>. A hub that is older than this change already speaks TLS on its link
+  port, so the daemon can be upgraded first.</p>
+
 <h3 id="linkmgmt">the link wizard: add, edit and remove links</h3>
 <p><code>tools/linkmgmt.py</code> manages this server's links and tells you exactly what to put on the other one. It asks a few questions (the other
   server's name, who dials whom, its address and port, the IPs it may connect from, TLS and certificate pinning, the password, or it generates a strong

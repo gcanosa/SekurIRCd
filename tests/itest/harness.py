@@ -339,12 +339,12 @@ def ws_parse(buf):
 class Services:
     """bin/services (ChanServ + NickServ) linked to `srv`. `nickserv` / `chanserv_extra` are extra lines for those sections."""
 
-    def __init__(self, srv, link_port, peer_name=SVC_NAME, password=SVC_PW, extra="", nickserv="", store=None, tail=""):
+    def __init__(self, srv, link_port, peer_name=SVC_NAME, password=SVC_PW, extra="", nickserv="", store=None, tail="", link_extra="", host="127.0.0.1"):
         self.dir = tempfile.mkdtemp(prefix="itest-svc-")
         self.pidfile = os.path.join(self.dir, "services.pid")
         self.conf = os.path.join(self.dir, "services.toml")
         store_line = f'store_file = "{store}"\n' if store else ""
-        self.body = (f'[link]\nhost = "127.0.0.1"\nport = {link_port}\nname = "{peer_name}"\npassword = "{password}"\n'
+        self.body = (f'[link]\nhost = "{host}"\nport = {link_port}\nname = "{peer_name}"\npassword = "{password}"\n{link_extra}\n'
                      f'[chanserv]\nnick = "ChanServ"\n{extra}\n[nickserv]\n{store_line}{nickserv}\n'
                      f'[storage]\npath = "cs.json"\nbackup_count = 1\n')
         self.proc = None

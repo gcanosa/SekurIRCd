@@ -33,6 +33,9 @@
  * its SSL_CTX is created once, lazily, and freed at shutdown. */
 
 static void send_member_line(link_conn_t *lc, const char *cmd, channel_t *chan, client_t *u, int rank, const char *flag);
+
+/* The address spellings this server uses for the machine it runs on. */
+static int link_ip_is_loopback(const char *ip) { return strncmp(ip, "127.", 4) == 0 || strcmp(ip, "0::1") == 0; }
 static ssize_t link_io_read(link_conn_t *lc, void *buf, size_t len) {
     if (!lc->ssl) return read(lc->fd, buf, len);
     ERR_clear_error();
@@ -527,7 +530,7 @@ void link_accept(server_t *srv, int listen_fd) {
         SSL_set_verify(lc->ssl, SSL_VERIFY_PEER, accept_any_cert); /* ask for (never require) the dialer's certificate, for pinning */
         SSL_set_fd(lc->ssl, fd);
         lc->tls_handshaking = 1;
-        lc->tls_sniff = strncmp(ipbuf, "127.", 4) == 0 || strcmp(ipbuf, "0::1") == 0; /* the services daemon on this box doesn't speak TLS */
+        lc->tls_sniff = link_ip_is_loopback(ipbuf); /* services on this box may link in plain text (one on another machine must use TLS) */
     }
     lc->next = srv->links;
     srv->links = lc;
@@ -916,7 +919,17 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
         server_add_user(srv, svc);
         lc->bots[lc->n_bots++] = svc;
         /* The channel service: it asks for each registered channel's members itself (SVCMEMBERS ... SYNC). */
-        if (!lc->service) { lc->service = svc; srv->svc_back_at = time(NULL); }
+        if (!lc->service) {
+            lc->service = svc;
+            srv->svc_back_at = time(NULL);
+            if (!lc->ssl && !link_ip_is_loopback(lc->ip)) { /* not refused: a services daemon that always linked this way keeps working */
+                char m[300];
+                snprintf(m, sizeof m, "Services link %s from %s is plain text: IDENTIFY and SASL passwords cross the network unencrypted "
+                         "-- set tls = true in the daemon's [link] and [links] tls on this server", lc->peer_name, lc->ip);
+                log_warn("link", "%s", m);
+                server_notify_opers(srv, m);
+            }
+        }
         netsync_introduce_user(srv, svc); /* a service nick is a user to the rest of the network too */
         log_info("link", "link '%s' introduced service nick '%s'", lc->peer_name, nick);
         return 0;

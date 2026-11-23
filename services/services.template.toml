@@ -49,6 +49,39 @@ port = 7000
 name = "services.sekurircd.local"
 password = "change-me-to-a-long-shared-secret"
 
+# Services on ANOTHER machine than the hub: point host/port at the hub's link
+# listener, turn TLS on, and pin the hub's certificate. Without tls = true the
+# link is plain text: every IDENTIFY and SASL password crosses the network
+# unencrypted (services warns, and so does the hub). A hub whose [links] tls is
+# on takes plain text from its own machine only. Off by default, so an install
+# that links on 127.0.0.1 is unchanged.
+#
+# The hub's certificate is judged one of two ways, checked BEFORE the password
+# is sent:
+#   fingerprint  pin it: its SHA-256 ("sha256:" and ':' optional). The chain is
+#                ignored; get it with
+#                  openssl x509 -in hub.crt -noout -fingerprint -sha256
+#   (none)       verify it like a web server's: against ca_file (or the system
+#                CAs), and for the name in `host` -- use a name, or an address the
+#                certificate lists.
+# cert/key: present a certificate of your own, so the hub can pin THIS daemon
+# with fingerprint = "..." on its [[links.peers]] entry (both or neither).
+# Relative paths mean "next to this file". These need a restart.
+#tls = false
+#fingerprint = ""
+#ca_file = ""
+#cert = ""
+#key = ""
+
+# require_tls = true: never send a password in plain text to a hub on another
+# machine. If tls is off (or the hub does not take TLS) the daemon does not link
+# and says why, instead of linking with a warning. A hub on this machine is not
+# "another machine", so a plain link on 127.0.0.1 is unaffected. Off by default;
+# tools/makeconf.py and the web wizard turn it on for services on another machine.
+# The hub's side of the same rule is [links] tls = true: it takes plain text from
+# its own machine only.
+#require_tls = false
+
 
 # -----------------------------------------------------------------------------
 #  CHANSERV -- channel registration

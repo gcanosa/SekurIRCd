@@ -36,8 +36,26 @@ def split(s):
     return [x for x in re.split(r"[,\s]+", s) if x]
 
 
+def norm_fp(s):
+    """"sha256:AB:CD..." / 64 hex digits -> "sha256:<lowercase hex>", or None if it isn't a SHA-256 fingerprint."""
+    h = re.sub(r"^sha256:", "", s.strip(), flags=re.I).replace(":", "").lower()
+    return "sha256:" + h if re.fullmatch(r"[0-9a-f]{64}", h) else None
+
+
+def cert_fingerprint(path):
+    """SHA-256 fingerprint of a PEM certificate file ("sha256:..."), or None (no openssl, no file)."""
+    if not (shutil.which("openssl") and os.path.exists(path)):
+        return None
+    r = subprocess.run(["openssl", "x509", "-in", path, "-noout", "-fingerprint", "-sha256"], capture_output=True, text=True)
+    return norm_fp(r.stdout.split("=", 1)[1]) if r.returncode == 0 and "=" in r.stdout else None
+
+
 def render(a):
-    """Answers dict -> (sekurircd.toml text, services.toml text or None). Pure: no prompts, no I/O."""
+    """Answers dict -> (sekurircd.toml text or None, services.toml text or None). Pure: no prompts, no I/O.
+    a["svc_where"]: "here" (services next to the ircd, the default), "remote" (this server is the hub of services that run on
+    another machine: the second text is THEIR services.toml) or "only" (this machine runs only the services daemon: no ircd text)."""
+    if a.get("svc_where") == "only":
+        return None, render_services(a)
     L = ["# sekurircd.toml written by tools/makeconf.py",
          "# Every key not listed here uses its built-in default (see config/sekurircd.template.toml).", "",
          "[server]", f"name = {q(a['name'])}", f"network = {q(a['network'])}"]
@@ -80,6 +98,14 @@ def render(a):
     if a.get("email"):
         L += ["", "[admin]", f"email = {q(a['email'])}"]
 
+    if a.get("svc_where") == "remote":
+        L += ["", "# NickServ/ChanServ run on another machine and link over TLS: this link carries every IDENTIFY and SASL password.",
+              "# With [links] tls on, every other server that links here has to use TLS too (it reuses the [tls] certificate).",
+              "[links]", "enabled = true", 'mode = "hub"', "tls = true", f"bind = {q(a['link_bind'])}", f"port = {a['link_port']}",
+              "", "# The services daemon: hash of the plain [link] password in the services machine's services.toml.",
+              "[[links.peers]]", f"name = {q(a['svc_name'])}", f"password_hash = {q(a['svc_hash'])}", f"allowed_ips = {arr(a['svc_ips'])}"]
+        if a.get("svc_pin"): L += ["# Only the services daemon's own certificate gets in.", f"fingerprint = {q(a['svc_pin'])}"]
+        return "\n".join(L) + "\n", render_services(a)
     if not a["svc"]:
         return "\n".join(L) + "\n", None
 
@@ -88,12 +114,33 @@ def render(a):
           f"bind = {q('0.0.0.0' if a['other_links'] else '127.0.0.1')}", f"port = {a['link_port']}",
           "", "# The services daemon: hash of the plain [link] password in services.toml.",
           "[[links.peers]]", f"name = {q(a['svc_name'])}", f"password_hash = {q(a['svc_hash'])}", 'allowed_ips = ["127.0.0.1"]']
+    return "\n".join(L) + "\n", render_services(a)
 
-    S = ["# services.toml written by tools/makeconf.py (bin/services: NickServ + ChanServ)", "",
-         "[link]", "# The ircd's link listener, not its client port.", 'host = "127.0.0.1"', f"port = {a['link_port']}",
-         "# Must match the [[links.peers]] entry in sekurircd.toml, and stay plain here (this side sends it).",
-         f"name = {q(a['svc_name'])}", f"password = {q(a['svc_pass'])}",
-         "", "[chanserv]", 'nick = "ChanServ"', 'user = "ChanServ"', f"host = {q(a['svc_name'])}",
+
+def render_services(a):
+    """services.toml text. Next to the ircd it links on 127.0.0.1; for a hub on another machine it links over TLS."""
+    remote = a.get("svc_where", "here") != "here"
+    if remote:
+        S = ["# services.toml written by tools/makeconf.py (bin/services: NickServ + ChanServ)",
+             "# This daemon runs on its own machine and links to the hub over TLS: the link carries every IDENTIFY and SASL password.", "",
+             "[link]", "# The hub's link listener ([links] port in its sekurircd.toml), not its client port.",
+             f"host = {q(a['hub_host'])}", f"port = {a['link_port']}",
+             "# Must match the hub's [[links.peers]] entry, and stay plain here (this side sends it).",
+             f"name = {q(a['svc_name'])}", f"password = {q(a['svc_pass'])}",
+             "tls = true", "# Never send a password in plain text to another machine.", "require_tls = true"]
+        if a.get("hub_pin"): S += ["# The hub's certificate, pinned; checked before the password is sent.", f"fingerprint = {q(a['hub_pin'])}"]
+        elif a.get("hub_ca"): S += ["# No pin: the hub's certificate must verify against this CA bundle, for the name in host.", f"ca_file = {q(a['hub_ca'])}"]
+        elif a.get("hub_pin_want"): S += ["# FILL THIS IN: the hub's certificate fingerprint (on the hub: openssl x509 -in <its cert> -noout -fingerprint -sha256).",
+                                          '#fingerprint = "sha256:..."']
+        else: S += ["# No pin: the hub's certificate must verify against the system CAs, for the name in host."]
+        if a.get("svc_cert"): S += ["# This daemon's own certificate: the hub pins it.", f"cert = {q(a['svc_cert'])}", f"key = {q(a['svc_key'])}"]
+        S += [""]
+    else:
+        S = ["# services.toml written by tools/makeconf.py (bin/services: NickServ + ChanServ)", "",
+             "[link]", "# The ircd's link listener, not its client port.", 'host = "127.0.0.1"', f"port = {a['link_port']}",
+             "# Must match the [[links.peers]] entry in sekurircd.toml, and stay plain here (this side sends it).",
+             f"name = {q(a['svc_name'])}", f"password = {q(a['svc_pass'])}", ""]
+    S += ["[chanserv]", 'nick = "ChanServ"', 'user = "ChanServ"', f"host = {q(a['svc_name'])}",
          'realname = "Channel Registration Service"', f"founder_mode = {q(a['founder'])}", f"expire_days = {a.get('cs_expire', 0)}",
          "", "[nickserv]", f"enabled = {str(a['ns']).lower()}"]
     if a["ns"]:
@@ -101,7 +148,7 @@ def render(a):
         if a.get("admins"): S.append(f"admins = {arr(a['admins'])}")
         S += ["# Drop accounts nobody logged in to for this many days (0 = never).", f"expire_days = {a.get('ns_expire', 0)}"]
     S += ["", "[storage]", "# Relative to the directory bin/services runs from.", 'path = "chanserv.json"', "backup_count = 5"]
-    return "\n".join(L) + "\n", "\n".join(S) + "\n"
+    return "\n".join(S) + "\n"
 
 
 EFNET_ZONE = ["[[blacklist.zone]]", "# EFnet RBL: IRC-focused (open proxies, drones, spam hosts), free, no query limits.",
@@ -187,8 +234,70 @@ def password(prompt):
         print(red("  they don't match"))
 
 
+def chk_fp(s):
+    return None if norm_fp(s) else "a SHA-256 fingerprint: 64 hex digits (\"sha256:\" and ':' allowed)"
+
+
+def chk_ips(s):
+    ips = split(s)
+    return None if ips and all(re.fullmatch(r"[0-9A-Fa-f:.*?/]+", x) for x in ips) else "one or more IP addresses (a CIDR or a * glob works too)"
+
+
+def services_options(a):
+    """NickServ / ChanServ choices: they go into services.toml wherever the daemon runs."""
+    a["ns"] = yes("NickServ (accounts and SASL)?", True)
+    a["enforce"] = a["ns"] and yes("Enforce nick ownership (rename to Guest after 60s)?", False)
+    a["admins"] = split(ask("Services admins, by account name (empty = none)", "")) if a["ns"] else []
+    days = lambda s: None if s.isdigit() and int(s) <= 3650 else "a number of days, 0..3650"
+    a["ns_expire"] = int(ask("Drop accounts nobody logged in to for how many days? (0 = never)", "0", days)) if a["ns"] else 0
+    a["cs_expire"] = int(ask("Drop channel registrations unused for how many days? (0 = never)", "0", days))
+    a["founder"] = ["o", "q"][pick("Channel founder rank", ["o: channel op (@)", "q: channel owner (~)"], 1)]
+
+
+def tls_client_options(a):
+    """How the services daemon's TLS link to a hub on another machine is judged (services.toml [link])."""
+    how = pick("The hub's certificate is checked by", ["its SHA-256 fingerprint (a pin: best for a self-signed certificate)",
+                                                      "a CA this machine trusts, and the hub's name (a certificate from a CA)"], 1)
+    if how == 0:
+        fp = ask("Hub certificate fingerprint (empty = fill it in later)", "", lambda s: chk_fp(s) if s else None)
+        a["hub_pin"] = norm_fp(fp) if fp else ""
+        a["hub_pin_want"] = not a["hub_pin"]
+    else:
+        ca = ask("CA bundle file (empty = this machine's system CAs)", "")
+        a["hub_ca"] = ca
+
+
+def interview_services_only(a):
+    """This machine runs only the services daemon, linked over TLS to a hub elsewhere: services.toml and nothing else."""
+    section("the hub")
+    print(dim("  Ask the hub's operator for its address, link port, and the services entry in its [[links.peers]]\n"
+              "  (name and password). The link carries every IDENTIFY and SASL password, so it uses TLS."))
+    a["hub_host"] = ask("Hub address (the name or IP of the server that runs sekurircd)", None, lambda s: None if s and " " not in s else "an address")
+    a["link_port"] = int(ask("Hub link port ([links] port in its sekurircd.toml)", "7000", chk_port))
+    a["svc_name"] = ask("Services name (the hub's [[links.peers]] name)", "services.sekurircd.local", chk_name)
+    a["svc_pass"] = password("Link password (the hub's [[links.peers]] password)")
+    a["network"] = ask("Network name", "ExampleNet", lambda s: None if s and " " not in s else "one word")
+    tls_client_options(a)
+    if yes("Present a certificate of this daemon's own, so the hub can pin it?", False):
+        a["svc_cert"] = ask("Certificate file (relative to services.toml)", "tls/services.crt")
+        a["svc_key"] = ask("Key file", "tls/services.key")
+    section("services (NickServ + ChanServ)")
+    a["svc"] = True
+    services_options(a)
+    a["stats"] = False
+    print(dim("  The stats panel isn't set up here: it needs the ircd's ports and certificate. See stats/stats.template.toml."))
+    return a
+
+
 def interview():
     a = {}
+    section("what this machine runs")
+    a["svc_where"] = ["here", "remote", "only"][pick("This machine runs", [
+        "an IRC server, with NickServ/ChanServ next to it (the usual setup)",
+        "an IRC server whose NickServ/ChanServ run on another machine (this one is their hub)",
+        "only the NickServ/ChanServ daemon, linked to an IRC server on another machine"], 1)]
+    if a["svc_where"] == "only":
+        return interview_services_only(a)
     section("server")
     a["name"] = ask("Server name (with a dot)", "irc.example.org", chk_name)
     a["network"] = ask("Network name", "ExampleNet", lambda s: None if s and " " not in s else "one word")
@@ -196,11 +305,16 @@ def interview():
     a["bind"] = ask("Bind address (0.0.0.0 = all interfaces)", "0.0.0.0")
     a["port"] = int(ask("Plaintext port", "6667", chk_port))
     a["ipv6"] = yes("Also listen on IPv6?", False)
-    print(dim("  A leaf joins an existing network through its hub, and uses the hub's NickServ/ChanServ (and SASL)."))
-    a["leaf"] = yes("Is this a leaf of an existing network (its hub runs services)?", False)
+    if a["svc_where"] == "remote":
+        a["leaf"] = False  # the hub of the services is not a leaf
+    else:
+        print(dim("  A leaf joins an existing network through its hub, and uses the hub's NickServ/ChanServ (and SASL)."))
+        a["leaf"] = yes("Is this a leaf of an existing network (its hub runs services)?", False)
 
     section("tls")
-    a["tls"] = yes("Enable TLS (port 6697)?", True)
+    a["tls"] = True if a["svc_where"] == "remote" else yes("Enable TLS (port 6697)?", True)
+    if a["svc_where"] == "remote":
+        print(dim("  On: services link over TLS, with this server's certificate."))
     if a["tls"]:
         a["tls_port"] = int(ask("TLS port", "6697", chk_port))
         a["cert"] = ask("Certificate file (relative to the config's directory)", "tls/cert.pem")
@@ -276,6 +390,33 @@ def interview():
         print(dim("  The network's stats panel runs next to the hub's services; a leaf only reports its own numbers."))
         a["statsline"] = yes("Report this server's CPU, memory and protection numbers to the network (stats_interval)?", True)
         return a
+    if a["svc_where"] == "remote":
+        section("services on another machine")
+        print(dim("  This server is the hub of a services daemon that runs elsewhere (run this wizard there and choose \"only the\n"
+                  "  NickServ/ChanServ daemon\"). Their link uses TLS, and with [links] tls on, every other server that links here must too."))
+        a["svc"] = True
+        a["link_bind"] = ask("Address the link listener binds to (0.0.0.0 = all interfaces)", "0.0.0.0")
+        a["link_port"] = int(ask("Link port (the services machine dials it; outside 6660-7000 gets less scanner noise)", "17000", chk_port))
+        a["hub_host"] = ask("Address the services machine reaches this server at", a["name"], lambda s: None if s and " " not in s else "an address")
+        a["svc_name"] = ask("Services name", "services.sekurircd.local",
+                            lambda s: chk_name(s) or ("must differ from the server name" if s == a["name"] else None))
+        a["svc_ips"] = split(ask("The services machine's IP address(es) (the hub only accepts them)", None, chk_ips))
+        a["svc_pass"] = secrets.token_urlsafe(24)
+        a["svc_hash"] = scrypt_hash(a["svc_pass"])
+        print(dim("  The services machine will judge this server's certificate. A self-signed one is best pinned by its fingerprint\n"
+                  "  (made after the certificate exists); one from a CA is checked by name."))
+        how = pick("The services machine checks this server's certificate by", ["its fingerprint (a pin)", "a CA it trusts, and the name above"], 1)
+        a["hub_pin_want"] = how == 0
+        pin = ask("Fingerprint of the services machine's own certificate, so this hub pins it (empty = password only)", "",
+                  lambda s: chk_fp(s) if s else None)
+        if pin:
+            a["svc_pin"] = norm_fp(pin)
+            a["svc_cert"], a["svc_key"] = "tls/services.crt", "tls/services.key"
+        services_options(a)
+        section("stats panel")
+        print(dim("  The panel runs next to services; this server only reports its numbers to it."))
+        a["statsline"] = yes("Report this server's CPU, memory and protection numbers to the network (stats_interval)?", True)
+        return a
     print(dim("  One services daemon per network, normally next to the hub. On a leaf whose hub already runs them, answer n:\n"
               "  the leaf reaches the hub's NickServ/ChanServ (and SASL) over the link. Two would collide."))
     a["svc"] = yes("Run services (accounts, SASL, nick and channel registration)?", True)
@@ -286,13 +427,7 @@ def interview():
         a["svc_pass"] = secrets.token_urlsafe(24)
         a["svc_hash"] = scrypt_hash(a["svc_pass"])
         a["other_links"] = yes("Will this server also link to other servers?", False)
-        a["ns"] = yes("NickServ (accounts and SASL)?", True)
-        a["enforce"] = a["ns"] and yes("Enforce nick ownership (rename to Guest after 60s)?", False)
-        a["admins"] = split(ask("Services admins, by account name (empty = none)", "")) if a["ns"] else []
-        days = lambda s: None if s.isdigit() and int(s) <= 3650 else "a number of days, 0..3650"
-        a["ns_expire"] = int(ask("Drop accounts nobody logged in to for how many days? (0 = never)", "0", days)) if a["ns"] else 0
-        a["cs_expire"] = int(ask("Drop channel registrations unused for how many days? (0 = never)", "0", days))
-        a["founder"] = ["o", "q"][pick("Channel founder rank", ["o: channel op (@)", "q: channel owner (~)"], 1)]
+        services_options(a)
 
         section("stats panel (stats/stats.toml)")
         print(dim("  A web page for admins: world map of the servers, users over time, splits and their reasons, uptime,\n"
@@ -339,10 +474,12 @@ def check(binary, path):
     return r.returncode == 0
 
 
-def confcheck(files, svc_path):
+def confcheck(files, svc_path, has_ircd=True):
     """Validate with tools/confcheck.py: TOML syntax, the daemons' own --check, keys against the templates, plain-text
     passwords and (default paths) file permissions. Its -c covers one sekurircd.toml only, so other paths get the
     services daemon's own --check next to it."""
+    if not has_ircd:  # services alone: confcheck wants a sekurircd.toml, so the daemon's own --check is the validation
+        return check("services", svc_path)
     cmd = [sys.executable, os.path.join(ROOT, "tools", "confcheck.py"), "-q", "--no-banner"]
     custom = os.path.abspath(files[0][0]) != os.path.join(ROOT, "config", "sekurircd.toml") or \
         (svc_path is not None and os.path.abspath(svc_path) != os.path.join(ROOT, "services", "services.toml"))
@@ -354,7 +491,7 @@ def confcheck(files, svc_path):
     return ok
 
 
-def write_all(files, svc_path):
+def write_all(files, svc_path, has_ircd=True):
     """files: [(path, text)], sekurircd.toml first. Back up what exists, write 0600, confcheck, restore everything on failure."""
     stamp = time.strftime("%Y%m%d-%H%M%S")
     backups = []
@@ -369,7 +506,7 @@ def write_all(files, svc_path):
             fh.write(text)
         os.chmod(path, 0o600)
     print()
-    ok = confcheck(files, svc_path)
+    ok = confcheck(files, svc_path, has_ircd)
     for path, _ in files:
         if os.path.basename(path) == "stats.toml":
             r = subprocess.run([sys.executable, os.path.join(ROOT, "stats", "netstats.py"), "-c", path, "check"],
@@ -383,6 +520,28 @@ def write_all(files, svc_path):
         sys.exit(red("confcheck did not accept the generated config, so nothing was changed. Please report this as a bug."))
     for path, bak in backups:
         print(green(f"  wrote {path}") + (dim(f"  (old file kept as {bak})") if bak else ""))
+
+
+def write_remote_services(a, cfg_path):
+    """The services.toml for the services machine, next to the hub's config: with the hub certificate's fingerprint filled in when
+    that was asked for and the certificate exists. -> its path."""
+    d = os.path.dirname(os.path.abspath(cfg_path))
+    if a.get("hub_pin_want") and not a.get("hub_pin"):
+        fp = cert_fingerprint(os.path.join(d, a["cert"]))
+        if fp: a = dict(a, hub_pin=fp)
+    path = os.path.join(d, "services-remote.toml")
+    with open(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as fh:
+        fh.write(render_services(a))
+    os.chmod(path, 0o600)
+    print(("  " + green("✔ ") if check_quiet("services", path) else "  " + red("✘ ")) + green(f"wrote {path}") + dim("  (for the services machine)"))
+    return path, a.get("hub_pin", "")
+
+
+def check_quiet(binary, path):
+    exe = os.path.join(ROOT, "bin", binary)
+    if not os.access(exe, os.X_OK): exe = shutil.which(binary)
+    if not exe: return True
+    return subprocess.run([exe, "--config", path, "--check"], capture_output=True, cwd=os.path.dirname(os.path.abspath(path))).returncode == 0
 
 
 def extras(a, cfg):
@@ -452,6 +611,42 @@ def selftest():
     if "tomllib" in sys.modules:
         assert tomllib.loads(ircd)["debug_channel"]["stats_interval"] == 300
         assert tomllib.loads(render(dict(a, dbg="", statsline=False))[0]).get("debug_channel") is None
+    # services on another machine: this server is the hub (links over TLS), and the services machine gets its own file
+    with tempfile.TemporaryDirectory() as d:
+        if shutil.which("openssl"):
+            subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "2", "-keyout", os.path.join(d, "k.pem"),
+                            "-out", os.path.join(d, "c.pem"), "-subj", "/CN=irc.test.org"], capture_output=True, check=True)
+            fp = cert_fingerprint(os.path.join(d, "c.pem"))
+            assert fp and norm_fp(fp.upper().replace("SHA256:", "")) == fp
+        r = dict(a, svc_where="remote", tls=True, tls_port=6697, cert="c.pem", key="k.pem", link_bind="0.0.0.0", link_port=17000,
+                 hub_host="irc.test.org", svc_ips=["203.0.113.9"], svc_pin="sha256:" + "ab" * 32, svc_cert="tls/services.crt",
+                 svc_key="tls/services.key", hub_pin="sha256:" + "cd" * 32, stats=False)
+        ircd, svc = render(r)
+        assert "[[links.peers]]" in ircd and "tls = true" in ircd and svc.count("[link]") == 1
+        variants = [("pin", r), ("ca", dict(r, hub_pin="", hub_ca="ca.pem", svc_pin="", svc_cert="")),
+                    ("later", dict(r, hub_pin="", hub_pin_want=True, svc_pin="", svc_cert="")), ("system", dict(r, hub_pin="", svc_pin="", svc_cert=""))]
+        for name, v in variants:
+            ircd, svc = render(v)
+            x, s = os.path.join(d, f"{name}.toml"), os.path.join(d, f"{name}-services.toml")
+            open(x, "w").write(ircd); open(s, "w").write(svc)
+            if "tomllib" in sys.modules:
+                ti, ts = tomllib.loads(ircd), tomllib.loads(svc)
+                peer = ti["links"]["peers"][0]
+                assert ti["links"]["tls"] is True and peer["allowed_ips"] == ["203.0.113.9"] and peer["name"] == ts["link"]["name"]
+                assert peer.get("fingerprint") == (v["svc_pin"] or None) and ("cert" in ts["link"]) == bool(v["svc_cert"])
+                assert ts["link"]["tls"] is True and ts["link"]["require_tls"] is True and ts["link"]["host"] == "irc.test.org"
+                assert ts["link"].get("fingerprint") == (v["hub_pin"] or None) and ts["link"].get("ca_file") == (v.get("hub_ca") or None)
+            assert check("sekurircd", x) and check("services", s), name
+    # only the services daemon: no ircd file at all
+    o = dict(svc_where="only", svc=True, hub_host="irc.test.org", link_port=7000, svc_name="services.test.org", svc_pass="p1",
+             network="TestNet", hub_pin="sha256:" + "cd" * 32, ns=True, enforce=False, admins=["alice"], ns_expire=0, cs_expire=0, founder="o")
+    ircd, svc = render(o)
+    assert ircd is None
+    with tempfile.TemporaryDirectory() as d:
+        open(os.path.join(d, "services.toml"), "w").write(svc)
+        assert check("services", os.path.join(d, "services.toml"))
+        if "tomllib" in sys.modules:
+            assert tomllib.loads(svc)["link"]["fingerprint"] == o["hub_pin"] and "[nickserv]" in svc
     print("selftest ok")
 
 
@@ -473,22 +668,45 @@ def main():
     if exists and not o.print:
         print(yellow("\nAlready there (a backup is kept if you overwrite): " + ", ".join(exists)))
     a = interview()
+    where = a.get("svc_where", "here")
     ircd, svc = render(a)
-    prot = render_protection(a)
-    stats = render_stats(a)
-    files = [(o.config, ircd)] + ([(o.services, svc)] if svc else []) + \
-        ([(os.path.join(os.path.dirname(os.path.abspath(o.config)), "protection.toml"), prot)] if prot else []) + \
-        ([(o.stats, stats)] if stats else [])
+    prot = render_protection(a) if ircd else None
+    stats = render_stats(a) if ircd else None
+    cfgdir = os.path.dirname(os.path.abspath(o.config))
+    files = ([(o.config, ircd)] if ircd else []) + ([(o.services, svc)] if svc and where != "remote" else []) + \
+        ([(os.path.join(cfgdir, "protection.toml"), prot)] if prot else []) + ([(o.stats, stats)] if stats else [])
     if o.print:
         for path, text in files:
             print("\n" + bold(f"# ---- {path}") + "\n" + text)
+        if where == "remote": print("\n" + bold("# ---- services-remote.toml (for the services machine)") + "\n" + svc)
         return
     names = [p for p, _ in files]
     if not yes("\nWrite " + ", ".join(names[:-1]) + (" and " if len(names) > 1 else "") + names[-1] + "?", True):
         sys.exit("Nothing written.")
-    write_all(files, o.services if svc else None)
-    extras(a, o.config)
+    write_all(files, o.services if svc and where != "remote" else None, has_ircd=where != "only")
+    remote = None
+    if where != "only":
+        extras(a, o.config)
+    if where == "remote":
+        remote = write_remote_services(a, o.config)
     print("\n" + bold("Next:"))
+    if where == "only":
+        print(f"  the hub:       its operator adds this machine to the hub's [[links.peers]] entry for {a['svc_name']} (allowed_ips) and opens the link port")
+        if a.get("svc_cert"):
+            print(f"  certificate:   openssl req -x509 -newkey rsa:2048 -nodes -days 825 -keyout {a['svc_key']} -out {a['svc_cert']} -subj /CN={a['svc_name']}")
+            print(f"                 openssl x509 -in {a['svc_cert']} -noout -fingerprint -sha256   {dim('(give the hub operator this fingerprint: fingerprint = \"...\" on the entry)')}")
+        if a.get("hub_pin_want"):
+            print(yellow(f"  ! fill in the hub certificate's fingerprint in {o.services} ([link] fingerprint), or services refuse to link"))
+        print(f"  start:         ./sekurircd start   {dim('(no config/sekurircd.toml here, so it manages services only)')}")
+        return
+    if where == "remote":
+        print(f"  services:      copy {remote[0]} to the services machine as services/services.toml, then delete it here (it holds the link password)")
+        print(f"                 {dim('there: ./sekurircd start (no config/sekurircd.toml there, so it manages services only)')}")
+        print(f"  firewall:      open TCP {a['link_port']} for {', '.join(a['svc_ips'])} only")
+        if a.get("hub_pin_want"):
+            print(f"  pin:           {remote[1] or yellow('(no certificate yet: openssl x509 -in <cert> -noout -fingerprint -sha256, then [link] fingerprint there)')}")
+        if a.get("svc_pin"):
+            print(f"  its certificate: on the services machine, {a['svc_cert']} and {a['svc_key']} must be the certificate with fingerprint {a['svc_pin']}")
     if not a["opers"]: print(yellow("  ! no operators: nobody can /OPER until you add one ([[operators]])"))
     print(f"  edit the MOTD: {os.path.join(os.path.dirname(o.config), 'ircd.motd')} (made from the template on first start)")
     if a.get("leaf") or not svc:
@@ -507,7 +725,7 @@ def main():
     if os.path.abspath(o.config) == os.path.join(ROOT, "config", "sekurircd.toml"):
         print(f"  start:         ./sekurircd start   {dim('(the daemons, from ' + ROOT + ')')}")
     else:
-        print(f"  start:         sekurircd --config {o.config}" + (f"   and   services --config {o.services}" if svc else ""))
+        print(f"  start:         sekurircd --config {o.config}" + (f"   and   services --config {o.services}" if svc and where != "remote" else ""))
 
 
 if __name__ == "__main__":

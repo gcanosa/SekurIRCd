@@ -54,7 +54,10 @@ make clean</pre>
 <h2 id="makeconf">create the config</h2>
 <p>The quickest way is to let SekurIRCd ask. <code>tools/makeconf.py</code> asks about the server, TLS, cloaking, operators and services.
   It then writes a complete <code>config/sekurircd.toml</code>, a <code>config/protection.toml</code> if you turn on the
-  Protection bundle, and, if you want NickServ and ChanServ, a <code>services/services.toml</code> whose link settings match it. <code>bin/sekurircd --makeconf</code> runs the same tool.</p>
+  Protection bundle, and, if you want NickServ and ChanServ, a <code>services/services.toml</code> whose link settings match it. <code>bin/sekurircd --makeconf</code> runs the same tool.
+  It first asks what the machine runs: the usual setup (services next to the server), a server whose services run on another machine (it writes the TLS link for them and a ready
+  <code>services-remote.toml</code> to copy there, with the certificate fingerprint filled in), or only the services daemon (just <code>services.toml</code>, no ircd).
+  <a href="configuration.html#remote-services">Services on their own machine</a> has the details.</p>
 <pre>tools/makeconf.py                  # writes config/sekurircd.toml and services/services.toml
 ./bin/sekurircd --makeconf         # the same, started from the ircd binary
 tools/makeconf.py -c /etc/sekurircd/sekurircd.toml -s /etc/sekurircd/services.toml   # other paths
