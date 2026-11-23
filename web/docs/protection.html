@@ -182,6 +182,11 @@ window = 1.0       # ...within this many seconds is disconnected</pre>
   lookup and bans them again, unless the address is under <code>[exempt]</code>. The reliable fixes are that exemption, dropping the zone, narrowing it with
   <code>replies</code> and <code>ban_unknown = false</code>, or using <code>action = "reject"</code> so no lasting ban exists and pointing the user at the provider's
   delisting page, which is what <code>%i</code> in the ban <code>reason</code> is for.</p>
+<p class="note"><strong>Exempting an address live:</strong> <code>[exempt]</code> only skips the DNSBL and the scanner and needs a rehash. An <code>ELINE</code> on an
+  IP, glob or CIDR (<code>/ELINE 2402:d0c0:21::/64 1d :our bouncers</code>) takes effect at once and exempts that address from Z-lines, the connect-flood throttle,
+  the per-IP connection cap, the DNSBL and the scanner as well, so a trusted network that reconnects fast is never banned. It lives on that server only
+  (like the connect-flood throttle it overrides), shows in <code>/STATS e</code> and <code>TESTLINE</code>, and goes with <code>/UNELINE &lt;mask&gt;</code>. Lifting a
+  connect-flood ban with <code>UNZLINE</code> also forgets that address's connect count, so the next connection isn't banned again at once.</p>
 
 <h2>spam protection</h2>
 <p>The layers above act on connections. <code>[spam]</code> acts on what a connected user <em>sends</em>. It is <strong>off by default</strong>

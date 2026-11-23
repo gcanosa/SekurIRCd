@@ -1199,6 +1199,24 @@ int server_client_line_hits(const char *mask, const char *line_type, const clien
     return line_hits_cloak(mask, line_type, c->ip, c->user, c->realhost, c->ident_confirmed, c->cloak);
 }
 
+/* An ELINE on a whole address ("1.2.3.4", "2001:db8::/64", "*@10.0.*" -- the user part must be "*" or absent) exempts
+ * that address wherever it is checked before any user or host is known: Z/K/G-lines, the connect-flood throttle, the
+ * per-IP cap, the DNSBL and the scanner. A user@host ELINE stays a K/G-line exemption for that user only. */
+int server_eline_hits_ip(const kline_entry_t *e, const char *ip) {
+    if (e->line_type[0] != 'E' || !ip || !ip[0]) return 0;
+    const char *h = strrchr(e->mask, '@');
+    if (h && !(h - e->mask == 1 && e->mask[0] == '*')) return 0;
+    h = h ? h + 1 : e->mask;
+    if (h[strspn(h, "0123456789abcdefABCDEF.:*?/")]) return 0; /* a hostname or cloak: nothing to match an IP against */
+    return irc_ip_mask_match(h, ip);
+}
+
+int server_eline_ip(server_t *srv, const char *ip) {
+    for (kline_entry_t *e = srv->klines; e; e = e->next)
+        if (server_eline_hits_ip(e, ip)) return 1;
+    return 0;
+}
+
 static int server_client_eline_exempt(server_t *srv, client_t *c) {
     for (kline_entry_t *e = srv->klines; e; e = e->next)
         if (e->line_type[0] == 'E' && server_client_line_hits(e->mask, "K", c)) return 1;
@@ -1211,6 +1229,7 @@ int server_kline_enforce(server_t *srv, const char *mask, const char *line_type,
     for (client_t *c = srv->all_clients; c; c = c->all_next) {
         if (c == except || c->fd < 0 || c->quitting) continue;
         if (!server_client_line_hits(mask, line_type, c)) continue;
+        if (server_eline_ip(srv, c->ip)) continue; /* an ELINE on the address protects an already-connected user from any line */
         if (line_type[0] != 'Z' && server_client_eline_exempt(srv, c)) continue; /* ELINE protects an already-connected user too */
         snprintf(c->quit_reason, sizeof c->quit_reason, "%s", quit_reason);
         client_mark_quit(c);
@@ -1228,6 +1247,7 @@ int server_kline_remove_typed(server_t *srv, const char *mask, char type) {
         if (type_ok && strcasecmp((*pp)->mask, mask) == 0) {
             kline_entry_t *dead = *pp;
             *pp = dead->next;
+            net_connect_flood_reset(dead->mask); /* a flood ban's counter is still hot for a few seconds: lifting it must not re-trip at once */
             free(dead);
             srv->klines_dirty = 1;
             srv->kline_gen++;
@@ -1270,6 +1290,7 @@ int server_line_mask_hits(const char *mask, const char *line_type, const char *i
 const char *server_kline_match(server_t *srv, const char *ip, const char *user,
                                 const char *host, int ident_confirmed, const char *cloak) {
     static char reason_buf[300];
+    if (server_eline_ip(srv, ip)) return NULL; /* an ELINE on the whole address: no line applies, Z-lines included */
     for (kline_entry_t *k = srv->klines; k; k = k->next) {
         if (k->line_type[0] == 'S' || k->line_type[0] == 'E') continue; /* SHUN/ELINE aren't bans */
         if (!line_hits_cloak(k->mask, k->line_type, ip, user, host, ident_confirmed, cloak)) continue;

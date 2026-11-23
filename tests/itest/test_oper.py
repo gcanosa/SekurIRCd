@@ -1,4 +1,6 @@
 import re
+import socket
+import time
 from harness import Server
 
 CFG = {"operators": [
@@ -46,6 +48,41 @@ def test_eline_protects_from_kline():
         assert any("PONG" in l for l in vic.say("PING z")), "ELINE keeps the connected user"
         boss.say("UNELINE *@127.0.0.1")
         boss.say("UNKLINE *@127.0.0.1")
+
+
+def _refusal(s):
+    """What a brand-new connection to the server is told before it can register."""
+    sock = socket.create_connection(("127.0.0.1", s.port), timeout=2)
+    time.sleep(0.4)
+    try:
+        return sock.recv(4096).decode(errors="replace")
+    finally:
+        sock.close()
+
+
+def test_eline_on_an_address_exempts_zline_flood_and_cap():
+    cfg = {**CFG, "security": {"connect_flood_max": 3, "connect_flood_window": 30.0, "max_connections_per_ip": 3}}
+    with Server(cfg=cfg) as s:
+        boss = oper(s, "boss")
+        assert any("E-line added" in l for l in boss.say("ELINE *@127.0.0.0/8 test", 0.4))
+        many = [s.client(f"c{i}") for i in range(6)]   # past both the flood limit (3) and the per-IP cap (3)
+        boss.say("ZLINE 127.0.0.1 10m :test")
+        assert any("PONG" in l for l in many[0].say("PING z")), "a Z-line on an ELINE'd address disconnects nobody"
+        assert s.client("late"), "...and refuses nobody"
+        assert any("E-line *@127.0.0.0/8" in l for l in boss.say("TESTLINE 127.0.0.1", 0.4)), "TESTLINE shows the ELINE"
+        boss.say("UNELINE *@127.0.0.0/8")
+        assert "Z-Lined" in _refusal(s), "without the ELINE the Z-line bites"
+        boss.say("UNZLINE 127.0.0.1")
+
+
+def test_unzline_of_a_flood_ban_forgets_the_connect_count():
+    cfg = {**CFG, "security": {"connect_flood_max": 3, "connect_flood_window": 30.0, "max_connections_per_ip": 20}}
+    with Server(cfg=cfg) as s:
+        boss = oper(s, "boss")
+        # (the harness's own readiness probe counts too, so just connect until the ban comes)
+        assert any("reconnecting too fast" in _refusal(s) for _ in range(6)), "connecting past the limit trips the flood ban"
+        assert any("Removed line" in l for l in boss.say("UNZLINE 127.0.0.1", 0.4))
+        assert s.client("after"), "lifting the ban resets the count, so the next connect isn't banned again at once"
 
 
 def test_sanick_chgident_globops():

@@ -278,7 +278,7 @@ int protection_scan_start(struct server *srv, const char *ip) {
     const cfg_protection_t *p = &srv->cfg.protection;
     struct in_addr ia;
     if (!p->scan_enabled || p->n_protocols == 0 || inet_pton(AF_INET, ip, &ia) != 1) return 0;
-    if (protection_exempt(p, ip)) return 0;
+    if (protection_exempt(p, ip) || server_eline_ip(srv, ip)) return 0;
     time_t now = time(NULL);
     if (slot_live(srv->prot.negcache, PROT_NEGCACHE_SLOTS, ia.s_addr, now)) return 0;
     if (ip_has_scans(srv, ia.s_addr)) return 0;

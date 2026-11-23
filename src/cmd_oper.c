@@ -337,7 +337,8 @@ void cmd_testline(server_t *srv, client_t *cl, irc_message_t *msg) {
     }
     int hits = 0;
     for (kline_entry_t *k = srv->klines; k; k = k->next) {
-        if (!server_line_mask_hits(k->mask, k->line_type[0] == 'S' || k->line_type[0] == 'E' ? "K" : k->line_type, ip, user, host, ident_confirmed)) continue;
+        if (!server_line_mask_hits(k->mask, k->line_type[0] == 'S' || k->line_type[0] == 'E' ? "K" : k->line_type, ip, user, host, ident_confirmed)
+            && !server_eline_hits_ip(k, ip)) continue;
         char m[500];
         snprintf(m, sizeof m, "%s-line %s (by %s): %s", k->line_type, k->mask, k->set_by, k->reason);
         notice_self(srv, cl, m);
@@ -757,7 +758,8 @@ static void line_common(server_t *srv, client_t *cl, irc_message_t *msg, const c
 void cmd_kline(server_t *srv, client_t *cl, irc_message_t *msg) { line_common(srv, cl, msg, "K"); }
 void cmd_gline(server_t *srv, client_t *cl, irc_message_t *msg) { line_common(srv, cl, msg, "G"); }
 void cmd_zline(server_t *srv, client_t *cl, irc_message_t *msg) { line_common(srv, cl, msg, "Z"); }
-/* SHUN: keep the connection but silently drop the user's messaging commands. ELINE: exempt a mask from K/G-lines. */
+/* SHUN: keep the connection but silently drop the user's messaging commands. ELINE: exempt a mask from K/G-lines; on a
+ * whole address (IP, glob or CIDR) it also exempts it from Z-lines, the connect-flood throttle, the caps, the DNSBL and the scanner. */
 void cmd_shun(server_t *srv, client_t *cl, irc_message_t *msg) { line_common(srv, cl, msg, "S"); }
 void cmd_eline(server_t *srv, client_t *cl, irc_message_t *msg) { line_common(srv, cl, msg, "E"); }
 

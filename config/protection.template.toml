@@ -29,7 +29,8 @@
 #  EXEMPT -- never DNSBL-checked or scanned
 # -----------------------------------------------------------------------------
 # IP globs ("*", "?"). Useful for a trusted host that runs a proxy on purpose
-# (a bouncer, your VPN exit). Connection caps and the flood throttle still apply.
+# (a bouncer, your VPN exit). Connection caps and the flood throttle still apply;
+# an oper can lift those live, with no rehash, using /ELINE <ip | glob | CIDR>.
 [exempt]
 
 ips = [

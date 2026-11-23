@@ -199,7 +199,7 @@ static const help_entry_t HELP_TABLE[] = {
     {"CHGIDENT", {"CHGIDENT <nick> <ident>", "IRC operators only: change a user's ident."}},
     {"SANICK", {"SANICK <nick> <newnick>", "IRC operators only: force a nick change."}},
     {"SHUN", {"SHUN [<mask> [duration] [reason]]", "IRC operators only: silently drop a connected user's messages (no disconnect), on every linked server. Needs UNSHUN to lift."}},
-    {"ELINE", {"ELINE [<mask> [duration] [reason]]", "IRC operators only: exempt a mask from K/G-lines."}},
+    {"ELINE", {"ELINE [<mask> [duration] [reason]]", "IRC operators only: exempt a mask from K/G-lines. On a whole address (IP, glob or CIDR such as 2001:db8::/64) it also exempts it from Z-lines, the connect-flood throttle, the per-IP connection cap, the DNSBL and the proxy scanner."}},
     {"ACCEPT", {"ACCEPT [nick[,-nick,...]]", "Caller-ID (+g): allow/remove nicks that may message you; no argument lists them."}},
     {"LOCOPS", {"LOCOPS :<text>", "IRC operators only: message the operators on this server."}},
     {"OPERWALL", {"OPERWALL :<text>", "IRC operators only: same as GLOBOPS."}},

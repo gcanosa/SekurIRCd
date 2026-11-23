@@ -314,6 +314,10 @@ int server_kline_enforce(server_t *srv, const char *mask, const char *line_type,
 const char *server_kline_match(server_t *srv, const char *ip, const char *user,
                                 const char *host, int ident_confirmed, const char *cloak);
 int server_client_line_hits(const char *mask, const char *line_type, const struct client *c);
+/* An ELINE on a whole address ("1.2.3.4", "2001:db8::/64", "*@10.0.*") exempts it from every line, the connect-flood
+ * throttle, the per-IP cap, the DNSBL and the scanner. _hits_ip tests one entry (TESTLINE), server_eline_ip the list. */
+int server_eline_hits_ip(const kline_entry_t *e, const char *ip);
+int server_eline_ip(server_t *srv, const char *ip);
 
 /* Records nick/user/host/realname into the WHOWAS ring buffer -- called
  * from server_remove_client right before a client is freed. */

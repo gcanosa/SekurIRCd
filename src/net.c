@@ -567,6 +567,11 @@ int net_connect_flood_hit(const cfg_security_t *sec, const char *ip) {
     return t->count > sec->connect_flood_max;
 }
 
+void net_connect_flood_reset(const char *key) {
+    for (int i = 0; i < CONNECT_FLOOD_SLOTS; i++)
+        if (strcasecmp(g_connect_tracks[i].ip, key) == 0) memset(&g_connect_tracks[i], 0, sizeof g_connect_tracks[i]);
+}
+
 /* errno from the last accept() that failed -- accept_clients needs to tell
  * "backlog drained" (EAGAIN) apart from "out of descriptors" (EMFILE), and
  * the work accept_common does after a successful accept would clobber it. */
@@ -712,10 +717,11 @@ static client_t *accept_common(server_t *srv, int listen_fd) {
      * scanned; that connection is ours, not a flood, and needs no second
      * DNSBL lookup or scan. */
     int scan_related = protection_ip_related(srv, ipbuf);
+    int elined = server_eline_ip(srv, ipbuf); /* an ELINE on this address: no flood throttle, per-IP cap, DNSBL or scan (server_kline_match skips its lines) */
 
     char limit_key[64]; /* an IPv6 client counts as its whole /64 (ipv6_limit_prefix): rotating addresses in it doesn't help */
     server_ip_key(srv, ipbuf, limit_key, sizeof limit_key);
-    if (!scan_related && net_connect_flood_hit(&srv->cfg.security, limit_key)) {
+    if (!scan_related && !elined && net_connect_flood_hit(&srv->cfg.security, limit_key)) {
         long dur = srv->cfg.security.connect_flood_kline_duration[0]
             ? irc_parse_duration(srv->cfg.security.connect_flood_kline_duration) : 0;
         if (dur < 0) dur = 0;
@@ -748,7 +754,7 @@ static client_t *accept_common(server_t *srv, int listen_fd) {
     }
     int per_ip_cap = srv->cfg.security.max_connections_per_ip;
     if (cl->class_idx >= 0 && srv->cfg.classes[cl->class_idx].max_per_ip > 0) per_ip_cap = srv->cfg.classes[cl->class_idx].max_per_ip;
-    if (!scan_related && per_ip_cap > 0) {
+    if (!scan_related && !elined && per_ip_cap > 0) {
         /* O(1): server_add_connection/unlink_connection keep this exact.
          * Walking all_clients here cost O(connections) on every accept(),
          * times ACCEPT_BURST per poll wakeup, exactly when under a flood. */
@@ -780,7 +786,7 @@ static client_t *accept_common(server_t *srv, int listen_fd) {
     crypto_random_hex(cl->your_id, sizeof cl->your_id, 8);
 
     const cfg_protection_t *prot = &srv->cfg.protection;
-    int exempt = protection_exempt(prot, ipbuf);
+    int exempt = elined || protection_exempt(prot, ipbuf);
     if (prot->bl_enabled && prot->n_blacklists > 0 && !exempt && !scan_related) {
         job_t j; memset(&j, 0, sizeof j);
         j.type = JOB_DNSBL;

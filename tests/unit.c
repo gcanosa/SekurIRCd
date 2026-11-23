@@ -719,6 +719,45 @@ static void test_connect_flood_throttle(void) {
     for (int i = 0; i < 10; i++) assert(net_connect_flood_hit(&sec, "203.0.113.11") == 0);
 }
 
+/* An ELINE on a whole address exempts it from every line, Z-lines included (a user@host or hostname ELINE never does),
+ * and lifting a flood ban forgets that address's connect count so it doesn't trip again on the next connect. */
+static void test_eline_address_and_unzline_flood_reset(void) {
+    config_t cfg;
+    config_defaults(&cfg);
+    server_t srv;
+    assert(server_init(&srv, &cfg) == 0);
+    const char *v6 = "2402:d0c0:21::5";
+
+    server_kline_add(&srv, "2402:d0c0:21::/64", "Connecting too fast", "connect-flood", "Z", 600);
+    assert(server_kline_match(&srv, v6, NULL, v6, 0, NULL) != NULL);
+    server_kline_add(&srv, "*@2402:d0c0:21::/64", "friends", "oper", "E", 0);
+    assert(server_eline_ip(&srv, v6) && !server_eline_ip(&srv, "2402:d0c0:22::5"));
+    assert(server_kline_match(&srv, v6, NULL, v6, 0, NULL) == NULL);
+    assert(server_kline_match(&srv, "2402:d0c0:21::9", "u", "h", 0, NULL) == NULL);
+
+    server_kline_add(&srv, "203.0.113.0/24", "bad", "oper", "Z", 0);
+    server_kline_add(&srv, "bob@203.0.113.7", "one user", "oper", "E", 0);   /* user@host: K/G only, never an address */
+    server_kline_add(&srv, "*@*.example.com", "a host", "oper", "E", 0);
+    assert(!server_eline_ip(&srv, "203.0.113.7"));
+    assert(server_kline_match(&srv, "203.0.113.7", NULL, "203.0.113.7", 0, NULL) != NULL);
+    server_kline_add(&srv, "203.0.113.9", "bare form", "oper", "E", 0);
+    assert(server_eline_ip(&srv, "203.0.113.9") && !server_eline_ip(&srv, "203.0.113.10"));
+    assert(server_kline_match(&srv, "203.0.113.9", NULL, "203.0.113.9", 0, NULL) == NULL);
+    assert(server_kline_match(&srv, "203.0.113.10", NULL, "203.0.113.10", 0, NULL) != NULL);
+
+    /* UNZLINE of a flood ban resets the counter kept under the same key */
+    srv.cfg.security.connect_flood_max = 2;
+    srv.cfg.security.connect_flood_window = 10.0;
+    const char *key = "2402:d0c0:21::/64";
+    assert(net_connect_flood_hit(&srv.cfg.security, key) == 0);
+    assert(net_connect_flood_hit(&srv.cfg.security, key) == 0);
+    assert(net_connect_flood_hit(&srv.cfg.security, key) == 1);
+    assert(server_kline_remove_typed(&srv, key, 'Z') == 1);
+    assert(net_connect_flood_hit(&srv.cfg.security, key) == 0);
+
+    server_free_tables(&srv);
+}
+
 /* --- spam protection ---------------------------------------------------------- */
 
 static void test_spam_config_defaults_and_template(void) {
@@ -1373,6 +1412,7 @@ int main(void) {
     RUN(test_links_allowed_ips_config);
     RUN(test_config_ipv6_glob_padding);
     RUN(test_connect_flood_throttle);
+    RUN(test_eline_address_and_unzline_flood_reset);
     RUN(test_channel_mode_string_cannot_overflow);
     RUN(test_line_mask_hits);
     RUN(test_spam_config_defaults_and_template);

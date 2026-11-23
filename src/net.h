@@ -23,6 +23,8 @@ int net_set_nonblocking(int fd);
  * only so tests/unit.c can exercise it directly. Returns 1 once `ip` exceeds
  * sec->connect_flood_max connects within sec->connect_flood_window seconds. */
 int net_connect_flood_hit(const cfg_security_t *sec, const char *ip);
+/* Forget the connect count for `key` (the Z-line mask a flood ban was stored under): UNZLINE calls it. */
+void net_connect_flood_reset(const char *key);
 
 /* Runs until srv->shutdown_requested. Returns 0 normally. */
 /* Restores the client's default displayed host (cloak if host_masking, else
