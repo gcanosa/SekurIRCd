@@ -11,6 +11,7 @@
 #include "../src/log.h"
 
 #include <arpa/inet.h>
+#include <netinet/in.h> /* struct in6_addr on the BSDs */
 #include <errno.h>
 #include <openssl/err.h>
 #include <openssl/ssl.h>

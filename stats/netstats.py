@@ -165,13 +165,27 @@ def load_config(path):
 
 # --- passwords (same scrypt format as the ircd's oper passwords, tools/linkmgmt.py scrypt_hash) ------------------------
 
+SEKURIRCD_BIN = os.path.join(ROOT, "bin", "sekurircd")  # its scrypt stands in where hashlib has none (Python on LibreSSL, OpenBSD)
+
+
 def hash_password(pw):
+    if not hasattr(hashlib, "scrypt"):
+        import subprocess
+        out = subprocess.run([SEKURIRCD_BIN, "--hash-password"], input=f"{pw}\n{pw}\n", capture_output=True, text=True, check=True).stdout
+        return re.search(r"scrypt\$\S+", out).group(0)
     salt = secrets.token_bytes(16)
     d = hashlib.scrypt(pw.encode(), salt=salt, n=16384, r=8, p=1, dklen=64, maxmem=32 * 1024 * 1024)
     return f"scrypt$16384$8$1${salt.hex()}${d.hex()}"
 
 
 def check_password(pw, stored):
+    if not hasattr(hashlib, "scrypt"):
+        import subprocess
+        try:
+            return subprocess.run([SEKURIRCD_BIN, "--verify-password"], input=f"{pw}\n{stored}\n", capture_output=True, text=True,
+                                  timeout=10).returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            return False
     try:
         _, n, r, p, salt, want = stored.split("$")
         d = hashlib.scrypt(pw.encode(), salt=bytes.fromhex(salt), n=int(n), r=int(r), p=int(p), dklen=len(want) // 2,

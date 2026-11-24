@@ -6,14 +6,11 @@ import hashlib, json, os, secrets, time
 from harness import Server, Services, SVC_NAME, SVC_PW
 from test_accounts2 import ns
 from test_chanserv2 import cs
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "tools"))
+from linkmgmt import scrypt_hash  # the services' password format (falls back to bin/sekurircd where hashlib has no scrypt)
 
 DAY = 86400
-
-
-def scrypt_hash(pw):  # the services' password format
-    salt = secrets.token_bytes(16)
-    d = hashlib.scrypt(pw.encode(), salt=salt, n=16384, r=8, p=1, dklen=64, maxmem=32 * 1024 * 1024)
-    return f"scrypt$16384$8$1${salt.hex()}${d.hex()}"
 
 
 def test_unused_accounts_expire_and_leave_their_channels():

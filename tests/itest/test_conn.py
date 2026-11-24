@@ -115,7 +115,8 @@ def make_cert(d):
     crt, key = os.path.join(d, "t.crt"), os.path.join(d, "t.key")
     conf = os.path.join(d, "t.cnf")  # our own: NetBSD's openssl has no system openssl.cnf to read
     with open(conf, "w") as f:
-        f.write("[req]\ndistinguished_name = dn\nprompt = no\n[dn]\nCN = localhost\n")
+        f.write("[req]\ndistinguished_name = dn\nprompt = no\nx509_extensions = v3\n[dn]\nCN = localhost\n"
+                "[v3]\nsubjectAltName = DNS:localhost\nbasicConstraints = critical,CA:TRUE\n")  # newer OpenSSL matches names by SAN only
     r = subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", key, "-out", crt, "-days", "1",
                         "-config", conf], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr

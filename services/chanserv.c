@@ -42,6 +42,7 @@
 #include <strings.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h> /* struct timeval: Linux and the BSDs don't get it through the others */
 #include <time.h>
 #include <unistd.h>
 

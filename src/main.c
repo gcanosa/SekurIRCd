@@ -6,6 +6,7 @@
  */
 #include "config.h"
 #include "crypto.h"
+#include <openssl/crypto.h>
 #include "log.h"
 #include "net.h"
 #include "server.h"
@@ -69,6 +70,18 @@ static void read_password_noecho(const char *prompt, char *out, size_t outsz) {
     }
     size_t len = strlen(out);
     while (len > 0 && (out[len - 1] == '\n' || out[len - 1] == '\r')) out[--len] = '\0';
+}
+
+/* --verify-password: a password line, then a stored hash line, on stdin; exit 0 when they match. For the Python tools on a
+ * system whose hashlib has no scrypt (OpenBSD's LibreSSL): crypto.c carries its own. */
+static int verify_password_cli(void) {
+    char pw[256], stored[300];
+    if (!fgets(pw, sizeof pw, stdin) || !fgets(stored, sizeof stored, stdin)) return 2;
+    pw[strcspn(pw, "\r\n")] = '\0';
+    stored[strcspn(stored, "\r\n")] = '\0';
+    int ok = crypto_verify_password(pw, stored);
+    OPENSSL_cleanse(pw, sizeof pw);
+    return ok ? 0 : 1;
 }
 
 static int hash_password_cli(void) {
@@ -229,6 +242,7 @@ int main(int argc, char **argv) {
         if ((strcmp(a, "-c") == 0 || strcmp(a, "--config") == 0) && i + 1 < argc) config_path = argv[++i];
         else if (strcmp(a, "-v") == 0 || strcmp(a, "--verbose") == 0) verbose = 1;
         else if (strcmp(a, "--hash-password") == 0) do_hash = 1;
+        else if (strcmp(a, "--verify-password") == 0) return verify_password_cli();
         else if (strcmp(a, "-d") == 0 || strcmp(a, "--daemon") == 0) do_daemon = 1;
         else if (strcmp(a, "--pidfile") == 0 && i + 1 < argc) pidfile = argv[++i];
         else if (strcmp(a, "--stop") == 0) do_stop = 1;

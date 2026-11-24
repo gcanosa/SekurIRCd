@@ -5,12 +5,9 @@ require_email without email_command is refused."""
 import hashlib, json, os, re, secrets, stat, subprocess, time
 from harness import Server, SERVICES
 from test_accounts2 import ns, sasl_plain
-
-
-def scrypt_hash(pw):
-    salt = secrets.token_bytes(16)
-    d = hashlib.scrypt(pw.encode(), salt=salt, n=16384, r=8, p=1, dklen=64, maxmem=32 * 1024 * 1024)
-    return f"scrypt$16384$8$1${salt.hex()}${d.hex()}"
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "tools"))
+from linkmgmt import scrypt_hash  # the services' password format (falls back to bin/sekurircd where hashlib has no scrypt)
 
 
 def last_code(mails, account):
@@ -85,7 +82,6 @@ def test_ircv3_register_and_verify():
         assert any("FAIL VERIFY INVALID_CODE" in l for l in c.say("VERIFY ircv3 deadbeef", 1.5))
         got = c.say(f"VERIFY ircv3 {last_code(mails, 'ircv3')}", 1.5)
         assert any("VERIFY SUCCESS ircv3" in l for l in got) and any(" 900 " in l for l in got), got
-
 
 
 def test_require_email_needs_a_mailer(tmp_path=None):

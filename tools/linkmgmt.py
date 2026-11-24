@@ -75,6 +75,10 @@ def read_config(path):
 
 def scrypt_hash(pw):
     """Same format and cost as src/crypto.c crypto_hash_password (and `sekurircd --hash-password`)."""
+    if not hasattr(hashlib, "scrypt"):  # Python on LibreSSL (OpenBSD): the ircd binary has its own scrypt
+        out = subprocess.run([os.path.join(ROOT, "bin", "sekurircd"), "--hash-password"], input=f"{pw}\n{pw}\n",
+                             capture_output=True, text=True, check=True).stdout
+        return re.search(r"scrypt\$\S+", out).group(0)
     salt = secrets.token_bytes(16)
     d = hashlib.scrypt(pw.encode(), salt=salt, n=16384, r=8, p=1, dklen=64, maxmem=32 * 1024 * 1024)
     return f"scrypt$16384$8$1${salt.hex()}${d.hex()}"
