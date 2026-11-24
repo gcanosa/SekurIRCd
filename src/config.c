@@ -926,6 +926,30 @@ static int build_config(toml_node_t *raw, const char *path, config_t *out,
                     return -1;
                 }
             }
+            snprintf(fn, sizeof fn, "vhosts[%d].accounts", i);
+            if (cfg_get_str_array(v, "accounts", vh->accounts, CFG_MAX_ACCOUNTS_PER_VHOST, &vh->n_accounts, errbuf, errbufsz, fn)) return -1;
+            for (int j = 0; j < vh->n_accounts; j++) {
+                if (!irc_valid_user(vh->accounts[j], 30)) {
+                    snprintf(errbuf, errbufsz, "vhosts[%d].accounts[%d] must be an account name (letters, digits and the usual nick characters)", i, j);
+                    return -1;
+                }
+            }
+            snprintf(fn, sizeof fn, "vhosts[%d].password", i);
+            if (cfg_get_str(v, "password", "", vh->password, CFG_STR, errbuf, errbufsz, fn)) return -1;
+            if (strpbrk(vh->password, " \t\r\n")) { /* it is typed as a command parameter */
+                snprintf(errbuf, errbufsz, "vhosts[%d].password must not contain whitespace", i);
+                return -1;
+            }
+            snprintf(fn, sizeof fn, "vhosts[%d].password_hash", i);
+            if (cfg_get_str(v, "password_hash", "", vh->password_hash, CFG_STR, errbuf, errbufsz, fn)) return -1;
+            if (vh->password[0] && vh->password_hash[0]) {
+                snprintf(errbuf, errbufsz, "vhosts[%d] takes password or password_hash, not both", i);
+                return -1;
+            }
+            if (vh->password_hash[0] && strncmp(vh->password_hash, "scrypt$", 7) != 0) {
+                snprintf(errbuf, errbufsz, "vhosts[%d].password_hash must be a string from `sekurircd --hash-password` (scrypt$...)", i);
+                return -1;
+            }
             out->n_vhosts++;
         }
     }

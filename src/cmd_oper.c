@@ -535,7 +535,9 @@ void cmd_restart(server_t *srv, client_t *cl, irc_message_t *msg) {
     finish_die_or_restart(srv, cl, 1, check_extra_password(srv->cfg.security.restart_password, given));
 }
 
-/* net.c: apply a finished JOB_SASL for AUTH_OPER/AUTH_DIE/AUTH_RESTART --
+static void finish_vhost(server_t *srv, client_t *cl, int success); /* the host-masking section below */
+
+/* net.c: apply a finished JOB_SASL for AUTH_OPER/AUTH_DIE/AUTH_RESTART/AUTH_VHOST --
  * see cmd.h's doc comment. AUTH_SASL/AUTH_REGISTER never reach here (net.c
  * routes those to cmd_finish_auth in cmd_reg.c instead). */
 void cmd_finish_privileged_auth(server_t *srv, client_t *cl, int purpose, int success) {
@@ -544,17 +546,53 @@ void cmd_finish_privileged_auth(server_t *srv, client_t *cl, int purpose, int su
         case AUTH_OPER:    finish_oper(srv, cl, cl->pending_account, success); break;
         case AUTH_DIE:     finish_die_or_restart(srv, cl, 0, success); break;
         case AUTH_RESTART: finish_die_or_restart(srv, cl, 1, success); break;
+        case AUTH_VHOST:   finish_vhost(srv, cl, success); break;
         default: break;
     }
 }
 
 /* --- host masking: VHOST / CHGHOST / SETHOST -------------------------------- */
 
-static int may_use_vhost(client_t *cl, cfg_vhost_t *v) {
+/* Opers, a matching allowed_hosts mask, or a logged-in account the block names: the vhosts /VHOST lists for this user. */
+static int vhost_listed_for(client_t *cl, cfg_vhost_t *v) {
     if (cl->umodes & UMODE_O) return 1;
     for (int i = 0; i < v->n_allowed_hosts; i++)
         if (irc_host_mask_match(cl->user, cl->ip, v->allowed_hosts[i])) return 1;
+    for (int i = 0; cl->account[0] && i < v->n_accounts; i++)
+        if (strcasecmp(cl->account, v->accounts[i]) == 0) return 1;
     return 0;
+}
+
+/* ... and may use: that, or a vhost with a password and nobody named (anyone who knows it -- not listed to those who don't). */
+static int may_use_vhost(client_t *cl, cfg_vhost_t *v) {
+    return vhost_listed_for(cl, v) || ((v->password[0] || v->password_hash[0]) && !v->n_allowed_hosts && !v->n_accounts);
+}
+
+/* The user wears `v`: shown like a SETHOST, on every server. */
+static void vhost_activate(server_t *srv, client_t *cl, const cfg_vhost_t *v) {
+    char old_prefix[320];
+    client_prefix(cl, old_prefix, sizeof old_prefix);
+    snprintf(cl->host, sizeof cl->host, "%s", v->host);
+    broadcast_chghost(srv, cl, old_prefix);
+    char m[300]; snprintf(m, sizeof m, "vhost set to %s", v->host);
+    notice_self(srv, cl, m);
+    log_info("oper", "%s activated vhost %s", cl->nick, v->host);
+    char snote[300]; snprintf(snote, sizeof snote, "%s activated vhost %s", cl->nick, v->host);
+    server_notify_opers(srv, snote);
+}
+
+/* A worker finished the scrypt check of a hashed vhost password (cmd_finish_privileged_auth). pending_account holds "<index> <host>"
+ * (the host cut short): a rehash in between may have moved or dropped the block, so it is found again before anything is applied. */
+static void finish_vhost(server_t *srv, client_t *cl, int success) {
+    int idx = atoi(cl->pending_account);
+    const char *want = strchr(cl->pending_account, ' ');
+    cfg_vhost_t *v = idx >= 0 && idx < srv->cfg.n_vhosts && want ? &srv->cfg.vhosts[idx] : NULL;
+    if (!v || !v->password_hash[0] || strncasecmp(v->host, want + 1, strlen(want + 1)) != 0 || !may_use_vhost(cl, v)) {
+        notice_self(srv, cl, "That vhost changed meanwhile -- try again");
+        return;
+    }
+    if (!success) { auth_fail_record(cl->ip); notice_self(srv, cl, "Wrong password for that vhost"); return; }
+    vhost_activate(srv, cl, v);
 }
 
 /* IRCv3 chghost: only delivered to `cl` itself and channel-mates that
@@ -569,15 +607,61 @@ void broadcast_chghost(server_t *srv, client_t *cl, const char *old_prefix) {
     netsync_user_chghost(srv, cl);
 }
 
+/* SVSHOST from services (cmd_reg.c's svc_command): the host the user's account chose, or "-" for the usual one. Like SETHOST, shown
+ * network-wide through the CHGHOST propagation; services repeat it at every login and after a restart, so a host that is already
+ * right is left alone. */
+void cmd_svshost(server_t *srv, client_t *cl, const char *host) {
+    char old_prefix[320], old_host[sizeof cl->host];
+    client_prefix(cl, old_prefix, sizeof old_prefix);
+    snprintf(old_host, sizeof old_host, "%s", cl->host);
+    if (strcmp(host, "-") == 0) net_reset_host(srv, cl);
+    else if (irc_valid_host(host)) snprintf(cl->host, sizeof cl->host, "%s", host);
+    else return;
+    if (strcmp(old_host, cl->host) != 0) broadcast_chghost(srv, cl, old_prefix);
+}
+
+/* VHOST ADD|DEL <account> <host> / VHOST LIST <account>: an oper's edit of the vhosts an account may choose from. Services keep them
+ * (one list for the whole network), so this only checks the privilege and the oper scope here and hands the request over -- from a
+ * hub or a leaf alike. 1 = it was one of those forms (and is dealt with); a non-oper's "VHOST add" is just a vhost name. */
+static int vhost_edit(server_t *srv, client_t *cl, irc_message_t *msg) {
+    const char *sub = msg->params[0];
+    int list = strcasecmp(sub, "LIST") == 0;
+    if ((!list && strcasecmp(sub, "ADD") && strcasecmp(sub, "DEL")) || !(cl->umodes & UMODE_O)) return 0;
+    if (!OPER_CAN(cl, OPER_PRIV_HOST)) { err_no_privileges(cl); return 1; }
+    if (msg->nparams < (list ? 2 : 3)) { notice_self(srv, cl, "Syntax: VHOST ADD|DEL <account> <host>, VHOST LIST <account>"); return 1; }
+    if (netsync_scope_refuse(srv, cl, "VHOST")) return 1; /* the list is the whole network's, even to read */
+    if (!services_agent(srv)) { notice_self(srv, cl, "Account services are unavailable right now"); return 1; }
+    cmd_svc_vhost(srv, cl, sub, msg->params[1], list ? NULL : msg->params[2]);
+    if (!list) {
+        log_info("oper", "%s used VHOST %s %s %s", cl->nick, sub, msg->params[1], msg->params[2]);
+        char snote[400]; snprintf(snote, sizeof snote, "%s used VHOST %s %s %s", cl->nick, sub, msg->params[1], msg->params[2]);
+        server_notify_opers(srv, snote);
+    }
+    return 1;
+}
+
+/* Account vhosts (an oper granted them, services keep them) are NickServ's: a logged-in user's VHOST that isn't one of this server's own
+ * [[vhosts]] goes there, as /msg NickServ VHOST ... */
+static int vhost_to_nickserv(server_t *srv, client_t *cl, const char *args) {
+    if (!cl->account[0] || !services_agent(srv)) return 0;
+    char text[300];
+    snprintf(text, sizeof text, "VHOST%s%s", args[0] ? " " : "", args);
+    cmd_to_nickserv(srv, cl, text);
+    return 1;
+}
+
 void cmd_vhost(server_t *srv, client_t *cl, irc_message_t *msg) {
+    if (msg->nparams >= 1 && vhost_edit(srv, cl, msg)) return;
     if (msg->nparams < 1) {
         char list[600] = "";
         for (int i = 0; i < srv->cfg.n_vhosts; i++) {
-            if (!may_use_vhost(cl, &srv->cfg.vhosts[i])) continue;
+            if (!vhost_listed_for(cl, &srv->cfg.vhosts[i])) continue;
             if (list[0]) strncat(list, ", ", sizeof list - strlen(list) - 1);
             strncat(list, srv->cfg.vhosts[i].host, sizeof list - strlen(list) - 1);
+            if (srv->cfg.vhosts[i].password[0] && !(cl->umodes & UMODE_O)) strncat(list, " (password)", sizeof list - strlen(list) - 1);
         }
-        notice_self(srv, cl, list[0] ? list : "No vhosts are available to you");
+        if (list[0]) notice_self(srv, cl, list);
+        if (!vhost_to_nickserv(srv, cl, "") && !list[0]) notice_self(srv, cl, "No vhosts are available to you");
         return;
     }
     const char *requested = msg->params[0];
@@ -590,22 +674,35 @@ void cmd_vhost(server_t *srv, client_t *cl, irc_message_t *msg) {
         notice_self(srv, cl, m);
         char snote[300]; snprintf(snote, sizeof snote, "%s cleared their vhost", cl->nick);
         server_notify_opers(srv, snote);
+        vhost_to_nickserv(srv, cl, "OFF"); /* and an account vhost stops being applied at login */
         return;
     }
     cfg_vhost_t *match = NULL;
     for (int i = 0; i < srv->cfg.n_vhosts; i++)
         if (strcasecmp(srv->cfg.vhosts[i].host, requested) == 0) { match = &srv->cfg.vhosts[i]; break; }
-    if (!match) { char m[300]; snprintf(m, sizeof m, "No such vhost: %s", requested); notice_self(srv, cl, m); return; }
+    if (!match) {
+        if (vhost_to_nickserv(srv, cl, requested)) return;
+        char m[300]; snprintf(m, sizeof m, "No such vhost: %s", requested); notice_self(srv, cl, m);
+        return;
+    }
     if (!may_use_vhost(cl, match)) { notice_self(srv, cl, "You are not permitted to use that vhost"); return; }
-    char old_prefix[320];
-    client_prefix(cl, old_prefix, sizeof old_prefix);
-    snprintf(cl->host, sizeof cl->host, "%s", match->host);
-    broadcast_chghost(srv, cl, old_prefix);
-    char m[300]; snprintf(m, sizeof m, "vhost set to %s", match->host);
-    notice_self(srv, cl, m);
-    log_info("oper", "%s activated vhost %s", cl->nick, match->host);
-    char snote[300]; snprintf(snote, sizeof snote, "%s activated vhost %s", cl->nick, match->host);
-    server_notify_opers(srv, snote);
+    if ((match->password[0] || match->password_hash[0]) && !(cl->umodes & UMODE_O)) { /* opers need none; everyone else shares the failed-login budget of their address */
+        if (msg->nparams < 2) { notice_self(srv, cl, "That vhost needs its password: VHOST <host> <password>"); return; }
+        if (auth_fail_throttled(cl->ip)) { notice_self(srv, cl, "Too many failed attempts -- wait a minute"); return; }
+        if (match->password_hash[0]) { /* scrypt takes ~30 ms: on a worker, like /OPER, so guessing never stalls the server */
+            if (cl->auth_pending) { notice_self(srv, cl, "Another password check is in progress -- try again shortly"); return; }
+            snprintf(cl->pending_account, sizeof cl->pending_account, "%d %.50s", (int)(match - srv->cfg.vhosts), match->host);
+            if (submit_privileged_check(cl, msg->params[1], match->password_hash, AUTH_VHOST) != 0)
+                notice_self(srv, cl, "Server is busy -- try again shortly");
+            return; /* finish_vhost applies it */
+        }
+        if (!crypto_secure_streq(msg->params[1], match->password)) {
+            auth_fail_record(cl->ip);
+            notice_self(srv, cl, "Wrong password for that vhost");
+            return;
+        }
+    }
+    vhost_activate(srv, cl, match);
 }
 
 void cmd_chghost(server_t *srv, client_t *cl, irc_message_t *msg) {

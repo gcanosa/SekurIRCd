@@ -9,8 +9,10 @@
  *   SVCNICK <uid> <newnick>    SVCQUIT <uid>    SVCACCOUNT <uid> <account|*>
  *   SVCSASL <cid> S <mech> <certfp|*> <ip>  |  SVCSASL <cid> C <data>  |  SVCSASL <cid> D A
  *   SVCREGISTER <cid> <ip> <account> <email|*> :<password>
+ *   SVCVHOST <uid> ADD|DEL|LIST <account> [host]   (an IRC operator's /VHOST ADD|DEL|LIST, checked on their server)
  * What we send: SVSLOGIN <id> <account|*> [regts [always-on secs]], SVSOPER <uid> <privileges|-> <account> ([[opers]]: IRC operator
- * status for a logged-in account, or "-" to take it back), SVSJOIN <id> <#chan,...> (SET AJOIN, after a login), SVSNICK <id> <nick>,
+ * status for a logged-in account, or "-" to take it back), SVSHOST <uid> <host|-> (the account's chosen vhost, "-" = the usual host),
+ * SVSJOIN <id> <#chan,...> (SET AJOIN, after a login), SVSNICK <id> <nick>,
  * KILL <id> :reason, SVCSASL <cid> C|D ...,
  * SVCREGRESULT <cid> SUCCESS|FAIL <code> <account> :text. <id> is a UID or a SASL client id (see link.h). */
 #include "svc.h"
@@ -74,6 +76,7 @@ static ns_cfg_t C;
 
 static account_store_t g_acc;
 static void opers_resync(void); /* [[opers]] below */
+static void vhost_admin(const char *to, const char *sub, const char *name, const char *host); /* VHOST below */
 
 /* --- config ---------------------------------------------------------------------------------------------------- */
 
@@ -254,6 +257,7 @@ void ns_shutdown(void) {
 typedef struct nsuser {
     char uid[16], nick[64], cf[64], user[32], host[128], ip[64], account[64], certfp[72], server[128];
     char oper_sent[96];    /* the SVSOPER privileges last sent for this user ("" = none): resent only when they change */
+    char vhost_sent[256];  /* the SVSHOST host last sent for this user ("" = none), same idea */
     time_t enforce_at;     /* rename deadline for an unidentified user on a registered nick (0 = none) */
     char enforce_owner[64];
     UT_hash_handle hh;     /* by uid */
@@ -357,6 +361,27 @@ static void oper_sync(nsuser_t *u) {
     else log_info("nickserv", "%s is no longer a network oper", u->nick);
 }
 
+/* The vhost the user's account chose, as SVSHOST (the user's server shows it network-wide like a CHGHOST), when it differs from
+ * what we last said; "-" puts the real/cloaked host back (logged out, or the choice is gone). `force` says it again anyway: the
+ * user asked just now, and may have changed their host on the server since (/VHOST off, /SETHOST). */
+static void vhost_sync(nsuser_t *u, int force) {
+    const char *want = u->account[0] ? accounts_vhost(&g_acc, u->account) : NULL;
+    if (!want) want = "";
+    if (!force && strcmp(want, u->vhost_sent) == 0) return;
+    wire("SVSHOST", (const char *[]){u->uid, want[0] ? want : "-"}, 2, NULL);
+    snprintf(u->vhost_sent, sizeof u->vhost_sent, "%s", want);
+}
+
+/* "a.example, b.example [in use]" -- the hosts granted to `account`. */
+static void vhost_list_str(const char *account, char *out, size_t outsz) {
+    const char *chosen = accounts_vhost(&g_acc, account), *h;
+    out[0] = '\0';
+    for (int i = 0; (h = accounts_vhost_at(&g_acc, account, i)); i++) {
+        size_t l = strlen(out);
+        snprintf(out + l, outsz - l, "%s%s%s", i ? ", " : "", h, chosen && strcasecmp(chosen, h) == 0 ? " [in use]" : "");
+    }
+}
+
 /* After a reload: say it all again to everyone who should be an oper (a server that now takes grants, or that restarted, hears it;
  * an unchanged one ignores it), and take it back from those whose entry is gone. */
 static void opers_resync(void) {
@@ -382,6 +407,7 @@ static void login(const char *id, const char *account) {
         snprintf(u->account, sizeof u->account, "%s", account ? account : "");
         if (account) u->enforce_at = 0;
         oper_sync(u);
+        vhost_sync(u, 0);
     }
 }
 
@@ -850,6 +876,16 @@ static void ev_user(irc_message_t *m) {
     if (renamed) enforce_check(u);
     if (fresh && sasl_seen_check(u)) ajoin_send(u->uid, u->account); /* SASL: no SVCACCOUNT follows */
     oper_sync(u); /* a SASL login made before registration, or a user the hub resent after a services restart */
+    vhost_sync(u, 0);
+}
+
+/* SVCVHOST <uid> ADD|DEL|LIST <account> [host] -- an IRC operator's /VHOST ADD|DEL|LIST, from whichever server they are on. Their server
+ * checked the `host` privilege (and oper_scope); the hub vouches for the line like it does for SVCREGISTER. */
+static void ev_vhost(irc_message_t *m) {
+    nsuser_t *u = m->nparams >= 3 ? user_by_uid(m->params[0]) : NULL;
+    const char *sub = u ? m->params[1] : "";
+    if (!u || (strcasecmp(sub, "ADD") && strcasecmp(sub, "DEL") && strcasecmp(sub, "LIST"))) return;
+    vhost_admin(u->nick, sub, m->params[2], m->nparams > 3 ? m->params[3] : NULL);
 }
 
 int ns_event(irc_message_t *m) {
@@ -873,6 +909,7 @@ int ns_event(irc_message_t *m) {
             if (u->account[0] && strcasecmp(u->account, u->enforce_owner) == 0) u->enforce_at = 0;
             if (u->account[0]) { cs_user_login(u->nick); sasl_seen_check(u); ajoin_send(u->uid, u->account); }
             oper_sync(u);
+            vhost_sync(u, 0);
         }
         return 1;
     }
@@ -884,6 +921,7 @@ int ns_event(irc_message_t *m) {
     if (!strcmp(c, "SVCSASL")) { ev_sasl(m); return 1; }
     if (!strcmp(c, "SVCREGISTER")) { ev_register(m); return 1; }
     if (!strcmp(c, "SVCVERIFY")) { ev_verify(m); return 1; }
+    if (!strcmp(c, "SVCVHOST")) { ev_vhost(m); return 1; }
     return 0;
 }
 
@@ -1103,6 +1141,9 @@ static void cmd_info(nsuser_t *u, const char *a) {
     if (!self && !is_admin(u)) return; /* the owner (and services admins) also see the email and grouped nicks */
     const char *ajoin = accounts_ajoin(&g_acc, who);
     if (ajoin && ajoin[0]) sayf(u->nick, "Auto-join: %s", ajoin);
+    char vh[600];
+    vhost_list_str(who, vh, sizeof vh);
+    if (vh[0]) sayf(u->nick, "Vhosts: %s", vh);
     const char *em = accounts_email(&g_acc, who);
     sayf(u->nick, "Email: %s%s", em ? em : "(none)", em ? (accounts_email_verified(&g_acc, who) ? " (verified)" : " (unverified)") : "");
     int gn = accounts_group_count(&g_acc, who);
@@ -1233,6 +1274,65 @@ static void cmd_set_always_on(nsuser_t *u, const char *v) {
     log_info("nickserv", "%s turned always-on %s for %s", u->nick, on ? "on" : "off", account);
 }
 
+/* Every connection logged in to `account` hears the account's current vhost (forced: somebody just chose or changed it). */
+static void vhost_resync_account(const char *account, int force) {
+    nsuser_t *x, *tmp;
+    HASH_ITER(hh, g_by_uid, x, tmp) if (x->account[0] && strcasecmp(x->account, account) == 0) vhost_sync(x, force);
+}
+
+/* VHOST [<host>|OFF] -- list the hosts an oper granted this account, wear one (kept for every login, on every server), or stop. */
+static void cmd_vhost(nsuser_t *u, const char *a) {
+    if (!u->account[0]) { say(u->nick, "You must IDENTIFY first"); return; }
+    char account[64], list[600];
+    snprintf(account, sizeof account, "%s", u->account);
+    vhost_list_str(account, list, sizeof list);
+    if (!a) {
+        if (list[0]) sayf(u->nick, "Your vhosts: %s -- VHOST <host> wears one, VHOST OFF takes it off", list);
+        else say(u->nick, "No vhosts are assigned to your account -- an operator can add some (VHOST ADD)");
+        return;
+    }
+    if (strcasecmp(a, "OFF") == 0) {
+        if (!accounts_vhost(&g_acc, account)) say(u->nick, "No vhost is saved for your account");
+        else say(u->nick, "Vhost off: you show your usual host, and no vhost is applied at login");
+        accounts_set_vhost(&g_acc, account, NULL);
+        vhost_resync_account(account, 1);
+        return;
+    }
+    const char *h = NULL;
+    for (int i = 0; !h && accounts_vhost_at(&g_acc, account, i); i++)
+        if (strcasecmp(accounts_vhost_at(&g_acc, account, i), a) == 0) h = accounts_vhost_at(&g_acc, account, i);
+    if (!h) { sayf(u->nick, "Your account has no vhost %s%s%s", a, list[0] ? " -- yours: " : "", list); return; }
+    accounts_set_vhost(&g_acc, account, h);
+    vhost_resync_account(account, 1);
+    sayf(u->nick, "Your vhost is now %s (it is applied at every login; VHOST OFF stops that)", h);
+    log_info("nickserv", "%s chose vhost %s for %s", u->nick, h, account);
+}
+
+/* VHOST ADD|DEL <account> <host> / VHOST LIST <account>: the grants. From an IRC operator (SVCVHOST: their own server checked the
+ * `host` privilege) or a services admin typing it here. Answers go to `to`. */
+static void vhost_admin(const char *to, const char *sub, const char *name, const char *host) {
+    const char *owner = name ? accounts_owner_of_nick(&g_acc, name) : NULL;
+    if (!owner) { say(to, "No such account"); return; }
+    char account[64], list[600], m[400];
+    snprintf(account, sizeof account, "%s", owner);
+    if (strcasecmp(sub, "LIST") == 0) {
+        vhost_list_str(account, list, sizeof list);
+        sayf(to, "%s: %s", account, list[0] ? list : "no vhosts");
+        return;
+    }
+    if (!host || !irc_valid_host(host)) { say(to, "Syntax: VHOST ADD|DEL <account> <host> (a valid host name)"); return; }
+    if (strcasecmp(sub, "ADD") == 0) {
+        if (accounts_vhost_add(&g_acc, account, host) != 0) { sayf(to, "%s already has %s, or already has the most (%d)", account, host, ACCOUNT_MAX_VHOSTS); return; }
+        snprintf(m, sizeof m, "%s granted vhost %s to account %s", to, host, account);
+    } else {
+        if (accounts_vhost_del(&g_acc, account, host) != 0) { sayf(to, "%s has no vhost %s", account, host); return; }
+        vhost_resync_account(account, 0); /* the one it was wearing goes with it */
+        snprintf(m, sizeof m, "%s removed vhost %s from account %s", to, host, account);
+    }
+    say(to, m);
+    log_info("nickserv", "%s", m);
+}
+
 /* STATUS / ACC <nick>: is that nick logged in to the account that owns it? For bots. 0 = offline or not registered,
  * 1 = online but not logged in to its owner, 3 = logged in to its owner (2, "recognised by ACCESS", is never given:
  * there is no ACCESS list, CERT logs in outright). STATUS answers Anope's way, ACC Atheme's. */
@@ -1342,6 +1442,14 @@ static const svc_help_t NS_HELP[] = {
      "  INFO  shows the fingerprint on file\n"
      "Needs you logged in.\n"
      "Example: /msg NickServ CERT ADD", 0},
+    {"VHOST|VHOST OFF", "wear a virtual host an operator gave you",
+     "Syntax: VHOST\n"
+     "        VHOST <host>\n"
+     "        VHOST OFF\n"
+     "Without a host: the vhosts your account may use. With one: you show it (on every server, to everyone) and\n"
+     "it is applied again at every login. OFF takes it off and stops that. Needs you logged in.\n"
+     "Examples: /msg NickServ VHOST\n"
+     "          /msg NickServ VHOST vip.example.org", 0},
     {"GROUP", "add your current nick to your account",
      "Syntax: GROUP\n"
      "Adds the nick you are using now to your account (up to 10 nicks), so it is protected and logs in to\n"
@@ -1404,6 +1512,13 @@ static const svc_help_t NS_HELP[] = {
      "Syntax: FDROP <account>\n"
      "Deletes an account without its password. Cannot be undone.\n"
      "Example: /msg NickServ FDROP spammer", 1},
+    {"VHOST ADD|VHOST DEL|VHOST LIST", "(admin) give an account vhosts to choose from",
+     "Syntax: VHOST ADD <account> <host>\n"
+     "        VHOST DEL <account> <host>\n"
+     "        VHOST LIST <account>\n"
+     "An account may have up to 20 vhosts and picks one with VHOST <host>. DEL also takes it off whoever is\n"
+     "wearing it. IRC operators with the host privilege can do the same from any server with /VHOST ADD|DEL|LIST.\n"
+     "Example: /msg NickServ VHOST ADD alice vip.example.org", 1},
     {"SASET PASSWORD|SASET", "(admin) set an account's password",
      "Syntax: SASET PASSWORD <account> <new password>\n"
      "Example: /msg NickServ SASET PASSWORD alice temppass123", 1},
@@ -1482,6 +1597,12 @@ int ns_privmsg(const char *target, const char *from_nick, const char *text) {
     else if (strcasecmp(cmd, "LISTLOGINS") == 0) cmd_listlogins(u);
     else if (strcasecmp(cmd, "LISTCHANS") == 0) cmd_listchans(u);
     else if (strcasecmp(cmd, "CERT") == 0) cmd_cert(u, a);
+    else if (strcasecmp(cmd, "VHOST") == 0) {
+        if (!a || (strcasecmp(a, "ADD") && strcasecmp(a, "DEL") && strcasecmp(a, "LIST"))) cmd_vhost(u, a);
+        else if (!is_admin(u)) say(u->nick, "Permission denied -- that needs a services admin account ([nickserv] admins); an IRC operator can use /VHOST ADD|DEL|LIST");
+        else if (!b) say(u->nick, "Syntax: VHOST ADD|DEL <account> <host>, VHOST LIST <account>");
+        else vhost_admin(u->nick, a, b, c3);
+    }
     else if (strcasecmp(cmd, "SET") == 0 && a && strcasecmp(a, "PASSWORD") == 0) {
         if (!u->account[0]) say(u->nick, "You must IDENTIFY first");
         else if (!b || !c3) say(u->nick, "Syntax: SET PASSWORD <current> <new>");

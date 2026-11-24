@@ -474,6 +474,59 @@ void accounts_set_always_on(account_store_t *st, const char *name, int on) {
     commit(st, rec);
 }
 
+/* The granted list is "vhosts" (an array, as the grouped "nicks" are), the chosen one "vhost". */
+static cJSON *vhost_find(cJSON *arr, const char *host, int *idx) {
+    int i = 0;
+    cJSON *it;
+    cJSON_ArrayForEach(it, arr) {
+        if (cJSON_IsString(it) && strcasecmp(it->valuestring, host) == 0) { if (idx) *idx = i; return it; }
+        i++;
+    }
+    return NULL;
+}
+
+int accounts_vhost_add(account_store_t *st, const char *name, const char *host) {
+    cJSON *rec = find(st, name);
+    if (!rec) return -1;
+    cJSON *arr = cJSON_GetObjectItemCaseSensitive(rec, "vhosts");
+    if (!arr) { arr = cJSON_CreateArray(); cJSON_AddItemToObject(rec, "vhosts", arr); }
+    if (vhost_find(arr, host, NULL) || cJSON_GetArraySize(arr) >= ACCOUNT_MAX_VHOSTS) return -1;
+    cJSON_AddItemToArray(arr, cJSON_CreateString(host));
+    commit(st, rec);
+    return 0;
+}
+
+int accounts_vhost_del(account_store_t *st, const char *name, const char *host) {
+    cJSON *rec = find(st, name);
+    cJSON *arr = rec ? cJSON_GetObjectItemCaseSensitive(rec, "vhosts") : NULL;
+    int idx = 0;
+    if (!arr || !vhost_find(arr, host, &idx)) return -1;
+    cJSON_DeleteItemFromArray(arr, idx);
+    if (!cJSON_GetArraySize(arr)) cJSON_DeleteItemFromObjectCaseSensitive(rec, "vhosts");
+    const char *chosen = accounts_vhost(st, name);
+    if (chosen && strcasecmp(chosen, host) == 0) cJSON_DeleteItemFromObjectCaseSensitive(rec, "vhost");
+    commit(st, rec);
+    return 0;
+}
+
+const char *accounts_vhost_at(account_store_t *st, const char *name, int i) {
+    cJSON *it = cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(find(st, name), "vhosts"), i);
+    return cJSON_IsString(it) ? it->valuestring : NULL;
+}
+
+const char *accounts_vhost(account_store_t *st, const char *name) {
+    cJSON *v = cJSON_GetObjectItemCaseSensitive(find(st, name), "vhost");
+    return cJSON_IsString(v) ? v->valuestring : NULL;
+}
+
+void accounts_set_vhost(account_store_t *st, const char *name, const char *host) {
+    cJSON *rec = find(st, name);
+    if (!rec) return;
+    cJSON_DeleteItemFromObjectCaseSensitive(rec, "vhost");
+    if (host && host[0]) cJSON_AddStringToObject(rec, "vhost", host);
+    commit(st, rec);
+}
+
 const char *accounts_email(account_store_t *st, const char *name) {
     cJSON *v = cJSON_GetObjectItemCaseSensitive(find(st, name), "email");
     return cJSON_IsString(v) ? v->valuestring : NULL;

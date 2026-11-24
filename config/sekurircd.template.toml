@@ -461,13 +461,25 @@ chanserv_pidfile = ""
 # -----------------------------------------------------------------------------
 #  [[vhosts]] -- hosts users can switch to with /VHOST
 # -----------------------------------------------------------------------------
-# allowed_hosts: ident@host or IP masks (never nicks, which anyone can take).
-# A bare mask means any ident. Opers may use any vhost; leave allowed_hosts
-# empty for an oper-only one.
+# Who may use one: allowed_hosts (ident@host or IP masks, never nicks, which
+# anyone can take; a bare mask means any ident) and/or accounts (registered
+# people who are logged in, from wherever they connect). Either is enough.
+# A password is then asked for: /VHOST <host> <password>. Give it as password
+# (plain text in this file) or, better, password_hash (a scrypt string from
+# `sekurircd --hash-password`, which asks for the password and prints the hash; checked off the
+# main loop like /OPER), not both. Nothing rewrites the file for you.
+# Alone, with no allowed_hosts and no accounts, it opens the vhost to anyone who
+# knows the password, and /VHOST does not list it. Opers may use any vhost
+# without one; with none of the three it is oper-only.
+# These are per server. To give an account several vhosts to choose from on
+# every server, an oper uses /VHOST ADD <account> <host> instead (kept by
+# services; the person picks with /VHOST <host>).
 #
 #[[vhosts]]
 #host = "elite.users.example.com"
 #allowed_hosts = ["*@203.0.113.42", "198.51.100.*"]
+#accounts = ["alice", "bob"]
+#password_hash = "scrypt$16384$8$1$<salt-hex>$<digest-hex>"   # or: password = "change-me"
 
 
 # =============================================================================

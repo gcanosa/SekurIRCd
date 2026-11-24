@@ -983,7 +983,7 @@ static int link_process_line(server_t *srv, link_conn_t *lc, char *line) {
         netsync_global_notice(srv, msg.params[msg.nparams - 1]);
         return 0;
     }
-    if (!strcmp(msg.command, "SVSLOGIN") || !strcmp(msg.command, "SVSOPER") || !strcmp(msg.command, "SVSJOIN") || !strcmp(msg.command, "SVSNICK") || !strcmp(msg.command, "KILL") ||
+    if (!strcmp(msg.command, "SVSLOGIN") || !strcmp(msg.command, "SVSOPER") || !strcmp(msg.command, "SVSHOST") || !strcmp(msg.command, "SVSJOIN") || !strcmp(msg.command, "SVSNICK") || !strcmp(msg.command, "KILL") ||
         !strcmp(msg.command, "SVCSASL") || !strcmp(msg.command, "SVCREGRESULT")) {
         svc_command(srv, svc, &msg);
         return 0;

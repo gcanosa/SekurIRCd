@@ -462,7 +462,7 @@ int client_cert_fingerprint(client_t *cl, char *out, size_t outsz) {
 typedef struct { char ip[64]; time_t window_start; int count; } auth_fail_track_t;
 static auth_fail_track_t g_auth_fail_tracks[AUTH_FAIL_SLOTS];
 
-static int auth_fail_throttled(const char *ip) {
+int auth_fail_throttled(const char *ip) {
     time_t now = time(NULL);
     for (int i = 0; i < AUTH_FAIL_SLOTS; i++) {
         auth_fail_track_t *t = &g_auth_fail_tracks[i];
@@ -472,7 +472,7 @@ static int auth_fail_throttled(const char *ip) {
     return 0;
 }
 
-static void auth_fail_record(const char *ip) {
+void auth_fail_record(const char *ip) {
     time_t now = time(NULL);
     int slot = -1, oldest_i = 0;
     time_t oldest = now + 1;
@@ -693,17 +693,31 @@ void cmd_verify(server_t *srv, client_t *cl, irc_message_t *msg) {
     }
 }
 
-/* CERT ADD|DEL|INFO -- kept as shorthand for /msg NickServ CERT ..., which owns certificate fingerprints now. */
-void cmd_cert(server_t *srv, client_t *cl, irc_message_t *msg) {
-    char text[64];
-    snprintf(text, sizeof text, "CERT %s", msg->params[0]);
+/* A command typed to the ircd that NickServ owns: delivered as /msg NickServ <text> from `cl` (it answers with notices). */
+void cmd_to_nickserv(server_t *srv, client_t *cl, const char *text) {
     irc_message_t m;
     memset(&m, 0, sizeof m);
     m.command = "PRIVMSG";
     m.params[0] = "NickServ";
-    m.params[1] = text;
+    m.params[1] = (char *)text;
     m.nparams = 2;
     cmd_privmsg(srv, cl, &m);
+}
+
+/* CERT ADD|DEL|INFO -- kept as shorthand for /msg NickServ CERT ..., which owns certificate fingerprints now. */
+void cmd_cert(server_t *srv, client_t *cl, irc_message_t *msg) {
+    char text[64];
+    snprintf(text, sizeof text, "CERT %s", msg->params[0]);
+    cmd_to_nickserv(srv, cl, text);
+}
+
+/* SVCVHOST <uid> ADD|DEL|LIST <account> [host] -- an oper's edit of an account's vhosts (cmd_oper.c's VHOST checked their `host`
+ * privilege on this server); NickServ answers with a notice. */
+void cmd_svc_vhost(server_t *srv, client_t *cl, const char *sub, const char *account, const char *host) {
+    char line[500];
+    const char *p[] = {cl->uid, sub, account, host};
+    irc_build(line, sizeof line, NULL, 0, NULL, "SVCVHOST", p, host ? 4 : 3, NULL);
+    to_services(srv, line);
 }
 
 /* A SASL session finished (services said D S|F, or it timed out). */
@@ -756,7 +770,7 @@ static client_t *svc_target(server_t *srv, const char *id, char *route, size_t r
     return c;
 }
 
-/* A line from services (its own link, or relayed by netsync): SVSLOGIN, SVSOPER, SVSJOIN, SVSNICK, KILL, SVCSASL, SVCREGRESULT. Every one
+/* A line from services (its own link, or relayed by netsync): SVSLOGIN, SVSOPER, SVSHOST, SVSJOIN, SVSNICK, KILL, SVCSASL, SVCREGRESULT. Every one
  * names its target first; one that isn't ours is passed on toward its server. `svc` is the bot it came from (NULL when
  * relayed -- the sending services' server already checked that). */
 void svc_command(server_t *srv, client_t *svc, irc_message_t *msg) {
@@ -791,6 +805,8 @@ void svc_command(server_t *srv, client_t *svc, irc_message_t *msg) {
         log_info("sasl", "%s logged in as %s", cl->nick[0] ? cl->nick : cl->ip, msg->params[1]);
     } else if (!strcmp(c, "SVSOPER") && msg->nparams >= 2) {
         if (cl->registered) cmd_svsoper(srv, cl, msg->nparams > 2 ? msg->params[2] : "?", msg->params[1]);
+    } else if (!strcmp(c, "SVSHOST") && msg->nparams >= 2) {
+        if (cl->registered) cmd_svshost(srv, cl, msg->params[1]);
     } else if (!strcmp(c, "SVSJOIN") && msg->nparams >= 2) {
         if (cl->registered) cmd_svsjoin(srv, cl, msg->params[1]); /* not yet on the network: the SVCACCOUNT path retries */
     } else if (!strcmp(c, "SVSNICK") && msg->nparams >= 2) {

@@ -1590,6 +1590,7 @@ static void handle_svcrelay(server_t *srv, link_conn_t *lc, irc_message_t *msg) 
     const char *dest = msg->params[0], *line = msg->params[msg->nparams - 1];
     const netserver_t *to = svc_route(srv, dest);
     if (!to) return;
+    if (!strncmp(line, "SVCVHOST ", 9) && limited_link(srv, lc)) { scope_deny(srv, lc, NULL, "VHOST"); return; } /* a network-wide edit, from opers kept to their own server */
     if (to != srv->self_srv) {
         char out[1000];
         irc_build(out, sizeof out, NULL, 0, msg->prefix, "SVCRELAY", (const char *[]){dest}, 1, line);
@@ -1602,10 +1603,10 @@ static void handle_svcrelay(server_t *srv, link_conn_t *lc, irc_message_t *msg) 
     snprintf(buf, sizeof buf, "%s", line);
     irc_message_t m;
     if (irc_parse_line(buf, &m) != 0) return;
-    if (!strcmp(m.command, "SVSOPER")) { /* makes an oper: only the server that runs services may say it, not just any linked server */
+    if (!strcmp(m.command, "SVSOPER") || !strcmp(m.command, "SVSHOST")) { /* makes an oper / sets a host: only the server that runs services may say it, not just any linked server */
         netserver_t *from = src_server(srv, lc, msg->prefix);
         if (!from || strcasecmp(from->name, services_home(srv)) != 0) {
-            log_warn("netsync", "SVSOPER relayed by %s refused: services do not run there", from ? from->name : lc->peer_name);
+            log_warn("netsync", "%s relayed by %s refused: services do not run there", m.command, from ? from->name : lc->peer_name);
             return;
         }
     }

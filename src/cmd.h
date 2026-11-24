@@ -57,6 +57,7 @@ int force_nick_change(server_t *srv, client_t *target, const char *newnick);
 client_t *services_agent(server_t *srv);           /* the NickServ service user, or NULL while services are down */
 void cmd_services_tick(server_t *srv, time_t now);
 void cmd_channels_tick(server_t *srv, time_t now);
+void cmd_svshost(server_t *srv, client_t *cl, const char *host); /* SVSHOST from services: the account's vhost, or "-" for the usual host */
 void cmd_svsoper(server_t *srv, client_t *cl, const char *account, const char *privs); /* SVSOPER from services: privs csv, or "-" to take it back */
 void cmd_deoper(server_t *srv, client_t *cl, const char *why); /* -o and the oper-only modes, here and on the network */
 int cmd_opers_rehash(server_t *srv); /* after a rehash: privileges from [[operators]] as it is now; gone -> de-opered */
@@ -108,6 +109,10 @@ void cmd_register(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_verify(server_t *srv, client_t *cl, irc_message_t *msg);
 /* Bind/clear/report the caller's own account's SASL EXTERNAL cert fingerprint. */
 void cmd_cert(server_t *srv, client_t *cl, irc_message_t *msg);
+int auth_fail_throttled(const char *ip); /* per-IP failed-password budget shared by logins and password-protected [[vhosts]] */
+void auth_fail_record(const char *ip);
+void cmd_to_nickserv(server_t *srv, client_t *cl, const char *text); /* as if `cl` had sent /msg NickServ <text> */
+void cmd_svc_vhost(server_t *srv, client_t *cl, const char *sub, const char *account, const char *host); /* an oper's VHOST ADD|DEL|LIST, to services */
 void cmd_service_alias(server_t *srv, client_t *cl, irc_message_t *msg); /* NS/NICKSERV/CS/CHANSERV */
 /* net.c: apply a finished JOB_SASL for AUTH_OPER/AUTH_DIE/AUTH_RESTART
  * (cmd_oper.c) -- `purpose` is an auth_purpose_t (worker.h), passed as int

@@ -104,6 +104,15 @@ void accounts_set_ajoin(account_store_t *st, const char *name, const char *list)
 /* NickServ SET ALWAYS-ON: keep the account's nick on the network (detached) after its connection drops. */
 int accounts_always_on(account_store_t *st, const char *name);
 void accounts_set_always_on(account_store_t *st, const char *name, int on);
+/* Account vhosts (NickServ VHOST): the hosts an oper granted the account (at most ACCOUNT_MAX_VHOSTS), and the one it chose
+ * to wear -- applied at every login. add/del return 0, or -1 (no such account, already there, full, not on the list). del of the
+ * chosen one clears the choice. vhost_at(i) is NULL past the end; vhost() is NULL when none is chosen. Strings valid until the next change. */
+#define ACCOUNT_MAX_VHOSTS 20
+int accounts_vhost_add(account_store_t *st, const char *name, const char *host);
+int accounts_vhost_del(account_store_t *st, const char *name, const char *host);
+const char *accounts_vhost_at(account_store_t *st, const char *name, int i);
+const char *accounts_vhost(account_store_t *st, const char *name);
+void accounts_set_vhost(account_store_t *st, const char *name, const char *host);
 
 /* Contact email. set_email stores it unverified; with a pending code (set_pending_email) it only becomes the email once
  * check_verify sees the matching, unexpired code. */

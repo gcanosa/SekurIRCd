@@ -31,6 +31,7 @@
 #define CFG_MAX_HOSTS_PER_WEBIRC 16
 #define CFG_MAX_EXTRA_PORTS 16 /* [server] / [tls] extra_ports: per kind (plain, TLS) */
 #define CFG_MAX_HOSTS_PER_VHOST  16
+#define CFG_MAX_ACCOUNTS_PER_VHOST 16
 #define CFG_MAX_ALLOWED_CHANNELS 64
 #define CFG_MAX_AUTO_JOIN        32
 #define CFG_MAX_DNSBL_ZONES      16
@@ -203,6 +204,10 @@ typedef struct {
     char host[CFG_STR];
     char allowed_hosts[CFG_MAX_HOSTS_PER_VHOST][CFG_MASK];
     int n_allowed_hosts;
+    char accounts[CFG_MAX_ACCOUNTS_PER_VHOST][CFG_STR]; /* logged-in accounts that may use it, wherever they connect from */
+    int n_accounts;
+    char password[CFG_STR]; /* "" = none; else /VHOST <host> <password> (opers need none). Alone it opens the vhost to anyone who knows it */
+    char password_hash[CFG_STR]; /* the same as a scrypt string (`sekurircd --hash-password`), checked on a worker; password or password_hash, not both */
 } cfg_vhost_t;
 
 typedef struct {

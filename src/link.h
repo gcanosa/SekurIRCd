@@ -12,7 +12,7 @@
  *   SVCWATCH USERS                          -- subscribe to the user feed (link_svc_user)
  *   SVCSTATS [<since>]                      -- a network snapshot (SVCSTATNET/SVCSTATSRV.../SVCSTATEND) and, from then on,
  *                                              link/split/ban events (SVCSTATEV) and every server's stats line (SVCSTATLINE)
- *   SVSLOGIN/SVSOPER/SVSJOIN/SVSNICK/KILL/SVCSASL/SVCREGRESULT <id> ...  -- account services (cmd_reg.c's svc_command)
+ *   SVSLOGIN/SVSOPER/SVSHOST/SVSJOIN/SVSNICK/KILL/SVCSASL/SVCREGRESULT <id> ...  -- account services (cmd_reg.c's svc_command)
  *   PRIVMSG/NOTICE <target> :<text>         -- literal IRC lines, relayed verbatim
  *   PING / PONG                             -- keepalive
  * A pseudo-client (client_t with fd == -1) forwards client_send() over its link_conn's socket (see client.c).
