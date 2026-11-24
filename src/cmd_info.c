@@ -177,7 +177,7 @@ static const help_entry_t HELP_TABLE[] = {
     {"LIST", {"LIST [<param1,param2,...>]",
               "List channels; each param is an exact name or an ELIST search condition (>n, <n, or a glob)."}},
     {"LINKS", {"LINKS", "Show the servers linked to this network."}},
-    {"MAP", {"MAP", "Show an ASCII-tree view of the linked network."}},
+    {"MAP", {"MAP", "Show the linked servers as a tree, each with its users and share of the network."}},
     {"KICK", {"KICK <channel> <nick> [:reason]", "Remove a member from a channel. Requires chanop, halfop, or server-oper."}},
     {"KILL", {"KILL <nick> [:reason]", "Disconnect a user from the network. Server-oper only."}},
     {"KLINE", {"KLINE [<mask> [<duration>] [:reason]]",

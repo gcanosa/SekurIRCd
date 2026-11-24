@@ -713,31 +713,85 @@ void cmd_links(server_t *srv, client_t *cl, irc_message_t *msg) {
     client_reply(cl, N_ENDOFLINKS, pe, 1, "End of /LINKS list.");
 }
 
-/* /MAP as a tree: each server indented under the one it hangs off, with its user count. */
-static void map_subtree(server_t *srv, client_t *cl, const netserver_t *node, int depth) {
-    char m[200], pad[64] = "";
-    for (int i = 0; i < depth && i < 20; i++) strncat(pad, i == depth - 1 ? "|-- " : "    ", sizeof pad - strlen(pad) - 1);
-    snprintf(m, sizeof m, "%s%s (%d users)", pad, node->name, node->n_users);
-    client_reply(cl, N_MAP, NULL, 0, m);
+/* /MAP: the servers as a tree, one row each:  <tree><name> ---- | Users: N (P.PP%)
+ * Real users only (a services daemon's bots are not people), and P is the share of all the users on the listed servers, so the
+ * column adds up to 100. The "|" lines up on the longest row: a first pass measures, a second prints. The services link is not
+ * a server with user slots: its row is always 0 (0.00%). */
+typedef struct {
+    server_t *srv;
+    client_t *cl;
+    int print, width, nsvc, svc_seen, udigits, pw;
+    long total, maxu;
+} map_t;
+
+/* ponytail: one scan of srv->users per server per pass; a few servers x thousands of users is far below a millisecond. */
+static int map_real_users(const server_t *srv, const netserver_t *node) {
+    int n = node->n_users;
+    for (const client_t *u = srv->users; u; u = u->hh.next)
+        if (u->is_service && (u->remote ? u->nserver : srv->self_srv) == node) n--;
+    return n < 0 ? 0 : n;
+}
+
+static void map_row(map_t *m, const char *text, int users) {
+    if (!m->print) {
+        int w = (int)strlen(text);
+        if (w > m->width) m->width = w;
+        m->total += users;
+        if (users > m->maxu) m->maxu = users;
+        return;
+    }
+    char dash[96], line[300];
+    int nd = m->width - (int)strlen(text) + 2; /* at least two dashes after the longest row */
+    if (nd > (int)sizeof dash - 1) nd = (int)sizeof dash - 1;
+    memset(dash, '-', (size_t)nd);
+    dash[nd] = '\0';
+    double pct = m->total > 0 ? 100.0 * users / (double)m->total : 0.0;
+    snprintf(line, sizeof line, "%s %s | Users: %*d (%*.2f%%)", text, dash, m->udigits, users, m->pw, pct);
+    client_reply(m->cl, N_MAP, NULL, 0, line);
+}
+
+/* `lead` is what the ancestors put in front of this row ("| " under one with younger siblings, "  " under the last). */
+static void map_walk(map_t *m, const netserver_t *node, const char *lead, int root, int last) {
+    char text[200], below[64];
+    if (root) snprintf(text, sizeof text, "%s", node->name);
+    else snprintf(text, sizeof text, "%s%s%s", lead, last ? "`-" : "|-", node->name);
+    map_row(m, text, map_real_users(m->srv, node));
+    if (root) below[0] = '\0';
+    else snprintf(below, sizeof below, "%s%s", lead, last ? "  " : "| ");
+    if (strlen(below) > 40) return; /* a chain this deep is not a network; keeps `lead` short */
+    const netserver_t *lastc = NULL;
     netserver_t *s, *tmp;
-    HASH_ITER(hh, srv->servers, s, tmp)
-        if (s->uplink == node) map_subtree(srv, cl, s, depth + 1);
+    HASH_ITER(hh, m->srv->servers, s, tmp) if (s->uplink == node) lastc = s;
+    for (s = m->srv->servers; s; s = s->hh.next)
+        if (s->uplink == node) map_walk(m, s, below, 0, s == lastc && !(root && m->nsvc));
+    if (!root) return;
+    for (link_conn_t *lc = m->srv->links; lc; lc = lc->next) { /* services links hang off this server, after its servers */
+        if (!lc->authenticated || lc->is_server) continue;
+        char t[200];
+        snprintf(t, sizeof t, "%s%s", ++m->svc_seen == m->nsvc ? "`-" : "|-", lc->peer_name);
+        map_row(m, t, 0);
+    }
 }
 
 void cmd_map(server_t *srv, client_t *cl, irc_message_t *msg) {
     (void)msg;
-    if (links_flattened(srv, cl)) {
+    if (links_flattened(srv, cl)) { /* only this server is shown, so no share: "100%" would claim it is the whole network */
         char m[300];
-        snprintf(m, sizeof m, "%s (%d users)", own_name_shown(srv), srv->self_srv ? srv->self_srv->n_users : srv->n_clients);
+        snprintf(m, sizeof m, "%s -- | Users: %d", own_name_shown(srv), srv->self_srv ? map_real_users(srv, srv->self_srv) : srv->n_clients);
         client_reply(cl, N_MAP, NULL, 0, m);
         client_reply(cl, N_MAPEND, NULL, 0, "End of /MAP");
         return;
     }
-    if (srv->self_srv) map_subtree(srv, cl, srv->self_srv, 0);
-    for (link_conn_t *lc = srv->links; lc; lc = lc->next) { /* service links */
-        if (!lc->authenticated || lc->is_server) continue;
-        char m[160]; snprintf(m, sizeof m, "|-- %s", lc->peer_name);
-        client_reply(cl, N_MAP, NULL, 0, m);
+    if (srv->self_srv) {
+        map_t m = {.srv = srv, .cl = cl};
+        for (link_conn_t *lc = srv->links; lc; lc = lc->next) m.nsvc += lc->authenticated && !lc->is_server;
+        map_walk(&m, srv->self_srv, "", 1, 1);
+        m.print = 1;
+        m.svc_seen = 0;
+        for (long v = m.maxu; v >= 10; v /= 10) m.udigits++;
+        m.udigits++;
+        m.pw = m.total > 0 && m.maxu >= m.total ? 6 : 5; /* "100.00" when one server holds everybody, else "48.76" */
+        map_walk(&m, srv->self_srv, "", 1, 1);
     }
     client_reply(cl, N_MAPEND, NULL, 0, "End of /MAP");
 }

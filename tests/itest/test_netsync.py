@@ -20,7 +20,7 @@ def test_servers_link_and_appear_in_map_and_links():
         assert names == {"a.test.net", "b.test.net", "c.test.net"}, names
         mp = c.say("MAP", 0.6)
         text = "\n".join(mp)
-        assert "a.test.net" in text and "|-- b.test.net" in text and "c.test.net" in text, text
+        assert "a.test.net" in text and "`-b.test.net" in text and "c.test.net" in text, text
 
 
 def test_users_and_whois_across_servers():
