@@ -3,6 +3,7 @@
  * handlers. Not yet ported: STATUSMSG delivery lives in cmd_user.c
  * (PRIVMSG/NOTICE); EXTBAN a: lives in channel.c's mask matcher. */
 #include "cmd.h"
+#include "xline.h"
 #include "net.h"
 #include "history.h"
 #include "link.h"
@@ -16,8 +17,7 @@
 #include <strings.h>
 #include <time.h>
 
-#define MAX_CHANNELS_PER_CLIENT 200
-#define KICK_MAX_REASON 300 /* advertised as KICKLEN=300 in server.c */
+#define KICK_MAX_REASON 300 /* the most [limits] kick_length may be: the reason buffer's size */
 
 #define invite_key_of(c) client_invite_key(c)
 
@@ -156,7 +156,7 @@ void cmd_replay_join(client_t *cl, channel_t *chan) {
 }
 
 void cmd_force_join(server_t *srv, client_t *cl, const char *chan_name) {
-    if (!irc_valid_channel(chan_name, 50)) return;
+    if (!irc_valid_channel(chan_name, srv->cfg.limits.channel_length)) return;
     channel_t *existing = server_find_channel(srv, chan_name);
     int is_new = (existing == NULL);
     channel_t *chan = existing ? existing : server_get_or_create_channel(srv, chan_name);
@@ -187,7 +187,7 @@ static int g_redirect_depth;
 /* +L (to == NULL) or a ~f: forward ban (to = its channel). One hop only. */
 static int try_redirect(server_t *srv, client_t *cl, channel_t *chan, const char *to) {
     if (!to && (!(chan->modes & CMODE_REDIRECT) || !chan->redirect[0])) return 0;
-    if (g_redirect_depth || !irc_valid_channel(to ? to : chan->redirect, 50)) return 0;
+    if (g_redirect_depth || !irc_valid_channel(to ? to : chan->redirect, srv->cfg.limits.channel_length)) return 0;
     char target[CHAN_NAMELEN];
     snprintf(target, sizeof target, "%s", to ? to : chan->redirect);
     const char *p[] = {chan->name, target};
@@ -199,7 +199,7 @@ static int try_redirect(server_t *srv, client_t *cl, channel_t *chan, const char
 }
 
 static void do_join_one(server_t *srv, client_t *cl, const char *chan_name, const char *key) {
-    if (!irc_valid_channel(chan_name, 50)) {
+    if (!irc_valid_channel(chan_name, srv->cfg.limits.channel_length)) {
         err_no_such_channel(cl, chan_name);
         return;
     }
@@ -209,13 +209,23 @@ static void do_join_one(server_t *srv, client_t *cl, const char *chan_name, cons
         irc_casefold(cf2, sizeof cf2, srv->cfg.debug_channel.name);
         if (strcmp(cf1, cf2) == 0) { err_no_such_channel(cl, chan_name); return; }
     }
+    if (!OPER_CAN(cl, OPER_PRIV_OVERRIDE) && !cl->is_service) { /* RESV: a reserved name; those already in it stay */
+        const char *why = xline_match(srv, 'R', chan_name);
+        if (why) {
+            char m[300];
+            snprintf(m, sizeof m, "Channel is reserved: %s", why);
+            const char *p[] = {chan_name};
+            client_reply(cl, N_UNAVAILRESOURCE, p, 1, m);
+            return;
+        }
+    }
     channel_t *chan = server_find_channel(srv, chan_name);
     if (chan && channel_find_member(chan, cl)) {
         const char *p[] = {chan->name};
         client_reply(cl, N_USERONCHANNEL, p, 1, "You're already on that channel");
         return;
     }
-    if (n_channels_of(cl) >= MAX_CHANNELS_PER_CLIENT && !OPER_CAN(cl, OPER_PRIV_OVERRIDE)) {
+    if (n_channels_of(cl) >= srv->cfg.limits.channels_per_user && !OPER_CAN(cl, OPER_PRIV_OVERRIDE)) {
         const char *p[] = {chan_name};
         client_reply(cl, N_TOOMANYCHANNELS, p, 1, "You have joined too many channels");
         return;
@@ -310,7 +320,7 @@ void cmd_svsjoin(server_t *srv, client_t *cl, const char *list) {
     snprintf(buf, sizeof buf, "%s", list);
     char *save = NULL;
     for (char *name = strtok_r(buf, ",", &save); name; name = strtok_r(NULL, ",", &save)) {
-        if (!irc_valid_channel(name, 50)) continue;
+        if (!irc_valid_channel(name, srv->cfg.limits.channel_length)) continue;
         channel_t *chan = server_find_channel(srv, name);
         if (chan && channel_find_member(chan, cl)) continue;
         do_join_one(srv, cl, name, NULL);
@@ -319,14 +329,16 @@ void cmd_svsjoin(server_t *srv, client_t *cl, const char *list) {
 
 void cmd_join(server_t *srv, client_t *cl, irc_message_t *msg) {
     if (strcmp(msg->params[0], "0") == 0) { /* RFC 2812: JOIN 0 leaves every channel */
-        char names[MAX_CHANNELS_PER_CLIENT][CHAN_NAMELEN];
-        int n = 0;
-        for (chan_node_t *c = cl->channels; c && n < MAX_CHANNELS_PER_CLIENT; c = c->next) snprintf(names[n++], CHAN_NAMELEN, "%s", c->chan->name);
+        int total = n_channels_of(cl), n = 0;
+        char (*names)[CHAN_NAMELEN] = total > 0 ? malloc((size_t)total * sizeof *names) : NULL;
+        if (!names) return;
+        for (chan_node_t *c = cl->channels; c && n < total; c = c->next) snprintf(names[n++], CHAN_NAMELEN, "%s", c->chan->name);
         for (int i = 0; i < n; i++) { /* one at a time: cmd_part copies its list into a fixed buffer */
             irc_message_t part = {.command = "PART", .nparams = 1};
             part.params[0] = names[i];
             cmd_part(srv, cl, &part);
         }
+        free(names);
         return;
     }
     char chanlist[600];
@@ -364,7 +376,7 @@ void cmd_part(server_t *srv, client_t *cl, irc_message_t *msg) {
             client_prefix(cl, prefix, sizeof prefix);
             char line[510];
             const char *p[] = {chan->name};
-            irc_build(line, sizeof line, NULL, 0, prefix, "PART", p, 1, reason);
+            irc_build(line, sizeof line, NULL, 0, prefix, "PART", p, 1, PRIVACY_REASON(srv, reason));
             netsync_chan_part(srv, chan, cl, reason);
             server_history_event(srv, chan, line);
             { /* only members who could see them in the channel see them leave (+D hidden, +u audience) */
@@ -396,8 +408,8 @@ void cmd_rename(server_t *srv, client_t *cl, irc_message_t *msg) {
     const char *code = NULL, *desc = NULL;
     char ncf[CHAN_NAMELEN];
     irc_casefold(ncf, sizeof ncf, newname);
-    channel_t *clash = irc_valid_channel(newname, 50) ? server_find_channel(srv, newname) : NULL;
-    if (!irc_valid_channel(newname, 50)) { code = "CANNOT_RENAME"; desc = "That is not a valid channel name"; }
+    channel_t *clash = irc_valid_channel(newname, srv->cfg.limits.channel_length) ? server_find_channel(srv, newname) : NULL;
+    if (!irc_valid_channel(newname, srv->cfg.limits.channel_length)) { code = "CANNOT_RENAME"; desc = "That is not a valid channel name"; }
     else if (clash && clash != chan) { code = "CHANNEL_NAME_IN_USE"; desc = "A channel with that name already exists"; }
     else if (chan->modes & CMODE_R) { code = "CANNOT_RENAME"; desc = "A registered channel can't be renamed"; }
     else if (srv->cfg.debug_channel.enabled) {
@@ -468,7 +480,7 @@ void cmd_sajoin(server_t *srv, client_t *cl, irc_message_t *msg) {
     snprintf(chanlist, sizeof chanlist, "%s", msg->params[1]);
     char *save = NULL;
     for (char *tok = strtok_r(chanlist, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
-        if (!irc_valid_channel(tok, 50)) continue;
+        if (!irc_valid_channel(tok, srv->cfg.limits.channel_length)) continue;
         channel_t *existing = server_find_channel(srv, tok);
         if (existing && channel_find_member(existing, target)) continue;
         cmd_force_join(srv, target, tok);
@@ -502,7 +514,7 @@ void cmd_sapart(server_t *srv, client_t *cl, irc_message_t *msg) {
         client_prefix(target, prefix, sizeof prefix);
         char line[500];
         const char *p[] = {chan->name};
-        irc_build(line, sizeof line, NULL, 0, prefix, "PART", p, 1, reason);
+        irc_build(line, sizeof line, NULL, 0, prefix, "PART", p, 1, PRIVACY_REASON(srv, reason));
         server_broadcast_channel(chan, line, NULL);
         netsync_chan_part(srv, chan, target, reason);
         char chan_name_buf[CHAN_NAMELEN];
@@ -557,7 +569,7 @@ void cmd_topic(server_t *srv, client_t *cl, irc_message_t *msg) {
     }
     const char *newtopic = msg->params[msg->nparams - 1];
     if (spam_check_text(srv, cl, SPAM_T_TOPIC, newtopic)) return;
-    snprintf(chan->topic, TOPIC_MAX_LEN + 1, "%s", newtopic); /* TOPICLEN: longer would overflow the broadcast line */
+    snprintf(chan->topic, (size_t)srv->cfg.limits.topic_length + 1, "%s", newtopic); /* TOPICLEN (<= TOPIC_MAX_LEN): longer would overflow the broadcast line */
     client_prefix(cl, chan->topic_setter, sizeof chan->topic_setter);
     chan->topic_time = time(NULL);
 
@@ -583,7 +595,7 @@ void cmd_names(server_t *srv, client_t *cl, irc_message_t *msg) {
     while (tok) {
         channel_t *chan = server_find_channel(srv, tok);
         if (chan) {
-            if ((chan->modes & (CMODE_S | CMODE_P)) && !channel_find_member(chan, cl)) {
+            if (((chan->modes & (CMODE_S | CMODE_P)) || (srv->cfg.privacy.names_members_only && !OPER_CAN(cl, OPER_PRIV_AUSPEX))) && !channel_find_member(chan, cl)) {
                 const char *pe[] = {chan->name};
                 client_reply(cl, N_ENDOFNAMES, pe, 1, "End of /NAMES list.");
             } else {
@@ -664,8 +676,26 @@ void cmd_list(server_t *srv, client_t *cl, irc_message_t *msg) {
     client_reply(cl, N_LISTEND, NULL, 0, "End of /LIST");
 }
 
+/* [privacy] hide_links / hide_server_name: a user who is not an oper sees only this server (under the stand-in name, if one is set). */
+static int links_flattened(server_t *srv, client_t *cl) {
+    return (srv->cfg.privacy.hide_links || srv->cfg.privacy.hide_server_name[0]) && !(cl->umodes & UMODE_O);
+}
+
+static const char *own_name_shown(server_t *srv) {
+    return srv->cfg.privacy.hide_server_name[0] ? srv->cfg.privacy.hide_server_name : srv->cfg.server.name;
+}
+
 void cmd_links(server_t *srv, client_t *cl, irc_message_t *msg) {
     (void)msg;
+    if (links_flattened(srv, cl)) {
+        const char *p[] = {own_name_shown(srv), own_name_shown(srv)};
+        char m[300];
+        snprintf(m, sizeof m, "0 %s", srv->cfg.server.network);
+        client_reply(cl, N_LINKS, p, 2, m);
+        const char *pe[] = {"*"};
+        client_reply(cl, N_ENDOFLINKS, pe, 1, "End of /LINKS list.");
+        return;
+    }
     netserver_t *s, *tmp;
     HASH_ITER(hh, srv->servers, s, tmp) {
         const char *p[] = {s->name, s->uplink ? s->uplink->name : srv->cfg.server.name};
@@ -696,6 +726,13 @@ static void map_subtree(server_t *srv, client_t *cl, const netserver_t *node, in
 
 void cmd_map(server_t *srv, client_t *cl, irc_message_t *msg) {
     (void)msg;
+    if (links_flattened(srv, cl)) {
+        char m[300];
+        snprintf(m, sizeof m, "%s (%d users)", own_name_shown(srv), srv->self_srv ? srv->self_srv->n_users : srv->n_clients);
+        client_reply(cl, N_MAP, NULL, 0, m);
+        client_reply(cl, N_MAPEND, NULL, 0, "End of /MAP");
+        return;
+    }
     if (srv->self_srv) map_subtree(srv, cl, srv->self_srv, 0);
     for (link_conn_t *lc = srv->links; lc; lc = lc->next) { /* service links */
         if (!lc->authenticated || lc->is_server) continue;
@@ -714,7 +751,7 @@ void cmd_invite(server_t *srv, client_t *cl, irc_message_t *msg) {
      * arbitrary-text channel to any nick on the server, around /SILENCE, +D
      * and +R -- all of which PRIVMSG enforces. Validate the name, and apply
      * the same three checks. */
-    if (!irc_valid_channel(chan_name, 50)) { err_no_such_channel(cl, chan_name); return; }
+    if (!irc_valid_channel(chan_name, srv->cfg.limits.channel_length)) { err_no_such_channel(cl, chan_name); return; }
     if (client_is_silencing(target, cl)) return; /* dropped without telling the sender, as PRIVMSG does */
     if ((target->umodes & UMODE_NOPM) && !OPER_CAN(cl, OPER_PRIV_OVERRIDE) && cl != target) {
         const char *pe[] = {target->nick};
@@ -881,8 +918,8 @@ void cmd_kick(server_t *srv, client_t *cl, irc_message_t *msg) {
     char reason_buf[KICK_MAX_REASON + 1];
     const char *raw = msg->nparams > 2 ? msg->params[msg->nparams - 1] : cl->nick;
     size_t rl = strlen(raw);
-    if (rl > KICK_MAX_REASON) {
-        rl = KICK_MAX_REASON;
+    if (rl > (size_t)srv->cfg.limits.kick_length) {
+        rl = (size_t)srv->cfg.limits.kick_length;
         while (rl > 0 && ((unsigned char)raw[rl] & 0xC0) == 0x80) rl--;
     }
     memcpy(reason_buf, raw, rl);
@@ -1039,7 +1076,6 @@ static int parse_rate(const char *s, int *n, int *secs) {
     return 1;
 }
 
-#define MAX_MODE_PARAMS 6 /* advertised as MODES=6 in ISUPPORT */
 
 void cmd_apply_channel_mode(server_t *srv, client_t *cl, channel_t *chan,
                              const char *modestring, const char **args, int nargs, int is_full_op) {
@@ -1058,7 +1094,7 @@ void cmd_apply_channel_mode(server_t *srv, client_t *cl, channel_t *chan,
          * to outflags[] unboundedly, and "MODE #c +nnnn...", 500 letters
          * long, smashes the stack. Every write below appends at most a sign
          * plus a letter, so leaving 2 bytes plus the NUL is sufficient. */
-        if (of + 2 >= sizeof outflags || n_outparams >= MAX_MODE_PARAMS) break; /* == ISUPPORT MODES= */
+        if (of + 2 >= sizeof outflags || n_outparams >= srv->cfg.limits.modes_per_command) break; /* == ISUPPORT MODES= */
         char c = *pch;
         if (c == '+' || c == '-') { sign = c; continue; }
 
@@ -1130,7 +1166,7 @@ void cmd_apply_channel_mode(server_t *srv, client_t *cl, channel_t *chan,
                 char tcf[CHAN_NAMELEN], ccf[CHAN_NAMELEN];
                 irc_casefold(tcf, sizeof tcf, target);
                 irc_casefold(ccf, sizeof ccf, chan->name);
-                if (!irc_valid_channel(target, 50) || strcmp(tcf, ccf) == 0) { /* junk, or a channel forwarding to itself */
+                if (!irc_valid_channel(target, srv->cfg.limits.channel_length) || strcmp(tcf, ccf) == 0) { /* junk, or a channel forwarding to itself */
                     err_no_such_channel(cl, target);
                     continue;
                 }
@@ -1258,7 +1294,7 @@ void cmd_apply_channel_mode(server_t *srv, client_t *cl, channel_t *chan,
             masklist_t *ml = (c == 'b') ? &chan->bans : (c == 'e') ? &chan->exceptions : &chan->invex;
             int changed;
             if (sign == '+') {
-                if (ml->n >= CHAN_MAX_MASKLIST) {
+                if (ml->n >= masklist_cap(ml)) {
                     const char *pe[] = {chan->name, mask};
                     client_reply(cl, N_BANLISTFULL, pe, 2, "Channel list is full");
                     argi++; continue;

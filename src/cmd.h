@@ -57,6 +57,7 @@ int force_nick_change(server_t *srv, client_t *target, const char *newnick);
 client_t *services_agent(server_t *srv);           /* the NickServ service user, or NULL while services are down */
 void cmd_services_tick(server_t *srv, time_t now);
 void cmd_channels_tick(server_t *srv, time_t now);
+void cmd_defcon(server_t *srv, client_t *cl, irc_message_t *msg);
 void cmd_svshost(server_t *srv, client_t *cl, const char *host); /* SVSHOST from services: the account's vhost, or "-" for the usual host */
 void cmd_svsoper(server_t *srv, client_t *cl, const char *account, const char *privs); /* SVSOPER from services: privs csv, or "-" to take it back */
 void cmd_deoper(server_t *srv, client_t *cl, const char *why); /* -o and the oper-only modes, here and on the network */

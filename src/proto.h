@@ -230,6 +230,7 @@ size_t irc_time_tag_insert(const char *line, char *tag, size_t tagsz, size_t *at
 #define N_ENDOFWHOIS       "318"
 #define N_WHOISCHANNELS    "319"
 
+#define N_TRYAGAIN         "263"
 #define N_LISTSTART        "321"
 #define N_LIST             "322"
 #define N_LISTEND          "323"

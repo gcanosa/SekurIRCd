@@ -290,14 +290,17 @@ void channel_normalize_mask(const char *in, char *out, size_t outsz) {
     else snprintf(out, outsz, "%s!*@*", in);
 }
 
+int masklist_default_cap = CHAN_MAX_MASKLIST;
+
 int masklist_add(masklist_t *ml, const char *mask) {
     for (int i = 0; i < ml->n; i++)
         if (strcasecmp(ml->masks[i], mask) == 0) return -1;
-    if (ml->n >= CHAN_MAX_MASKLIST) return -1;
+    if (ml->n >= masklist_cap(ml)) return -1;
     if (!ml->masks) {
-        ml->masks = calloc(CHAN_MAX_MASKLIST, sizeof ml->masks[0]);
-        ml->set_at = calloc(CHAN_MAX_MASKLIST, sizeof ml->set_at[0]);
-        ml->set_by = calloc(CHAN_MAX_MASKLIST, sizeof ml->set_by[0]);
+        ml->cap = masklist_default_cap;
+        ml->masks = calloc((size_t)ml->cap, sizeof ml->masks[0]);
+        ml->set_at = calloc((size_t)ml->cap, sizeof ml->set_at[0]);
+        ml->set_by = calloc((size_t)ml->cap, sizeof ml->set_by[0]);
         if (!ml->masks || !ml->set_at || !ml->set_by) { masklist_free(ml); return -1; }
     }
     snprintf(ml->masks[ml->n], sizeof ml->masks[0], "%s", mask);
@@ -317,6 +320,7 @@ void masklist_free(masklist_t *ml) {
     ml->masks = NULL;
     ml->set_at = NULL;
     ml->set_by = NULL;
+    ml->cap = 0;
     ml->n = 0;
 }
 

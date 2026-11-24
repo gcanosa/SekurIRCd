@@ -1,6 +1,7 @@
 /* Registration: NICK, USER, PASS, CAP, PING, PONG, QUIT, plus the relay to account services (AUTHENTICATE, REGISTER,
  * CERT, and the services -> user commands in svc_command). Accounts themselves live in the services daemon. */
 #include "cmd.h"
+#include "xline.h"
 #include "crypto.h"
 #include "log.h"
 #include "net.h"
@@ -43,6 +44,17 @@ void cmd_nick(server_t *srv, client_t *cl, irc_message_t *msg) {
                 client_reply(cl, N_UNAVAILRESOURCE, p, 1, "Nickname is reserved");
                 return;
             }
+        }
+    }
+
+    if (!cl->is_service && !(cl->umodes & UMODE_O)) { /* a Q-line: a registered oper keeps the nick they have */
+        const char *why = xline_match(srv, 'Q', newnick);
+        if (why) {
+            char m[300];
+            snprintf(m, sizeof m, "Nickname is reserved: %s", why);
+            const char *p[] = {newnick};
+            client_reply(cl, N_UNAVAILRESOURCE, p, 1, m);
+            return;
         }
     }
 

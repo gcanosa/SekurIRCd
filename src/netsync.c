@@ -1,4 +1,6 @@
 #include "netsync.h"
+#include "xline.h"
+#include "classes.h"
 #include "net.h"
 
 #include "channel.h"
@@ -93,6 +95,11 @@ client_t *netsync_find_uid(server_t *srv, const char *uid) {
 
 const char *netsync_server_name_of(server_t *srv, const client_t *cl) {
     return (cl->nserver && cl->remote) ? cl->nserver->name : srv->cfg.server.name;
+}
+
+const char *netsync_server_name_shown(server_t *srv, const client_t *viewer, const client_t *u) {
+    if (srv->cfg.privacy.hide_server_name[0] && !(viewer->umodes & UMODE_O)) return srv->cfg.privacy.hide_server_name;
+    return netsync_server_name_of(srv, u);
 }
 
 int netsync_has_links(const server_t *srv) {
@@ -293,8 +300,16 @@ static void send_burst(server_t *srv, link_conn_t *lc) {
         irc_build(line, sizeof line, NULL, 0, self_sid(srv), k->line_type[0] == 'G' ? "GLINE" : "SHUN", p, 3, k->reason);
         send_link(lc, line);
     }
+    /* 4b. Q-lines, RESVs and X-lines */
+    for (xline_t *x = srv->xlines; x; x = x->next) {
+        char exp[24], t[2] = {x->type, 0};
+        snprintf(exp, sizeof exp, "%ld", (long)x->expires_at);
+        irc_build(line, sizeof line, NULL, 0, self_sid(srv), "XLN", (const char *[]){t, x->mask, x->set_by, exp}, 4, x->reason);
+        send_link(lc, line);
+    }
     /* 5. global spam rules (ours, then every other server's we hold) */
     spam_burst(srv, lc);
+    classes_burst(srv, lc);
     irc_build(line, sizeof line, NULL, 0, self_sid(srv), "EOB", NULL, 0, NULL);
     send_link(lc, line);
 }
@@ -475,6 +490,28 @@ static int limited_link(server_t *srv, const link_conn_t *lc) {
     return p && !p->host[0] && p->oper_local;
 }
 
+/* [[links.peers]] introduces / leaf: may `name` appear behind this link? (The peer itself is not asked: it is who the link is with.) */
+static int introduces_ok(const cfg_link_peer_t *p, const char *name) {
+    if (!p || !p->introduces_set) return 1;
+    char n[CFG_STR], g[CFG_STR];
+    irc_casefold(n, sizeof n, name);
+    for (int i = 0; i < p->n_introduces; i++) {
+        irc_casefold(g, sizeof g, p->introduces[i]);
+        if (irc_glob_match(g, n)) return 1;
+    }
+    return 0;
+}
+
+/* The name of a server behind `lc` that its entry no longer allows (after a rehash tightened introduces), or NULL. */
+const char *netsync_introduces_violation(server_t *srv, link_conn_t *lc) {
+    const cfg_link_peer_t *p = peer_cfg(srv, lc);
+    if (!p || !p->introduces_set || !lc->nserver) return NULL;
+    netserver_t *s, *tmp;
+    HASH_ITER(hh, srv->servers, s, tmp)
+        if (s != lc->nserver && netsync_is_behind(s, lc->nserver) && !introduces_ok(p, s->name)) return s->name;
+    return NULL;
+}
+
 /* A limited server's oper asked for something that reaches past that server and it arrived anyway: dropped, and the oper and
  * our opers hear about it. (The leaf normally refuses first; this is the older-or-modified-leaf backstop.) */
 static void scope_deny(server_t *srv, link_conn_t *lc, client_t *oper, const char *what) {
@@ -543,8 +580,10 @@ static void kill_back(server_t *srv, link_conn_t *lc, const char *uid, const cha
 static void remove_server_tree(server_t *srv, netserver_t *root) {
     char reason[300];
     const char *up = root->uplink ? root->uplink->name : srv->self_srv->name;
-    snprintf(reason, sizeof reason, "%s %s", up, root->name);
-    server_fbatch_begin(srv, FB_NETSPLIT, "netsplit", up, root->name); /* IRCv3: all its QUITs in one netsplit batch */
+    const char *down = root->name;
+    if (srv->cfg.privacy.hide_server_name[0]) { up = "*.net"; down = "*.split"; } /* [privacy] hide_server_name: no server names in a split */
+    snprintf(reason, sizeof reason, "%s %s", up, down);
+    server_fbatch_begin(srv, FB_NETSPLIT, "netsplit", up, down); /* IRCv3: all its QUITs in one netsplit batch */
     int prev = srv->fb_cur;
     srv->fb_cur = FB_NETSPLIT;
     client_t *u, *utmp;
@@ -589,6 +628,27 @@ static void handle_server(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
         log_error("netsync", "link '%s' introduced a bad server '%s' (%s) -- dropping the link", lc->peer_name, name, sid);
         link_forward_line(lc, "ERROR :Bad server name or SID");
         link_close(srv, lc);
+        return;
+    }
+    const cfg_link_peer_t *peer = peer_cfg(srv, lc);
+    if (!introduces_ok(peer, name)) {
+        char m[400];
+        if (peer->n_introduces == 0) { /* leaf = true: nothing may be behind this link, so the link itself is wrong */
+            snprintf(m, sizeof m, "Link with %s closed: it introduced server %s, but its [[links.peers]] entry says nothing may link behind it (leaf = true)", lc->peer_name, name);
+            log_error("netsync", "%s", m);
+            server_notify_opers(srv, m);
+            link_forward_line(lc, "ERROR :No server may link behind you here");
+            link_close_why(srv, lc, "Introduced a server it may not");
+            return;
+        }
+        /* only the intruder is refused: it is not entered here, so everything it or its users send is ignored (a link speaks only for
+         * servers behind it), and its introducer is asked to drop it. The link stays up. */
+        snprintf(m, sizeof m, "Refused server %s introduced by %s: not in the introduces list of %s", name, from->name, lc->peer_name);
+        log_warn("netsync", "%s", m);
+        server_notify_opers(srv, m);
+        char line[300];
+        irc_build(line, sizeof line, NULL, 0, self_sid(srv), "RSQUIT", (const char *[]){sid}, 1, "Not allowed behind this link");
+        send_link(lc, line);
         return;
     }
     if (netsync_find_sid(srv, sid) || netsync_find_name(srv, name)) { /* a loop or a duplicate: refuse the whole link */
@@ -1202,7 +1262,7 @@ static void handle_part(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
             char prefix[320], line[500];
             client_prefix(u, prefix, sizeof prefix);
             const char *p[] = {chan->name};
-            irc_build(line, sizeof line, NULL, 0, prefix, "PART", p, 1, reason);
+            irc_build(line, sizeof line, NULL, 0, prefix, "PART", p, 1, PRIVACY_REASON(srv, reason));
             server_history_event(srv, chan, line);
             member_t *pm, *ptmp;
             HASH_ITER(hh, chan->members, pm, ptmp)
@@ -1507,6 +1567,56 @@ static void handle_ungline(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     flood(srv, lc, fl);
 }
 
+/* :<sid> CLASS CLEAR | ADD :<definition> | DEL <origin> :<name> -- a server's global connection classes, as a set (classes.c keeps them);
+ * a leaf the hub limits to its own server has none to send. A DEL is passed toward the owner, which drops the class and sends its set again. */
+static void handle_class(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
+    if (msg->nparams < 1) return;
+    if (limited_link(srv, lc)) { log_debug("netsync", "CLASS from %s dropped (oper_scope = local)", lc->peer_name); return; }
+    netserver_t *s = src_server(srv, lc, msg->prefix);
+    if (!s && msg->prefix && lc->nserver && strcmp(msg->prefix, lc->nserver->sid) == 0) s = lc->nserver;
+    if (!s) return;
+    if (!strcasecmp(msg->params[0], "DEL")) {
+        if (msg->nparams < 3) return;
+        if (strcmp(msg->params[1], self_sid(srv)) == 0) { classes_global_del(srv, msg->params[2], s->name); return; }
+        netserver_t *o = netsync_find_sid(srv, msg->params[1]);
+        if (!o || !o->route || o->route == lc) return;
+        char fwd[400];
+        irc_build(fwd, sizeof fwd, NULL, 0, s->sid, "CLASS", (const char *[]){"DEL", o->sid}, 2, msg->params[2]);
+        send_link(o->route, fwd);
+        return;
+    }
+    const char *rule = msg->nparams > 1 ? msg->params[1] : NULL;
+    if (srv->cfg.links.accept_global_classes) classes_net_receive(srv, s->sid, msg->params[0], rule);
+    char fl[1400]; /* passed on whether or not this server applies it: the servers behind it may */
+    irc_build(fl, sizeof fl, NULL, 0, s->sid, "CLASS", (const char *[]){msg->params[0]}, 1, rule);
+    flood(srv, lc, fl);
+}
+
+/* :<sid> XLN <Q|R|X> <mask> <setter> <expires> :<reason> -- a Q-line, RESV or X-line (xline.h); a leaf the hub limits to its own
+ * server has none to send, like its GLINEs. */
+static void handle_xln(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
+    if (limited_link(srv, lc)) { log_debug("netsync", "XLN from %s dropped (oper_scope = local)", lc->peer_name); return; }
+    netserver_t *s = src_server(srv, lc, msg->prefix);
+    if (!s && msg->prefix && lc->nserver && strcmp(msg->prefix, lc->nserver->sid) == 0) s = lc->nserver;
+    if (!s || msg->nparams < 5 || !msg->params[0][0] || msg->params[0][1] || !strchr("QRX", msg->params[0][0])) return;
+    long exp = atol(msg->params[3]);
+    if (exp > 0 && exp <= (long)time(NULL)) return; /* already expired */
+    xline_add(srv, msg->params[0][0], msg->params[1], msg->params[4], msg->params[2], (time_t)exp);
+    char fl[700];
+    irc_build(fl, sizeof fl, NULL, 0, s->sid, "XLN", (const char *[]){msg->params[0], msg->params[1], msg->params[2], msg->params[3]}, 4, msg->params[4]);
+    flood(srv, lc, fl);
+}
+
+static void handle_unxln(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
+    if (msg->nparams < 2 || !msg->params[0][0] || msg->params[0][1] || !strchr("QRX", msg->params[0][0])) return;
+    if (limited_link(srv, lc)) { log_debug("netsync", "UNXLN from %s dropped (oper_scope = local)", lc->peer_name); return; }
+    if (!src_server(srv, lc, msg->prefix) && !(msg->prefix && lc->nserver && strcmp(msg->prefix, lc->nserver->sid) == 0)) return;
+    xline_remove(srv, msg->params[0][0], msg->params[1]);
+    char fl[400];
+    irc_build(fl, sizeof fl, NULL, 0, msg->prefix, "UNXLN", (const char *[]){msg->params[0], msg->params[1]}, 2, NULL);
+    flood(srv, lc, fl);
+}
+
 /* :<sid> SPAMFILTER CLEAR | ADD :<rule> -- a server's global spam rules, as a set (spam.c keeps them). A leaf the hub limits to
  * its own server (oper_scope = local) has no network-wide rules: what it sends is dropped here, like its GLINEs. */
 static void handle_spamfilter(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
@@ -1750,6 +1860,9 @@ void netsync_handle(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
     else if (!strcmp(c, "WALLOPS") || !strcmp(c, "GLOBOPS")) handle_wallops(srv, lc, msg);
     else if (!strcmp(c, "GLINE") || !strcmp(c, "SHUN")) handle_gline(srv, lc, msg);
     else if (!strcmp(c, "UNGLINE") || !strcmp(c, "UNSHUN")) handle_ungline(srv, lc, msg);
+    else if (!strcmp(c, "CLASS")) handle_class(srv, lc, msg);
+    else if (!strcmp(c, "XLN")) handle_xln(srv, lc, msg);
+    else if (!strcmp(c, "UNXLN")) handle_unxln(srv, lc, msg);
     else if (!strcmp(c, "SPAMFILTER")) handle_spamfilter(srv, lc, msg);
     else if (!strcmp(c, "RQUERY")) handle_rquery(srv, lc, msg);
     else if (!strcmp(c, "SNOTE")) handle_snote(srv, lc, msg);
@@ -1993,6 +2106,40 @@ void netsync_gline(server_t *srv, const char *mask, const char *setter, long exp
     char line[600], exp[24];
     snprintf(exp, sizeof exp, "%ld", expires);
     irc_build(line, sizeof line, NULL, 0, self_sid(srv), "GLINE", (const char *[]){mask, setter, exp}, 3, reason);
+    flood(srv, NULL, line);
+}
+
+void netsync_class(server_t *srv, link_conn_t *to, const char *origin, const char *rule) {
+    if (!netsync_has_links(srv)) return;
+    if (to && origin) { /* its own classes, or those of a server behind it, are already there */
+        netserver_t *o = netsync_find_sid(srv, origin);
+        if (o && o->route == to) return;
+    }
+    char line[1400];
+    irc_build(line, sizeof line, NULL, 0, origin ? origin : self_sid(srv), "CLASS", (const char *[]){rule ? "ADD" : "CLEAR"}, 1, rule);
+    if (to) send_link(to, line); else flood(srv, NULL, line);
+}
+
+void netsync_class_del(server_t *srv, const char *origin, const char *name) {
+    netserver_t *o = netsync_find_sid(srv, origin);
+    if (!o || !o->route) return;
+    char line[400];
+    irc_build(line, sizeof line, NULL, 0, self_sid(srv), "CLASS", (const char *[]){"DEL", origin}, 2, name);
+    send_link(o->route, line);
+}
+
+void netsync_xline(server_t *srv, char type, const char *mask, const char *setter, long expires, const char *reason) {
+    if (!netsync_has_links(srv)) return;
+    char line[700], exp[24], t[2] = {type, 0};
+    snprintf(exp, sizeof exp, "%ld", expires);
+    irc_build(line, sizeof line, NULL, 0, self_sid(srv), "XLN", (const char *[]){t, mask, setter, exp}, 4, reason);
+    flood(srv, NULL, line);
+}
+
+void netsync_unxline(server_t *srv, char type, const char *mask) {
+    if (!netsync_has_links(srv)) return;
+    char line[400], t[2] = {type, 0};
+    irc_build(line, sizeof line, NULL, 0, self_sid(srv), "UNXLN", (const char *[]){t, mask}, 2, NULL);
     flood(srv, NULL, line);
 }
 

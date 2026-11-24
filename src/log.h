@@ -22,6 +22,8 @@ typedef struct log_config {
     log_level_t level;       /* effective minimum level when debug == 0 */
     long max_bytes;
     int backup_count;
+    char audit_file[512];    /* "" = no audit log; relative = inside `directory` */
+    int syslog;              /* also send log and audit lines to the system log */
 } log_config_t;
 
 /* (Re)configure logging -- same "clear every handler, rebuild" semantics as
@@ -34,6 +36,10 @@ void log_init(const log_config_t *cfg, int verbose);
  * its own min_level and adds its own framing), same role as
  * Server._DebugChannelLogHandler. NULL clears it. */
 void log_set_hook(void (*hook)(log_level_t level, const char *tag, const char *msg));
+
+/* One line in the audit log (oper actions): `[logging] audit_file`, and syslog when `syslog` is on. No-op when neither is. */
+void log_audit(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+int log_audit_enabled(void);
 
 void log_write(log_level_t level, const char *tag, const char *fmt, ...)
     __attribute__((format(printf, 3, 4)));

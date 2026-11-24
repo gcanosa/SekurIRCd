@@ -7,6 +7,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
+#include <syslog.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -26,6 +27,9 @@ static log_level_t g_min_level = LOG_INFO;
 static int g_use_color = 0;
 static FILE *g_file = NULL;
 static long g_file_size = 0;
+static FILE *g_audit = NULL;
+static long g_audit_size = 0;
+static int g_syslog_open = 0;
 static void (*g_hook)(log_level_t, const char *, const char *) = NULL;
 
 log_level_t log_level_from_name(const char *name) {
@@ -70,6 +74,24 @@ static void open_log_file(void) {
     if (g_file_size < 0) g_file_size = 0;
 }
 
+static void audit_path(char *out, size_t outsz) {
+    if (g_cfg.audit_file[0] == '/') snprintf(out, outsz, "%s", g_cfg.audit_file);
+    else snprintf(out, outsz, "%s/%s", g_cfg.directory, g_cfg.audit_file);
+}
+
+static void open_audit_file(void) {
+    if (g_audit) { fclose(g_audit); g_audit = NULL; }
+    if (!g_cfg.audit_file[0]) return;
+    char path[1100];
+    audit_path(path, sizeof path);
+    if (g_cfg.audit_file[0] != '/') mkdir_p(g_cfg.directory);
+    g_audit = fopen(path, "a");
+    if (!g_audit) { fprintf(stderr, "log: could not open audit log %s for writing\n", path); g_audit_size = 0; return; }
+    fcntl(fileno(g_audit), F_SETFD, FD_CLOEXEC);
+    g_audit_size = ftell(g_audit);
+    if (g_audit_size < 0) g_audit_size = 0;
+}
+
 static int g_verbose;
 
 void log_init(const log_config_t *cfg, int verbose) {
@@ -78,6 +100,53 @@ void log_init(const log_config_t *cfg, int verbose) {
     g_min_level = (cfg->debug || verbose) ? LOG_DEBUG : cfg->level;
     g_use_color = use_color();
     open_log_file();
+    open_audit_file();
+    if (cfg->syslog && !g_syslog_open) { openlog("sekurircd", LOG_PID, LOG_DAEMON); g_syslog_open = 1; }
+    else if (!cfg->syslog && g_syslog_open) { closelog(); g_syslog_open = 0; }
+}
+
+int log_audit_enabled(void) { return g_audit != NULL || g_syslog_open; }
+
+/* The audit file rotates like the main one: base.(n-1) -> base.n, base -> base.1. */
+static void rotate_audit(void) {
+    if (g_audit) { fclose(g_audit); g_audit = NULL; }
+    char base[1100], from[1200], to[1200];
+    audit_path(base, sizeof base);
+    if (g_cfg.backup_count > 0) {
+        snprintf(to, sizeof to, "%s.%d", base, g_cfg.backup_count);
+        unlink(to);
+        for (int i = g_cfg.backup_count - 1; i >= 1; i--) {
+            snprintf(from, sizeof from, "%s.%d", base, i);
+            snprintf(to, sizeof to, "%s.%d", base, i + 1);
+            rename(from, to);
+        }
+        snprintf(to, sizeof to, "%s.1", base);
+        rename(base, to);
+    } else {
+        unlink(base);
+    }
+    open_audit_file();
+}
+
+void log_audit(const char *fmt, ...) {
+    if (!g_audit && !g_syslog_open) return;
+    char msg[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(msg, sizeof msg, fmt, ap);
+    va_end(ap);
+    for (char *c = msg; *c; c++) if (*c == '\n' || *c == '\r') *c = ' '; /* one line per action, whatever the text held */
+    if (g_syslog_open) syslog(LOG_NOTICE, "audit: %s", msg);
+    if (!g_audit) return;
+    time_t now = time(NULL);
+    struct tm tmv;
+    localtime_r(&now, &tmv);
+    char ts[32];
+    strftime(ts, sizeof ts, "%Y-%m-%d %H:%M:%S", &tmv);
+    int n = fprintf(g_audit, "%s %s\n", ts, msg);
+    fflush(g_audit);
+    if (n > 0) g_audit_size += n;
+    if (g_cfg.max_bytes > 0 && g_audit_size >= g_cfg.max_bytes) rotate_audit();
 }
 
 void log_reinit(const log_config_t *cfg) { log_init(cfg, g_verbose); } /* /REHASH: the new [logging], same -v */
@@ -129,6 +198,11 @@ void log_write(log_level_t level, const char *tag, const char *fmt, ...) {
     if (g_hook) g_hook(level, tag, msg);
 
     if (level < g_min_level) return;
+
+    if (g_syslog_open) {
+        static const int PRIO[] = {LOG_DEBUG, LOG_INFO, LOG_WARNING, LOG_ERR, LOG_CRIT};
+        syslog(PRIO[level], "%s: %s", tag, msg);
+    }
 
     time_t now = time(NULL);
     struct tm tmv;

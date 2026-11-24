@@ -82,7 +82,10 @@ typedef struct {
     int dynamic;        /* holds a ~j: extban, whose verdict depends on other channels -> never cached */
     time_t *set_at;     /* parallel to masks: when it was set (RPL_BANLIST, ~t: expiry) */
     char (*set_by)[64]; /* parallel to masks: who set it, "" = unknown (a burst) */
+    int cap;            /* slots allocated (the [limits] max_list_size at the time of the first add); 0 until then */
 } masklist_t;
+extern int masklist_default_cap; /* [limits] max_list_size, kept current by server_init / server_rehash */
+static inline int masklist_cap(const masklist_t *ml) { return ml->masks ? ml->cap : masklist_default_cap; }
 
 /* +f in UnrealIRCd's form "[<n><type>[#<action>[<mins>]],...]:<secs>". Types: c CTCP, j joins, k knocks, m messages,
  * n nick changes (all channel-wide), t text per user, r the same line repeated per user. The plain "<lines>:<secs>" form needs none of this (fp stays NULL). */

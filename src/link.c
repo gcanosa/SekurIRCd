@@ -613,6 +613,15 @@ int link_reconcile(server_t *srv) {
             why = "its address is no longer in the entry's allowed_ips";
             reason = "Link no longer allowed by allowed_ips";
         }
+        if (!why && p) {
+            const char *bad = netsync_introduces_violation(srv, lc);
+            if (bad) {
+                static char buf[200];
+                snprintf(buf, sizeof buf, "server %s behind it is no longer allowed by its introduces / leaf setting", bad);
+                why = buf;
+                reason = "Link no longer allowed by introduces";
+            }
+        }
         if (!why) continue;
         char m[300], line[200];
         snprintf(m, sizeof m, "Link with %s closed: %s", lc->peer_name, why);

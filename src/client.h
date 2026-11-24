@@ -6,6 +6,7 @@
 #ifndef SEKURIRCD_CLIENT_H
 #define SEKURIRCD_CLIENT_H
 
+#include "config.h"
 #include "vendor/uthash.h"
 
 #include <openssl/ssl.h>
@@ -201,6 +202,7 @@ typedef struct client {
 
     time_t flood_window_start;
     int flood_count;
+    struct { time_t start; int count; } cmd_rate[CFG_MAX_CMD_LIMITS]; /* [flood] command_limits: windows in the order the config lists them */
 
     /* Spam protection (spam.c): recent (target, text) sends, deduped per pair. */
     struct { uint32_t tgt, txt; time_t at; } spam_ring[SPAM_TRACK];

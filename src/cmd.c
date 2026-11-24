@@ -1,6 +1,9 @@
 #include "cmd.h"
+#include "log.h"
 #include "net.h"
 #include "protection.h"
+#include "xline.h"
+#include "classes.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -25,6 +28,7 @@ static unsigned command_priv(const char *c) {
         {"KILL", OPER_PRIV_KILL},
         {"KLINE", OPER_PRIV_KLINE}, {"SHUN", OPER_PRIV_KLINE}, {"UNSHUN", OPER_PRIV_KLINE}, {"ELINE", OPER_PRIV_KLINE}, {"UNELINE", OPER_PRIV_KLINE}, {"GLINE", OPER_PRIV_KLINE}, {"ZLINE", OPER_PRIV_KLINE},
         {"UNKLINE", OPER_PRIV_KLINE}, {"UNGLINE", OPER_PRIV_KLINE}, {"UNZLINE", OPER_PRIV_KLINE},
+        {"DEFCON", OPER_PRIV_KLINE}, {"CLASS", OPER_PRIV_KLINE}, {"QLINE", OPER_PRIV_KLINE}, {"UNQLINE", OPER_PRIV_KLINE}, {"RESV", OPER_PRIV_KLINE}, {"UNRESV", OPER_PRIV_KLINE}, {"XLINE", OPER_PRIV_KLINE}, {"UNXLINE", OPER_PRIV_KLINE},
         {"SPAMFILTER", OPER_PRIV_KLINE}, {"TESTLINE", OPER_PRIV_KLINE}, {"PROTECT", OPER_PRIV_KLINE},
         {"SAJOIN", OPER_PRIV_SA}, {"SAPART", OPER_PRIV_SA}, {"SAMODE", OPER_PRIV_SA}, {"SANICK", OPER_PRIV_SA},
         {"CHGHOST", OPER_PRIV_HOST}, {"SETHOST", OPER_PRIV_HOST}, {"CHGIDENT", OPER_PRIV_HOST}, {"USERIP", OPER_PRIV_HOST},
@@ -53,6 +57,14 @@ static const cmd_entry_t DISPATCH[] = {
     {"SHUN", cmd_shun, 0, 1, 1},
     {"UNSHUN", cmd_unshun, 1, 1, 1},
     {"ELINE", cmd_eline, 0, 1, 1},
+    {"DEFCON", cmd_defcon, 0, 1, 1},
+    {"CLASS", cmd_class, 0, 1, 1},
+    {"QLINE", cmd_qline, 0, 1, 1},
+    {"UNQLINE", cmd_unqline, 1, 1, 1},
+    {"RESV", cmd_resv, 0, 1, 1},
+    {"UNRESV", cmd_unresv, 1, 1, 1},
+    {"XLINE", cmd_xline, 0, 1, 1},
+    {"UNXLINE", cmd_unxline, 1, 1, 1},
     {"UNELINE", cmd_uneline, 1, 1, 1},
     {"GLOBOPS", cmd_globops, 1, 1, 1},
     {"OPERWALL", cmd_globops, 1, 1, 1},
@@ -195,6 +207,30 @@ void cmd_send_welcome_if_ready(server_t *srv, client_t *cl) {
         server_notify_opers(srv, snote);
         return;
     }
+    int defcon = server_defcon(srv);
+    if (defcon <= 3 && !server_eline_ip(srv, cl->ip)) { /* DEFCON 3: log in (SASL) to connect; 2: and over TLS */
+        const char *why = defcon <= 2 && !cl->ssl ? "only TLS connections are taken right now" : !cl->account[0] ? "only logged-in users (SASL) are taken right now" : NULL;
+        if (why) {
+            char err[300];
+            snprintf(err, sizeof err, "ERROR :Closing Link: %s (DEFCON %d)", why, defcon);
+            client_send(cl, err);
+            snprintf(cl->quit_reason, sizeof cl->quit_reason, "%s (DEFCON %d)", why, defcon);
+            client_mark_quit(cl);
+            return;
+        }
+    }
+    const char *xl = xline_match(srv, 'X', cl->realname); /* an X-line: the realname is the thing banned */
+    if (xl) {
+        snprintf(cl->quit_reason, sizeof cl->quit_reason, "X-Lined: %s", xl);
+        char err[400];
+        snprintf(err, sizeof err, "ERROR :Closing Link: %s (X-Lined: %s)", cl->ip, xl);
+        client_send(cl, err);
+        client_mark_quit(cl);
+        char snote[400];
+        snprintf(snote, sizeof snote, "Rejected connection from %s (%s@%s): X-Lined: %s", cl->ip, cl->user, cl->realhost, xl);
+        server_notify_opers(srv, snote);
+        return;
+    }
     if (net_takeover(srv, cl)) return; /* always-on: resumed the account's kept session instead of joining as new */
     cl->registered = 1;
 
@@ -241,6 +277,42 @@ static int find_dispatch(const char *cmd) {
 }
 
 static void dispatch_inner(server_t *srv, client_t *cl, irc_message_t *msg);
+
+/* [flood] command_limits: true (and RPL_TRYAGAIN sent) when `cl` has run `command` more than its limit allows in the window.
+ * Opers and unregistered connections are never limited. */
+static int cmd_rate_limited(server_t *srv, client_t *cl, const char *command) {
+    const cfg_security_t *sec = &srv->cfg.security;
+    if (sec->n_cmd_limits == 0 || !cl->registered || (cl->umodes & UMODE_O)) return 0;
+    for (int j = 0; j < sec->n_cmd_limits; j++) {
+        if (strcasecmp(sec->cmd_limits[j].name, command) != 0) continue;
+        time_t now = time(NULL);
+        if (cl->cmd_rate[j].start == 0 || difftime(now, cl->cmd_rate[j].start) >= sec->cmd_limits[j].window) {
+            cl->cmd_rate[j].start = now;
+            cl->cmd_rate[j].count = 0;
+        }
+        if (++cl->cmd_rate[j].count <= sec->cmd_limits[j].max) return 0;
+        const char *p[] = {command};
+        client_reply(cl, N_TRYAGAIN, p, 1, "Please wait a while and try again.");
+        return 1;
+    }
+    return 0;
+}
+
+/* The audit log: what an oper ran. Read-only lookups and secrets stay out of it. */
+static void audit_oper_command(client_t *cl, const irc_message_t *msg) {
+    static const char *const QUIET[] = {"TESTLINE", "TRACE", "STATS", "LINKS", "MAP"};
+    for (size_t k = 0; k < sizeof QUIET / sizeof QUIET[0]; k++) if (strcasecmp(msg->command, QUIET[k]) == 0) return;
+    int secret = strcasecmp(msg->command, "DIE") == 0 || strcasecmp(msg->command, "RESTART") == 0; /* their parameter is a password */
+    char args[400] = "";
+    for (int k = 0; k < msg->nparams && !secret; k++) {
+        size_t l = strlen(args);
+        const char *a = msg->params[k];
+        int trailing = k == msg->nparams - 1 && (!*a || *a == ':' || strchr(a, ' '));
+        snprintf(args + l, sizeof args - l, " %s%s", trailing ? ":" : "", a);
+    }
+    log_audit("%s!%s@%s%s%s %s%s", cl->nick, client_ident(cl), cl->realhost[0] ? cl->realhost : cl->host, cl->remote ? " on " : "",
+              cl->remote ? netsync_server_name_of(cl->srv, cl) : "", msg->command, secret ? " <redacted>" : args);
+}
 
 void cmd_count_remote(server_t *srv, const char *name) {
     int n = srv->n_command_counts;
@@ -314,6 +386,8 @@ static void dispatch_inner(server_t *srv, client_t *cl, irc_message_t *msg) {
             for (int k = 0; k < msg->nparams; k++) b += strlen(msg->params[k]) + 1;
             srv->command_counts[cs].bytes += b;
         }
+        if (cmd_rate_limited(srv, cl, DISPATCH[i].name)) return;
+        if (DISPATCH[i].oper_only && log_audit_enabled()) audit_oper_command(cl, msg); /* before: DIE and RESTART never return */
         DISPATCH[i].handler(srv, cl, msg);
         return;
     }

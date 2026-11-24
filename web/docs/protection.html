@@ -162,6 +162,11 @@ max_connections_per_ip = 0     # per single IP; 0 = unlimited</pre>
 <pre>[flood]
 max_msgs = 20      # a registered client sending more than this many lines...
 window = 1.0       # ...within this many seconds is disconnected</pre>
+<p>The guard counts every line alike. For what it lets through (scraping with <code>WHO</code> and <code>LIST</code>, <code>WHOIS</code> probing, nick changing), limit single commands:</p>
+<pre>[flood]
+command_limits = ["WHO 5/10", "LIST 2/30", "WHOIS 10/10", "NICK 3/60"]   # at most 5 WHO per 10 seconds, ...</pre>
+<p>Past a limit the user is answered "Please wait a while and try again" (numeric 263) and the command is not run; nobody is disconnected. Opers are never held to them, <code>NICK</code> counts only once registered, and the key works in <code>[security]</code> of <code>sekurircd.toml</code> too.</p>
+<p>When a server is under attack, <code>/DEFCON</code> (an oper command) raises the bar for new connections at once, and <code>/DEFCON 5</code> lifts it: level 4 halves the connect rate and allows two connections per address, 3 also needs a login (SASL), 2 also needs TLS, 1 takes no new connections. An ELINE'd address is exempt. <code>/DEFCON 3 30m</code> puts the level back by itself.</p>
 
 <h2>bans: k-line, g-line, z-line</h2>
 <p>All three ban by IP mask, are enforced before registration, and disconnect matching clients that are already online. Automatic bans from blacklist hits, the proxy scanner and the

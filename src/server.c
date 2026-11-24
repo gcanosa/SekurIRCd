@@ -7,6 +7,8 @@
 #include "proto.h"
 #include "spam.h"
 #include "worker.h"
+#include "xline.h"
+#include "classes.h"
 #include "history.h"
 #include "vendor/cJSON.h"
 
@@ -124,6 +126,7 @@ static void warn_plain_passwords(const config_t *cfg) {
 int server_init(server_t *srv, const config_t *cfg) {
     memset(srv, 0, sizeof *srv);
     srv->cfg = *cfg;
+    masklist_default_cap = cfg->limits.max_list_size;
     srv->svc_gone_at = time(NULL);
     server_apply_cloak_secret(srv);
     netsync_init(srv);
@@ -145,6 +148,9 @@ int server_init(server_t *srv, const config_t *cfg) {
     warn_plain_passwords(&srv->cfg);
 
     server_kline_load(srv);
+    xline_load(srv);
+    classes_load(srv);
+    classes_rebuild(srv);
     spam_reload(srv);
     protection_reload(srv);
     return 0;
@@ -296,8 +302,14 @@ int server_rehash(server_t *srv, char *errbuf, size_t errbufsz) {
                                        os->host_masking_keep_labels != ns->host_masking_keep_labels || os->host_masking_ip_ranges != ns->host_masking_ip_ranges ||
                                        strcmp(os->host_masking_secret, ns->host_masking_secret) || !os->host_masking ||
                                        strcmp(srv->cfg.server.network, tmp.server.network)); /* {network} is in the cloak */
+    if (tmp.limits.whowas_entries != srv->cfg.limits.whowas_entries) { /* the ring's index maths changes with its size: start it over */
+        for (int i = 0; i < WHOWAS_MAX; i++) { free((void *)srv->whowas[i].nick); srv->whowas[i] = (whowas_entry_t){0}; }
+        srv->whowas_head = srv->whowas_count = 0;
+    }
     config_free(&srv->cfg); /* the new config owns its own arrays; nothing keeps a pointer into the old ones across commands */
     srv->cfg = tmp;
+    masklist_default_cap = srv->cfg.limits.max_list_size;
+    classes_rebuild(srv); /* the table points into srv->cfg.classes, which was just replaced */
     server_apply_cloak_secret(srv);
     if (recloak) {
         int n = recloak_all(srv, !os_masking);
@@ -309,7 +321,8 @@ int server_rehash(server_t *srv, char *errbuf, size_t errbufsz) {
     log_reinit(&lcfg);
     if (strcmp(old_klines, new_klines) != 0) { /* the lines we hold, plus the new file's, saved there */
         server_kline_load(srv);
-        srv->klines_dirty = 1, srv->kline_gen++;
+        xline_load(srv);
+        srv->klines_dirty = 1, srv->kline_gen++, srv->xlines_dirty = 1;
         NOTE("K/G/Z-lines: now kept in %s", new_klines[0] ? new_klines : "memory only");
     }
     int n_links = link_reconcile(srv); /* a removed [[links.peers]] entry (or an address it no longer allows) drops its link now */
@@ -322,6 +335,7 @@ int server_rehash(server_t *srv, char *errbuf, size_t errbufsz) {
     if (srv->self_srv) snprintf(srv->self_srv->desc, sizeof srv->self_srv->desc, "%s", srv->cfg.server.network); /* LINKS/MAP description follows the network name */
     cmd_cap_notify_changes(srv, srv->services_online, old_history);
     net_reclass_all(srv);
+    classes_publish(srv); /* the file's scope = "global" classes may have changed */
     net_apply_listeners(srv);
     server_load_motd(srv);
     config_motd_path(&srv->cfg, path, sizeof path);
@@ -788,7 +802,7 @@ void server_remove_client(server_t *srv, client_t *cl, const char *quit_reason) 
     char prefix[320];
     client_prefix(cl, prefix, sizeof prefix);
     char line[512];
-    irc_build(line, sizeof line, NULL, 0, prefix, "QUIT", NULL, 0, quit_reason ? quit_reason : "");
+    irc_build(line, sizeof line, NULL, 0, prefix, "QUIT", NULL, 0, srv->cfg.privacy.hide_part_quit_reasons ? "Quit" : (quit_reason ? quit_reason : ""));
     if (cl->conn_id) worker_cancel(cl->conn_id); /* skip its still-queued lookups */
     if (cl->uid[0] && !cl->remote) netsync_user_quit(srv, cl, quit_reason); /* tell the rest of the network */
     link_svc_user(srv, cl, SVC_EV_QUIT);
@@ -839,10 +853,18 @@ void server_remove_client(server_t *srv, client_t *cl, const char *quit_reason) 
 void server_send_isupport(server_t *srv, client_t *cl) {
     char netbuf[CFG_STR + 16];
     snprintf(netbuf, sizeof netbuf, "NETWORK=%s", srv->cfg.server.network);
-    char nicklen[32], chanlen[32], topiclen[32];
+    char nicklen[32], chanlen[32], topiclen[32], awaylen[32], chanlimit[32], kicklen[32], maxlist[64], modes[16], monitor[32], silence[32];
+    const cfg_limits_t *lim = &srv->cfg.limits;
     snprintf(nicklen, sizeof nicklen, "NICKLEN=%d", srv->cfg.security.max_nick_length);
-    snprintf(chanlen, sizeof chanlen, "CHANNELLEN=%d", 50);
-    snprintf(topiclen, sizeof topiclen, "TOPICLEN=%d", TOPIC_MAX_LEN);
+    snprintf(chanlen, sizeof chanlen, "CHANNELLEN=%d", lim->channel_length);
+    snprintf(topiclen, sizeof topiclen, "TOPICLEN=%d", lim->topic_length);
+    snprintf(awaylen, sizeof awaylen, "AWAYLEN=%d", lim->away_length);
+    snprintf(chanlimit, sizeof chanlimit, "CHANLIMIT=#:%d", lim->channels_per_user);
+    snprintf(kicklen, sizeof kicklen, "KICKLEN=%d", lim->kick_length);
+    snprintf(maxlist, sizeof maxlist, "MAXLIST=b:%d,e:%d,I:%d", lim->max_list_size, lim->max_list_size, lim->max_list_size);
+    snprintf(modes, sizeof modes, "MODES=%d", lim->modes_per_command);
+    snprintf(monitor, sizeof monitor, "MONITOR=%d", lim->monitor_entries);
+    snprintf(silence, sizeof silence, "SILENCE=%d", lim->silence_entries);
 
     char icontok[CFG_STR + 16], denytok[CFG_STR + 16];
     snprintf(icontok, sizeof icontok, "draft/ICON=%s", srv->cfg.server.icon);
@@ -851,15 +873,15 @@ void server_send_isupport(server_t *srv, client_t *cl) {
     snprintf(histtok, sizeof histtok, "CHATHISTORY=%d", srv->cfg.messages.history_size > 100 ? 100 : srv->cfg.messages.history_size);
     /* Alphabetical (draft/ICON filed under ICON); keep it that way when adding a token. NULL = feature off. */
     const char *tokens[] = {
-        "AWAYLEN=399", "BOT=B", "CALLERID=g", "CASEMAPPING=ascii", "CHANLIMIT=#:200",
+        awaylen, "BOT=B", "CALLERID=g", "CASEMAPPING=ascii", chanlimit,
         "CHANMODES=beI,k,lfjL,imnprstzCNPQSTVROMcDuGK", chanlen, "CHANTYPES=#",
         srv->cfg.messages.history_size > 0 ? histtok : NULL,
         srv->cfg.messages.client_tag_deny[0] ? denytok : NULL,
         "ELIST=MNU", "EXCEPTS=e", "EXTBAN=~,amnrzjtSf",
         srv->cfg.server.icon[0] ? icontok : NULL,
-        "INVEX=I", "KICKLEN=300", "LINELEN=512", "MAXLIST=b:100,e:100,I:100", "MODES=6", "MONITOR=100",
+        "INVEX=I", kicklen, "LINELEN=512", maxlist, modes, monitor,
         srv->cfg.messages.history_size > 0 ? "MSGREFTYPES=msgid,timestamp" : NULL,
-        netbuf, nicklen, "PREFIX=(qaohv)~&@%+", "SILENCE=15", "STATUSMSG=~&@%+",
+        netbuf, nicklen, "PREFIX=(qaohv)~&@%+", silence, "STATUSMSG=~&@%+",
         "TARGMAX=PRIVMSG:4,NOTICE:4,KICK:1,JOIN:,PART:,WHOIS:", /* JOIN/PART/WHOIS: blank = no limit, they take lists */
         topiclen,
         srv->cfg.messages.utf8_only ? "UTF8ONLY" : NULL,
@@ -1321,6 +1343,9 @@ int server_is_shunned(server_t *srv, client_t *cl) {
 
 void server_free_tables(server_t *srv) {
     server_kline_flush(srv);
+    xline_flush(srv);
+    xline_free(srv);
+    classes_free(srv);
     netsync_free(srv);
     history_maybe_save(srv, 1);
     history_free(srv);
@@ -1341,6 +1366,16 @@ void server_free_tables(server_t *srv) {
     HASH_ITER(hh, srv->ip_counts, e, tmp) { HASH_DEL(srv->ip_counts, e); free(e); }
 }
 
+int server_defcon(server_t *srv) {
+    if (srv->defcon_level && srv->defcon_until && time(NULL) >= srv->defcon_until) {
+        srv->defcon_level = 0;
+        srv->defcon_until = 0;
+        server_notify_opers(srv, "DEFCON expired: back to level 5 (normal)");
+        log_info("defcon", "expired: back to level 5");
+    }
+    return srv->defcon_level ? srv->defcon_level : 5;
+}
+
 /* --- WHOWAS -------------------------------------------------------------- */
 
 void server_whowas_record(server_t *srv, const char *nick, const char *user,
@@ -1349,8 +1384,11 @@ void server_whowas_record(server_t *srv, const char *nick, const char *user,
     static const size_t cap[4] = {NICKLEN - 1, USERLEN - 1, HOSTLEN - 1, REALNAMELEN - 1}; /* the old fixed field sizes */
     size_t len[4], total = 0;
     for (int i = 0; i < 4; i++) { len[i] = strnlen(in[i], cap[i]); total += len[i] + 1; }
+    int ring = srv->cfg.limits.whowas_entries; /* [limits] whowas_entries; 0 keeps no WHOWAS at all */
+    if (ring <= 0) return;
     char *blob = malloc(total), *p = blob;
     if (!blob) return;
+    if (srv->whowas_head >= ring) srv->whowas_head = 0;
     whowas_entry_t *e = &srv->whowas[srv->whowas_head];
     free((void *)e->nick); /* the entry this overwrites (NULL the first time round) */
     const char **dst[4] = {&e->nick, &e->user, &e->host, &e->realname};
@@ -1360,8 +1398,8 @@ void server_whowas_record(server_t *srv, const char *nick, const char *user,
         *dst[i] = p;
         p += len[i] + 1;
     }
-    srv->whowas_head = (srv->whowas_head + 1) % WHOWAS_MAX;
-    if (srv->whowas_count < WHOWAS_MAX) srv->whowas_count++;
+    srv->whowas_head = (srv->whowas_head + 1) % ring;
+    if (srv->whowas_count < ring) srv->whowas_count++;
 }
 
 /* --- MONITOR --------------------------------------------------------------- */

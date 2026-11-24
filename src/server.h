@@ -18,7 +18,14 @@
 
 #define MOTD_MAX_LINES 200
 #define MOTD_LINE_LEN  400
-#define WHOWAS_MAX     200
+#define WHOWAS_MAX     CFG_WHOWAS_MAX
+
+/* The DEFCON level now in force on this server: 5 = normal, 4 stricter connection limits, 3 + login required (SASL), 2 + TLS only,
+ * 1 = lockdown, no new connections. An expiry that has passed is applied (and announced) here. */
+int server_defcon(struct server *srv);
+
+/* [privacy] hide_part_quit_reasons: the reason other users are shown for a PART/QUIT (NULL = none; the network still gets the real one). */
+#define PRIVACY_REASON(srv, reason) ((srv)->cfg.privacy.hide_part_quit_reasons ? NULL : (reason))
 
 /* MOTD / oper MOTD / rules: each line is its own exact-size heap string (a reload frees and re-reads them), so a
  * three-line MOTD costs bytes, not MOTD_MAX_LINES * MOTD_LINE_LEN of fixed arrays. */
@@ -65,7 +72,11 @@ typedef struct server {
     struct client *by_uid;            /* netsync: every user (local and remote) by UID */
     unsigned long uid_counter;
     struct { time_t next; double backoff; } dial[CFG_MAX_LINK_PEERS]; /* per dial-out peer reconnect state */
-    int class_count[CFG_MAX_CLASSES]; /* live connections per [[classes]] entry */
+    int class_count[64]; /* live connections per class_tab entry (SRV_MAX_CLASSES, classes.h) */
+    const cfg_class_t *class_tab[64]; /* the connection classes in the order they are tried: config, CLASS ADD, other servers'; classes.c rebuilds it */
+    int n_class_tab;
+    struct sclass *rt_classes;  /* classes added with CLASS ADD (classes.json) */
+    struct sclass *net_classes; /* global classes other servers published */
     int n_watchers;        /* clients with a non-empty MONITOR/WATCH list */
     struct watch_entry *mon_idx, *watch_idx; /* watched nick (casefolded) -> the clients watching it; see server_watch_index_add */
     char msgid_prefix[17]; /* random per run, so msgids stay unique across restarts */
@@ -129,6 +140,10 @@ typedef struct server {
     kline_entry_t *klines;
     unsigned kline_gen;     /* bumped whenever the list changes -- invalidates client_t's cached SHUN verdict */
     int klines_dirty;       /* a write is pending -- net.c's tick flushes it (see server_kline_flush) */
+    struct xline *xlines;   /* Q-lines, RESVs, X-lines (xline.h) */
+    int defcon_level;       /* DEFCON: 0 = normal (5); 4..1 as set by an oper, see server_defcon */
+    time_t defcon_until;    /* 0 = until lifted; else the level drops back to normal then */
+    int xlines_dirty;       /* same, for xlines.json */
 
     /* Exact concurrent-connection count per IP, maintained by
      * server_add_connection/unlink_connection -- replaces walking every

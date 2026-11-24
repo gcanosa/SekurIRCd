@@ -68,6 +68,13 @@ connect_flood_ban_duration = "10m"
 max_msgs = 20
 window = 1.0
 
+# Limits on single commands, for what a flood guard that counts every line
+# alike lets through: scraping with WHO and LIST, WHOIS probing, nick changing.
+# "<COMMAND> <most>/<seconds>": past that a user is answered "try again" (263)
+# and the command is not run. Opers are never held to them. NICK counts once
+# registered. (The same key works in sekurircd.toml [security].)
+#command_limits = ["WHO 5/10", "LIST 2/30", "WHOIS 10/10", "NICK 3/60"]
+
 
 # -----------------------------------------------------------------------------
 #  SPAM -- private messages, notices and channels

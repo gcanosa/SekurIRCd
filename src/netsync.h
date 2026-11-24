@@ -92,6 +92,8 @@ struct client *netsync_find_uid(struct server *srv, const char *uid);
 void netsync_default_sid(const char *name, char *out /* >= SID_LEN+1 */);
 /* The server name a client lives on (ours for local clients). */
 const char *netsync_server_name_of(struct server *srv, const struct client *cl);
+/* The server name `viewer` is shown for `u`: [privacy] hide_server_name stands in for everyone's, except to opers. */
+const char *netsync_server_name_shown(struct server *srv, const struct client *viewer, const struct client *u);
 
 /* --- links ------------------------------------------------------------------------------------------ */
 /* Handshake finished on `lc` with a SEKURNET peer `name`/`sid`/`desc` (hop = 1): register it, send our burst.
@@ -150,6 +152,15 @@ void netsync_gline(struct server *srv, const char *mask, const char *setter, lon
 void netsync_ungline(struct server *srv, const char *mask);
 void netsync_shun(struct server *srv, const char *mask, const char *setter, long expires, const char *reason);
 void netsync_unshun(struct server *srv, const char *mask);
+/* Q-lines / RESVs / X-lines (xline.h): `:<sid> XLN <Q|R|X> <mask> <setter> <expires> :<reason>` and `:<sid> UNXLN <type> <mask>`. */
+/* Global connection classes (classes.h): `:<origin> CLASS CLEAR` then `:<origin> CLASS ADD :<definition>` per class; `to` NULL = every link,
+ * origin NULL = this server's. netsync_class_del asks the owner of a class (a server we hold it from) to drop it. */
+/* [[links.peers]] introduces / leaf: a server behind `lc` its entry no longer allows (link_reconcile checks it after a rehash), or NULL. */
+const char *netsync_introduces_violation(struct server *srv, struct link_conn *lc);
+void netsync_class(struct server *srv, struct link_conn *to, const char *origin, const char *rule);
+void netsync_class_del(struct server *srv, const char *origin, const char *name);
+void netsync_xline(struct server *srv, char type, const char *mask, const char *setter, long expires, const char *reason);
+void netsync_unxline(struct server *srv, char type, const char *mask);
 /* One line of `origin`'s (NULL = our own) global spam rule set: `rule` NULL is CLEAR. To one link (its burst), or to every
  * link when `to` is NULL. A link that leads to the origin is skipped. */
 void netsync_spamfilter(struct server *srv, struct link_conn *to, const char *origin, const char *rule);

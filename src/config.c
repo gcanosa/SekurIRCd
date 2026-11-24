@@ -12,6 +12,7 @@
 #include "tomlx.h"
 
 #include <ctype.h>
+#include <glob.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -258,6 +259,8 @@ static void ip_mask_normalize(char *h, const char *what) {
     if (h[0] == ':' && strlen(h) + 2 <= CFG_MASK) memmove(h + 1, h, strlen(h) + 1), h[0] = '0';
 }
 
+void config_ip_mask_normalize(char *h, const char *what) { ip_mask_normalize(h, what); }
+
 #define NORM_MASKS(arr, n, what) do { for (int k_ = 0; k_ < (n); k_++) ip_mask_normalize((arr)[k_], what); } while (0)
 
 static int is_absolute_path(const char *p) { return p[0] == '/'; }
@@ -342,6 +345,14 @@ void config_log_cfg(const config_t *cfg, struct log_config *out) {
     out->backup_count = cfg->logging.backup_count;
     snprintf(out->directory, sizeof out->directory, "%s", cfg->logging.directory);
     snprintf(out->file, sizeof out->file, "%s", cfg->logging.file);
+    snprintf(out->audit_file, sizeof out->audit_file, "%s", cfg->logging.audit_file);
+    out->syslog = cfg->logging.syslog;
+}
+
+int config_classes_path(const config_t *cfg, char *out, size_t outsz) {
+    if (cfg->path[0] == '\0') return 0;
+    resolve_against_config_dir(cfg, "classes.json", out, outsz);
+    return 1;
 }
 
 int config_klines_path(const config_t *cfg, char *out, size_t outsz) {
@@ -525,6 +536,19 @@ void config_defaults(config_t *out) {
     out->logging.max_bytes = 5 * 1024 * 1024;
     out->logging.backup_count = 5;
 
+    /* [limits]: the values that used to be compile-time constants, so a config without the section behaves as before */
+    out->limits.channels_per_user = 200;
+    out->limits.max_list_size = 100;
+    out->limits.topic_length = 307;
+    out->limits.kick_length = 300;
+    out->limits.away_length = 399;
+    out->limits.channel_length = 50;
+    out->limits.monitor_entries = 100;
+    out->limits.silence_entries = 15;
+    out->limits.whowas_entries = 200;
+    out->limits.modes_per_command = 6;
+    out->limits.registration_timeout = 60;
+
     snprintf(out->tls.cert_file, CFG_PATH, "%s", "");
     out->tls.port = 6697;
 
@@ -532,6 +556,7 @@ void config_defaults(config_t *out) {
     out->accounts.max_accounts = 10000;
 
     snprintf(out->links.mode, sizeof out->links.mode, "hub");
+    out->links.accept_global_classes = 1;
     snprintf(out->links.bind, CFG_STR, "0.0.0.0");
     snprintf(out->links.bind6, CFG_STR, "::");
     out->links.port = 7000;
@@ -607,6 +632,45 @@ static int parse_spam(toml_node_t *sp, config_t *out, char *errbuf, size_t errbu
 }
 
 /* --- build from parsed TOML ---------------------------------------------------- */
+
+/* command_limits = ["WHO 5/10", ...] in [flood] (protection.toml) or [security]: at most 5 WHO per 10 seconds. Absent key = leave as is. */
+static int parse_cmd_limits(toml_node_t *tab, const char *section, cfg_security_t *sec, char *errbuf, size_t errbufsz) {
+    if (!tab || !tx_get(tab, "command_limits")) return 0;
+    char v[CFG_MAX_CMD_LIMITS][CFG_STR], fn[48];
+    int n = 0;
+    snprintf(fn, sizeof fn, "%s.command_limits", section);
+    if (cfg_get_str_array(tab, "command_limits", v, CFG_MAX_CMD_LIMITS, &n, errbuf, errbufsz, fn)) return -1;
+    sec->n_cmd_limits = 0;
+    for (int i = 0; i < n; i++) {
+        char name[16], junk;
+        int max;
+        double win;
+        if (sscanf(v[i], "%15s %d/%lf %c", name, &max, &win, &junk) != 3 || max < 1 || win <= 0) {
+            snprintf(errbuf, errbufsz, "%s.command_limits entries look like \"WHO 5/10\" (at most 5 per 10 seconds): \"%s\"", section, v[i]);
+            return -1;
+        }
+        for (char *c = name; *c; c++) *c = (char)toupper((unsigned char)*c);
+        for (int j = 0; j < sec->n_cmd_limits; j++)
+            if (strcmp(sec->cmd_limits[j].name, name) == 0) { snprintf(errbuf, errbufsz, "%s.command_limits names %s twice", section, name); return -1; }
+        snprintf(sec->cmd_limits[sec->n_cmd_limits].name, sizeof sec->cmd_limits[0].name, "%s", name);
+        sec->cmd_limits[sec->n_cmd_limits].max = max;
+        sec->cmd_limits[sec->n_cmd_limits].window = win;
+        sec->n_cmd_limits++;
+    }
+    return 0;
+}
+
+/* A TLS certificate fingerprint as the config may spell it (any case, ':' between bytes) -> 64 lowercase hex. 0 ok. */
+static int norm_certfp(const char *in, char out[65]) {
+    size_t n = 0;
+    for (const char *c = in; *c; c++) {
+        if (*c == ':') continue;
+        if (!isxdigit((unsigned char)*c) || n >= 64) return -1;
+        out[n++] = (char)tolower((unsigned char)*c);
+    }
+    out[n] = '\0';
+    return n == 64 ? 0 : -1;
+}
 
 static int build_config(toml_node_t *raw, const char *path, config_t *out,
                          char *errbuf, size_t errbufsz) {
@@ -774,6 +838,7 @@ static int build_config(toml_node_t *raw, const char *path, config_t *out,
         snprintf(errbuf, errbufsz, "security.ping_timeout must be greater than security.ping_interval");
         return -1;
     }
+    if (parse_cmd_limits(sec, "security", &out->security, errbuf, errbufsz)) return -1;
     if (out->security.max_connections < 0) { snprintf(errbuf, errbufsz, "security.max_connections must be >= 0 (0 = unlimited)"); return -1; }
     if (out->security.max_connections_per_ip < 0) { snprintf(errbuf, errbufsz, "security.max_connections_per_ip must be >= 0 (0 = unlimited)"); return -1; }
     if (out->security.ident_timeout <= 0) { snprintf(errbuf, errbufsz, "security.ident_timeout must be > 0"); return -1; }
@@ -827,6 +892,9 @@ static int build_config(toml_node_t *raw, const char *path, config_t *out,
     if (cfg_get_int(log, "backup_count", 5, &out->logging.backup_count, errbuf, errbufsz, "logging.backup_count")) return -1;
     if (out->logging.max_bytes < 1) { snprintf(errbuf, errbufsz, "logging.max_bytes must be >= 1"); return -1; }
     if (out->logging.backup_count < 0) { snprintf(errbuf, errbufsz, "logging.backup_count must be >= 0"); return -1; }
+    if (cfg_get_str(log, "audit_file", "", out->logging.audit_file, CFG_STR, errbuf, errbufsz, "logging.audit_file")) return -1;
+    if (strchr(out->logging.audit_file, '/') && out->logging.audit_file[0] != '/') { snprintf(errbuf, errbufsz, "logging.audit_file is a file name inside logging.directory (or an absolute path)"); return -1; }
+    if (cfg_get_bool(log, "syslog", 0, &out->logging.syslog, errbuf, errbufsz, "logging.syslog")) return -1;
 
     /* [[operators]] */
     if (tx_get(raw, "operators")) {
@@ -847,8 +915,25 @@ static int build_config(toml_node_t *raw, const char *path, config_t *out,
             snprintf(fn, sizeof fn, "operators[%d].password_hash", i);
             if (cfg_get_str(o, "password_hash", "", op->password_hash, CFG_STR, errbuf, errbufsz, fn)) return -1;
             if (!op->name[0]) { snprintf(errbuf, errbufsz, "operators[%d] requires name", i); return -1; }
-            if ((op->password[0] != '\0') == (op->password_hash[0] != '\0')) {
-                snprintf(errbuf, errbufsz, "operators[%d] requires exactly one of password or password_hash", i);
+            {
+                char fp[CFG_MAX_OPER_CERTFPS][CFG_STR];
+                int nfp = 0;
+                snprintf(fn, sizeof fn, "operators[%d].certfp", i);
+                if (cfg_get_str_array(o, "certfp", fp, CFG_MAX_OPER_CERTFPS, &nfp, errbuf, errbufsz, fn)) return -1;
+                for (int j = 0; j < nfp; j++) {
+                    if (norm_certfp(fp[j], op->certfp[j]) != 0) {
+                        snprintf(errbuf, errbufsz, "operators[%d].certfp: \"%s\" is not a SHA-256 fingerprint (64 hex characters; colons are fine)", i, fp[j]);
+                        return -1;
+                    }
+                }
+                op->n_certfp = nfp;
+            }
+            if (op->password[0] && op->password_hash[0]) {
+                snprintf(errbuf, errbufsz, "operators[%d] takes password or password_hash, not both", i);
+                return -1;
+            }
+            if (!op->password[0] && !op->password_hash[0] && op->n_certfp == 0) { /* certfp alone is a login: the certificate is the credential */
+                snprintf(errbuf, errbufsz, "operators[%d] requires exactly one of password or password_hash (or a certfp)", i);
                 return -1;
             }
             snprintf(fn, sizeof fn, "operators[%d].hosts", i);
@@ -980,6 +1065,16 @@ static int build_config(toml_node_t *raw, const char *path, config_t *out,
             if (cfg_get_int(t, "flood_max_msgs", 0, &cc->flood_max_msgs, errbuf, errbufsz, fn)) return -1;
             snprintf(fn, sizeof fn, "classes[%d].flood_window", i);
             if (cfg_get_double(t, "flood_window", 0, &cc->flood_window, errbuf, errbufsz, fn)) return -1;
+            {
+                char scope[16];
+                snprintf(fn, sizeof fn, "classes[%d].scope", i);
+                if (cfg_get_str(t, "scope", "local", scope, sizeof scope, errbuf, errbufsz, fn)) return -1;
+                if (strcasecmp(scope, "local") != 0 && strcasecmp(scope, "global") != 0) {
+                    snprintf(errbuf, errbufsz, "classes[%d].scope must be \"local\" or \"global\"", i);
+                    return -1;
+                }
+                cc->global = strcasecmp(scope, "global") == 0;
+            }
             if (!cc->name[0] || cc->n_hosts < 1) {
                 snprintf(errbuf, errbufsz, "classes[%d] needs a name and at least one hosts glob", i);
                 return -1;
@@ -1046,6 +1141,54 @@ static int build_config(toml_node_t *raw, const char *path, config_t *out,
                 return -1;
             }
         }
+    }
+
+    /* [limits] */
+    {
+        int e;
+        toml_node_t *lim = cfg_get_section(raw, "limits", errbuf, errbufsz, &e);
+        if (e) return -1;
+        cfg_limits_t *l = &out->limits;
+        static const struct { const char *key; int lo, hi; size_t off; } LIM[] = {
+            {"channels_per_user", 1, 500, offsetof(cfg_limits_t, channels_per_user)},
+            {"max_list_size", 1, 500, offsetof(cfg_limits_t, max_list_size)},
+            {"topic_length", 1, 307, offsetof(cfg_limits_t, topic_length)},
+            {"kick_length", 1, 300, offsetof(cfg_limits_t, kick_length)},
+            {"away_length", 1, 399, offsetof(cfg_limits_t, away_length)},
+            {"channel_length", 10, 50, offsetof(cfg_limits_t, channel_length)},
+            {"monitor_entries", 1, 500, offsetof(cfg_limits_t, monitor_entries)},
+            {"silence_entries", 1, 100, offsetof(cfg_limits_t, silence_entries)},
+            {"whowas_entries", 0, CFG_WHOWAS_MAX, offsetof(cfg_limits_t, whowas_entries)},
+            {"modes_per_command", 1, 12, offsetof(cfg_limits_t, modes_per_command)},
+            {"registration_timeout", 5, 600, offsetof(cfg_limits_t, registration_timeout)},
+        };
+        for (size_t k = 0; k < sizeof LIM / sizeof LIM[0]; k++) {
+            int *f = (int *)((char *)l + LIM[k].off);
+            char fn[48];
+            snprintf(fn, sizeof fn, "limits.%s", LIM[k].key);
+            if (cfg_get_int(lim, LIM[k].key, *f, f, errbuf, errbufsz, fn)) return -1;
+            if (*f < LIM[k].lo || *f > LIM[k].hi) {
+                snprintf(errbuf, errbufsz, "limits.%s must be in %d-%d", LIM[k].key, LIM[k].lo, LIM[k].hi);
+                return -1;
+            }
+        }
+    }
+
+    /* [privacy] */
+    {
+        int e;
+        toml_node_t *pv = cfg_get_section(raw, "privacy", errbuf, errbufsz, &e);
+        if (e) return -1;
+        cfg_privacy_t *p = &out->privacy;
+        if (cfg_get_bool(pv, "hide_links", 0, &p->hide_links, errbuf, errbufsz, "privacy.hide_links")) return -1;
+        if (cfg_get_str(pv, "hide_server_name", "", p->hide_server_name, CFG_STR, errbuf, errbufsz, "privacy.hide_server_name")) return -1;
+        if (p->hide_server_name[0] && (strpbrk(p->hide_server_name, " \t:") || !strchr(p->hide_server_name, '.'))) {
+            snprintf(errbuf, errbufsz, "privacy.hide_server_name must look like a server name: a dot, no spaces (e.g. \"*.example.net\")");
+            return -1;
+        }
+        if (cfg_get_bool(pv, "hide_idle", 0, &p->hide_idle, errbuf, errbufsz, "privacy.hide_idle")) return -1;
+        if (cfg_get_bool(pv, "hide_part_quit_reasons", 0, &p->hide_part_quit_reasons, errbuf, errbufsz, "privacy.hide_part_quit_reasons")) return -1;
+        if (cfg_get_bool(pv, "names_members_only", 0, &p->names_members_only, errbuf, errbufsz, "privacy.names_members_only")) return -1;
     }
 
     /* [dnsbl] */
@@ -1139,6 +1282,7 @@ static int build_config(toml_node_t *raw, const char *path, config_t *out,
         if (cfg_get_bool(lk, "enabled", 0, &out->links.enabled, errbuf, errbufsz, "links.enabled")) return -1;
         if (cfg_get_str(lk, "mode", "hub", out->links.mode, sizeof out->links.mode, errbuf, errbufsz, "links.mode")) return -1;
         if (cfg_get_bool(lk, "autoconnect", 1, &out->links.autoconnect, errbuf, errbufsz, "links.autoconnect")) return -1;
+        if (cfg_get_bool(lk, "accept_global_classes", 1, &out->links.accept_global_classes, errbuf, errbufsz, "links.accept_global_classes")) return -1;
         if (cfg_get_str(lk, "bind", "0.0.0.0", out->links.bind, CFG_STR, errbuf, errbufsz, "links.bind")) return -1;
         if (cfg_get_str(lk, "bind6", "::", out->links.bind6, CFG_STR, errbuf, errbufsz, "links.bind6")) return -1;
         if (cfg_get_int(lk, "port", 7000, &out->links.port, errbuf, errbufsz, "links.port")) return -1;
@@ -1185,6 +1329,24 @@ static int build_config(toml_node_t *raw, const char *path, config_t *out,
                 snprintf(fn, sizeof fn, "links.peers[%d].allowed_ips", i);
                 if (cfg_get_str_array(pe, "allowed_ips", p->allowed_ips, CFG_MAX_LINK_ALLOWED_IPS, &p->n_allowed_ips, errbuf, errbufsz, fn)) return -1;
                 NORM_MASKS(p->allowed_ips, p->n_allowed_ips, "[[links.peers]] allowed_ips");
+
+                {   /* which servers may appear behind this peer (see netsync.c's introduces_ok) */
+                    int leaf = 0;
+                    snprintf(fn, sizeof fn, "links.peers[%d].leaf", i);
+                    if (cfg_get_bool(pe, "leaf", 0, &leaf, errbuf, errbufsz, fn)) return -1;
+                    snprintf(fn, sizeof fn, "links.peers[%d].introduces", i);
+                    if (cfg_get_str_array(pe, "introduces", p->introduces, CFG_MAX_INTRODUCES, &p->n_introduces, errbuf, errbufsz, fn)) return -1;
+                    if (leaf && tx_get(pe, "introduces")) {
+                        snprintf(errbuf, errbufsz, "links.peers[%d]: leaf = true already means nothing may link behind it -- drop introduces (or leaf)", i);
+                        return -1;
+                    }
+                    for (int j = 0; j < p->n_introduces; j++)
+                        if (!p->introduces[j][0] || strpbrk(p->introduces[j], " \t,:")) {
+                            snprintf(errbuf, errbufsz, "links.peers[%d].introduces: \"%s\" is not a server-name glob (like \"*.eu.example.net\")", i, p->introduces[j]);
+                            return -1;
+                        }
+                    p->introduces_set = leaf || tx_get(pe, "introduces") != NULL;
+                }
 
                 {   /* what this peer's opers may do (the hub states it; see netsync.c's OPERSCOPE) */
                     char sc[16];
@@ -1504,6 +1666,7 @@ static int apply_protection(toml_node_t *raw, config_t *out, char *errbuf, size_
     if (cfg_get_double(fl, "window", sec->flood_window, &sec->flood_window, errbuf, errbufsz, "flood.window")) return -1;
     if (sec->flood_max_msgs < 1) { snprintf(errbuf, errbufsz, "flood.max_msgs must be >= 1"); return -1; }
     if (sec->flood_window <= 0) { snprintf(errbuf, errbufsz, "flood.window must be > 0"); return -1; }
+    if (parse_cmd_limits(fl, "flood", sec, errbuf, errbufsz)) return -1;
 
     toml_node_t *sp = cfg_get_section(raw, "spam", errbuf, errbufsz, &e);
     if (e) return -1;
@@ -1616,6 +1779,141 @@ static int check_listener_ports(const config_t *c, char *errbuf, size_t errbufsz
     return 0;
 }
 
+/* --- include = [file names or globs] ---------------------------------------------------------------------------------------
+ * The main file may name other files (globs, relative to its own directory) that hold more [sections] and [[tables]]: a few
+ * hundred [[operators]] or [[classes]] need not live in one file. They are appended to the main text before it is parsed, so a
+ * section may appear in only one of the files, and each included file must start with a [header] (anything above one would
+ * land in the last table of the file before it). An include inside an included file is ignored. */
+
+typedef struct { char file[CFG_PATH]; int first_line, n_lines; } cfg_seg_t;
+
+static char *slurp_file(const char *path, size_t *len) {
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return NULL;
+    fseek(fp, 0, SEEK_END);
+    long n = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+    if (n < 0 || n > (16 << 20)) { fclose(fp); return NULL; }
+    char *buf = malloc((size_t)n + 2);
+    if (!buf) { fclose(fp); return NULL; }
+    size_t rd = fread(buf, 1, (size_t)n, fp);
+    fclose(fp);
+    buf[rd] = '\0';
+    *len = rd;
+    return buf;
+}
+
+static int count_lines(const char *t, size_t len) {
+    int n = 0;
+    for (size_t i = 0; i < len; i++) if (t[i] == '\n') n++;
+    return n + (len && t[len - 1] != '\n');
+}
+
+/* "invalid TOML in <file> line N: ..." when the parser's message carries a line number inside one of the segments. */
+static void toml_error_text(const char *msg, const cfg_seg_t *segs, int nsegs, char *errbuf, size_t errbufsz) {
+    const char *l = strstr(msg, "line ");
+    int line = l ? atoi(l + 5) : 0;
+    for (int i = 0; i < nsegs && line > 0; i++)
+        if (line >= segs[i].first_line && line <= segs[i].first_line + segs[i].n_lines) { /* <=: the parser may name the line after a bad one */
+            snprintf(errbuf, errbufsz, "invalid TOML in %s (line %d of it): %s", segs[i].file, line - segs[i].first_line + 1, msg);
+            return;
+        }
+    snprintf(errbuf, errbufsz, "invalid TOML in %s: %s", segs[0].file, msg);
+}
+
+/* The main file at `resolved`, plus whatever its include names, parsed. On success *text is the combined text (free it after
+ * toml_free(*res)); on failure errbuf says why and nothing is left allocated. */
+static int parse_with_includes(const char *resolved, char **text, toml_result_t *res, char *errbuf, size_t errbufsz) {
+    size_t len = 0;
+    char *main_text = slurp_file(resolved, &len);
+    if (!main_text) { snprintf(errbuf, errbufsz, "config file not found: %s", resolved); return -1; }
+    cfg_seg_t segs[CFG_MAX_INCLUDES + 1];
+    int nsegs = 1;
+    snprintf(segs[0].file, sizeof segs[0].file, "%s", resolved);
+    segs[0].first_line = 1;
+    segs[0].n_lines = count_lines(main_text, len);
+
+    *res = toml_parse(main_text, (int)len);
+    if (!res->ok) { toml_error_text(res->errmsg, segs, nsegs, errbuf, errbufsz); toml_free(*res); free(main_text); return -1; }
+
+    toml_node_t *inc = tx_array(&res->toptab, "include");
+    if (!inc && tx_get(&res->toptab, "include")) { snprintf(errbuf, errbufsz, "include must be a list of file names or globs"); toml_free(*res); free(main_text); return -1; }
+    int ninc = tx_len(inc);
+    if (ninc == 0) { *text = main_text; return 0; }
+
+    char pats[CFG_MAX_INCLUDES][CFG_PATH];
+    if (ninc > CFG_MAX_INCLUDES) { snprintf(errbuf, errbufsz, "include names too many files (max %d)", CFG_MAX_INCLUDES); toml_free(*res); free(main_text); return -1; }
+    for (int i = 0; i < ninc; i++) {
+        toml_node_t *e = tx_at(inc, i, TOML_STRING);
+        if (!e) { snprintf(errbuf, errbufsz, "include must be a list of file names or globs"); toml_free(*res); free(main_text); return -1; }
+        snprintf(pats[i], sizeof pats[i], "%s", e->u.s);
+    }
+    toml_free(*res);
+
+    char dir[CFG_PATH];
+    snprintf(dir, sizeof dir, "%s", resolved);
+    char *slash = strrchr(dir, '/');
+    if (slash) *slash = '\0'; else snprintf(dir, sizeof dir, ".");
+
+    size_t cap = len + 1, used = len;
+    char *all = realloc(main_text, cap + 1);
+    if (!all) { free(main_text); snprintf(errbuf, errbufsz, "out of memory"); return -1; }
+    int next_line = segs[0].n_lines + 1;
+    for (int i = 0; i < ninc; i++) {
+        char pat[CFG_PATH * 2];
+        if (pats[i][0] == '/') snprintf(pat, sizeof pat, "%s", pats[i]); else snprintf(pat, sizeof pat, "%s/%s", dir, pats[i]);
+        glob_t g;
+        int rc = glob(pat, 0, NULL, &g);
+        if (rc != 0) {
+            globfree(&g);
+            if (rc == GLOB_NOMATCH && strpbrk(pats[i], "*?[")) continue; /* a glob that matches nothing is fine: an empty conf.d */
+            snprintf(errbuf, errbufsz, "include \"%s\": no such file", pats[i]);
+            free(all);
+            return -1;
+        }
+        for (size_t k = 0; k < g.gl_pathc; k++) {
+            if (nsegs > CFG_MAX_INCLUDES) { snprintf(errbuf, errbufsz, "include names too many files (max %d)", CFG_MAX_INCLUDES); globfree(&g); free(all); return -1; }
+            size_t flen = 0;
+            char *ft = slurp_file(g.gl_pathv[k], &flen);
+            if (!ft) { snprintf(errbuf, errbufsz, "include: cannot read %s", g.gl_pathv[k]); globfree(&g); free(all); return -1; }
+            const char *first = ft;
+            for (;;) { /* the first line that is not blank or a comment */
+                while (*first == ' ' || *first == '\t' || *first == '\r' || *first == '\n') first++;
+                if (*first != '#') break;
+                while (*first && *first != '\n') first++;
+            }
+            if (*first && *first != '[') {
+                snprintf(errbuf, errbufsz, "%s: an included file starts with a [section] or [[table]] header (a setting above one would belong to the file before it)", g.gl_pathv[k]);
+                free(ft); globfree(&g); free(all);
+                return -1;
+            }
+            size_t need = used + flen + 3;
+            if (need > cap) {
+                char *bigger = realloc(all, need + 1);
+                if (!bigger) { free(ft); globfree(&g); free(all); snprintf(errbuf, errbufsz, "out of memory"); return -1; }
+                all = bigger;
+                cap = need;
+            }
+            all[used++] = '\n'; /* a file that does not end in a newline must not run into the next */
+            memcpy(all + used, ft, flen);
+            used += flen;
+            all[used++] = '\n';
+            all[used] = '\0';
+            snprintf(segs[nsegs].file, sizeof segs[nsegs].file, "%s", g.gl_pathv[k]);
+            segs[nsegs].first_line = next_line + 1; /* the '\n' above is a line of its own */
+            segs[nsegs].n_lines = count_lines(ft, flen);
+            next_line = segs[nsegs].first_line + segs[nsegs].n_lines;
+            nsegs++;
+            free(ft);
+        }
+        globfree(&g);
+    }
+    *res = toml_parse(all, (int)used);
+    if (!res->ok) { toml_error_text(res->errmsg, segs, nsegs, errbuf, errbufsz); toml_free(*res); free(all); return -1; }
+    *text = all;
+    return 0;
+}
+
 int config_load(const char *path, config_t *out, char *errbuf, size_t errbufsz) {
     char resolved[CFG_PATH];
 
@@ -1639,21 +1937,13 @@ int config_load(const char *path, config_t *out, char *errbuf, size_t errbufsz) 
         snprintf(resolved, sizeof resolved, "%s/%s", cwd, path);
     }
 
-    FILE *fp = fopen(resolved, "rb");
-    if (!fp) {
-        snprintf(errbuf, errbufsz, "config file not found: %s", resolved);
-        return -1;
-    }
-    toml_result_t res = toml_parse_file(fp);
-    fclose(fp);
-    if (!res.ok) {
-        snprintf(errbuf, errbufsz, "invalid TOML in %s: %s", resolved, res.errmsg);
-        toml_free(res);
-        return -1;
-    }
+    char *text = NULL;
+    toml_result_t res;
+    if (parse_with_includes(resolved, &text, &res, errbuf, errbufsz) != 0) return -1;
 
     int rc = build_config(&res.toptab, resolved, out, errbuf, errbufsz);
     toml_free(res);
+    free(text);
     if (rc == 0) rc = check_listener_ports(out, errbuf, errbufsz);
     if (rc == 0) rc = load_protection_file(out, errbuf, errbufsz);
     if (rc != 0) config_free(out); /* build_config started from defaults, so whatever it allocated is ours to drop */

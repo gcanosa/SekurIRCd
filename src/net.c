@@ -8,6 +8,8 @@
  * srv->users/srv->channels/srv->links.
  */
 #include "net.h"
+#include "xline.h"
+#include "classes.h"
 #include "cmd.h"
 #include "config.h"
 #include "crypto.h"
@@ -535,8 +537,14 @@ static connect_track_t g_connect_tracks[CONNECT_FLOOD_SLOTS];
 
 /* Returns 1 once `ip` exceeds security.connect_flood_max connects within
  * security.connect_flood_window seconds. */
+static int connect_flood_hit_n(int max, double window, const char *ip);
+
 int net_connect_flood_hit(const cfg_security_t *sec, const char *ip) {
-    if (sec->connect_flood_max <= 0) return 0;
+    return connect_flood_hit_n(sec->connect_flood_max, sec->connect_flood_window, ip);
+}
+
+static int connect_flood_hit_n(int max, double window, const char *ip) {
+    if (max <= 0) return 0;
     time_t now = time(NULL);
     int slot = -1;
     for (int i = 0; i < CONNECT_FLOOD_SLOTS; i++) {
@@ -557,14 +565,14 @@ int net_connect_flood_hit(const cfg_security_t *sec, const char *ip) {
         slot = oldest_i;
     }
     connect_track_t *t = &g_connect_tracks[slot];
-    if (strcmp(t->ip, ip) != 0 || now - t->window_start > sec->connect_flood_window) {
+    if (strcmp(t->ip, ip) != 0 || now - t->window_start > window) {
         snprintf(t->ip, sizeof t->ip, "%s", ip);
         t->window_start = now;
         t->count = 1;
         return 0;
     }
     t->count++;
-    return t->count > sec->connect_flood_max;
+    return t->count > max;
 }
 
 void net_connect_flood_reset(const char *key) {
@@ -636,8 +644,8 @@ void net_set_cloak(server_t *srv, client_t *cl) {
 
 int net_assign_class(server_t *srv, client_t *cl) {
     net_release_class(srv, cl);
-    for (int i = 0; i < srv->cfg.n_classes; i++) {
-        const cfg_class_t *cc = &srv->cfg.classes[i];
+    for (int i = 0; i < srv->n_class_tab; i++) {
+        const cfg_class_t *cc = srv->class_tab[i];
         int hit = 0;
         for (int j = 0; j < cc->n_hosts && !hit; j++) hit = irc_ip_mask_match(cc->hosts[j], cl->ip);
         if (!hit) continue;
@@ -652,13 +660,14 @@ int net_assign_class(server_t *srv, client_t *cl) {
 }
 
 void net_release_class(server_t *srv, client_t *cl) {
-    if (cl->class_idx >= 0 && cl->class_idx < CFG_MAX_CLASSES && srv->class_count[cl->class_idx] > 0)
+    if (cl->class_idx >= 0 && cl->class_idx < SRV_MAX_CLASSES && srv->class_count[cl->class_idx] > 0)
         srv->class_count[cl->class_idx]--;
     cl->class_idx = -1;
     cl->sendq_max = 0;
 }
 
 void net_reclass_all(server_t *srv) {
+    classes_rebuild(srv); /* the table's indexes are what clients carry: rebuilt, then every connection is placed again */
     memset(srv->class_count, 0, sizeof srv->class_count);
     for (client_t *c = srv->all_clients; c; c = c->all_next) {
         c->class_idx = -1;
@@ -718,10 +727,24 @@ static client_t *accept_common(server_t *srv, int listen_fd) {
      * DNSBL lookup or scan. */
     int scan_related = protection_ip_related(srv, ipbuf);
     int elined = server_eline_ip(srv, ipbuf); /* an ELINE on this address: no flood throttle, per-IP cap, DNSBL or scan (server_kline_match skips its lines) */
+    int defcon = server_defcon(srv);
+    if (defcon <= 1 && !elined) { /* DEFCON 1: lockdown */
+        const char *msg = "ERROR :Closing Link: this server is not taking new connections right now (DEFCON 1)\r\n";
+        if (write(fd, msg, strlen(msg)) < 0) { /* best effort; peer may already be gone */ }
+        close(fd);
+        srv->refused_connections++;
+        return NULL;
+    }
 
     char limit_key[64]; /* an IPv6 client counts as its whole /64 (ipv6_limit_prefix): rotating addresses in it doesn't help */
     server_ip_key(srv, ipbuf, limit_key, sizeof limit_key);
-    if (!scan_related && !elined && net_connect_flood_hit(&srv->cfg.security, limit_key)) {
+    int flood_max = srv->cfg.security.connect_flood_max;
+    double flood_win = srv->cfg.security.connect_flood_window;
+    if (defcon <= 4) { /* DEFCON 4: half the allowed connect rate, and a rate where there was none */
+        flood_max = flood_max > 0 ? (flood_max > 1 ? flood_max / 2 : 1) : 3;
+        if (flood_win <= 0 || srv->cfg.security.connect_flood_max <= 0) flood_win = 10.0;
+    }
+    if (!scan_related && !elined && connect_flood_hit_n(flood_max, flood_win, limit_key)) {
         long dur = srv->cfg.security.connect_flood_kline_duration[0]
             ? irc_parse_duration(srv->cfg.security.connect_flood_kline_duration) : 0;
         if (dur < 0) dur = 0;
@@ -753,7 +776,8 @@ static client_t *accept_common(server_t *srv, int listen_fd) {
         return NULL;
     }
     int per_ip_cap = srv->cfg.security.max_connections_per_ip;
-    if (cl->class_idx >= 0 && srv->cfg.classes[cl->class_idx].max_per_ip > 0) per_ip_cap = srv->cfg.classes[cl->class_idx].max_per_ip;
+    if (cl->class_idx >= 0 && srv->class_tab[cl->class_idx]->max_per_ip > 0) per_ip_cap = srv->class_tab[cl->class_idx]->max_per_ip;
+    if (defcon <= 4 && (per_ip_cap <= 0 || per_ip_cap > 2)) per_ip_cap = 2; /* DEFCON 4: two connections per address */
     if (!scan_related && !elined && per_ip_cap > 0) {
         /* O(1): server_add_connection/unlink_connection keep this exact.
          * Walking all_clients here cost O(connections) on every accept(),
@@ -1510,8 +1534,8 @@ static int read_client_once(server_t *srv, client_t *cl) {
 int net_flood_charge(server_t *srv, client_t *cl) {
     int fl_msgs = srv->cfg.security.flood_max_msgs;
     double fl_win = srv->cfg.security.flood_window;
-    if (cl->class_idx >= 0 && cl->class_idx < srv->cfg.n_classes) { /* a class may tighten or relax the flood guard */
-        const cfg_class_t *cc = &srv->cfg.classes[cl->class_idx];
+    if (cl->class_idx >= 0 && cl->class_idx < srv->n_class_tab) { /* a class may tighten or relax the flood guard */
+        const cfg_class_t *cc = srv->class_tab[cl->class_idx];
         if (cc->flood_max_msgs > 0) fl_msgs = cc->flood_max_msgs;
         if (cc->flood_window > 0) fl_win = cc->flood_window;
     }
@@ -1669,10 +1693,9 @@ static void drain_worker_results(server_t *srv) {
     }
 }
 
-/* Unregistered connections get this long to finish NICK/USER(/CAP/SASL)
- * -- otherwise an idle socket holds an fd for the full ping_timeout.
- * ponytail: fixed, make it a [security] key if 60s ever proves wrong. */
-#define REGISTRATION_TIMEOUT 60
+/* Unregistered connections get [limits] registration_timeout seconds (60) to finish NICK/USER(/CAP/SASL)
+ * -- otherwise an idle socket holds an fd for the full ping_timeout. */
+#define REGISTRATION_TIMEOUT srv->cfg.limits.registration_timeout
 
 /* PING/timeout for client connections + the link keepalive tick. */
 static void tick(server_t *srv) {
@@ -1729,6 +1752,7 @@ static void tick(server_t *srv) {
     protection_tick(srv);
     server_kline_prune_expired(srv);
     server_kline_flush(srv); /* batched: see server_kline_flush */
+    xline_flush(srv);
     history_maybe_save(srv, 0);
 
     if (srv->cfg.debug_channel.stats_interval > 0) {

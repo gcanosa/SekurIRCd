@@ -42,6 +42,11 @@
 #define CFG_MAX_BL_REPLIES       16
 #define CFG_MAX_EXEMPTS          64
 #define CFG_MAX_TARGET_STRINGS    8
+#define CFG_MAX_CMD_LIMITS        8
+#define CFG_MAX_OPER_CERTFPS      4
+#define CFG_MAX_INCLUDES          32
+#define CFG_MAX_INTRODUCES        16
+#define CFG_WHOWAS_MAX            2000 /* hard cap on [limits] whowas_entries (the ring is a fixed array in server_t) */
 
 typedef struct {
     char name[CFG_STR];
@@ -97,6 +102,10 @@ typedef struct {
     double ident_timeout;
     int rdns_enabled;
     double rdns_timeout;
+    /* [flood] command_limits: "<COMMAND> <max>/<seconds>" -- more than `max` of that command in `window` seconds gets
+     * RPL_TRYAGAIN instead of being run (opers with exempt_opers skip them). NICK counts only after registration. */
+    struct { char name[16]; int max; double window; } cmd_limits[CFG_MAX_CMD_LIMITS];
+    int n_cmd_limits;
 } cfg_security_t;
 
 typedef struct {
@@ -152,6 +161,8 @@ typedef struct {
     char hosts[CFG_MAX_HOSTS_PER_OPER][CFG_MASK];
     int n_hosts;
     char modes[24];      /* per-login override of security.oper_modes; "" = use that */
+    char certfp[CFG_MAX_OPER_CERTFPS][65]; /* SHA-256 fingerprints (lowercase hex) of TLS client certificates that may use this login; none = no requirement */
+    int n_certfp;
     unsigned privs;      /* OPER_PRIV_* bits from `privileges`; 0 = key absent = everything (back-compat) */
 } cfg_operator_t;
 
@@ -189,6 +200,7 @@ typedef struct {
     int sendq_max;       /* bytes queued for a slow reader before "SendQ exceeded" */
     int flood_max_msgs;
     double flood_window;
+    int global;          /* scope = "global": published to every linked server, which applies it to its own connections */
 } cfg_class_t;
 
 /* [[webirc]]: a trusted web gateway that may send WEBIRC to override a
@@ -222,6 +234,11 @@ typedef struct {
     int n_allowed_ips;
     int oper_local;          /* hub-role only, oper_scope = "local": that server's opers can't reach past their own server */
     unsigned oper_deny;      /* hub-role only, oper_deny: OPER_PRIV_* bits stripped from that server's opers */
+    /* introduces / leaf (either role): the server names that may appear BEHIND this peer (the peer itself always may). Unset =
+     * any (as before); leaf = true is an empty list: nothing may. See netsync.c's introduces_ok. */
+    int introduces_set;
+    char introduces[CFG_MAX_INTRODUCES][CFG_STR];
+    int n_introduces;
 } cfg_link_peer_t;
 
 typedef struct {
@@ -235,6 +252,7 @@ typedef struct {
     double ping_interval;
     double ping_timeout;
     int max_line_length;
+    int accept_global_classes; /* apply the [[classes]] other servers publish (scope = "global" / CLASS ADD GLOBAL); off = only this server's own */
     int autoconnect;     /* dial the configured peers on startup and whenever they drop (default on); off = only on /CONNECT */
     double reconnect_delay;
     double reconnect_delay_max;
@@ -347,13 +365,43 @@ typedef struct {
     char file[CFG_STR];
     long max_bytes;
     int backup_count;
+    char audit_file[CFG_STR]; /* oper actions, one line each, in `directory`; "" = off */
+    int syslog;               /* also send log (and audit) lines to the system log */
 } cfg_logging_t;
+
+/* [limits]: sizes that used to be compile-time constants. The defaults are those constants. The ones ISUPPORT advertises
+ * (channels_per_user, max_list_size, topic/kick/away/channel_length, monitor/silence entries, modes_per_command) are per
+ * server: set them the same on every server of a network so clients see one set of rules. */
+typedef struct {
+    int channels_per_user;    /* CHANLIMIT */
+    int max_list_size;        /* MAXLIST: bans, exceptions and invite exceptions each */
+    int topic_length;         /* TOPICLEN */
+    int kick_length;          /* KICKLEN */
+    int away_length;          /* AWAYLEN */
+    int channel_length;       /* CHANNELLEN */
+    int monitor_entries;      /* MONITOR */
+    int silence_entries;      /* SILENCE */
+    int whowas_entries;       /* WHOWAS records kept; 0 = no WHOWAS */
+    int modes_per_command;    /* MODES: parameter-taking mode changes in one MODE line */
+    int registration_timeout; /* seconds a connection has to finish NICK/USER/CAP before it is dropped */
+} cfg_limits_t;
+
+/* [privacy]: what ordinary users may learn about the network. Opers (and a user about themself) still see everything. */
+typedef struct {
+    int hide_links;                   /* LINKS and MAP show non-opers only this server */
+    char hide_server_name[CFG_STR];   /* "" = off; else the name shown instead of any server's real one (WHOIS, WHO, LINKS, MAP, netsplit QUITs) */
+    int hide_idle;                    /* WHOIS idle/signon only to the user and opers */
+    int hide_part_quit_reasons;       /* PART/QUIT messages dropped on the way to other users */
+    int names_members_only;           /* NAMES of a channel you are not in lists nobody */
+} cfg_privacy_t;
 
 typedef struct {
     cfg_server_t server;
     cfg_security_t security;
     cfg_messages_t messages;
     cfg_logging_t logging;
+    cfg_limits_t limits;
+    cfg_privacy_t privacy;
     /* The [[tables]] below are heap arrays sized to what the file actually lists (n_* entries, capped at CFG_MAX_*):
      * an inline array for every possible entry made config_t -- and so the server -- over a megabyte. Owned by the
      * config_t that config_load filled in; config_free releases them, and a struct copy moves ownership. */
@@ -403,6 +451,10 @@ void config_rules_path(const config_t *cfg, char *out, size_t outsz);
 struct log_config;
 void config_log_cfg(const config_t *cfg, struct log_config *out); /* [logging] as log_init takes it */
 int config_klines_path(const config_t *cfg, char *out, size_t outsz);
+/* classes.json (the classes CLASS ADD made), next to the config file; 0 when there is no config file. */
+int config_classes_path(const config_t *cfg, char *out, size_t outsz);
+/* A [[classes]] host as written -> as the server spells addresses (zero-padded IPv6 groups, a leading ::). Warns when it changes a glob. */
+void config_ip_mask_normalize(char *host, const char *what);
 /* [spam] filters_file resolved against the config dir; 0 if unset. */
 int config_spamfilters_path(const config_t *cfg, char *out, size_t outsz);
 /* [security] protection_file resolved against the config dir; 0 if unset. */

@@ -779,8 +779,8 @@ static void whois_one(server_t *srv, client_t *cl, const char *nick) {
         if (target->remote) netsync_push(srv, target, line); else client_send(target, line);
     }
 
-    const char *p2[] = {target->nick, netsync_server_name_of(srv, target)};
-    client_reply(cl, N_WHOISSERVER, p2, 2, target->remote && target->nserver ? target->nserver->desc : srv->cfg.server.network);
+    const char *p2[] = {target->nick, netsync_server_name_shown(srv, cl, target)};
+    client_reply(cl, N_WHOISSERVER, p2, 2, target->remote && target->nserver && !(srv->cfg.privacy.hide_server_name[0] && !(cl->umodes & UMODE_O)) ? target->nserver->desc : srv->cfg.server.network);
 
     int self_or_oper = (cl == target) || OPER_CAN(cl, OPER_PRIV_AUSPEX);
     if (target->is_service) {
@@ -844,7 +844,7 @@ static void whois_one(server_t *srv, client_t *cl, const char *nick) {
         client_reply(cl, N_WHOISCHANNELS, p4, 1, chanbuf);
     }
 
-    if (!target->remote && (!(target->umodes & UMODE_HIDEIDLE) || self_or_oper)) { /* idle time lives on the user's own server */
+    if (!target->remote && ((!(target->umodes & UMODE_HIDEIDLE) && !srv->cfg.privacy.hide_idle) || self_or_oper)) { /* idle time lives on the user's own server */
         long idle = (long)difftime(time(NULL), target->last_msg);
         char idlebuf[32], signonbuf[32];
         snprintf(idlebuf, sizeof idlebuf, "%ld", idle);
@@ -884,7 +884,7 @@ static const char *whox_value(char letter, client_t *u, channel_t *chan, client_
     case 'u': return client_ident(u);
     case 'i': return (OPER_CAN(cl, OPER_PRIV_AUSPEX) || u == cl) ? u->ip : "255.255.255.255";
     case 'h': return u->host;
-    case 's': return netsync_server_name_of(cl->srv, u);
+    case 's': return netsync_server_name_shown(cl->srv, cl, u);
     case 'n': return u->nick;
     case 'f': {
         int multi = cl->caps & CAP_MULTI_PREFIX;
@@ -930,7 +930,7 @@ static void send_who_classic(client_t *cl, client_t *u, channel_t *chan, int mul
     who_rank_flags(m ? m->rank : 0, multi, rankch);
     char flags[10];
     snprintf(flags, sizeof flags, "%s%s%s%s", u->is_away ? "G" : "H", visible_oper(u, cl) ? "*" : "", (u->umodes & UMODE_B) ? "B" : "", rankch);
-    const char *p[] = {chan ? chan->name : "*", client_ident(u), u->host, netsync_server_name_of(cl->srv, u), u->nick, flags};
+    const char *p[] = {chan ? chan->name : "*", client_ident(u), u->host, netsync_server_name_shown(cl->srv, cl, u), u->nick, flags};
     char trailing[600];
     snprintf(trailing, sizeof trailing, "0 %s", u->realname);
     client_reply(cl, N_WHOREPLY, p, 6, trailing);
@@ -1065,7 +1065,7 @@ void cmd_away(server_t *srv, client_t *cl, irc_message_t *msg) {
     if (!cl->registered) { /* draft/pre-away: set the status quietly before registration finishes */
         if (!(cl->caps & CAP_PRE_AWAY)) { err_not_registered(cl); return; }
         if (msg->nparams < 1 || msg->params[0][0] == '\0' || strcmp(msg->params[0], "*") == 0) { cl->is_away = 0; cl->away[0] = '\0'; }
-        else { cl->is_away = 1; snprintf(cl->away, sizeof cl->away, "%.399s", msg->params[msg->nparams - 1]); }
+        else { cl->is_away = 1; snprintf(cl->away, sizeof cl->away, "%.*s", cl->srv->cfg.limits.away_length, msg->params[msg->nparams - 1]); }
         return;
     }
     if (msg->nparams < 1 || msg->params[0][0] == '\0') {
@@ -1075,7 +1075,7 @@ void cmd_away(server_t *srv, client_t *cl, irc_message_t *msg) {
     } else {
         if (spam_check_text(srv, cl, SPAM_T_AWAY, msg->params[msg->nparams - 1])) return;
         cl->is_away = 1;
-        snprintf(cl->away, sizeof cl->away, "%.399s", msg->params[msg->nparams - 1]);
+        snprintf(cl->away, sizeof cl->away, "%.*s", cl->srv->cfg.limits.away_length, msg->params[msg->nparams - 1]);
         client_reply(cl, N_NOWAWAY, NULL, 0, "You have been marked as being away");
     }
     broadcast_away(srv, cl);
@@ -1088,7 +1088,7 @@ void cmd_whowas(server_t *srv, client_t *cl, irc_message_t *msg) {
     int shown = 0;
     /* newest first, matching upstream's reversed(server.whowas) */
     for (int i = 0; i < srv->whowas_count; i++) {
-        int idx = ((srv->whowas_head - 1 - i) % WHOWAS_MAX + WHOWAS_MAX) % WHOWAS_MAX;
+        int idx = ((srv->whowas_head - 1 - i) % srv->cfg.limits.whowas_entries + srv->cfg.limits.whowas_entries) % srv->cfg.limits.whowas_entries;
         whowas_entry_t *w = &srv->whowas[idx];
         if (strcasecmp(w->nick, nick) != 0) continue;
         const char *p[] = {w->nick, w->user, w->host, "*"};
@@ -1189,7 +1189,6 @@ void cmd_ison(server_t *srv, client_t *cl, irc_message_t *msg) {
     client_reply(cl, N_ISON, NULL, 0, sc.out);
 }
 
-#define MAX_MONITOR 100
 
 /* Appends `item` to a comma-separated MONITOR reply, first sending what's there if it would push the line past 512. */
 static void mon_append(client_t *cl, const char *code, char *buf, size_t bufsz, const char *item) {
@@ -1228,8 +1227,8 @@ static void monitor_impl(server_t *srv, client_t *cl, irc_message_t *msg) {
         }
         char online[600] = "", offline[600] = "";
         for (char *t = strtok_r(targets, ",", &save); t; t = strtok_r(NULL, ",", &save)) {
-            if (cl->n_monitor >= MAX_MONITOR) {
-                char nbuf[8]; snprintf(nbuf, sizeof nbuf, "%d", MAX_MONITOR);
+            if (cl->n_monitor >= srv->cfg.limits.monitor_entries) {
+                char nbuf[8]; snprintf(nbuf, sizeof nbuf, "%d", srv->cfg.limits.monitor_entries);
                 const char *p[] = {nbuf, t};
                 client_reply(cl, N_MONLISTFULL, p, 2, "Monitor list is full");
                 break;
@@ -1357,10 +1356,7 @@ static void watch_impl(server_t *srv, client_t *cl, irc_message_t *msg) {
     }
 }
 
-#define MAX_SILENCE 15
-
 void cmd_silence(server_t *srv, client_t *cl, irc_message_t *msg) {
-    (void)srv;
     if (msg->nparams < 1) {
         for (int i = 0; i < cl->n_silence; i++) {
             const char *p[] = {cl->silence[i]};
@@ -1379,7 +1375,7 @@ void cmd_silence(server_t *srv, client_t *cl, irc_message_t *msg) {
                     break;
                 }
             }
-        } else if (cl->n_silence < MAX_SILENCE) {
+        } else if (cl->n_silence < srv->cfg.limits.silence_entries) {
             const char *mask = entry[0] == '+' ? entry + 1 : entry;
             char (*nl)[256] = client_list_grow(cl->silence, cl->n_silence, sizeof *nl);
             if (!nl) continue;
@@ -1403,7 +1399,7 @@ void cmd_glob(server_t *srv, client_t *cl, irc_message_t *msg) {
         if (invisible_to(u, cl)) continue;
         char flags[8];
         snprintf(flags, sizeof flags, "%s%s%s", u->is_away ? "G" : "H", visible_oper(u, cl) ? "*" : "", (u->umodes & UMODE_B) ? "B" : "");
-        const char *p[] = {"*", client_ident(u), u->host, netsync_server_name_of(srv, u), u->nick, flags};
+        const char *p[] = {"*", client_ident(u), u->host, netsync_server_name_shown(srv, cl, u), u->nick, flags};
         char trailing[600];
         snprintf(trailing, sizeof trailing, "0 %s", u->realname);
         client_reply(cl, N_WHOREPLY, p, 6, trailing);

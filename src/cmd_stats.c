@@ -192,8 +192,8 @@ static void st_hub(server_t *srv, client_t *cl, char letter, const char *arg) {
 
 static void st_auth(server_t *srv, client_t *cl, char letter, const char *arg) {
     (void)arg; (void)letter;
-    for (int i = 0; i < srv->cfg.n_classes; i++) {
-        const cfg_class_t *c = &srv->cfg.classes[i];
+    for (int i = 0; i < srv->n_class_tab; i++) {
+        const cfg_class_t *c = srv->class_tab[i];
         for (int h = 0; h < c->n_hosts; h++)
             client_reply(cl, N_STATSILINE, (const char *[]){"I", c->hosts[h], "*", c->hosts[h], "0", c->name}, 6, NULL);
     }
@@ -212,8 +212,8 @@ static void st_classes(server_t *srv, client_t *cl, char letter, const char *arg
     char ping[16], max[16], sq[24], cur[16];
     snprintf(ping, sizeof ping, "%d", (int)srv->cfg.security.ping_interval);
     int in_classes = 0;
-    for (int i = 0; i < srv->cfg.n_classes; i++) {
-        const cfg_class_t *c = &srv->cfg.classes[i];
+    for (int i = 0; i < srv->n_class_tab; i++) {
+        const cfg_class_t *c = srv->class_tab[i];
         snprintf(max, sizeof max, "%d", c->max_clients ? c->max_clients : srv->cfg.security.max_connections);
         snprintf(sq, sizeof sq, "%d", c->sendq_max ? c->sendq_max : SENDQ_MAX);
         snprintf(cur, sizeof cur, "%d", srv->class_count[i]);
@@ -372,7 +372,7 @@ static void st_memory(server_t *srv, client_t *cl, char letter, const char *arg)
     dbg(cl, letter, "users %d (%d remote, %d detached), %d connections, %zu bytes each", users, remote, srv->n_ghosts, srv->n_clients, sizeof(client_t));
     dbg(cl, letter, "channels %d (%zu bytes each), memberships %d (%zu bytes each)", nchan, sizeof(channel_t), members, sizeof(member_t));
     dbg(cl, letter, "send/receive buffers %zu KB, links %d (%zu bytes each), servers %d", bufs / 1024, nlinks, sizeof(link_conn_t), nsrv);
-    dbg(cl, letter, "ban lines %d, whowas %d/%d, history %d conversation%s / %ld message%s", nk, srv->whowas_count, WHOWAS_MAX,
+    dbg(cl, letter, "ban lines %d, whowas %d/%d, history %d conversation%s / %ld message%s", nk, srv->whowas_count, srv->cfg.limits.whowas_entries,
         convs, convs == 1 ? "" : "s", msgs, msgs == 1 ? "" : "s");
     struct rusage ru;
     long rss = 0;

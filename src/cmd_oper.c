@@ -123,6 +123,7 @@ static void grant_oper(server_t *srv, client_t *cl, const char *op_name) {
     server_send_oper_motd(srv, cl);
     if (srv->cfg.security.oper_auto_join[0]) cmd_force_join(srv, cl, srv->cfg.security.oper_auto_join);
     log_info("oper", "%s OPER'd as %s", cl->nick, op_name);
+    log_audit("OPER %s ok for %s!%s@%s", op_name, cl->nick, cl->user, cl->ip);
 
     char snote[128];
     snprintf(snote, sizeof snote, "%s is now an IRC operator (%s)", cl->nick, op_name);
@@ -132,6 +133,7 @@ static void grant_oper(server_t *srv, client_t *cl, const char *op_name) {
 static void finish_oper(server_t *srv, client_t *cl, const char *op_name, int pw_ok) {
     if (!pw_ok) {
         cl->oper_fails++;
+        log_audit("OPER %s failed for %s!%s@%s: wrong password", op_name, cl->nick, cl->user, cl->ip);
         char snote[300];
         snprintf(snote, sizeof snote, "Failed OPER attempt by %s (%s@%s)", cl->nick, cl->user, cl->realhost[0] ? cl->realhost : cl->host);
         server_notify_opers(srv, snote);
@@ -195,6 +197,17 @@ void cmd_oper(server_t *srv, client_t *cl, irc_message_t *msg) {
             if (irc_host_mask_match(cl->user, cl->ip, op->hosts[j])) { host_ok = 1; break; }
         }
         if (!host_ok) break; /* wrong host: same "no O-lines" reply as wrong name, never leaks which */
+        if (op->n_certfp > 0) { /* the login is tied to TLS client certificates: no matching one reads as no O-line, too */
+            char fp[72] = "";
+            int cert_ok = 0;
+            if (client_cert_fingerprint(cl, fp, sizeof fp) == 0)
+                for (int j = 0; j < op->n_certfp && !cert_ok; j++) cert_ok = strcasecmp(op->certfp[j], fp) == 0;
+            if (!cert_ok) { log_audit("OPER %s refused for %s!%s@%s: no matching client certificate", op->name, cl->nick, cl->user, cl->ip); break; }
+            if (!op->password[0] && !op->password_hash[0]) { /* the certificate is the credential */
+                finish_oper(srv, cl, op->name, 1);
+                return;
+            }
+        }
 
         if (op->password_hash[0]) {
             /* scrypt verify is ~30ms -- run it on a worker so hammering
@@ -222,6 +235,7 @@ void cmd_oper(server_t *srv, client_t *cl, irc_message_t *msg) {
         return;
     }
     client_reply(cl, N_NOOPERHOST, NULL, 0, "No O-lines for your host");
+    log_audit("OPER %s refused for %s!%s@%s: no O-line for that name or host", name, cl->nick, cl->user, cl->ip);
     char snote[300];
     snprintf(snote, sizeof snote, "Failed OPER attempt by %s (%s@%s)", cl->nick, cl->user, cl->realhost[0] ? cl->realhost : cl->host);
     server_notify_opers(srv, snote);
@@ -879,6 +893,41 @@ void cmd_uneline(server_t *srv, client_t *cl, irc_message_t *msg) { unline_typed
 void cmd_unkline(server_t *srv, client_t *cl, irc_message_t *msg) { unline_common(srv, cl, msg->params[0]); }
 void cmd_ungline(server_t *srv, client_t *cl, irc_message_t *msg) { if (netsync_scope_refuse(srv, cl, "UNGLINE")) return; unline_typed(srv, cl, msg->params[0], 'G'); netsync_ungline(srv, msg->params[0]); }
 void cmd_unzline(server_t *srv, client_t *cl, irc_message_t *msg) { unline_common(srv, cl, msg->params[0]); }
+
+/* DEFCON [level [duration]]: see server_defcon. Local to this server; the level resets with a restart. */
+void cmd_defcon(server_t *srv, client_t *cl, irc_message_t *msg) {
+    static const char *const WHAT[] = {"", "lockdown: no new connections", "TLS and a login (SASL) are required to connect",
+                                       "a login (SASL) is required to connect", "half the connect rate, two connections per address", "normal"};
+    int now_level = server_defcon(srv);
+    char m[300];
+    if (msg->nparams < 1) {
+        if (now_level < 5 && srv->defcon_until) {
+            char exp[32];
+            struct tm tmv;
+            gmtime_r(&srv->defcon_until, &tmv);
+            strftime(exp, sizeof exp, "%Y-%m-%d %H:%M:%S UTC", &tmv);
+            snprintf(m, sizeof m, "DEFCON %d (%s), until %s", now_level, WHAT[now_level], exp);
+        } else snprintf(m, sizeof m, "DEFCON %d (%s)", now_level, WHAT[now_level]);
+        notice_self(srv, cl, m);
+        return;
+    }
+    char *end;
+    long level = strtol(msg->params[0], &end, 10);
+    if (*end || level < 1 || level > 5) { notice_self(srv, cl, "Usage: DEFCON [<5|4|3|2|1> [duration]]"); return; }
+    long dur = 0;
+    if (msg->nparams > 1) {
+        dur = irc_parse_duration(msg->params[1]);
+        if (dur <= 0) { notice_self(srv, cl, "DEFCON: the duration is like 30m or 2h"); return; }
+    }
+    srv->defcon_level = level == 5 ? 0 : (int)level;
+    srv->defcon_until = level < 5 && dur > 0 ? time(NULL) + dur : 0;
+    char snote[400];
+    snprintf(snote, sizeof snote, "%s set DEFCON to %ld (%s)%s", cl->nick, level, WHAT[level], srv->defcon_until ? " for a limited time" : "");
+    server_notify_opers(srv, snote);
+    log_info("defcon", "%s set level %ld", cl->nick, level);
+    snprintf(m, sizeof m, "DEFCON %ld (%s)", level, WHAT[level]);
+    notice_self(srv, cl, m);
+}
 
 /* --- SQUIT (closes any link, hub or leaf side) / CONNECT (leaf-mode manual
  * dial, see link.c's link_connect_leaf). ------------------------------------ */
