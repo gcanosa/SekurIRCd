@@ -1,465 +1,323 @@
 # =============================================================================
-#  SekurIRCd -- server configuration template
+#  SekurIRCd -- server configuration (config/sekurircd.toml)
 # =============================================================================
+#  Quick start:  tools/makeconf.py  (or bin/sekurircd --makeconf) writes this
+#                file for you after a few questions.
+#  By hand:      1. cp config/sekurircd.template.toml config/sekurircd.toml
+#                2. set [server] name/network and add one [[operators]] login
+#                3. bin/sekurircd --config config/sekurircd.toml --check
+#                4. ./sekurircd start
 #
-#  Quick start:
-#    tools/makeconf.py          asks a few questions and writes this file for you
-#                               (also: bin/sekurircd --makeconf)
-#  By hand:
-#    1. cp config/sekurircd.template.toml config/sekurircd.toml
-#    2. edit it -- at least [server] name/network and one [[operators]] login
-#    3. bin/sekurircd --config config/sekurircd.toml --check
-#    4. ./sekurircd start
+#  How to read this file:
+#    [required]     must be set (in its block, when you use that block)
+#    [recommended]  works without it, but set it for a real server
+#    [optional]     leave it out and the value shown applies (the default)
+#    A line starting with "#key =" is off / at its default: remove the "#" to
+#    set it. Everything applies live with /REHASH, except [server] name and
+#    sid (a restart). Relative paths are relative to THIS file, except
+#    [logging] directory (relative to the working directory).
 #
-#  Every key is optional: the value shown (commented out or not) is the
-#  built-in default unless noted. Changes apply live with /REHASH, except
-#  [server] name and sid (this server's identity on the network: a restart).
+#  Related files (all next to this one):
+#    ircd.motd, ircd.smotd, oper.motd, ircd.rules   texts (made from templates)
+#    protection.toml     the Protection bundle: caps, floods, spam, DNSBL,
+#                        proxy scanner (config/protection.template.toml)
+#    spamfilters.conf    regex spam rules (config/spamfilters.template.conf)
+#    ../services/services.toml   NickServ + ChanServ, network-wide [[opers]]
 #
-#  Relative paths: motd/rules/klines/history files and TLS cert/key resolve
-#  against this file's directory; [logging] directory against the working
-#  directory.
-#
-#  Related files:
-#    ircd.motd, oper.motd, ircd.rules   MOTD, oper MOTD, /RULES text (made from
-#                                       their templates on first start)
-#    protection.toml                    the Protection bundle (optional; copy
-#                                       config/protection.template.toml)
-#    spamfilters.conf                   regex spam rules, named by protection.toml
-#                                       [spam] filters_file (config/
-#                                       spamfilters.template.conf); `global`
-#                                       rules reach every linked server
-#    ../services/services.toml          NickServ + ChanServ, and network-wide
-#                                       opers ([[opers]])
-#
-#  Sections:
-#    SERVER       [server]
-#    LISTENERS    [tls]  [websocket]
-#    SECURITY     [security]
-#    MESSAGES     [messages]
-#    CHANNELS     [channels]
-#    LIMITS       [limits]
-#    PRIVACY      [privacy]
-#    OPERATORS    [[operators]]  [admin]  [debug_channel]
-#    CONNECTIONS  [[classes]]  [[webirc]]  [[vhosts]]
-#    LOGGING      [logging]
-#    LINKING      [links]  [[links.peers]]
+#  Contents:
+#    include  [server]  [tls]  [websocket]  [security]  [messages]  [channels]
+#    [limits]  [privacy]  [[operators]]  [admin]  [debug_channel]  [[classes]]
+#    [[webirc]]  [[vhosts]]  [logging]  [links]  [[links.peers]]
 # =============================================================================
 
-
-# --- include ---
-# More [sections] and [[tables]] in other files: names or globs, relative to
-# this file, read in order at start and at /REHASH. Handy for a long list of
-# [[operators]] or [[classes]]. Each file must start with a [header] (anything
-# above one would belong to the file before it), and a [section] may live in
-# only one of the files. Errors name the file and line. tools/confcheck.py and
-# tools/linkmgmt.py look at this file only.
+# --- include: split the configuration over several files ---
+# [optional] More [sections] / [[tables]] from other files (names or globs,
+# relative to this file), read in order at start and on /REHASH. Each file
+# must start with a [header], and a section may live in one file only. Must
+# stay above every [section]. tools/confcheck.py and linkmgmt.py read this
+# file only. e.g. include = ["opers.toml", "conf.d/*.toml"]
 #include = ["conf.d/*.toml"]
 
-
 # =============================================================================
-#  SERVER
+#  [server] -- identity and plain-text client ports
 # =============================================================================
 [server]
-
-# Hostname shown to clients. Must contain a dot: clients read a dotless
-# prefix as a nick. Changing it needs a restart: linked servers and their
-# [[links.peers]] know this server by it (/REHASH keeps the old one and says so).
+# [required] Hostname shown to clients. Must contain a dot (clients read a
+# dotless prefix as a nick). Restart to change: linked servers know it by name.
 name = "irc.example.org"
-
-# Network name shown in the welcome message.
+# [recommended] Network name shown in the welcome message.
 network = "SekuriIRC Network"
-
-# Network icon URL, advertised as IRCv3 draft/ICON. "" = none.
+# [optional] Network icon URL (IRCv3 draft/ICON). "" = none.
 #icon = "https://example.org/icon.png"
-
-# Server ID on a linked network: 3 characters, a digit then two of 0-9 A-Z
-# (e.g. "0AB"), unique across the network. "" (default) derives one from
-# [server] name, which is fine unless two server names happen to derive the same
-# one -- the link is then refused and you set a different sid on one of them.
-# Changing it needs a restart: every local user's ID starts with it.
+# [optional] Server ID on a linked network: a digit then two of 0-9 A-Z, unique
+# across the network, e.g. "0AB". "" = derived from name. Restart to change.
 #sid = ""
-
-# Version string for 004/VERSION. Leave unset to report the running build.
+# [optional] Version string for 004/VERSION. Unset = the running build's.
 #version = "0.8.4"
-
-# --- listening ---
-
-# 0.0.0.0 = all interfaces, 127.0.0.1 = this machine only.
+# [optional] Address to listen on: 0.0.0.0 = all interfaces, 127.0.0.1 = local only.
 bind = "0.0.0.0"
-
-# Plaintext client port.
+# [optional] Plain-text client port.
 port = 6667
-
-# More plaintext client ports, on the same bind address (and IPv6, when on). Only these are opened on top of `port`;
-# REHASH opens and closes them live. A port that is already taken is logged and skipped. Up to 16.
+# [optional] More plain-text ports on the same address; opened/closed on
+# /REHASH, a busy one is skipped. Up to 16.
 #extra_ports = [6668, 6669]
-
-# Also listen on IPv6 (every listener: clients, TLS, WebSocket, links).
-# Masks everywhere accept CIDR too, e.g. "2001:db8::/32".
+# [optional] Also listen on IPv6 (clients, TLS, WebSocket, links), on bind6.
+# Every mask in this file accepts CIDR too, e.g. "2001:db8::/32".
 #ipv6 = false
 #bind6 = "::"
-
-# IPv6 clients are counted per /64 (one subscriber) for per-IP limits,
-# throttles and cloaks. 128 = per address (easy to dodge).
+# [optional] IPv6 clients count per /64 for per-IP limits, throttles and
+# cloaks (16-128; 128 = per address, easy to dodge).
 #ipv6_limit_prefix = 64
-
-# --- load balancers ---
-
-# Hosts (globs) that speak PROXY protocol v1 to pass on the real client IP.
-# Connections from them must start with a PROXY line; from anyone else a
+# [optional] Load balancers that send PROXY protocol v1 with the real client
+# IP (globs). Their connections must start with a PROXY line; anyone else's
 # PROXY line is ignored, so it can't be spoofed.
 #proxy_protocol_hosts = ["10.0.0.5"]
 
-
 # =============================================================================
-#  LISTENERS
+#  [tls] -- encrypted client port
 # =============================================================================
-
-# -----------------------------------------------------------------------------
-#  [tls] -- encrypted client port, next to the plaintext one
-# -----------------------------------------------------------------------------
 [tls]
-
+# [optional] Turn the TLS port on.
 enabled = false
+# [optional] TLS client port.
 port = 6697
-
-# More TLS client ports (same certificate), next to `port`. The STS policy still names `port`. Up to 16.
+# [optional] More TLS ports with the same certificate (STS still names port).
 #extra_ports = [7000, 9999]
-
-# PEM certificate (or chain) and its key, relative to this file. Required when
-# enabled. A self-signed certificate works (clients must allow it):
-#   openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
-#     -keyout key.pem -out cert.pem -subj "/CN=irc.example.org"
-# For a trusted one: tools/mkcert.sh --domain irc.example.org
+# [required when enabled] PEM certificate (or chain) and its key.
+#   Trusted:     tools/mkcert.sh --domain irc.example.org
+#   Self-signed: openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
+#                  -keyout key.pem -out cert.pem -subj "/CN=irc.example.org"
 cert_file = ""
 key_file = ""
-
-# Ask (never require) clients for a certificate, so a fingerprint bound with
-# /CERT ADD can log in through SASL EXTERNAL. Needs services running.
+# [optional] Ask (never require) clients for a certificate: needed for SASL
+# EXTERNAL (NickServ CERT ADD), WHOIS certfp and [[operators]] certfp.
 request_client_cert = false
-
-# IRCv3 STS: tell clients to always use TLS here for this many seconds.
-# 0 = don't advertise it.
+# [optional] IRCv3 STS: tell clients to always use TLS here for this many
+# seconds, e.g. 31536000 (a year). 0 = don't advertise.
 sts_duration = 0
 
-# -----------------------------------------------------------------------------
+# =============================================================================
 #  [websocket] -- IRC over WebSocket, for browser clients
-# -----------------------------------------------------------------------------
+# =============================================================================
 [websocket]
-
+# [optional] Turn the WebSocket port on.
 enabled = false
+# [optional] WebSocket port.
 port = 8080
-
-# wss://, using the [tls] certificate (needs [tls] enabled). Or terminate TLS
-# in a reverse proxy instead.
+# [optional] wss:// with the [tls] certificate (needs [tls] enabled). Or put a
+# reverse proxy in front that does TLS.
 tls = false
-
-# Reverse proxies whose X-Forwarded-For / X-Real-IP is trusted for the real
-# client address. Everyone else's header is ignored.
+# [optional] Reverse proxies whose X-Forwarded-For / X-Real-IP is trusted for
+# the real client address; anyone else's header is ignored.
 #trusted_proxies = ["127.0.0.1"]
-
-# Origins a browser must come from, e.g. ["https://chat.example.org"].
-# Empty = any. When set, non-browser clients (no Origin) are refused.
-#allowed_origins = []
-
+# [optional] Origins a browser must come from. [] = any. When set, clients
+# without an Origin header (non-browsers) are refused.
+#allowed_origins = ["https://chat.example.org"]
 
 # =============================================================================
-#  SECURITY
+#  [security] -- protocol limits, cloaks, lookups, bans, opers
 # =============================================================================
 [security]
-
-# --- protocol limits ---
-
-# Longest line accepted, in bytes.
+# [optional] Longest line accepted, in bytes.
 max_line_length = 512
-
-# Most parameters one command may carry.
+# [optional] Most parameters one command may carry.
 max_params = 15
-
-# Longest nickname.
+# [optional] Longest nickname.
 max_nick_length = 30
-
-# --- keepalive ---
-
-# Seconds idle before the server sends PING, and seconds of total silence
-# before the client is dropped. ping_timeout must be greater.
+# [optional] Seconds idle before the server PINGs, and seconds of silence
+# before the client is dropped. ping_timeout must be the larger one.
 ping_interval = 120
 ping_timeout = 300
-
-# --- Protection bundle ---
-
-# Connection caps, flood and spam protection, DNSBL and the proxy scanner live
-# in this file (see config/protection.template.toml). Relative to this file.
-# Missing file = built-in defaults (all of it off). "" = never look for one.
+# [optional] The Protection bundle file (connection caps, floods, spam, DNSBL,
+# proxy scanner). Missing file = all of it off. "" = never look for one.
 protection_file = "protection.toml"
+# [optional] Per-command rate limits: "<COMMAND> <most>/<seconds>"; past it the
+# user gets "try again" (263). Opers are never limited; NICK counts only once
+# registered. Can also live in protection.toml [flood]. Up to 8.
+#command_limits = ["WHO 5/10", "LIST 2/30", "WHOIS 10/10", "NICK 3/60"]
 
-# --- host cloaking ---
-
-# Hide users' real IPs and hostnames from other users. Opers, and the user
-# themselves, still see the real one in /WHOIS; bans still match it.
+# --- host cloaking: hide real IPs and hostnames from other users ---
+# [optional] Turn cloaks on. Opers and the user still see the real host; bans
+# match both.
 host_masking = false
-
-# Cloak template:
-#   {token}    keyed hash of the real host (stable, can't be reversed)
-#   {network}  [server] network, lowercased
-#   {suffix}   "users.{network}", or the real host's last labels once rDNS
-#              resolves (see host_masking_keep_labels)
-# For an UnrealIRCd-style "a1b2c3d4.orange.es" use "{token}.{suffix}".
+# [optional] Cloak template. {token} = keyed hash of the real host,
+# {network} = [server] network lowercased, {suffix} = "users.{network}" or the
+# real host's last labels (host_masking_keep_labels).
+# e.g. "{token}.{suffix}" gives "a1b2c3d4.orange.es".
 host_masking_format = "{token}.users.{network}"
-
-# Hash bytes in {token} (2 hex characters each).
+# [optional] Bytes of hash in {token} (2 hex characters each).
 host_masking_token_bytes = 4
-
-# Labels of the resolved hostname kept in {suffix} (2 keeps "orange.es").
-# 0 = never show the real host. "co.uk"-style domains need 3. Never the whole
-# hostname: one with this many labels or fewer keeps one less (3 turns
-# "vps123.ovh.net" into "ovh.net").
+# [optional] Labels of the resolved hostname kept in {suffix}: 2 keeps
+# "orange.es", 3 suits "co.uk" domains. 0 = never show any of the real host.
 host_masking_keep_labels = 0
-
-# Cloaks keyed on an IP (no real-host suffix) get the IP's /24 and /16 (IPv6:
-# /48 and /32) as their own labels: a1b2c3d4e5f6a7b8.1a2b3c4d.5e6f7a8b.users.net.
-# Channel ops can then ban *!*@*.1a2b3c4d.5e6f7a8b.users.net for a whole /24
-# without seeing it. Turning it on changes those cloaks, so bans on the old ones
-# stop matching; set it the same on every linked server.
+# [optional] IP cloaks get the /24 and /16 (IPv6 /48 and /32) as labels, so
+# ops can ban a range they can't see: *!*@*.1a2b3c4d.5e6f7a8b.users.net.
+# Changes existing cloaks; set it alike on every linked server.
 host_masking_ip_ranges = false
-
-# Key behind {token}. Empty = random at each start, so cloaks change on every
-# restart and differ between linked servers. Set one (and the same one on
-# every linked server) for stable cloaks. Keep it out of version control.
+# [recommended] Key behind {token}. "" = random at each start (cloaks change on
+# restart and differ between servers). Use the same one on every linked server.
 host_masking_secret = ""
 
 # --- lookups on connect ---
-
-# Reverse DNS of the client IP. Needed for hostname bans and
-# host_masking_keep_labels; off = faster connects, bare IPs.
+# [optional] Reverse DNS of the client IP (needed for hostname bans and
+# keep_labels). Off = faster connects, bare IPs.
 rdns_enabled = true
 rdns_timeout = 3.0
-
-# RFC 1413 ident check. Most hosts run no identd, so it mostly adds delay.
+# [optional] RFC 1413 ident lookup. Most hosts run no identd: mostly delay.
 ident_enabled = false
 ident_timeout = 3.0
 
-# --- bans ---
-
-# File that keeps K/G/Z-lines across restarts, relative to this file.
-# "" = in memory only.
+# --- bans and reserved names ---
+# [recommended] File that keeps K/G/Z-lines across restarts (Q-lines, RESVs
+# and X-lines go to xlines.json beside it). "" = memory only.
+# e.g. klines_file = "klines.json"
 klines_file = ""
-
-# Nicks no local client may take (services use them). Stops anyone from
-# posing as NickServ to collect passwords. [] = none.
+# [optional] Nicks no local client may take, so nobody poses as a service.
 reserved_nicks = ["nickserv", "chanserv", "operserv", "memoserv", "hostserv", "botserv"]
-
-# --- user modes ---
-
-# Set on every client after it connects. Self modes only: i (invisible),
-# w (wallops), d (deaf), T (no CTCP), s (server notices), B (bot), g, Z,
-# p, I, R, D.
-# +o can never be given this way.
+# [optional] Modes every client gets on connect (self modes only: i w d T s B
+# g Z p I R D; never o).
 default_user_modes = "iw"
 
-# --- operators ---
-# The logins themselves are [[operators]] below; these settings apply to every
-# oper, however they became one.
-
-# Modes every /OPER gets. o is always included; others allowed: the ones
-# above plus the oper-only H, q, W and F (connects/exits on other servers).
-# An [[operators]] login's own `modes` replaces this for that login.
+# --- operators (the logins are [[operators]] below) ---
+# [optional] Modes every /OPER gets. o is always set; also allowed: the modes
+# above plus oper-only H, q, W and F. A login's own `modes` replaces it.
 oper_modes = "+osw"
-
-# Channel opers are joined to after /OPER. Not locked down automatically: use
-# channel modes (+i, +k) to keep others out.
+# [optional] Channel opers join after /OPER (lock it with +i or +k yourself).
 #oper_auto_join = "#opers"
-
-# Give opers a recognizable host after /OPER, e.g. netadmin.<network>.
+# [optional] Give opers a recognisable host after /OPER.
 oper_host_masking = false
 oper_host_format = "netadmin.{network}"
-
-# Network operators: services can make an account an IRC operator on whichever
-# server it logs in to, with no [[operators]] block here ([[opers]] in
-# services.toml, see the template there). true = this server accepts those
-# grants; false = it ignores them, and takes back the ones it gave on /REHASH.
+# [optional] Take network-wide opers from services ([[opers]] in
+# services.toml). false = ignore them, and take back given ones on /REHASH.
 accept_services_opers = true
-
-# --- /DIE and /RESTART ---
-
-# Extra password for /DIE and /RESTART on top of being an oper.
-# Empty = being an oper is enough. Hash with: sekurircd --hash-password
+# [optional] Extra password for /DIE and /RESTART on top of being an oper.
+# Hash with: sekurircd --hash-password. Plain-text forms also work
+# (tools/confcheck.py --fix --write hashes them). Unset = being an oper is enough.
 #die_password_hash = "scrypt$16384$8$1$<salt-hex>$<digest-hex>"
 #restart_password_hash = "scrypt$16384$8$1$<salt-hex>$<digest-hex>"
-# Plain-text versions (tools/confcheck.py --fix --write hashes them):
 #die_password = ""
 #restart_password = ""
 
-# --- per-command limits ---
-
-# A user who runs a command more often than this is answered with "try again"
-# (263) instead of having it run. "<COMMAND> <most>/<seconds>". Opers are
-# never held to them. NICK counts only once registered. Also readable in
-# protection.toml [flood]. Empty = none.
-#command_limits = ["WHO 5/10", "LIST 2/30", "WHOIS 10/10", "NICK 3/60"]
-
-
 # =============================================================================
-#  MESSAGES
+#  [messages] -- texts, message size, history
 # =============================================================================
 [messages]
-
-# Text files, relative to this file (made from their templates on first start).
-motd = "ircd.motd"     # optional ircd.smotd next to it: shown on connect, ircd.motd on /MOTD
-                       # (cp ircd.template.smotd ircd.smotd for a short one that points to /MOTD)
+# [optional] Text files (made from their templates on first start). An
+# ircd.smotd next to the MOTD is shown on connect instead, and the full MOTD on
+# /MOTD (cp ircd.template.smotd ircd.smotd).
+motd = "ircd.motd"
 oper_motd = "oper.motd"
 rules = "ircd.rules"
-
-# Longest PRIVMSG/NOTICE text, in bytes; longer is truncated.
+# [optional] Longest PRIVMSG/NOTICE text in bytes; longer is cut.
 max_message_length = 400
-
-# --- history (IRCv3 CHATHISTORY) ---
-
-# Lines kept per channel for scrollback and catch-up. About 0.7 KB per line.
-# 0 = off, max 500.
+# [optional] Lines of history kept per channel for IRCv3 CHATHISTORY
+# (about 0.7 KB each). 0 = off, at most 500.
 history_size = 50
-
-# Keep history across restarts (written every 30s and on shutdown, readable
-# only by the ircd's user). "" = memory only.
+# [optional] Keep history across restarts (saved every 30 s and on shutdown).
+# "" = memory only.
 #history_file = "history.json"
-
-# Also keep private messages between two logged-in accounts.
+# [optional] Also keep private messages between two logged-in accounts.
 #history_dm = true
-
-# Also keep joins, parts, kicks, modes, topics, nick changes and reactions
-# (shown to clients with draft/event-playback). Not for +D / +u channels.
+# [optional] Also keep joins, parts, kicks, modes, topics, nicks and reactions
+# (for draft/event-playback). Never for +D / +u channels.
 #history_events = true
-
-# --- content ---
-
-# Refuse any line that isn't valid UTF-8 (IRCv3 UTF8ONLY). Turn off only for
-# users on legacy charsets.
+# [optional] Refuse lines that aren't valid UTF-8 (IRCv3 UTF8ONLY).
 #utf8_only = true
-
-# Client tags not relayed, names without "+". "typing" blocks typing
-# notifications; "*,-draft/react,-draft/reply" blocks all but reactions
-# and replies. "" = relay all.
+# [optional] Client tags not relayed (names without "+"). e.g. "typing" stops
+# typing notices; "*,-draft/react,-draft/reply" keeps only reactions and
+# replies. "" = relay all.
 #client_tag_deny = ""
-
-# Words starred out in channels with +G (case-insensitive).
+# [optional] Words starred out in +G channels (case-insensitive).
 #censor_words = ["badword", "otherword"]
 
-
 # =============================================================================
-#  CHANNELS
+#  [channels] -- who may create channels, and their defaults
 # =============================================================================
 [channels]
-
-# Only opers may create new channels (anyone may still join existing ones).
+# [optional] Only opers may create channels (anyone may join existing ones).
 restrict_creation = false
-
-# Channels anyone may create even when restrict_creation is on.
+# [optional] Channels anyone may still create when restrict_creation is on.
+# e.g. allowed_channels = ["#help", "#lobby"]
 allowed_channels = []
-
-# Modes for a newly created channel: n, t, i, p, s, m.
+# [optional] Modes of a new channel (any of n t i p s m).
 default_modes = "nt"
-
-# Channels every client joins after connecting (they may /PART).
+# [optional] Channels every client joins on connect (they may /PART).
+# e.g. auto_join = ["#lobby"]
 auto_join = []
 
-
 # =============================================================================
-#  LIMITS -- sizes that used to be fixed
+#  [limits] -- sizes (the defaults are what SekurIRCd always used)
 # =============================================================================
-# The values shown are what every server did before this section existed, so
-# leaving it alone changes nothing. Those marked * are advertised to clients
-# (ISUPPORT): set them the same on every server of a network, so a client sees
-# one set of rules wherever it connects.
+# Keys marked * are advertised to clients (ISUPPORT): set them alike on every
+# server of a network, so clients see one set of rules.
 [limits]
-
-# * Channels one user may be in (CHANLIMIT). 1-500. Opers with override ignore it.
+# [optional] * Channels one user may be in (CHANLIMIT), 1-500. Override opers ignore it.
 channels_per_user = 200
-
-# * Entries in a channel's ban, exception and invite-exception lists, each
-# (MAXLIST). 1-500; each slot of a list in use costs about 330 bytes.
+# [optional] * Entries in each ban / exception / invite-exception list
+# (MAXLIST), 1-500; about 330 bytes per slot in use.
 max_list_size = 100
-
-# * Longest topic, kick reason and away message, in bytes; and the longest
-# channel name (TOPICLEN 1-307, KICKLEN 1-300, AWAYLEN 1-399, CHANNELLEN 10-50).
+# [optional] * Longest topic (1-307), kick reason (1-300), away message (1-399)
+# and channel name (10-50), in bytes.
 topic_length = 307
 kick_length = 300
 away_length = 399
 channel_length = 50
-
-# * MONITOR and SILENCE list sizes (1-500, 1-100).
+# [optional] * MONITOR (1-500) and SILENCE (1-100) list sizes.
 monitor_entries = 100
 silence_entries = 15
-
-# * Parameter-taking mode changes in one MODE command (MODES, 1-12).
+# [optional] * Parameter-taking mode changes in one MODE command (MODES), 1-12.
 modes_per_command = 6
-
-# Departed users /WHOWAS remembers (0-2000). 0 = no WHOWAS at all. A change
+# [optional] Departed users /WHOWAS remembers, 0-2000 (0 = no WHOWAS). A change
 # starts the list over.
 whowas_entries = 200
-
-# Seconds a new connection has to finish registering (NICK, USER, CAP, SASL)
-# before it is dropped. 5-600.
+# [optional] Seconds a new connection has to finish registering, 5-600.
 registration_timeout = 60
 
-
 # =============================================================================
-#  PRIVACY -- what ordinary users may learn about the network
+#  [privacy] -- what ordinary users may learn (all off; opers see everything)
 # =============================================================================
-# All off. Opers see everything; so does a user, about themself.
 #[privacy]
-
-# LINKS and MAP show non-opers only this server, not the ones behind it.
+# [optional] LINKS and MAP show non-opers only this server.
 #hide_links = false
-
-# A name shown instead of any server's real one in /WHOIS, /WHO, /LINKS, /MAP
-# and netsplit QUITs ("*.net *.split"), e.g. "*.example.net". Implies
-# hide_links. The server name on every reply line is still this server's own.
+# [optional] A name shown instead of every server's real one in WHOIS, WHO,
+# LINKS, MAP and netsplit quits ("*.net *.split"). Implies hide_links.
+# e.g. hide_server_name = "*.example.net"
 #hide_server_name = ""
-
-# /WHOIS idle and signon time only for the user and opers.
+# [optional] WHOIS idle/signon time only for the user themself and opers.
 #hide_idle = false
-
-# PART and QUIT messages are not shown to other users ("Quit" instead).
+# [optional] PART and QUIT reasons are not shown to other users.
 #hide_part_quit_reasons = false
-
-# /NAMES of a channel you are not in lists nobody.
+# [optional] NAMES of a channel you are not in lists nobody.
 #names_members_only = false
 
-
 # =============================================================================
-#  OPERATORS
+#  [[operators]] -- /OPER logins on THIS server (one block per login)
 # =============================================================================
-
-# -----------------------------------------------------------------------------
-#  [[operators]] -- /OPER logins (none by default; add one per oper)
-# -----------------------------------------------------------------------------
-#   name           login name for /OPER
-#   password_hash  from `sekurircd --hash-password` (recommended), or
-#   password       plain text (tools/confcheck.py --fix --write hashes it)
-#   hosts          ident@host masks this login may /OPER from; "*@*" = anywhere
-#   privileges     limit the login to some oper commands; unset = all:
-#                    kill     KILL             kline    K/G/Z-LINE, SPAMFILTER, PROTECT
-#                    sa       SAJOIN/SAPART/SAMODE/SANICK
-#                    host     CHGHOST/SETHOST/CHGIDENT/USERIP
-#                    wallops  WALLOPS/GLOBOPS  rehash   REHASH
-#                    die      DIE/RESTART      link     SQUIT/CONNECT
-#                    override past channel rules: +i/+k/+l/+b/+m/+n/+t,
-#                             kick anyone, MODE without ops, PM past +D/+R/+g/+Z
-#                    auspex   see hidden info: real hosts/IPs, +i users,
-#                             +p channels, +H opers, idle, keys, TRACE
-#                    immune   exempt from SHUN, spam filters, +f/+j limits
-#                    all      everything;  [] = none of these (a helper)
-#   modes          replaces [security] oper_modes for this login
-#   certfp         SHA-256 fingerprints (64 hex, colons fine) of TLS client
-#                  certificates that may use this login: /OPER then needs a
-#                  matching one (needs [tls] request_client_cert = true).
-#                  With no password / password_hash the certificate alone is
-#                  the login. Fingerprint: openssl x509 -in c.crt -noout -fingerprint -sha256
-# Add or change one, then /REHASH. These logins work on THIS server only: for
-# someone who should be an oper on every server of the network, use [[opers]] in
-# services.toml instead (they log in to NickServ, no /OPER). Keep one login here
-# anyway, for when services is down.
-#
+#   name           [required] the login name: /OPER <name> <password>
+#   hosts          [required] ident@host masks it may /OPER from ("*@*" = anywhere)
+#   password_hash  [required, one of] scrypt string from `sekurircd --hash-password`
+#   password       [required, one of] plain text (confcheck --fix --write hashes it)
+#   certfp         [optional] SHA-256 fingerprints of TLS client certificates
+#                  (colons fine); /OPER then also needs a matching certificate
+#                  ([tls] request_client_cert). With no password at all the
+#                  certificate is the login: /OPER <name>. Fingerprint:
+#                  openssl x509 -in client.crt -noout -fingerprint -sha256
+#   privileges     [optional] limit the login; unset = everything:
+#                    kill      KILL            kline   K/G/Z/Q/X-LINE, RESV, SHUN,
+#                    sa        SAJOIN/SAPART/          ELINE, SPAMFILTER, CLASS,
+#                              SAMODE/SANICK           DEFCON, PROTECT
+#                    host      CHGHOST/SETHOST/CHGIDENT/USERIP, VHOST ADD|DEL
+#                    wallops   WALLOPS/GLOBOPS rehash  REHASH
+#                    die       DIE/RESTART     link    SQUIT/CONNECT
+#                    override  past channel rules (+i/+k/+l/+b/+m/+n/+t, kick
+#                              anyone, MODE without ops, PM past +D/+R/+g/+Z)
+#                    auspex    see hidden info (real hosts, +i users, +p
+#                              channels, +H opers, idle, keys, TRACE)
+#                    immune    exempt from SHUN, spam filters, +f/+j
+#                    all       everything;   [] = none (a helper)
+#   modes          [optional] replaces [security] oper_modes for this login
+# For opers on EVERY server use [[opers]] in services.toml; keep one login here
+# anyway for when services are down.
 #[[operators]]
 #name = "admin"
 #password_hash = "scrypt$16384$8$1$<salt-hex>$<digest-hex>"
@@ -469,71 +327,51 @@ registration_timeout = 60
 #modes = "+oswW"
 #certfp = ["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"]
 
-# -----------------------------------------------------------------------------
+# =============================================================================
 #  [admin] -- what /ADMIN shows (unset = "Not configured")
-# -----------------------------------------------------------------------------
+# =============================================================================
 #[admin]
+# [optional] Two free-text lines and a contact address.
 #location1 = "Somewhere, Some Country"
 #location2 = "Some Organization"
 #email = "admin@example.com"
 
-# -----------------------------------------------------------------------------
-#  [debug_channel] -- the server's own log, live in an oper-only channel
-# -----------------------------------------------------------------------------
-# Only opers can join it (others are told it doesn't exist). Set
-# [security] oper_auto_join to the same name to put opers in automatically.
-# On a network, enable it with the same name on every server (a server
-# without it lets anyone join), and set /MODE #server-debug +OsP once:
-# +O opers only everywhere, +s hidden from LIST/WHOIS, +P keeps the modes
-# when the last oper leaves. Each server's log lines stay on that server;
-# the stats line reaches every server's channel.
+# =============================================================================
+#  [debug_channel] -- the server's log, live in an oper-only channel
+# =============================================================================
+# Only opers can join (others are told it doesn't exist). On a network enable
+# it with the same name everywhere and set /MODE #server-debug +OsP once.
 [debug_channel]
-
+# [optional] Turn it on.
 enabled = false
+# [optional] The channel (also put it in [security] oper_auto_join).
 name = "#server-debug"
-
-# DEBUG, INFO, WARNING, ERROR or CRITICAL. INFO adds connects, oper actions
-# and link changes.
+# [optional] Lowest level shown: DEBUG, INFO, WARNING, ERROR or CRITICAL.
+# INFO adds connects, oper actions and link changes.
 min_level = "WARNING"
-
-# Seconds between stats lines (users, channels, bans, CPU and memory, what the
-# Protection bundle caught). Needs min_level = "INFO". 0 = off.
+# [optional] Seconds between stats lines (needs min_level INFO). 0 = off.
 stats_interval = 0
-
-# Services pidfile, to add their CPU and memory to the stats line. "" = don't.
+# [optional] Services pidfile, to add their CPU/memory to the stats line.
+# e.g. chanserv_pidfile = "../services/services.pid"
 chanserv_pidfile = ""
 
-
 # =============================================================================
-#  CONNECTIONS
+#  [[classes]] -- other limits for some addresses (first match wins)
 # =============================================================================
-
-# -----------------------------------------------------------------------------
-#  [[classes]] -- different limits for some hosts
-# -----------------------------------------------------------------------------
-# A client gets the FIRST class whose `hosts` match. A host is an IP glob or a
-# CIDR range, IPv4 and IPv6 mixed in one list ("192.0.2.*", "10.0.0.0/8",
-# "2001:db8::/32", "::1"). Every limit is optional; 0 or unset = the global
-# setting.
-# A glob is matched against the text the server spells the address with: IPv6
-# in its short form, no leading zeros ("c8", not "00c8") and "::" for a run of
-# zero groups. "2602:f992:00c8:b79*" is therefore read as "2602:f992:c8:b79*"
-# (and logged, and shown by tools/confcheck.py); a glob can still miss when an
-# address compresses differently. A CIDR range ("2602:f992:c8:b793::/64") never
-# does, so prefer it for IPv6.
-#   max_clients     connections in this class
-#   max_per_ip      replaces the per-IP connection cap
-#   sendq_max       bytes queued for a slow reader before "SendQ exceeded"
-#   flood_max_msgs / flood_window   replace the flood guard
-#   scope           "local" (default), or "global": published to every linked
-#                   server, which applies it to ITS OWN connections -- so
-#                   max_clients and max_per_ip count per server, not across
-#                   the network. A server with [links] accept_global_classes
-#                   = false keeps to its own classes. Older servers ignore it.
-# Opers can also add and remove classes while the server runs, no REHASH:
-#   /CLASS ADD [GLOBAL] <name> <host,host,...> [max_per_ip=N ...]   /CLASS DEL <name>   /CLASS
-# (kept in classes.json next to this file; a class from this file is changed here).
-#
+#   name            [required] the class name (letters, digits, _ . -)
+#   hosts           [required] IP globs or CIDR ranges, IPv4 and IPv6 mixed.
+#                   Prefer CIDR for IPv6 ("2001:db8:1::/48"): globs match the
+#                   short spelling ("c8", not "00c8"), which can miss.
+#   max_clients     [optional] connections in this class (0 = no limit)
+#   max_per_ip      [optional] replaces the per-IP connection cap
+#   sendq_max       [optional] bytes queued for a slow reader (4096-16777216)
+#   flood_max_msgs  [optional] with flood_window (seconds): replaces the flood guard
+#   scope           [optional] "local" (default) or "global": sent to every
+#                   linked server, each applying it to its own connections
+#                   (see [links] accept_global_classes). Older servers ignore it.
+# 0 or unset = the global setting. Opers can add/remove classes live, kept in
+# classes.json: /CLASS ADD [GLOBAL] <name> <hosts> [max_per_ip=N ...],
+# /CLASS DEL <name>, /CLASS (list).
 #[[classes]]
 #name = "office"
 #hosts = ["192.0.2.*", "2001:db8:1::/48"]
@@ -544,193 +382,124 @@ chanserv_pidfile = ""
 #flood_window = 10.0
 #scope = "local"
 
-# -----------------------------------------------------------------------------
+# =============================================================================
 #  [[webirc]] -- trusted web gateways (KiwiIRC, The Lounge, ...)
-# -----------------------------------------------------------------------------
-# Lets a gateway pass on each web user's real IP with WEBIRC, so bans and
-# limits hit that user, not the whole gateway. Both the gateway's IP (`hosts`,
-# required) and the password must match.
-#
+# =============================================================================
+# The gateway passes each web user's real IP, so bans and limits hit the user,
+# not the gateway.
+#   name      [optional] a label for logs
+#   password  [required] the gateway's WEBIRC password
+#   hosts     [required] the gateway's IP globs
 #[[webirc]]
 #name = "kiwi"
 #password = "change-me"
 #hosts = ["203.0.113.10"]
 
-# -----------------------------------------------------------------------------
-#  [[vhosts]] -- hosts users can switch to with /VHOST
-# -----------------------------------------------------------------------------
-# Who may use one: allowed_hosts (ident@host or IP masks, never nicks, which
-# anyone can take; a bare mask means any ident) and/or accounts (registered
-# people who are logged in, from wherever they connect). Either is enough.
-# A password is then asked for: /VHOST <host> <password>. Give it as password
-# (plain text in this file) or, better, password_hash (a scrypt string from
-# `sekurircd --hash-password`, which asks for the password and prints the hash; checked off the
-# main loop like /OPER), not both. Nothing rewrites the file for you.
-# Alone, with no allowed_hosts and no accounts, it opens the vhost to anyone who
-# knows the password, and /VHOST does not list it. Opers may use any vhost
-# without one; with none of the three it is oper-only.
-# These are per server. To give an account several vhosts to choose from on
-# every server, an oper uses /VHOST ADD <account> <host> instead (kept by
-# services; the person picks with /VHOST <host>).
-#
+# =============================================================================
+#  [[vhosts]] -- hosts people may switch to with /VHOST <host> (this server)
+# =============================================================================
+#   host           [required] the virtual host
+#   allowed_hosts  [optional] ident@host or IP masks that may use it
+#   accounts       [optional] logged-in accounts that may use it, from anywhere
+#   password_hash  [optional] scrypt from `sekurircd --hash-password`, or
+#   password       [optional] plain text (not both): then /VHOST <host> <password>
+# allowed_hosts or accounts are enough on their own; with a password too, both
+# are needed. A password alone opens it to anyone who knows it (not listed by
+# /VHOST). None of them = opers only (opers never need the password).
+# For vhosts that follow an ACCOUNT to every server, an oper uses
+# /VHOST ADD <account> <host> instead (kept by services; picked with /VHOST <host>).
 #[[vhosts]]
 #host = "elite.users.example.com"
 #allowed_hosts = ["*@203.0.113.42", "198.51.100.*"]
 #accounts = ["alice", "bob"]
-#password_hash = "scrypt$16384$8$1$<salt-hex>$<digest-hex>"   # or: password = "change-me"
-
+#password_hash = "scrypt$16384$8$1$<salt-hex>$<digest-hex>"
 
 # =============================================================================
-#  LOGGING
+#  [logging] -- log files, audit log, syslog
 # =============================================================================
 [logging]
-
-# false = console only, no log file.
+# [optional] false = console only, no log file.
 enabled = true
-
-# Created if missing. Relative = to the working directory.
+# [optional] Log directory, created if missing (relative to the working directory).
 directory = "logs"
-
-# Minimum level written: DEBUG, INFO, WARNING, ERROR, CRITICAL.
+# [optional] Lowest level written: DEBUG, INFO, WARNING, ERROR, CRITICAL.
 level = "INFO"
-
-# true = log every line in and out (very verbose), whatever `level` says.
+# [optional] true = DEBUG level and every line in and out (very verbose).
 debug = false
-
-# File name, rotated at max_bytes, keeping backup_count old files
-# (5 x 5 MiB = about 25 MiB).
+# [optional] Log file, rotated at max_bytes with backup_count old copies kept.
 file = "sekurircd.log"
 max_bytes = 5242880
 backup_count = 5
-
-# Audit log: one line per oper action (OPER logins and failures, KILL, K/G/Z-lines,
-# SPAMFILTER, CLASS, DEFCON, REHASH, DIE ... passwords left out). A file name
-# in `directory` (or an absolute path), rotated like the main log. "" = none.
+# [optional] Audit log: one line per oper action (OPER logins and failures,
+# KILL, the *-LINEs, SPAMFILTER, CLASS, DEFCON, REHASH, DIE...; passwords left
+# out). In `directory`, or an absolute path; rotated like the log. "" = none.
 #audit_file = "audit.log"
-
-# Also send the log (and the audit lines) to the system log (syslog, ident sekurircd).
+# [optional] Also send log and audit lines to syslog (ident "sekurircd").
 #syslog = false
 
-
 # =============================================================================
-#  LINKING -- multi-server networks and services
+#  [links] -- server linking and services
 # =============================================================================
-# Off by default. Also needed for services (NickServ + ChanServ), which link
-# in like a server. Linked servers form a tree and share users, channels,
-# bans and accounts. Each needs its own [server] name and sid, and the same
-# host_masking_secret. Different versions link as long as their link protocol
-# overlaps. tools/linkmgmt.py adds, edits and tests links for you.
+# Needed for a network of servers and for services (NickServ + ChanServ link in
+# like a server). Each server needs its own name and sid and the same
+# host_masking_secret. tools/linkmgmt.py adds, edits and tests links for you.
 [links]
-
+# [optional] Turn the link listener / dialing on.
 enabled = false
-
-# "hub" accepts links, "leaf" only dials out, "both" does both.
+# [optional] "hub" accepts links, "leaf" only dials out, "both" does both.
 mode = "hub"
-
-# Where the link listener binds (hub). Separate from the client ports.
-# macOS sometimes uses 7000 itself: pick another port if it won't bind.
+# [optional] The link listener (hub), apart from client ports. macOS may use
+# 7000 itself: pick another port if it won't bind.
 bind = "0.0.0.0"
 port = 7000
-
-# The link listener's IPv6 address, when [server] ipv6 is on.
+# [optional] The link listener's IPv6 address, when [server] ipv6 is on.
 #bind6 = "::"
-
-# TLS on links: a hub uses the [tls] cert/key on the link listener, a leaf
-# requires TLS to its uplink. Local plain-text links (services) still work.
+# [optional] TLS on links: a hub uses the [tls] cert/key, a leaf requires TLS
+# to its hub. Plain text is still taken from this machine (local services).
 tls = false
-
-# Leaf: accept the hub's certificate without CA validation. Prefer pinning a
-# `fingerprint` on the peer, which replaces this.
+# [optional] Leaf: skip CA checks of the hub's certificate. Prefer a peer
+# `fingerprint`, which replaces this.
 tls_insecure_skip_verify = false
-
-# Dial the peers that have a `host` at start and after a drop. false = only
-# on /CONNECT.
+# [optional] Dial peers with a `host` at start and after a drop (false = only /CONNECT).
 #autoconnect = true
-
-# Apply the [[classes]] other servers publish (scope = "global", /CLASS ADD
-# GLOBAL). false = only this server's own classes; they are still passed on.
+# [optional] Apply [[classes]] other servers publish (scope = "global").
+# false = keep to this server's own (they are still passed on).
 #accept_global_classes = true
-
-# --- timing ---
-
+# [optional] Link keepalive, in seconds.
 ping_interval = 60.0
 ping_timeout = 180.0
-
-# Reconnect backoff in seconds, doubling up to the max.
+# [optional] Reconnect backoff in seconds, doubling up to the max.
 reconnect_delay = 5.0
 reconnect_delay_max = 300.0
-
-# Longest line accepted from a linked server, in bytes.
+# [optional] Longest line accepted from a linked server, in bytes.
 #max_line_length = 8192
 
-# -----------------------------------------------------------------------------
-#  [[links.peers]] -- one per server (or services) this one links with
-# -----------------------------------------------------------------------------
-#   name           the peer's own server name, as it presents itself
-#   host / port    set on the DIALING side only; the other side accepts
-#   password_hash  accepting side (from `sekurircd --hash-password`), or
-#   password       plain; the dialing side must use the plain one
-#   fingerprint    "sha256:<hex>" of the peer's certificate (needs tls = true).
-#                  Checked before any password; with it, the password may be
-#                  left out. Get it with: tools/linkmgmt.py fingerprint
-#   allowed_ips    IP globs the peer may connect from (accepting side)
-#
-#   Which servers may appear BEHIND this peer (either side's entry). Unset =
-#   any, as before. A server that does not fit is refused: it is not entered
-#   here, so it and its users never show, its introducer is asked to drop it,
-#   and the link stays up. The peer itself is always accepted. Matching is
-#   case-insensitive; the list covers every server beyond the link, so a
-#   services server hanging off the peer must be listed too.
-#   introduces     server-name globs, e.g. ["*.eu.example.net", "services.example.net"]
-#                  Two hubs, each limiting the other to its own region:
-#                  newyork.us.example.net lists ["*.eu.example.net"] for frankfurt,
-#                  frankfurt.eu.example.net lists ["*.us.example.net"] for newyork.
-#   leaf           true = nothing may link behind it (introduces = []): a peer
-#                  that announces any server has its link closed. Not both.
-#                  Applies at once; /REHASH closes a link whose servers it no longer allows.
-#                  Each server enforces its own entries; older servers check nothing.
-#
-#   How far a leaf's IRC operators reach. Hub side only (the block without
-#   `host`); the leaf needs no setting: the hub tells it when it links and
-#   again on every /REHASH. Hub operators are never limited -- they keep the
-#   whole network, leaves included.
-#   oper_scope     "global" (default) = what an oper's `privileges` allow, on
-#                  any server.   "local" = only on their own server. The
-#                  leaf's opers can then not (their server says so; the hub
-#                  also drops it if it arrives anyway):
-#                    KILL, SAJOIN/SAPART/SANICK/CHGHOST/CHGIDENT on a user
-#                    of another server;  GLINE/UNGLINE/SHUN/UNSHUN (K/Z/E-lines
-#                    stay on their own server);  SQUIT of a server that isn't
-#                    linked to theirs;  REHASH/STATS of another server.
-#                  Their server also refuses SAMODE on a channel that has users
-#                  on other servers.
-#                  Allowed: WHOIS/VERSION/... of anything, WALLOPS/GLOBOPS,
-#                  and everything on their own server.
-#   oper_deny      privileges taken away from that leaf's opers on top of
-#                  their own `privileges` (the same names, see [[operators]]);
-#                  default none. Any of:
-#                    kill     KILL                 kline    K/G/Z/SHUN/E-LINE, SPAMFILTER, PROTECT
-#                    sa       SAJOIN/SAPART/SAMODE/SANICK
-#                    host     CHGHOST/SETHOST/CHGIDENT/USERIP
-#                    wallops  WALLOPS/GLOBOPS/LOCOPS    rehash   REHASH
-#                    die      DIE/RESTART          link     SQUIT/CONNECT
-#                    override past channel rules: +i/+k/+l/+b/+m/+n/+t, kick
-#                             anyone, MODE without ops, PM past +D/+R/+g/+Z
-#                    auspex   see hidden info: real hosts/IPs, +i users, +p
-#                             channels, +H opers, idle, keys, TRACE
-#                    immune   exempt from SHUN, spam filters, +f/+j limits
-#                    all      everything
-#                  override is the one oper_scope can't cover (a channel is
-#                  shared), so a limited leaf normally denies it too.
-#                  A leaf running an older version ignores oper_deny; the
-#                  hub still drops what oper_scope forbids when it arrives.
-
-#   Removing an entry and running /REHASH closes that peer's link at once and refuses it
-#   from then on; the same when allowed_ips no longer lists the address it is connected
-#   from. (A hub must keep at least one entry that accepts a leaf: a rehash with none is
-#   refused.) Changing a password or fingerprint does not close an open link: /SQUIT it.
-#   A leaf that is SQUITed dials again after reconnect_delay unless its own autoconnect
-#   is off, so to keep it out, remove its entry.
+# =============================================================================
+#  [[links.peers]] -- one block per server (or services) this one links with
+# =============================================================================
+#   name           [required] the peer's own server name
+#   host / port    [required on the DIALING side only] where to reach it
+#   password_hash  [required, one of] accepting side: `sekurircd --hash-password`
+#   password       [required, one of] plain; the dialing side must use this one
+#   fingerprint    [optional] "sha256:<hex>" of the peer's certificate (needs
+#                  [links] tls); checked before the password, which may then
+#                  be left out. Get it: tools/linkmgmt.py fingerprint
+#   allowed_ips    [optional] accepting side: IP globs the peer may come from
+#   introduces     [optional] server-name globs that may appear BEHIND this
+#                  peer (unset = any). Others are refused, and its introducer
+#                  is asked to drop them; the link stays up. List services too.
+#                  e.g. ["*.eu.example.net", "services.example.net"]
+#   leaf           [optional] true = nothing may link behind it (the link is
+#                  closed if something does). Not together with introduces.
+#   oper_scope     [optional, hub side] "global" (default) or "local": that
+#                  leaf's opers act only on their own server (no remote KILL,
+#                  GLINE/SHUN, Q/X-lines, RESV, global CLASS, VHOST ADD, remote
+#                  SQUIT/REHASH/STATS...). Hub opers are never limited.
+#   oper_deny      [optional, hub side] privileges taken from that leaf's opers
+#                  (names as in [[operators]]); a limited leaf usually denies
+#                  "override" too.
+# Removing an entry (or an address from allowed_ips) and /REHASH closes that
+# link at once; a changed password or fingerprint does not (use /SQUIT).
 
 # Hub side: a leaf that connects in.
 #[[links.peers]]
@@ -738,26 +507,26 @@ reconnect_delay_max = 300.0
 #password_hash = "scrypt$16384$8$1$<salt-hex>$<digest-hex>"
 #allowed_ips = ["203.0.113.5"]
 
-# Hub side: a leaf run by someone else -- its opers keep their own server only.
+# Hub side: a leaf run by someone else, kept to its own server and region.
 #[[links.peers]]
 #name = "leaf2"
 #password_hash = "scrypt$16384$8$1$<salt-hex>$<digest-hex>"
 #oper_scope = "local"
 #oper_deny = ["override", "auspex"]
-#introduces = ["*.eu.example.net"]   # or: leaf = true
+#introduces = ["*.eu.example.net"]
 #leaf = false
 
-# Hub side: services (bin/services). Same name and plain password as [link]
+# Hub side: services (bin/services); same name and plain password as [link]
 # in services/services.toml.
 #[[links.peers]]
 #name = "services.sekurircd.local"
 #password_hash = "scrypt$16384$8$1$<salt-hex>$<digest-hex>"
 #allowed_ips = ["127.0.0.1"]
 
-# Leaf side (with mode = "leaf"): the hub to dial. name = the HUB's name.
+# Leaf side (mode = "leaf"): the hub to dial; name = the HUB's name.
 #[[links.peers]]
 #name = "hub1"
 #host = "hub.example.net"
 #port = 7000
 #password = "a-long-shared-secret-unique-to-this-pair"
-#fingerprint = "sha256:<64 hex digits>"   # the hub's certificate (see above)
+#fingerprint = "sha256:<64 hex digits>"

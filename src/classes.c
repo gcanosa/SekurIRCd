@@ -209,8 +209,7 @@ void classes_net_receive(server_t *srv, const char *origin, const char *verb, co
             *pp = s->next;
             free(s);
         }
-        classes_rebuild(srv);
-        net_reclass_all(srv);
+        net_reclass_all(srv); /* rebuilds the table first */
         return;
     }
     if (strcasecmp(verb, "ADD") != 0 || !rule) return;
@@ -224,8 +223,7 @@ void classes_net_receive(server_t *srv, const char *origin, const char *verb, co
     s->c.global = 1;
     snprintf(s->origin, sizeof s->origin, "%s", origin);
     list_append(&srv->net_classes, s);
-    classes_rebuild(srv);
-    net_reclass_all(srv);
+    net_reclass_all(srv); /* rebuilds the table first */
 }
 
 void classes_global_del(server_t *srv, const char *name, const char *by) {
@@ -238,8 +236,7 @@ void classes_global_del(server_t *srv, const char *name, const char *by) {
         server_notify_network(srv, note);
         free(s);
         save(srv);
-        classes_rebuild(srv);
-        net_reclass_all(srv);
+        net_reclass_all(srv); /* rebuilds the table first */
         classes_publish(srv);
         return;
     }
@@ -328,8 +325,7 @@ void cmd_class(server_t *srv, client_t *cl, irc_message_t *msg) {
         s->c = c;
         list_append(&srv->rt_classes, s);
         save(srv);
-        classes_rebuild(srv);
-        net_reclass_all(srv);
+        net_reclass_all(srv); /* rebuilds the table first */
         if (global) classes_publish(srv);
         snprintf(m, sizeof m, "Class %s added%s", c.name, global ? " on every linked server" : " (this server only)");
         notice_self(srv, cl, m);
@@ -354,8 +350,7 @@ void cmd_class(server_t *srv, client_t *cl, irc_message_t *msg) {
             for (sclass_t **pp = &srv->rt_classes; *pp; pp = &(*pp)->next)
                 if (*pp == rt) { sclass_t *dead = *pp; *pp = dead->next; free(dead); break; }
             save(srv);
-            classes_rebuild(srv);
-            net_reclass_all(srv);
+            net_reclass_all(srv); /* rebuilds the table first */
             if (was_global) classes_publish(srv);
             snprintf(m, sizeof m, "Class %s removed", name);
             notice_self(srv, cl, m);
@@ -371,8 +366,7 @@ void cmd_class(server_t *srv, client_t *cl, irc_message_t *msg) {
             netserver_t *o = netsync_find_sid(srv, origin);
             *pp = dead->next;
             free(dead);
-            classes_rebuild(srv);
-            net_reclass_all(srv);
+            net_reclass_all(srv); /* rebuilds the table first */
             netsync_class_del(srv, origin, cname);
             snprintf(m, sizeof m, o ? "Class %s removed; %s was asked to remove it at the source" : "Class %s removed here only (%s is not linked)", cname, o ? o->name : origin);
             notice_self(srv, cl, m);

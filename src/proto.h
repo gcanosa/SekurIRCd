@@ -59,6 +59,7 @@ int irc_valid_nick(const char *nick, int max_len);
 int irc_valid_user(const char *user, int max_len);
 int irc_valid_channel(const char *chan, int max_len);
 int irc_valid_host(const char *host);
+int irc_valid_vhost(const char *host); /* a host a person is given (vhost, SETHOST, account cloak): also takes '/' ("users/alice") */
 
 /* ASCII-casefold copy (IRC casemapping is ASCII-only in this daemon, same as
  * protocol.casefold's docstring) -- not full Unicode casefolding.

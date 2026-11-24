@@ -1,247 +1,184 @@
 # =============================================================================
-#  SekurIRCd services -- NickServ + ChanServ (bin/services)
+#  SekurIRCd services -- NickServ + ChanServ (services/services.toml)
 # =============================================================================
-#
 #  One process for the whole network: accounts, SASL, nick and channel
-#  registration. It links to the ircd like a server; run exactly ONE copy.
+#  registration, account vhosts and network-wide opers. It links to the hub
+#  like a server; run exactly ONE copy. Without it: no NickServ, ChanServ or SASL.
 #
-#  Setup:
-#    1. cp services/services.template.toml services/services.toml
-#    2. in sekurircd.toml: [links] enabled, plus a [[links.peers]] entry with
-#       the same name and password as [link] below
-#    3. ./sekurircd start   (starts the ircd and services together)
+#  Setup:  1. cp services/services.template.toml services/services.toml
+#          2. in sekurircd.toml: [links] enabled and a [[links.peers]] entry
+#             with the same name and password as [link] below
+#          3. ./sekurircd start   (starts the ircd and services together)
+#          (tools/makeconf.py writes both files with matching settings.)
 #
-#  Or let tools/makeconf.py write both files with matching settings.
-#  Without services there is no NickServ, no ChanServ and no SASL.
+#  How to read this file:
+#    [required]     must be set
+#    [recommended]  works without it, but set it for a real network
+#    [optional]     leave it out and the value shown applies (the default)
+#    "#key =" lines are off / at their default: remove the "#" to set them.
+#  bin/services --rehash (SIGHUP) or /REHASH on the hub reloads this file;
+#  [link], the bots' nick/user/host/realname and the database paths need a
+#  restart. A file with a mistake is refused and the running settings stay.
 #
-#  bin/services --rehash (SIGHUP) reloads this file, and so does /REHASH on the
-#  hub (the server services link to). [link], the bots' nick/user/host/realname
-#  and the database paths need a restart; the rest applies at once. A file with a
-#  mistake is refused and the running settings stay.
-#
-#  Every key is optional unless noted: the value shown (commented out or not)
-#  is the built-in default.
-#
-#  Related files:
-#    ../stats/stats.toml    the network stats collector (optional; see
-#                           stats/stats.template.toml)
-#
-#  Sections:
-#    LINK        [link]
-#    CHANSERV    [chanserv]
-#    NICKSERV    [nickserv]
-#    OPERATORS   [[opers]]   network-wide IRC operators
-#    STORAGE     [storage]
+#  Contents: [link] [chanserv] [nickserv] [[opers]] [storage]
+#  Related: ../stats/stats.toml (network stats collector, optional)
 # =============================================================================
 
-
-# -----------------------------------------------------------------------------
-#  LINK -- how services connect to the ircd
-# -----------------------------------------------------------------------------
+# =============================================================================
+#  [link] -- how services connect to the hub
+# =============================================================================
 [link]
-
-# The ircd's link listener ([links] bind/port), not its client port.
+# [required] The hub's link listener ([links] bind/port), not a client port.
 host = "127.0.0.1"
 port = 7000
-
-# Must match a [[links.peers]] entry in sekurircd.toml. Keep the PLAIN
-# password here (services send it); the ircd side may store a password_hash.
+# [required] Must match a [[links.peers]] entry of the hub. Keep the PLAIN
+# password here (the hub may store a password_hash).
 name = "services.sekurircd.local"
 password = "change-me-to-a-long-shared-secret"
 
-# Services on ANOTHER machine than the hub: point host/port at the hub's link
-# listener, turn TLS on, and pin the hub's certificate. Without tls = true the
-# link is plain text: every IDENTIFY and SASL password crosses the network
-# unencrypted (services warns, and so does the hub). A hub whose [links] tls is
-# on takes plain text from its own machine only. Off by default, so an install
-# that links on 127.0.0.1 is unchanged.
-#
-# The hub's certificate is judged one of two ways, checked BEFORE the password
-# is sent:
-#   fingerprint  pin it: its SHA-256 ("sha256:" and ':' optional). The chain is
-#                ignored; get it with
-#                  openssl x509 -in hub.crt -noout -fingerprint -sha256
-#   (none)       verify it like a web server's: against ca_file (or the system
-#                CAs), and for the name in `host` -- use a name, or an address the
-#                certificate lists.
-# cert/key: present a certificate of your own, so the hub can pin THIS daemon
-# with fingerprint = "..." on its [[links.peers]] entry (both or neither).
-# Relative paths mean "next to this file". These need a restart.
+# --- services on another machine than the hub (all need a restart) ---
+# Without TLS every IDENTIFY and SASL password crosses the network in plain
+# text (both sides warn). A hub with [links] tls takes plain text only from its
+# own machine.
+# [optional] Link to the hub over TLS.
 #tls = false
+# [optional] Pin the hub's certificate by its SHA-256 ("sha256:" and colons
+# allowed); checked before the password is sent. Unset = verify it like a web
+# server's, against ca_file (or the system CAs) and the name in `host`.
+# Get it: openssl x509 -in hub.crt -noout -fingerprint -sha256
 #fingerprint = ""
 #ca_file = ""
+# [optional] A certificate of our own, so the hub can pin this daemon with a
+# fingerprint on its [[links.peers]] entry. Both or neither; relative = next
+# to this file.
 #cert = ""
 #key = ""
-
-# require_tls = true: never send a password in plain text to a hub on another
-# machine. If tls is off (or the hub does not take TLS) the daemon does not link
-# and says why, instead of linking with a warning. A hub on this machine is not
-# "another machine", so a plain link on 127.0.0.1 is unaffected. Off by default;
-# tools/makeconf.py and the web wizard turn it on for services on another machine.
-# The hub's side of the same rule is [links] tls = true: it takes plain text from
-# its own machine only.
+# [optional] Never send a password in plain text to a hub on another machine:
+# without TLS the daemon refuses to link (127.0.0.1 is not affected).
 #require_tls = false
 
-
-# -----------------------------------------------------------------------------
-#  CHANSERV -- channel registration
-# -----------------------------------------------------------------------------
+# =============================================================================
+#  [chanserv] -- channel registration
+# =============================================================================
 [chanserv]
-
+# [optional] The bot's identity (restart to change).
 nick = "ChanServ"
 user = "ChanServ"
 host = "services.sekurircd.local"
 realname = "Channel Registration Service"
-
-# Drop a registration nobody has used (IDENTIFY or any password command) for
-# this many days. 0 = never expire.
+# [optional] Drop a channel nobody used (IDENTIFY or a password command) for
+# this many days. 0 = never.
 #expire_days = 0
-
-# What the founder gets on IDENTIFY or CLAIM: "o" = channel op (@),
-# "q" = channel owner (~).
+# [optional] What the founder gets on IDENTIFY or CLAIM: "o" = op (@),
+# "q" = owner (~).
 #founder_mode = "o"
 
-
-# -----------------------------------------------------------------------------
-#  NICKSERV -- accounts, SASL, nick ownership
-# -----------------------------------------------------------------------------
+# =============================================================================
+#  [nickserv] -- accounts, SASL, nick ownership, account vhosts
+# =============================================================================
 [nickserv]
-
-# false = ChanServ only (then nothing offers accounts or SASL).
+# [optional] false = ChanServ only (no accounts, no SASL).
 #enabled = true
-
-# The bot's identity. A change needs a restart. host defaults to [chanserv] host.
+# [optional] The bot's identity (restart to change); host defaults to [chanserv] host.
 #nick = "NickServ"
 #user = "NickServ"
 #host = "services.sekurircd.local"
 #realname = "Nickname and Account Service"
 
 # --- account database ---
-
-# JSON file, relative to this file's directory. Unset = reuse the old
-# ircd-side accounts.json if there is one, else nickserv.json next to this
-# file. Rotating backups (<file>.bak1..N) are kept, and a corrupt file is
-# never overwritten: the newest good backup is loaded instead.
+# [optional] Account file, relative to this file. Unset = the old ircd-side
+# accounts.json if one exists, else nickserv.json here. Rotating backups
+# (<file>.bak1..N) are kept; a corrupt file is never overwritten.
 #store_file = "../config/accounts.json"
 #backup_count = 5
-
-# Most accounts allowed. 0 = unlimited.
+# [optional] Most accounts allowed. 0 = unlimited.
 #max_accounts = 0
 
 # --- administration ---
-
-# Services admins: accounts allowed SUSPEND, UNSUSPEND, FDROP, SASET PASSWORD
-# and full INFO. This is about the services themselves; it makes nobody an IRC
-# operator (that is [[opers]] below).
+# [recommended] Services admins: SUSPEND, FDROP, SASET PASSWORD, ACTIVATE,
+# NOEXPIRE, VHOST ADD|DEL|LIST and full INFO. Makes nobody an IRC operator
+# (that is [[opers]]).
 #admins = ["youraccount"]
 
 # --- nick ownership ---
-
-# Someone using a registered nick must log in within enforce_grace seconds
-# (5 to 600) or is renamed to Guest<number>, on every server of the network.
+# [optional] Someone on a registered nick must log in within enforce_grace
+# seconds (5-600) or is renamed Guest<number>, on every server.
 #enforce_nicks = false
 #enforce_grace = 60
-
-# Always-on: users can run /msg NickServ SET ALWAYS-ON ON so their nick stays
-# online (in its channels, marked away) after they disconnect, and reconnecting
-# with SASL resumes it (on another server of the network too: there the
-# channels see a quit and a rejoin). false turns the command off.
-# always_on_expire_days: how long a disconnected always-on nick is kept, counted
-# from when it disconnected, also across ircd restarts (0 = never expires).
+# [optional] Always-on (/msg NickServ SET ALWAYS-ON ON): the nick stays online,
+# away, in its channels after a disconnect; reconnecting with SASL resumes it.
+# Kept always_on_expire_days after the disconnect (0 = forever).
 #always_on = true
 #always_on_expire_days = 30
 
-# --- registration needs a verified email ---
+# --- account cloak: the host of a logged-in user ---
+# [optional] A logged-in user who has not chosen a vhost shows
+# account_cloak_format instead of the usual cloak, on every server; logging
+# out brings the usual one back. A vhost they choose (NickServ VHOST, /VHOST)
+# wins; VHOST DEFAULT goes back to this. false = logged-in users keep the
+# usual host.
+#account_cloak = true
+# [optional] {account} = the account name, {network} = the network name
+# (lowercased); characters a host can't hold become "-". Must contain {account}.
+# e.g. "{account}.users.{network}" gives "alice.users.sekurnet".
+#account_cloak_format = "users/{account}"
 
-# true: REGISTER (NickServ, or a client's draft/account-registration REGISTER)
-# needs an email address, and the new account does nothing -- no IDENTIFY, no
-# SASL, no nick protection -- until its owner sends the mailed code with
-# /msg NickServ VERIFY <code> (or the ircd's VERIFY <account> <code>); then
-# they are logged in. A registration nobody verifies within verify_window_hours
-# (1..168) is dropped and the name is free again. Accounts that already exist
-# are not affected. Admins can activate one by hand: ACTIVATE <account>.
-# Needs email_command (below); services refuse to start without it.
+# --- registration and email ---
+# [optional] REGISTER needs an email, and the account does nothing until its
+# owner sends the mailed code (/msg NickServ VERIFY <code>) within
+# verify_window_hours (1-168); else it is dropped. Needs email_command.
 #require_email = false
 #verify_window_hours = 24
-
-# --- account expiry ---
-
-# Drop an account nobody has logged in to for this many days (with its grouped
-# nicks; its channels lose it as founder, access entry and successor, so whoever
-# registers the name later inherits nothing). An account logged in right now
-# counts as used. Never expire: [nickserv] admins, [[opers]] accounts, suspended
-# accounts, and any an admin marks with /msg NickServ NOEXPIRE <account> ON.
-# 0 = never expire. Checked hourly, at most 32 drops an hour.
-#expire_days = 0
-# Email the account's verified address this many days before it expires,
-# through email_command with purpose "expire" and the days left as <code>
-# (make your script handle it first). 0 = no warning.
-#expire_warn_days = 0
-
-# --- email verification and password resets ---
-
-# SET EMAIL and RESETPASS run, without a shell:
-#   <email_command> <address> <code> <account> <network> verify|reset
-# (and "expire" with the days left as <code>, when expire_warn_days is set).
-# With require_email, the "verify" code of a new registration is valid for
-# verify_window_hours instead of one hour.
-# Point it at a small script that mails the code. Empty = no mail (addresses
-# stay unverified, no self-service reset). network defaults to the ircd's
-# [server] network.
+# [optional] Program that mails verification / reset / expiry codes, run
+# without a shell as:
+#   <email_command> <address> <code> <account> <network> verify|reset|expire
+# "" = no mail (no verified addresses, no RESETPASS). network defaults to the
+# ircd's [server] network.
 #email_command = "/usr/local/bin/send-verification"
 #network = "SekurNet"
 
+# --- account expiry ---
+# [optional] Drop an account nobody logged in to for this many days (its
+# channels lose it as founder/access/successor). Admins, [[opers]], suspended
+# and NOEXPIRE accounts never expire. 0 = never.
+#expire_days = 0
+# [optional] Mail a warning this many days before (email_command purpose
+# "expire", days left as <code>). 0 = no warning.
+#expire_warn_days = 0
 
-# -----------------------------------------------------------------------------
-#  OPERATORS -- network-wide IRC operators
-# -----------------------------------------------------------------------------
-# An account that gets IRC operator status on whichever server it is logged in
-# to, with no [[operators]] block in that server's sekurircd.toml: services tells
-# the user's server (SVSOPER) when they IDENTIFY or log in with SASL. Every other
-# server trusts an oper, so they reach the whole network. It ends when they log
-# out or disconnect, or when you remove the entry and reload (/REHASH on the
-# hub, or `bin/services --rehash`): no restart. Up to 32 entries.
-#
-#   account        the NickServ account (required)
-#   certfp         SHA-256 fingerprint of their TLS client certificate (colons
-#                  are fine). Required unless password_only. `NickServ CERT
-#                  INFO` shows it once the certificate is added.
-#   password_only  true = the account login alone is enough (no certificate)
-#   privileges     what they may do, the same names as an [[operators]] login:
-#                  kill, kline, sa, host, wallops, rehash, die, link, override,
-#                  auspex, immune, all.  Default: all.
-#
-# With a certfp the login needs the certificate as well as the password, so a
-# stolen password alone gets nothing. The server they connect to must ask for
-# one: [tls] request_client_cert = true in its sekurircd.toml (as for SASL
-# EXTERNAL), or services never sees a fingerprint.
-#
-# Each server can refuse these grants with [security] accept_services_opers =
-# false, and a hub's oper_scope / oper_deny for a leaf still apply to them. Keep
-# one [[operators]] block on the hub too, for when services is down.
-#
-# [[opers]] is its own top-level table, not part of [nickserv]: keep it after
-# the [nickserv] keys above, never in between.
-#
+# =============================================================================
+#  [[opers]] -- network-wide IRC operators (one block per account)
+# =============================================================================
+# Operator status on whichever server the account logs in to, with no
+# [[operators]] there; it ends at logout, disconnect, or when the entry is
+# removed and services reload. Up to 32.
+#   account        [required] the NickServ account
+#   certfp         [required unless password_only] SHA-256 of their TLS client
+#                  certificate (colons fine; `NickServ CERT INFO` shows it).
+#                  Their server needs [tls] request_client_cert = true.
+#   password_only  [optional] true = the account login alone is enough
+#   privileges     [optional] the [[operators]] names (kill, kline, sa, host,
+#                  wallops, rehash, die, link, override, auspex, immune,
+#                  all); default all
+# A server can refuse these with [security] accept_services_opers = false; a
+# hub's oper_scope / oper_deny still apply. Keep these blocks after [nickserv].
 #[[opers]]
 #account    = "youraccount"
 #certfp     = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 #privileges = ["all"]
-#
+
 #[[opers]]
 #account       = "helper"
 #password_only = true
 #privileges    = ["kill", "kline"]
 
-
-# -----------------------------------------------------------------------------
-#  STORAGE -- ChanServ's registrations
-# -----------------------------------------------------------------------------
+# =============================================================================
+#  [storage] -- ChanServ's registrations
+# =============================================================================
 [storage]
-
-# Relative to the directory bin/services runs from (not this file).
+# [optional] Channel database, relative to the directory bin/services runs
+# from (not this file).
 path = "chanserv.json"
-
-# Rotating backups (<path>.bak1 = newest). A missing or corrupt file falls
-# back to the newest readable backup.
+# [optional] Rotating backups (<path>.bak1 = newest); a missing or corrupt
+# file falls back to the newest readable one.
 backup_count = 5

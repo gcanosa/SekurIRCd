@@ -281,6 +281,15 @@ int irc_valid_host(const char *host) {
     return 1;
 }
 
+int irc_valid_vhost(const char *host) {
+    if (!host || host[0] == '/') return 0;
+    char tmp[256];
+    size_t len = strlen(host);
+    if (len >= sizeof tmp) return 0;
+    for (size_t i = 0; i <= len; i++) tmp[i] = host[i] == '/' ? '.' : host[i]; /* ponytail: same rules, '/' read as a label break */
+    return irc_valid_host(tmp);
+}
+
 void irc_casefold(char *out, size_t outsz, const char *in) {
     size_t i = 0;
     if (outsz == 0) return;
@@ -349,7 +358,8 @@ int irc_mask_match(const char *nick, const char *user, const char *host, const c
 
 int irc_host_mask_match(const char *user, const char *host, const char *mask) {
     const char *at = strrchr(mask, '@');
-    if (strchr(at ? at + 1 : mask, '/')) { /* user@CIDR: the user part is a glob, the host part an address range */
+    const char *sl = strchr(at ? at + 1 : mask, '/');
+    if (sl && isdigit((unsigned char)sl[1])) { /* user@CIDR: the user part is a glob, the host part an address range */
         char um[128];
         snprintf(um, sizeof um, "%.*s", at ? (int)(at - mask) : 1, at ? mask : "*");
         return irc_glob_match(um, user ? user : "") && irc_ip_mask_match(at ? at + 1 : mask, host ? host : "");

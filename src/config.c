@@ -1883,7 +1883,7 @@ static int parse_with_includes(const char *resolved, char **text, toml_result_t 
                 while (*first && *first != '\n') first++;
             }
             if (*first && *first != '[') {
-                snprintf(errbuf, errbufsz, "%s: an included file starts with a [section] or [[table]] header (a setting above one would belong to the file before it)", g.gl_pathv[k]);
+                snprintf(errbuf, errbufsz, "%s: an included file must start with a [section] or [[table]] header (a setting above one would belong to the file before it)", g.gl_pathv[k]);
                 free(ft); globfree(&g); free(all);
                 return -1;
             }

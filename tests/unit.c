@@ -1372,6 +1372,37 @@ static void test_parse_token_cap_and_names(void) {
     assert(!irc_valid_host(":foo") && irc_valid_host("a.b.c"));
 }
 
+/* log.c includes <syslog.h>, whose LOG_DEBUG/LOG_INFO macros once replaced log.h's levels there: debug mode logged nothing. */
+static void test_log_debug_mode_writes(void) {
+    char dir[64];
+    snprintf(dir, sizeof dir, "/tmp/sekurircd-logtest-%d", (int)getpid());
+    mkdir(dir, 0700);
+    log_config_t c;
+    memset(&c, 0, sizeof c);
+    snprintf(c.directory, sizeof c.directory, "%s", dir);
+    snprintf(c.file, sizeof c.file, "t.log");
+    c.enabled = 1;
+    c.level = LOG_WARNING;
+    c.debug = 1;
+    log_init(&c, 0);
+    log_write(LOG_DEBUG, "unit", "debug-line");
+    log_write(LOG_ERROR, "unit", "error-line");
+    char path[600], buf[4096] = "";
+    snprintf(path, sizeof path, "%s/t.log", dir);
+    FILE *fp = fopen(path, "r");
+    assert(fp);
+    size_t n = fread(buf, 1, sizeof buf - 1, fp);
+    buf[n] = '\0';
+    fclose(fp);
+    assert(strstr(buf, "debug-line") && strstr(buf, "error-line"));
+    log_config_t off;
+    memset(&off, 0, sizeof off);
+    off.level = LOG_WARNING;
+    log_init(&off, 0); /* back to stderr only, before the file goes */
+    unlink(path);
+    rmdir(dir);
+}
+
 int main(void) {
     RUN(test_parse_basic);
     RUN(test_parse_prefix_and_lowercase_command);
@@ -1432,6 +1463,7 @@ int main(void) {
     RUN(test_protection_pure_helpers);
     RUN(test_protection_bl_match);
     RUN(test_protection_bundle_config);
+    RUN(test_log_debug_mode_writes);
     printf("OK (%d tests)\n", g_tests_run);
     return 0;
 }

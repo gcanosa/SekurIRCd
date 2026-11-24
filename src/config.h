@@ -103,7 +103,7 @@ typedef struct {
     int rdns_enabled;
     double rdns_timeout;
     /* [flood] command_limits: "<COMMAND> <max>/<seconds>" -- more than `max` of that command in `window` seconds gets
-     * RPL_TRYAGAIN instead of being run (opers with exempt_opers skip them). NICK counts only after registration. */
+     * RPL_TRYAGAIN instead of being run (opers are never limited). NICK counts only after registration. */
     struct { char name[16]; int max; double window; } cmd_limits[CFG_MAX_CMD_LIMITS];
     int n_cmd_limits;
 } cfg_security_t;

@@ -1,3 +1,11 @@
+/* syslog.h first: its LOG_DEBUG / LOG_INFO / LOG_WARNING macros would otherwise replace log.h's levels of the same names in this
+ * file (debug mode then logged nothing at all). Its priorities are kept here, the clashing names undefined. */
+#include <syslog.h>
+static const int SYSLOG_PRIO[] = {LOG_DEBUG, LOG_INFO, LOG_WARNING, LOG_ERR, LOG_CRIT}; /* by log_level_t */
+#undef LOG_DEBUG
+#undef LOG_INFO
+#undef LOG_WARNING
+
 #include "log.h"
 
 #include <stdarg.h>
@@ -7,7 +15,6 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
-#include <syslog.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -199,10 +206,7 @@ void log_write(log_level_t level, const char *tag, const char *fmt, ...) {
 
     if (level < g_min_level) return;
 
-    if (g_syslog_open) {
-        static const int PRIO[] = {LOG_DEBUG, LOG_INFO, LOG_WARNING, LOG_ERR, LOG_CRIT};
-        syslog(PRIO[level], "%s: %s", tag, msg);
-    }
+    if (g_syslog_open) syslog(SYSLOG_PRIO[level], "%s: %s", tag, msg);
 
     time_t now = time(NULL);
     struct tm tmv;

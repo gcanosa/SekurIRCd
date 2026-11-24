@@ -8,6 +8,7 @@
  * command handler can never leave another part of the loop holding a
  * dangling client_t* in the same iteration. */
 #include "cmd.h"
+#include <ctype.h>
 #include "crypto.h"
 #include "link.h"
 #include "log.h"
@@ -177,7 +178,7 @@ void cmd_svsoper(server_t *srv, client_t *cl, const char *account, const char *p
 
 void cmd_oper(server_t *srv, client_t *cl, irc_message_t *msg) {
     const char *name = msg->params[0];
-    const char *password = msg->params[1];
+    const char *password = msg->nparams > 1 ? msg->params[1] : NULL; /* NULL: only a certfp-only login goes without */
 
     if (cl->umodes & UMODE_O) {
         notice_self(srv, cl, "You are already an IRC operator");
@@ -208,6 +209,7 @@ void cmd_oper(server_t *srv, client_t *cl, irc_message_t *msg) {
                 return;
             }
         }
+        if (!password) { client_reply(cl, N_NEEDMOREPARAMS, (const char *[]){"OPER"}, 1, "Not enough parameters"); return; }
 
         if (op->password_hash[0]) {
             /* scrypt verify is ~30ms -- run it on a worker so hammering
@@ -629,7 +631,7 @@ void cmd_svshost(server_t *srv, client_t *cl, const char *host) {
     client_prefix(cl, old_prefix, sizeof old_prefix);
     snprintf(old_host, sizeof old_host, "%s", cl->host);
     if (strcmp(host, "-") == 0) net_reset_host(srv, cl);
-    else if (irc_valid_host(host)) snprintf(cl->host, sizeof cl->host, "%s", host);
+    else if (irc_valid_vhost(host)) snprintf(cl->host, sizeof cl->host, "%s", host);
     else return;
     if (strcmp(old_host, cl->host) != 0) broadcast_chghost(srv, cl, old_prefix);
 }
@@ -665,6 +667,7 @@ static int vhost_to_nickserv(server_t *srv, client_t *cl, const char *args) {
 }
 
 void cmd_vhost(server_t *srv, client_t *cl, irc_message_t *msg) {
+    if (msg->nparams == 1 && strcasecmp(msg->params[0], "LIST") == 0) msg->nparams = 0; /* VHOST LIST alone = your own choices */
     if (msg->nparams >= 1 && vhost_edit(srv, cl, msg)) return;
     if (msg->nparams < 1) {
         char list[600] = "";
@@ -672,7 +675,7 @@ void cmd_vhost(server_t *srv, client_t *cl, irc_message_t *msg) {
             if (!vhost_listed_for(cl, &srv->cfg.vhosts[i])) continue;
             if (list[0]) strncat(list, ", ", sizeof list - strlen(list) - 1);
             strncat(list, srv->cfg.vhosts[i].host, sizeof list - strlen(list) - 1);
-            if (srv->cfg.vhosts[i].password[0] && !(cl->umodes & UMODE_O)) strncat(list, " (password)", sizeof list - strlen(list) - 1);
+            if ((srv->cfg.vhosts[i].password[0] || srv->cfg.vhosts[i].password_hash[0]) && !(cl->umodes & UMODE_O)) strncat(list, " (password)", sizeof list - strlen(list) - 1);
         }
         if (list[0]) notice_self(srv, cl, list);
         if (!vhost_to_nickserv(srv, cl, "") && !list[0]) notice_self(srv, cl, "No vhosts are available to you");
@@ -724,7 +727,7 @@ void cmd_chghost(server_t *srv, client_t *cl, irc_message_t *msg) {
     if (!target) { err_no_such_nick(cl, msg->params[0]); return; }
     if (target->remote) { netsync_encap(srv, cl, target, "CHGHOST", msg->params + 1, msg->nparams - 1); return; }
     const char *new_host = msg->params[1];
-    if (!irc_valid_host(new_host)) {
+    if (!irc_valid_vhost(new_host)) {
         char m[300]; snprintf(m, sizeof m, "Invalid hostname: %s", new_host);
         notice_self(srv, cl, m);
         return;
@@ -753,7 +756,7 @@ void cmd_sethost(server_t *srv, client_t *cl, irc_message_t *msg) {
         server_notify_opers(srv, snote);
         return;
     }
-    if (!irc_valid_host(requested)) {
+    if (!irc_valid_vhost(requested)) {
         char m[300]; snprintf(m, sizeof m, "Invalid hostname: %s", requested);
         notice_self(srv, cl, m);
         return;
@@ -817,6 +820,7 @@ static void line_common(server_t *srv, client_t *cl, irc_message_t *msg, const c
     char *hostpart = strrchr(maskbuf, '@');
     hostpart = hostpart ? hostpart + 1 : maskbuf;
     const char *slash = strchr(hostpart, '/');
+    if (slash && !isdigit((unsigned char)slash[1])) slash = NULL; /* "users/alice" is a host, not a CIDR */
     if (strcmp(hostpart, "*") == 0 || (slash && strtol(slash + 1, NULL, 10) == 0)) {
         notice_self(srv, cl, "Refusing to add a line matching every address (mask '*' or a /0)");
         return;

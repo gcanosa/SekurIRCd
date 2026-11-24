@@ -115,7 +115,7 @@ static const cmd_entry_t DISPATCH[] = {
     {"SILENCE", cmd_silence, 0, 1, 0},
     {"GLOB", cmd_glob, 1, 1, 0},
 
-    {"OPER", cmd_oper, 2, 1, 0},
+    {"OPER", cmd_oper, 1, 1, 0}, /* a certfp-only login needs no password */
     {"KILL", cmd_kill, 1, 1, 1},
     {"WALLOPS", cmd_wallops, 1, 1, 1},
     {"REHASH", cmd_rehash, 0, 1, 1},

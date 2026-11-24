@@ -196,16 +196,16 @@ container/setup.sh install</pre>
 <div class="tablewrap"><table>
 <tr><th>Tag</th><th>What it is</th><th>Use it for</th></tr>
 <tr><td><code>latest</code></td><td>the newest release. The default</td><td>a production server</td></tr>
-<tr><td><code>1.3</code></td><td>the newest patch release of 1.3 (1.3.5, then 1.3.6, ...)</td><td>production, bug fixes only</td></tr>
-<tr><td><code>1.3.5</code></td><td>exactly that release, it never changes</td><td>production you want pinned, and rolling back</td></tr>
+<tr><td><code>1.3</code></td><td>the newest patch release of 1.3 (1.3.6, then 1.3.7, ...)</td><td>production, bug fixes only</td></tr>
+<tr><td><code>1.3.6</code></td><td>exactly that release, it never changes</td><td>production you want pinned, and rolling back</td></tr>
 <tr><td><code>edge</code></td><td>the newest commit on <code>main</code> whose CI passed on every platform; it can be ahead of the last release</td><td>trying what is coming</td></tr>
 </table></div>
 <p>Right after a release, <code>edge</code> and <code>latest</code> hold the same code but are different builds: <code>edge</code> reports
-  <code>1.3.5-git.20261121</code>, the release reports <code>1.3.5</code>. Nothing updates by itself: your machine keeps the copy of the tag it pulled until you
+  <code>1.3.6-git.20261125</code>, the release reports <code>1.3.6</code>. Nothing updates by itself: your machine keeps the copy of the tag it pulled until you
   run <code>upgrade</code>. <code>container/setup.sh status</code> prints the image and version in use; <code>podman ps</code> shows the image of each container.</p>
 <p>The tag is set at install (<code>--image</code>, or <code>SEKURIRCD_IMAGE</code>) and then lives in the <code>Image=</code> line of the three units in
   <code>~/.config/containers/systemd/</code>. To change it, edit all three, pull the new tag and restart:</p>
-<pre>NEW=ghcr.io/gcanosa/sekurircd:latest                  # or :1.3, :1.3.5, :edge
+<pre>NEW=ghcr.io/gcanosa/sekurircd:latest                  # or :1.3, :1.3.6, :edge
 sed -i "s|^Image=.*|Image=$NEW|" ~/.config/containers/systemd/sekurircd-*.container
 systemctl --user daemon-reload
 podman pull $NEW

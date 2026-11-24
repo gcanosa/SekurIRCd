@@ -1,96 +1,145 @@
-# SekurIRCd network stats (stats/netstats.py). Live copy: stats/stats.toml; without that file nothing runs and
-# bin/services collects nothing. Only the server running services (the hub) needs this.
+# =============================================================================
+#  SekurIRCd network stats (stats/stats.toml, read by stats/netstats.py)
+# =============================================================================
+#  Only the server running services (the hub) needs it; without stats.toml
+#  nothing runs and services collect nothing.
+#    ./sekurircd enable-stats                         writes stats.toml from this file, collector on
+#    stats/netstats.py --user --admin --add yourname  a panel login (asks for the password)
+#    ./sekurircd start-stats                          the panel: http://127.0.0.1:8089/admin/
+#    ./sekurircd disable-stats                        all off again (stats.toml -> stats.toml.disabled)
+#  For per-server CPU, memory, version and the connections heatmap, set on
+#  EVERY server's sekurircd.toml: [debug_channel] stats_interval = 300.
 #
-#   ./sekurircd enable-stats                            # writes stats/stats.toml from this file, collector on
-#   stats/netstats.py --user --admin --add yourname     # a login for the panel (asks for the password)
-#   ./sekurircd start-stats                             # the web panel, http://127.0.0.1:8089/admin/
-#   ./sekurircd disable-stats                           # all off again (stats.toml -> stats.toml.disabled)
+#  How to read this file:
+#    [optional]  leave it out and the value shown applies (the default)
+#    "#key =" lines are off / at their default: remove the "#" to set them.
 #
-# For per-server CPU, memory, version and the connections heatmap, set on EVERY server (sekurircd.toml):
-#   [debug_channel]
-#   stats_interval = 300
+#  Contents: [collector] [storage] [http] [[users]] [announce] [alerts]
+#            [export] [geoip] [health] [[servers]]
+# =============================================================================
 
+# =============================================================================
+#  [collector] -- what services record for the panel
+# =============================================================================
 [collector]
-# bin/services asks the hub for a network snapshot this often and logs link splits, bans and stats lines as they
-# happen, to `log` (relative to this file), which netstats loads and empties every minute.
+# [optional] Turn collection on (./sekurircd enable-stats does it).
 enabled = false
+# [optional] Seconds between network snapshots (splits, bans and stats lines
+# are logged as they happen).
 sample_seconds = 60
+# [optional] Event file, relative to this file; netstats loads and empties it
+# every minute.
 log = "events.log"
 
+# =============================================================================
+#  [storage] -- the history database
+# =============================================================================
 [storage]
+# [optional] SQLite file, relative to this file.
 database = "stats.db"
-# Daily history is kept this long (7..3650). Fixed: per-minute samples 7 days, hourly 90 days.
+# [optional] Days of daily history kept (7-3650). Per-minute samples are kept
+# 7 days, hourly ones 90.
 retention_days = 365
 
+# =============================================================================
+#  [http] -- the live web panel (./sekurircd start-stats)
+# =============================================================================
 [http]
-# The live panel (./sekurircd start-stats). Off: use "netstats.py render" from cron and [export] instead.
+# [optional] false = no live panel: use "netstats.py render" from cron and [export].
 enabled = true
-# Shown in the page title.
+# [optional] Shown in the page title.
 network_name = "MyNetwork"
-# 127.0.0.1 + a reverse proxy (nginx/caddy) for the internet; or bind publicly with tls_cert/tls_key and open `port`
-# in the firewall (e.g. sudo ufw allow 8089/tcp -- "netstats.py check" prints the commands for ufw/firewalld/iptables/pf).
+# [optional] 127.0.0.1 behind a reverse proxy (nginx/caddy) is best; or bind
+# publicly with tls_cert/tls_key and open `port` (netstats.py check prints the
+# firewall commands).
 bind = "127.0.0.1"
 port = 8089
 tls_cert = ""
 tls_key = ""
-# true: anyone gets the viewer page without logging in ("Admin login" link for the rest).
+# [optional] true = anyone sees the viewer page without logging in.
 public = false
-# The name people open the panel by, through a reverse proxy that does HTTPS (e.g. "stats.example.net"; "" = none).
-# With it set, "netstats.py check" prints the Caddyfile block for it, and the panel logs https://hostname/admin/.
+# [optional] The name the panel is opened by through an HTTPS reverse proxy,
+# e.g. "stats.example.net" ("netstats.py check" then prints a Caddyfile block).
 hostname = ""
-# Reverse proxies whose X-Forwarded-For is believed, so failed logins are counted per visitor rather than for
-# everyone behind the proxy. Default: ["127.0.0.1", "::1"] when hostname is set, else none.
+# [optional] Proxies whose X-Forwarded-For is believed (failed logins then
+# count per visitor). Default: ["127.0.0.1", "::1"] with hostname set, else none.
 # trusted_proxies = ["127.0.0.1", "::1"]
 
-# Logins: managed with  netstats.py --user --admin|--viewer --add|--del NAME  and  --user --status.
-# admin = everything; viewer = no Security or Maintenance section, no server IPs. Without a login (public = true, and
-# [export] public_html) the page also leaves out versions, CPU and memory, and says only what kind of outage each one was.
+# =============================================================================
+#  [[users]] -- panel logins (managed with netstats.py --user)
+# =============================================================================
+#   name      the login name
+#   password  scrypt string (netstats.py --mkpasswd)
+#   role      "admin" (everything) or "viewer" (no Security/Maintenance, no IPs)
+# Add/remove: netstats.py --user --admin|--viewer --add|--del NAME; list: --user --status.
 # [[users]]
 # name = "yourname"
-# password = "scrypt$..."        # netstats.py --mkpasswd
+# password = "scrypt$..."
 # role = "admin"
 
+# =============================================================================
+#  [announce] -- planned maintenance, told to users on IRC
+# =============================================================================
 [announce]
-# Planned maintenance on the panel can be told to every user on IRC (a "tell users on IRC" box per window, off by
-# default): a notice when it is planned, then these reminders before it starts, and a "cancelled" notice if the window
-# is removed. services sends them as server notices to everyone connected, so it needs [collector] enabled = true.
+# [optional] Reminders before a planned window starts (per window, "tell users
+# on IRC" on the panel; needs [collector] enabled).
 reminders = ["24h", "1h"]
 
+# =============================================================================
+#  [alerts] -- a webhook post when something needs a human
+# =============================================================================
+# A link down for down_minutes, no data from services, a port not answering, a
+# certificate with under cert_days left. Sent once when it starts and once when
+# it is fine again; never during planned maintenance.
 [alerts]
-# A post to a webhook when something needs a human: a link down for down_minutes, no data from services, a port that
-# stops answering, a TLS certificate with fewer than cert_days left. Each is sent once when it starts and once when it is
-# fine again (certificates: once a day), and nothing during a maintenance window planned on the panel. "" = off.
-# format "json" posts {"text": ..., "content": ...} (Discord, Slack, Mattermost, Rocket.Chat); "text" a plain body (ntfy).
-# The panel's Maintenance section has a "Send a test alert" button once this is set.
+# [optional] Webhook URL. "" = off. e.g. "https://ntfy.sh/my-irc-alerts"
 webhook = ""
+# [optional] "json" ({"text": ..., "content": ...}: Discord, Slack, Mattermost)
+# or "text" (a plain body: ntfy).
 format = "json"
 down_minutes = 5
 cert_days = 14
 
+# =============================================================================
+#  [export] -- static pages written by "netstats.py render" (run it from cron)
+# =============================================================================
 [export]
-# Written by "netstats.py render" (run it from cron, e.g. every 5 minutes) -- static files for a website.
-# public_html gets the viewer page, admin_html the admin one: protect that one with your web server.
+# [optional] Where to write the viewer page and the admin page ("" = not
+# written). Protect admin_html with your web server.
 public_html = ""
 admin_html = ""
 
+# =============================================================================
+#  [geoip] -- the server map
+# =============================================================================
 [geoip]
-# Free DB-IP Lite city database (CC BY 4.0), downloaded by "netstats.py geoip-update" (monthly is plenty). Without it,
-# only servers with lat/lon below are on the map. Lookups are local; no server IP is ever sent anywhere.
+# [optional] DB-IP Lite city database (CC BY 4.0), fetched by "netstats.py
+# geoip-update" (monthly is plenty). Lookups stay local.
 file = "dbip-city-lite.csv.gz"
 
+# =============================================================================
+#  [health] -- probes netstats makes to every server
+# =============================================================================
 [health]
-# netstats connects to every server from here: these ports, TLS on tls_ports (certificate days left).
+# [optional] Ports to probe, which of them speak TLS (certificate days left),
+# seconds between rounds and per-probe timeout.
 ports = [6667, 6697]
 tls_ports = [6697]
 interval = 300
 timeout = 5
 
-# Per-server overrides (name = the server's name as in /LINKS):
+# =============================================================================
+#  [[servers]] -- per-server overrides (one block per server, all optional)
+# =============================================================================
+#   name      the server's name as in /LINKS
+#   host      what to probe and geolocate (default: the name)
+#   location  label;  lat / lon  map position (overrides GeoIP)
+#   ports     replaces [health] ports;  hide  true = leave it off the page
 # [[servers]]
 # name = "irc.example.net"
-# host = "203.0.113.10"           # what to probe and geolocate (default: the server name)
-# location = "Amsterdam, NL"      # label
-# lat = 52.37                     # map position (overrides GeoIP)
+# host = "203.0.113.10"
+# location = "Amsterdam, NL"
+# lat = 52.37
 # lon = 4.90
 # ports = [6667, 6697, 8097]
-# hide = false                    # true: leave it off the page
+# hide = false

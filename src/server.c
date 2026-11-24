@@ -309,7 +309,7 @@ int server_rehash(server_t *srv, char *errbuf, size_t errbufsz) {
     config_free(&srv->cfg); /* the new config owns its own arrays; nothing keeps a pointer into the old ones across commands */
     srv->cfg = tmp;
     masklist_default_cap = srv->cfg.limits.max_list_size;
-    classes_rebuild(srv); /* the table points into srv->cfg.classes, which was just replaced */
+    net_reclass_all(srv); /* the class table points into srv->cfg.classes, which was just replaced: rebuilt, everyone placed again */
     server_apply_cloak_secret(srv);
     if (recloak) {
         int n = recloak_all(srv, !os_masking);
@@ -334,7 +334,6 @@ int server_rehash(server_t *srv, char *errbuf, size_t errbufsz) {
     link_tls_cleanup(); /* the next dial reloads this server's certificate (and the new [tls] paths) */
     if (srv->self_srv) snprintf(srv->self_srv->desc, sizeof srv->self_srv->desc, "%s", srv->cfg.server.network); /* LINKS/MAP description follows the network name */
     cmd_cap_notify_changes(srv, srv->services_online, old_history);
-    net_reclass_all(srv);
     classes_publish(srv); /* the file's scope = "global" classes may have changed */
     net_apply_listeners(srv);
     server_load_motd(srv);

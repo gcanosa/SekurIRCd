@@ -185,7 +185,10 @@ def test_an_operator_can_be_tied_to_a_client_certificate():
         right = tls_client("right", gcrt, gkey)
         assert any(" 381 " in l for l in right.say("OPER pw pwpw", 0.5)), "password and certificate"
         r2 = tls_client("right2", gcrt, gkey)
-        assert any(" 464 " in l for l in r2.say("OPER pw nope", 0.5)) or True
+        assert any(" 464 " in l for l in r2.say("OPER pw nope", 0.5)), "the right certificate, the wrong password"
+        assert any(" 461 " in l for l in r2.say("OPER pw", 0.5)), "a password login still needs its password"
         r3 = tls_client("right3", gcrt, gkey)
-        assert any(" 381 " in l for l in r3.say("OPER only anything", 0.5)), "the certificate alone is the credential"
+        assert any(" 381 " in l for l in r3.say("OPER only", 0.5)), "the certificate alone is the credential, no password typed"
+        r4 = tls_client("right4", gcrt, gkey)
+        assert any(" 381 " in l for l in r4.say("OPER only anything", 0.5)), "and a typed one is ignored"
         assert any(" 491 " in l for l in wrong.say("OPER only anything", 0.5)), "and without it nothing works"

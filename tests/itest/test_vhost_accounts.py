@@ -206,3 +206,46 @@ def test_a_vhost_password_can_be_a_scrypt_hash_and_the_config_refuses_both():
     else:
         both.stop()
         raise AssertionError("a vhost with password and password_hash was accepted")
+
+
+def test_a_logged_in_user_wears_the_account_cloak_and_a_chosen_vhost_beats_it():
+    s = Server(cfg=dict(OPERS, **ACC))
+    with s:
+        a = register(s, "alice", "alice", "password1")
+        watch = s.client("watch")
+        watch.say("PING :drain", 0.6)
+        assert host_of(watch, "alice") == "users/alice", "registering logs in, and the default cloak is users/<account>"
+        ns(a, "LOGOUT", 1.0)
+        assert host_of(watch, "alice") not in (None, "users/alice"), "logged out: the usual host again"
+        a2 = sasl_login(s, "alice2", "alice", "password1")
+        time.sleep(0.6)
+        assert host_of(watch, "alice2") == "users/alice", "a SASL login gets it too"
+        boss = oper(s.client("boss"))
+        boss.say("VHOST ADD alice vip.example.org", 1.0)
+        a2.say("VHOST vip.example.org", 1.0)
+        assert host_of(watch, "alice2") == "vip.example.org", "a chosen vhost wins"
+        listed = a2.say("VHOST LIST", 1.0)
+        assert said(listed, "vip.example.org [in use]") and said(listed, "users/alice (default)"), "the default is one of the choices"
+        assert said(a2.say("VHOST DEFAULT", 1.0), "account cloak users/alice")
+        assert host_of(watch, "alice2") == "users/alice", "and DEFAULT goes back to it"
+        assert said(a2.say("VHOST", 1.0), "users/alice (default) [in use]")
+        assert said(boss.say("KLINE *@users/alice 1m :test", 0.6), "users/alice"), "a slash host is a host to K-LINE, not a /0 CIDR"
+
+
+def test_the_account_cloak_can_be_turned_off():
+    s = Server(cfg=dict(OPERS, accounts=dict(ACC["accounts"], account_cloak=False)))
+    with s:
+        b = register(s, "bob", "bob", "password1")
+        watch = s.client("watch")
+        watch.say("PING :drain", 0.6)
+        h = host_of(watch, "bob")
+        assert b and h and h != "users/bob", "off: logged-in users keep the usual host"
+
+
+def test_the_account_cloak_format_takes_account_and_network():
+    s = Server(cfg=dict(OPERS, accounts=dict(ACC["accounts"], account_cloak_format="{account}.members.{network}", network="Test Net")))
+    with s:
+        c = register(s, "Carol", "Carol", "password1")
+        watch = s.client("watch")
+        watch.say("PING :drain", 0.6)
+        assert c and host_of(watch, "Carol") == "Carol.members.test-net", "both placeholders: the account keeps its case, the network is made host-safe"

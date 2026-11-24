@@ -52,6 +52,6 @@ def test_a_bad_include_is_named_in_the_error():
     rc, out = check("[[classes]]\nname = oops\n")
     assert rc != 0 and "x.toml" in out and "line 2 of it" in out, out
     rc, out = check('stray = 1\n[server]\nname = "x.y"\n')
-    assert rc != 0 and "starts with a [section]" in out, out
+    assert rc != 0 and "must start with a [section]" in out, out
     rc, out = check("")
     assert rc == 0, out

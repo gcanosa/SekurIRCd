@@ -53,12 +53,12 @@ All three containers run the same image, `ghcr.io/gcanosa/sekurircd`, and the **
 | Tag | What it is | Use it for |
 |---|---|---|
 | `latest` | the newest release (a `v*` tag). The default | a production server |
-| `1.3` | the newest patch release of 1.3 (1.3.5, then 1.3.6, ...) | production, bug fixes only |
-| `1.3.5` | exactly that release, it never changes | production you want pinned, and rolling back |
+| `1.3` | the newest patch release of 1.3 (1.3.6, then 1.3.7, ...) | production, bug fixes only |
+| `1.3.6` | exactly that release, it never changes | production you want pinned, and rolling back |
 | `edge` | the newest commit on `main` whose CI passed on every platform; it may be ahead of the last release | trying what is coming |
 
-Right after a release `edge` and `latest` hold the same code, but they are different builds: `edge` reports `1.3.5-git.20261121`,
-the release reports `1.3.5`. Nothing updates by itself: your machine keeps the copy of the tag it pulled until you run `upgrade`.
+Right after a release `edge` and `latest` hold the same code, but they are different builds: `edge` reports `1.3.6-git.20261125`,
+the release reports `1.3.6`. Nothing updates by itself: your machine keeps the copy of the tag it pulled until you run `upgrade`.
 
 **Which one am I running?** `container/setup.sh status` prints the image and the version. `podman ps` shows the image per container.
 
@@ -67,7 +67,7 @@ the release reports `1.3.5`. Nothing updates by itself: your machine keeps the c
 edit all three, then pull and restart (do not use `upgrade` for this, see below):
 
 ```sh
-NEW=ghcr.io/gcanosa/sekurircd:latest                  # or :1.3, :1.3.5, :edge
+NEW=ghcr.io/gcanosa/sekurircd:latest                  # or :1.3, :1.3.6, :edge
 sed -i "s|^Image=.*|Image=$NEW|" ~/.config/containers/systemd/sekurircd-*.container
 systemctl --user daemon-reload
 podman pull $NEW

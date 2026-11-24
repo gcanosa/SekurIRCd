@@ -67,6 +67,8 @@ typedef struct {
     int expire_warn_days;  /* email its verified address this long before (0 = no warning; needs email_command) */
     int require_email;     /* REGISTER needs an email, and the account works once it is verified */
     long verify_window;    /* seconds an unverified registration waits for VERIFY before it is dropped */
+    int account_cloak;     /* a logged-in user without a chosen vhost shows account_cloak_format instead of the usual host */
+    char account_cloak_format[128]; /* {account} and {network}, e.g. "users/{account}" */
     char admins[NS_MAX_ADMINS][64];
     int n_admins;
     ns_oper_t opers[NS_MAX_OPERS];
@@ -76,6 +78,7 @@ static ns_cfg_t C;
 
 static account_store_t g_acc;
 static void opers_resync(void); /* [[opers]] below */
+static void vhost_resync_all(void); /* every user's SVSHOST again, where it changed */
 static void vhost_admin(const char *to, const char *sub, const char *name, const char *host); /* VHOST below */
 
 /* --- config ---------------------------------------------------------------------------------------------------- */
@@ -129,6 +132,7 @@ void ns_rehashed(void *old, char *kept, size_t keptsz) {
     if (!C.network_set) memcpy(C.network, o->network, sizeof C.network); /* the one the hub's SVCINFO named */
     free(o);
     opers_resync(); /* [[opers]] entries added or removed: logged-in users get (or lose) oper status now */
+    vhost_resync_all(); /* account_cloak turned on/off or its format changed */
 }
 
 int ns_config(toml_node_t *raw, const char *config_path, char *err, size_t errsz) {
@@ -166,6 +170,13 @@ int ns_config(toml_node_t *raw, const char *config_path, char *err, size_t errsz
     int vh = t_int(t, "verify_window_hours", 24);
     C.verify_window = (long)(vh < 1 ? 1 : vh > 168 ? 168 : vh) * 3600;
     C.expire_warn_days = t_int(t, "expire_warn_days", 0);
+    C.account_cloak = t_bool(t, "account_cloak", 1);
+    snprintf(C.account_cloak_format, sizeof C.account_cloak_format, "users/{account}");
+    t_str(t, "account_cloak_format", C.account_cloak_format, sizeof C.account_cloak_format);
+    if (C.account_cloak && !strstr(C.account_cloak_format, "{account}")) {
+        snprintf(err, errsz, "[nickserv] account_cloak_format must contain {account} (e.g. \"users/{account}\")");
+        return -1;
+    }
     if (C.expire_warn_days < 0 || C.expire_warn_days >= C.expire_days) C.expire_warn_days = 0;
     toml_node_t *ad = t ? tx_array(t, "admins") : NULL;
     for (int i = 0; ad && i < tx_len(ad) && C.n_admins < NS_MAX_ADMINS; i++) {
@@ -364,12 +375,36 @@ static void oper_sync(nsuser_t *u) {
 /* The vhost the user's account chose, as SVSHOST (the user's server shows it network-wide like a CHGHOST), when it differs from
  * what we last said; "-" puts the real/cloaked host back (logged out, or the choice is gone). `force` says it again anyway: the
  * user asked just now, and may have changed their host on the server since (/VHOST off, /SETHOST). */
+/* [nickserv] account_cloak_format for `account`: {account} and {network}, every character a host can't hold made '-'. */
+static void account_cloak_for(const char *account, char *out, size_t outsz) {
+    size_t n = 0;
+    for (const char *f = C.account_cloak_format; *f && n + 1 < outsz; ) {
+        const char *val = NULL;
+        int lower = 0; /* the network is lowercased; the account keeps its case */
+        if (!strncmp(f, "{account}", 9)) { val = account; f += 9; }
+        else if (!strncmp(f, "{network}", 9)) { val = C.network[0] ? C.network : "network"; lower = 1; f += 9; }
+        if (!val) { out[n++] = *f++; continue; }
+        for (; *val && n + 1 < outsz; val++) {
+            unsigned char ch = (unsigned char)*val;
+            out[n++] = isalnum(ch) || ch == '.' || ch == '-' ? (char)(lower ? tolower(ch) : ch) : '-';
+        }
+    }
+    out[n] = '\0';
+}
+
 static void vhost_sync(nsuser_t *u, int force) {
     const char *want = u->account[0] ? accounts_vhost(&g_acc, u->account) : NULL;
+    char cloak[256];
+    if (!want && u->account[0] && C.account_cloak) { account_cloak_for(u->account, cloak, sizeof cloak); want = cloak; }
     if (!want) want = "";
     if (!force && strcmp(want, u->vhost_sent) == 0) return;
     wire("SVSHOST", (const char *[]){u->uid, want[0] ? want : "-"}, 2, NULL);
     snprintf(u->vhost_sent, sizeof u->vhost_sent, "%s", want);
+}
+
+static void vhost_resync_all(void) {
+    nsuser_t *x, *xt;
+    HASH_ITER(hh, g_by_uid, x, xt) vhost_sync(x, 0);
 }
 
 /* "a.example, b.example [in use]" -- the hosts granted to `account`. */
@@ -915,6 +950,7 @@ int ns_event(irc_message_t *m) {
     }
     if (!strcmp(c, "SVCINFO")) { /* SVCINFO <hub> :<network> -- names the network in mails unless [nickserv] network does */
         if (m->nparams >= 2 && !C.network_set) snprintf(C.network, sizeof C.network, "%s", m->params[1]);
+        if (strstr(C.account_cloak_format, "{network}")) vhost_resync_all();
         return 1;
     }
     if (!C.enabled) return 0;
@@ -1286,13 +1322,20 @@ static void cmd_vhost(nsuser_t *u, const char *a) {
     char account[64], list[600];
     snprintf(account, sizeof account, "%s", u->account);
     vhost_list_str(account, list, sizeof list);
+    char cloak[256] = "";
+    if (C.account_cloak) account_cloak_for(account, cloak, sizeof cloak);
     if (!a) {
-        if (list[0]) sayf(u->nick, "Your vhosts: %s -- VHOST <host> wears one, VHOST OFF takes it off", list);
+        if (cloak[0]) { /* the account cloak is one of the choices: the one worn when no vhost is chosen */
+            size_t l = strlen(list);
+            snprintf(list + l, sizeof list - l, "%s%s (default)%s", l ? ", " : "", cloak, accounts_vhost(&g_acc, account) ? "" : " [in use]");
+            sayf(u->nick, "Your vhosts: %s -- VHOST <host> wears one, VHOST DEFAULT goes back to %s", list, cloak);
+        } else if (list[0]) sayf(u->nick, "Your vhosts: %s -- VHOST <host> wears one, VHOST OFF takes it off", list);
         else say(u->nick, "No vhosts are assigned to your account -- an operator can add some (VHOST ADD)");
         return;
     }
-    if (strcasecmp(a, "OFF") == 0) {
+    if (strcasecmp(a, "OFF") == 0 || strcasecmp(a, "DEFAULT") == 0 || (cloak[0] && strcasecmp(a, cloak) == 0)) {
         if (!accounts_vhost(&g_acc, account)) say(u->nick, "No vhost is saved for your account");
+        else if (cloak[0]) sayf(u->nick, "You show your account cloak %s again", cloak);
         else say(u->nick, "Vhost off: you show your usual host, and no vhost is applied at login");
         accounts_set_vhost(&g_acc, account, NULL);
         vhost_resync_account(account, 1);
@@ -1320,7 +1363,7 @@ static void vhost_admin(const char *to, const char *sub, const char *name, const
         sayf(to, "%s: %s", account, list[0] ? list : "no vhosts");
         return;
     }
-    if (!host || !irc_valid_host(host)) { say(to, "Syntax: VHOST ADD|DEL <account> <host> (a valid host name)"); return; }
+    if (!host || !irc_valid_vhost(host)) { say(to, "Syntax: VHOST ADD|DEL <account> <host> (a valid host name)"); return; }
     if (strcasecmp(sub, "ADD") == 0) {
         if (accounts_vhost_add(&g_acc, account, host) != 0) { sayf(to, "%s already has %s, or already has the most (%d)", account, host, ACCOUNT_MAX_VHOSTS); return; }
         snprintf(m, sizeof m, "%s granted vhost %s to account %s", to, host, account);
@@ -1442,12 +1485,13 @@ static const svc_help_t NS_HELP[] = {
      "  INFO  shows the fingerprint on file\n"
      "Needs you logged in.\n"
      "Example: /msg NickServ CERT ADD", 0},
-    {"VHOST|VHOST OFF", "wear a virtual host an operator gave you",
+    {"VHOST|VHOST OFF|VHOST DEFAULT", "wear a virtual host an operator gave you",
      "Syntax: VHOST\n"
      "        VHOST <host>\n"
-     "        VHOST OFF\n"
-     "Without a host: the vhosts your account may use. With one: you show it (on every server, to everyone) and\n"
-     "it is applied again at every login. OFF takes it off and stops that. Needs you logged in.\n"
+     "        VHOST DEFAULT | OFF\n"
+     "Without a host: the vhosts your account may use, and the network's account cloak (default) if it has one.\n"
+     "With one: you show it (on every server, to everyone) and it is applied again at every login. DEFAULT (or\n"
+     "OFF) goes back to the account cloak, or to your usual host where there is none. Needs you logged in.\n"
      "Examples: /msg NickServ VHOST\n"
      "          /msg NickServ VHOST vip.example.org", 0},
     {"GROUP", "add your current nick to your account",
@@ -1598,7 +1642,8 @@ int ns_privmsg(const char *target, const char *from_nick, const char *text) {
     else if (strcasecmp(cmd, "LISTCHANS") == 0) cmd_listchans(u);
     else if (strcasecmp(cmd, "CERT") == 0) cmd_cert(u, a);
     else if (strcasecmp(cmd, "VHOST") == 0) {
-        if (!a || (strcasecmp(a, "ADD") && strcasecmp(a, "DEL") && strcasecmp(a, "LIST"))) cmd_vhost(u, a);
+        if (!a || (strcasecmp(a, "LIST") == 0 && !b)) cmd_vhost(u, NULL); /* VHOST LIST alone: your own choices */
+        else if (strcasecmp(a, "ADD") && strcasecmp(a, "DEL") && strcasecmp(a, "LIST")) cmd_vhost(u, a);
         else if (!is_admin(u)) say(u->nick, "Permission denied -- that needs a services admin account ([nickserv] admins); an IRC operator can use /VHOST ADD|DEL|LIST");
         else if (!b) say(u->nick, "Syntax: VHOST ADD|DEL <account> <host>, VHOST LIST <account>");
         else vhost_admin(u->nick, a, b, c3);
