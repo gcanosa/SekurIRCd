@@ -61,8 +61,22 @@
 .chat-dlg label { display: flex; gap: 8px; align-items: center; font-size: .85rem; color: var(--c-muted); }
 .chat-dlg .act { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
 .chat-log .new { color: var(--link); text-align: center; font-size: .8rem; margin: 4px 0; }
-/* settings: "joins" off hides join, part, quit and nick lines (not your own join); the setting is a class on the chat, so it applies to what is already shown */
-.chat.hide-joins .ln.join:not(.self), .chat.hide-joins .ln.part, .chat.hide-joins .ln.quit, .chat.hide-joins .ln.nick { display: none; }
+/* settings: "joins" off hides the folded join, part, quit, nick and mode lines (not your own join); the setting is a class on the chat, so it applies to what is already shown */
+.chat.hide-joins .fold { display: none; }
+/* a run of those lines is one summary line; a click lists them. One alone shows as the plain line. */
+.chat-log .fs { cursor: pointer; }
+.chat-log .fs:hover, .chat-log .fs:focus-visible { color: var(--c-ink); outline: none; }
+.chat-log .fs .fc { display: inline-block; margin-left: .4em; transition: transform .15s; }
+.chat-log .fold.open .fc { transform: rotate(90deg); }
+.chat-log .fold.one .fs, .chat-log .fold:not(.open):not(.one) .fd { display: none; }
+@media (prefers-reduced-motion: reduce) { .chat-log .fs .fc { transition: none; } }
+/* maximize: wider than a phone, the chat fills the browser under the site's menu bar (chat.js sets --chat-nav, the bar's height) */
+#max-btn[aria-pressed="true"] .i-max, #max-btn:not([aria-pressed="true"]) .i-min { display: none; }
+@media (max-width: 640px) { #max-btn { display: none; } } /* phones: the chat already fills the screen */
+@media (min-width: 641px) {
+  html:has(.chat.max:not([hidden])) { overflow: hidden; }
+  .chat.max:not([hidden]) { position: fixed; left: 0; right: 0; top: calc(var(--chat-top, 0px) + var(--chat-nav, 0px)); height: calc(var(--chat-h, 100dvh) - var(--chat-nav, 0px)); min-height: 0; z-index: 4; border-width: 1px 0 0; border-radius: 0; }
+}
 #users > .away { opacity: .5; }
 #users > .acct::after { content: " \2713\FE0E"; color: var(--ok); font-size: .85em; }
 .chat-typing { padding: 0 12px; min-height: 1.5em; line-height: 1.5em; font-size: calc(.8rem * var(--fs, 1)); font-style: italic; color: var(--c-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

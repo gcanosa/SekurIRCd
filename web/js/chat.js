@@ -39,6 +39,11 @@
     '<button id="opts-btn" class="tool" type="button" aria-label="Settings" title="Settings">' +
     '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
     '<path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/></svg></button>' +
+    '<button id="max-btn" class="tool" type="button" aria-pressed="false">' +
+    '<svg class="i-max" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>' +
+    '<svg class="i-min" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3"/></svg></button>' +
     '<button id="quit-btn" class="tool" type="button" aria-label="Leave the chat" title="Leave the chat">' +
     '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
     '<path d="M18.36 6.64a9 9 0 1 1-12.73 0M12 2v10"/></svg></button></div>' +
@@ -113,8 +118,19 @@
     try { localStorage.setItem("chat-size", SIZES[i][0]); } catch (e) {}
   }
   setSize(size);
+  // Maximize (wider than a phone, where the chat already fills the screen): the chat fills the browser under the site's menu bar. Kept in this browser only.
+  var maxBtn = $("max-btn");
+  function navH() { var h = document.querySelector("body > header"); return h ? Math.max(0, Math.round(h.getBoundingClientRect().bottom)) : 0; } // the host site's sticky menu bar
+  function setMax(on) {
+    app.classList.toggle("max", on); app.style.setProperty("--chat-nav", navH() + "px");
+    maxBtn.setAttribute("aria-pressed", on); maxBtn.title = on ? "Restore size" : "Maximize"; maxBtn.setAttribute("aria-label", maxBtn.title);
+    try { localStorage.setItem("chat-max", on ? "on" : "off"); } catch (e) {}
+    if (!app.hidden) toBottom();
+  }
+  try { setMax(localStorage.getItem("chat-max") === "on"); } catch (e) { setMax(false); }
+  maxBtn.onclick = function () { setMax(!app.classList.contains("max")); };
   sizeBtn.onclick = function () { var stick = log.scrollTop + log.clientHeight >= log.scrollHeight - 30; setSize((size + 1) % SIZES.length); if (stick) log.scrollTop = log.scrollHeight; };
-  // Settings, kept in this browser only: sound (the chime), joins (join, part, quit and nick lines), typing (show who is typing, and tell others when you are),
+  // Settings, kept in this browser only: sound (the chime), joins (join, part, quit, nick and mode lines), typing (show who is typing, and tell others when you are),
   // notify (desktop notifications while the tab is in the background). The Settings button and /sound /joins /typing /notify flip the same switches.
   var opts = { sound: true, joins: true, typing: true, notify: false };
   try { Object.keys(opts).forEach(function (k) { var v = localStorage.getItem("chat-" + k); if (v) opts[k] = v === "on"; }); } catch (e) {}
@@ -228,7 +244,33 @@
     else if (!b.unread && !(!opts.joins && noise(cls))) { b.unread = true; drawTabs(); }
     if (document.hidden && !meta.hist && /\b(hl|msg)\b/.test(cls || "")) { unseen++; document.title = "(" + unseen + ") " + baseTitle; }
   }
-  function noise(cls) { return /\b(join|part|quit|nick)\b/.test(cls || "") && !/\bself\b/.test(cls || ""); } // the lines the "joins" setting hides
+  function noise(cls) { return /\b(join|part|quit|nick|mode)\b/.test(cls || "") && !/\bself\b/.test(cls || ""); } // the lines that fold, and the "joins" setting hides
+  // A run of joins, parts, quits, nick and mode changes is one line ("6 users have joined, 2 users have changed nick, and 10 users have left"); a click lists them.
+  // A lone one is shown as it is. Anything else in the log (a message, the "new messages" divider) ends the run.
+  function pl(n, one, many) { return n + " " + (n === 1 ? one : many); }
+  var FOLD = [ // what to count, and how to say it
+    [".join", function (n) { return pl(n, "user has", "users have") + " joined"; }],
+    [".nick", function (n) { return pl(n, "user has", "users have") + " changed nick"; }],
+    [".part, .quit", function (n) { return pl(n, "user has", "users have") + " left"; }],
+    [".mode", function (n) { return pl(n, "mode change", "mode changes"); }]];
+  function fold(d, t) {
+    var g = log.lastElementChild;
+    if (!g || !g.classList.contains("fold")) {
+      g = document.createElement("div"); g.className = "fold one";
+      var s = document.createElement("div"); s.className = "ln evt fs"; s.tabIndex = 0; s.setAttribute("role", "button"); s.setAttribute("aria-expanded", "false");
+      s.innerHTML = '<span class="ts"></span><span class="ic" aria-hidden="true">\u2022</span><span class="ft"></span><span class="fc" aria-hidden="true">\u25B8\uFE0E</span>'; // static markup
+      s.firstChild.textContent = t + " ";
+      s.onclick = function () { var o = g.classList.toggle("open"); s.setAttribute("aria-expanded", o); if (o) g.scrollIntoView({ block: "nearest" }); }; // keep the opened list in view
+      s.onkeydown = function (e) { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); s.click(); } };
+      var fd = document.createElement("div"); fd.className = "fd"; g.append(s, fd); log.appendChild(g);
+    }
+    var list = g.lastChild; list.appendChild(d);
+    if (list.childElementCount > 500) list.removeChild(list.firstChild); // ponytail: a channel with nothing but joins for days; the summary then counts the last 500
+    g.classList.toggle("one", list.childElementCount < 2);
+    if (list.childElementCount < 2) return;
+    var p = FOLD.map(function (f) { var n = list.querySelectorAll(f[0]).length; return n && f[1](n); }).filter(Boolean);
+    g.querySelector(".ft").textContent = p.length < 2 ? p[0] : p.slice(0, -1).join(", ") + (p.length > 2 ? "," : "") + " and " + p[p.length - 1];
+  }
   // a small glyph before each kind of event; the first class that matches wins, so specific kinds come before "evt"
   var EVT_ICONS = [["join", "\u2192"], ["part", "\u2190"], ["quit", "\u21d0"], ["kick", "\u2715"], ["nick", "\u21bb"], ["mode", "\u00b1"],
                ["topic", "\u270e"], ["invite", "\u2709"], ["away", "\u263e"], ["ctcp", "\u2699"], ["whois", "\u00bb"],
@@ -244,7 +286,8 @@
       var nk = document.createElement("span"); nk.className = "nk"; nk.textContent = l.from; nk.style.setProperty("--h", hue(l.from));
       d.append(l.kind === "act" ? "* " : l.kind === "notice" ? "-" : "<", nk, l.kind === "act" ? " " : l.kind === "notice" ? "- " : "> ");
     }
-    d.appendChild(fmt(l.text)); log.appendChild(d);
+    d.appendChild(fmt(l.text));
+    if (noise(l.cls)) fold(d, l.t); else log.appendChild(d);
     if (stick) log.scrollTop = log.scrollHeight;
   }
   function hue(n) { // a stable color per nickname: the same nick always gets the same hue
@@ -293,7 +336,7 @@
 
   // --- settings (the sliders button) ---
   var optsDlg = dlg('<form method="dialog"><h3>Settings</h3>' +
-    '<label><input type="checkbox" data-opt="joins"> Show joins, parts, quits and nick changes</label>' +
+    '<label><input type="checkbox" data-opt="joins"> Show joins, parts, quits, nick and mode changes</label>' +
     '<label><input type="checkbox" data-opt="typing"> Show who is typing, and let others see when you are</label>' +
     '<label><input type="checkbox" data-opt="sound"> Play a sound for private messages, mentions and invites</label>' +
     '<label><input type="checkbox" data-opt="notify"> Desktop notifications while this tab is in the background</label>' +
@@ -923,7 +966,7 @@
       if (/[^qaohvbeI+-]/.test(p[1] || "") && bufs[key(p[0])]) askModes(p[0]); // a channel mode changed: refresh the topic bar's tooltip
       return;
     }
-    if (c === "MODE" && isMe(p[0])) return say(reply(), "Your user modes: " + p.slice(1).join(" "), "evt mode", meta);
+    if (c === "MODE" && isMe(p[0])) return say(reply(), "Your user modes: " + p.slice(1).join(" "), "evt mode self", meta);
     if (c === "332") {
       if (!bufs[key(p[1])]) return say(active, "Topic of " + p[1] + ": " + p[2], "evt topic");
       buf(p[1]).topic = p[2]; return key(p[1]) === key(active) && drawTopic();
@@ -1116,7 +1159,7 @@
       if (cmd === "notify") { syncOpts(); return setNotify(on); }
       setOpt(cmd, on); syncOpts();
       if (cmd === "sound" && on) { unlockAudio(); lastChime = 0; chime(); }
-      return say(active, { sound: "Sound for private messages, notices, mentions and invites", joins: "Showing joins, parts, quits and nick changes", typing: "Typing indicators (yours and theirs)" }[cmd] + " is " + (on ? "on" : "off") + ".", "evt");
+      return say(active, { sound: "Sound for private messages, notices, mentions and invites", joins: "Showing joins, parts, quits, nick and mode changes", typing: "Typing indicators (yours and theirs)" }[cmd] + " is " + (on ? "on" : "off") + ".", "evt");
     }
     if (cmd === "list") return startList(rest);
     if (cmd === "stop") { var left = pasteQ.length; pasteQ = []; return say(active, left ? "Stopped: " + left + " pasted lines were not sent." : "Nothing is being sent.", "evt"); }
@@ -1243,7 +1286,7 @@
   // Phones: keep the full-screen chat inside the visible area, above the on-screen keyboard.
   var vv = window.visualViewport;
   if (vv) {
-    var fit = function () { app.style.setProperty("--chat-h", vv.height + "px"); app.style.setProperty("--chat-top", vv.offsetTop + "px"); if (!app.hidden) toBottom(); };
+    var fit = function () { app.style.setProperty("--chat-h", vv.height + "px"); app.style.setProperty("--chat-top", vv.offsetTop + "px"); app.style.setProperty("--chat-nav", navH() + "px"); if (!app.hidden) toBottom(); };
     vv.addEventListener("resize", fit); vv.addEventListener("scroll", fit); fit();
   }
   function fail() {
