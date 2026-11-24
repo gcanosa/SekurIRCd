@@ -12,6 +12,7 @@ password (scrypt hash on the accepting side), and the steps to bring the link up
   tools/linkmgmt.py add             link a new server
   tools/linkmgmt.py edit            change a link (password, address, allowed IPs, who dials)
   tools/linkmgmt.py del             remove a link
+  tools/linkmgmt.py hub             turn a linked server into a hub: one that also takes leaves of its own
   tools/linkmgmt.py test            optional network checks for a link: DNS, port open/firewall, TLS
   tools/linkmgmt.py test HOST PORT [--tls]   the same against any host (run it on the other server too); with
                                     --tls it also prints the certificate fingerprint to pin
@@ -127,9 +128,9 @@ def peer_block(name, pw=None, pw_hash=None, host=None, port=None, ips=None, fp=N
     return "\n".join(out)
 
 
-def links_block(mode, port, tls, pinned=False):
+def links_block(mode, port, tls, pinned=False, bind="0.0.0.0"):
     out = ["[links]", "enabled = true", f'mode = "{mode}"']
-    if mode != "leaf": out += ['bind = "0.0.0.0"', f"port = {port}"]
+    if mode != "leaf": out += [f"bind = {json.dumps(bind)}", f"port = {port}"]
     out.append(f"tls = {'true' if tls else 'false'}")
     if tls and mode != "hub" and not pinned: out.append("#tls_insecure_skip_verify = true   # only if the other side's cert is self-signed")
     return "\n".join(out)
@@ -665,6 +666,93 @@ def delete(cfg, path, dry_run=False):
     print()
 
 
+HUB_TREE = ("The network is a TREE: a server has exactly one way up. The new hub keeps its uplink (it dials {up}, as before) "
+            "and its own leaves dial IT, never {up} as well -- a second route in is refused as a loop.")
+
+
+def hubify(cfg, path, dry_run=False):
+    """Turn a linked server into a hub -- one that keeps its uplink AND takes leaves of its own (links.mode "both", a link
+    listener). Run on the server that becomes the hub (edits its config) or on the hub above it (prints what the node needs)."""
+    me = cfg.get("server", {}).get("name", "")
+    lk = cfg.get("links", {})
+    peers = [p for p in cfg["peers"] if not p.get("name", "").startswith("services.")]  # the services daemon is no server of the tree
+    dialed = [p for p in peers if p.get("host")]
+    mode = lk.get("mode", "hub")
+    print("\nWhich server becomes the hub?")
+    here = pick("Choice", [f"{me} (this one): it links up to a hub today and should also take leaves of its own",
+                           "a server that is linked to this one: print the config IT needs"], 1 if mode == "leaf" else 2) == 0
+    tls = bool(lk.get("tls"))
+    bind_q = "Address the new hub's link listener binds to (0.0.0.0 = all interfaces)"
+
+    if here:
+        if mode != "leaf" or not dialed:
+            return print(yellow(f"{me} is already a hub (links.mode = \"{mode}\"): it accepts links. Add a leaf with: tools/linkmgmt.py add\n"))
+        up, name = dialed[0], me
+        bind = ask(bind_q, lk.get("bind", "0.0.0.0"))
+        port = int(ask("Link port for its own leaves (outside 6660-7000 gets less scanner noise)", str(lk.get("port", DEFAULT_PORT)), chk_port))
+        kv = {"mode": '"both"', "bind": json.dumps(bind), "port": str(port)}
+        tls_kv, blocked = {}, False
+        if tls and not cfg.get("tls", {}).get("enabled"):  # the TLS link listener reuses the client [tls] certificate
+            fp, why = own_fingerprint(cfg, path)
+            if fp:
+                tls_kv["enabled"] = "true"
+                print(yellow("The TLS link listener reuses the client [tls] certificate, so [tls] enabled = true is set too "
+                             f"-- that also opens the client TLS port ({cfg.get('tls', {}).get('port', 6697)})."))
+            else:
+                blocked = True
+                print(yellow(f"A TLS link listener needs this server's [tls] certificate, and there is none ({why}).\n"))
+                print(CERT_HELP + "\n")
+
+        def edit(lines):
+            set_keys(lines, "links", kv)
+            if tls_kv: set_keys(lines, "tls", tls_kv)
+
+        heading(f"1) On THIS server ({me}) -- {rel(path)}")
+        if dry_run or blocked or not apply_local(path, edit, restart=True):
+            print("Not written. To do it by hand:" if not dry_run else "")
+            snippet("In [links], set:\n" + "\n".join(f"{k} = {v}" for k, v in kv.items()))
+            if tls_kv: snippet("In [tls], set:\nenabled = true")
+        heading(f"2) On its hub ({up['name']})")
+        print(f"Nothing to change: it keeps accepting {me} through the same [[links.peers]] block, which now also carries {me}'s leaves.")
+    else:
+        if mode == "leaf":
+            sys.exit(red(f"{me} is itself a leaf (links.mode = \"leaf\"): run this on the hub above the server, or on the server itself."))
+        below = [p for p in peers if not p.get("host")]  # the ones that dial us; a server we dial already accepts links
+        if not below:
+            sys.exit(red("No linked server dials this one (a server this one dials already accepts links)."))
+        print("\nWhich one?")
+        node = below[pick("Link", [p.get("name", "?") for p in below])]
+        name, up = node["name"], {"name": me}
+        bind = ask(bind_q, "0.0.0.0")
+        port = int(ask(f"Link port {name} listens on for its own leaves (outside 6660-7000 gets less scanner noise)", str(DEFAULT_PORT), chk_port))
+        heading(f"1) On THIS server ({me})")
+        print(f"Nothing to change: {name} keeps dialing {me} through its [[links.peers]] block for it (links.mode = \"{mode}\" accepts it).")
+        if node.get("oper_scope") or node.get("oper_deny"):
+            print(yellow(f"Its oper_scope / oper_deny here limit the whole link, so from now on also the opers of {name}'s leaves."))
+        heading(f"2) On {name} -- its config/sekurircd.toml (this tool can't reach it: replace these there)")
+        print(f"[links]: replace its section with the one below. Keep its [[links.peers]] block for {me} exactly as it is.\n")
+        snippet(links_block("both", port, tls, pinned=bool(node.get("fingerprint")), bind=bind))
+        if tls:
+            print(f"[links] tls = true applies to ALL of {name}'s links, its leaves' too, and the listener reuses its client [tls] certificate: "
+                  "its [tls] must be enabled with a certificate (cert_file/key_file). If it isn't yet:")
+            snippet('[tls]\nenabled = true\ncert_file = "tls/cert.pem"\nkey_file = "tls/key.pem"')
+            print(dim(f"  (tools/linkmgmt.py certs on {name} says how to get one; whoever pins it gets its fingerprint from tools/linkmgmt.py fingerprint)\n"))
+        else:
+            print(dim(f"Plain-text links: its leaves will link to it without TLS, like {name} does to {me} (the link carries every "
+                      "message; TLS is [links] tls = true on every server of a link).\n"))
+
+    heading("3) Then")
+    print(HUB_TREE.format(up=up["name"]) + "\n")
+    steps = [f"Check both configs:  tools/confcheck.py",
+             f"Open TCP {port} on {name}'s firewall, for its leaves' addresses only.",
+             f"{name}: restart its ircd (a new mode and listener need a restart, /REHASH can't switch them). It re-links to {up['name']} by itself.",
+             f"Verify the uplink: /LINKS on {name} (and {up['name']}) still shows both; then tools/linkmgmt.py test {name} {port}{' --tls' if tls else ''} from where its leaves are.",
+             f"First leaf: on {name}, tools/linkmgmt.py add  (choose \"<leaf> dials {name}\"), and paste the other side on the leaf.",
+             "Every server of the network needs the same [security] host_masking_secret (the tool prints it when it adds a leaf)."]
+    for i, s in enumerate(steps, 1): print(f"  {i}. {s}")
+    print()
+
+
 def selftest():
     assert mode_for(0, 1) == "hub" and mode_for(1, 0) == "leaf" and mode_for(2, 0) == "both" and mode_for(1, 1) == "both"
     h = scrypt_hash("s3cret").split("$")
@@ -733,12 +821,26 @@ def selftest():
             with contextlib.redirect_stdout(io.StringIO()):
                 assert write_config(f, good.replace('name = "b.test.net"', 'name = "b.test.net"\nhost = "h"\nport = 1')) is None
             assert open(f).read() == good
+    # a leaf becomes a hub: mode both + a listener, the rest of its config (and its uplink block) untouched, still valid
+    leaf = ('[server]\nname = "n.test.net"\n[links]\nenabled = true\nmode = "leaf" # uplink only\ntls = false\n'
+            '[[links.peers]]\nname = "h.test.net"\npassword = "p"\nhost = "127.0.0.1"\nport = 7000\n')
+    lines = leaf.splitlines()
+    set_keys(lines, "links", {"mode": '"both"', "bind": json.dumps("127.0.0.1"), "port": "7001"})
+    t = "\n".join(lines)
+    assert 'mode = "both"' in t and "uplink only" not in t and 'bind = "127.0.0.1"' in t and t.index("port = 7001") < t.index("[[links.peers]]")
+    assert t.endswith('host = "127.0.0.1"\nport = 7000') and t.count("[[links.peers]]") == 1
+    assert links_block("both", 7001, True, bind="10.0.0.5").splitlines()[3] == 'bind = "10.0.0.5"'
+    if tomllib: assert tomllib.loads(t)["links"]["mode"] == "both" and tomllib.loads(t)["links"]["peers"][0]["host"] == "127.0.0.1"
+    if os.path.exists(os.path.join(ROOT, "bin/sekurircd")):
+        with tempfile.TemporaryDirectory() as d:
+            f = os.path.join(d, "n.toml"); open(f, "w").write(t + "\n")
+            assert subprocess.run([os.path.join(ROOT, "bin/sekurircd"), "--check", "-c", f], capture_output=True).returncode == 0
     print("selftest ok")
 
 
 def main():
     ap = argparse.ArgumentParser(description="Server-link wizard: writes this server's side, prints the other server's.")
-    ap.add_argument("action", nargs="?", choices=["list", "add", "edit", "del", "test", "fingerprint", "certs"])
+    ap.add_argument("action", nargs="?", choices=["list", "add", "edit", "del", "hub", "test", "fingerprint", "certs"])
     ap.add_argument("target", nargs="*", help="test only: HOST PORT")
     ap.add_argument("--tls", action="store_true", help="test HOST PORT: also try a TLS handshake")
     ap.add_argument("-c", "--config", default=os.path.join(ROOT, "config/sekurircd.toml"))
@@ -758,13 +860,14 @@ def main():
               f"[[links.peers]] block for {cfg.get('server', {}).get('name', 'this server')}.\n")
         return
     show(cfg)
-    act = a.action or ["add", "edit", "del", "test", "certs", None][pick("What now?", ["Link a new server", "Edit a link", "Remove a link", "Test a link (network)", "Certificates for TLS links (how to get one)", "Quit"])]
+    act = a.action or ["add", "edit", "del", "hub", "test", "certs", None][pick("What now?", ["Link a new server", "Edit a link", "Remove a link", "Turn a linked server into a hub", "Test a link (network)", "Certificates for TLS links (how to get one)", "Quit"])]
     if act == "certs": return print("\n" + CERT_HELP + "\n")
     if act == "add": wizard(cfg, a.config, dry_run=a.dry_run)
     elif act == "edit": wizard(cfg, a.config, choose(cfg, "edit"), dry_run=a.dry_run)
     elif act == "del": delete(cfg, a.config, dry_run=a.dry_run)
+    elif act == "hub": hubify(cfg, a.config, dry_run=a.dry_run)
     elif act == "test": return test(cfg, a.target, a.tls)
-    if a.dry_run and act in ("add", "edit", "del"):
+    if a.dry_run and act in ("add", "edit", "del", "hub"):
         print(dim("--dry-run: nothing was written -- paste the blocks above into each server's config."))
 
 

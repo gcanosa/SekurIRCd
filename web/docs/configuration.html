@@ -208,10 +208,11 @@ fingerprint = "sha256:..."   # pin the hub's certificate: openssl x509 -in hub.c
     the accepting side only its scrypt hash), the shared password, and the firewall, restart and <code>/CONNECT</code> steps. Optionally saved to
     <code>link-for-&lt;name&gt;.toml</code> (<code>0600</code>) to <code>scp</code> across. Delete it afterwards: it holds the password.</li>
 </ul>
-<pre>tools/linkmgmt.py                  # menu: list, add, edit, remove, test
+<pre>tools/linkmgmt.py                  # menu: list, add, edit, remove, hub, test
 tools/linkmgmt.py add              # link a new server
 tools/linkmgmt.py edit             # password, address, IPs, who dials, pins
 tools/linkmgmt.py del              # remove a link
+tools/linkmgmt.py hub              # turn a linked server into a hub
 tools/linkmgmt.py fingerprint      # this server's cert, for the other to pin
 tools/linkmgmt.py test HOST PORT --tls   # DNS, port, firewall, TLS
 tools/linkmgmt.py --dry-run add    # change nothing, print both sides</pre>
@@ -233,6 +234,13 @@ Rehash the running ircd now? (y/n) [y]: y
 Rehashed.
 2) On the OTHER server (irc2.example.net) -- paste these there
 ...</pre>
+<p><strong>Turning a leaf into a hub.</strong> <code>tools/linkmgmt.py hub</code> makes a server that is linked to a hub also take leaves of its own, and keeps its
+  uplink: <code>links.mode</code> goes from <code>"leaf"</code> to <code>"both"</code> and it gets a link listener (<code>bind</code>, <code>port</code>). Run it on the
+  server that becomes the hub and it edits that server's config the same safe way (diff, confirm, backup, <code>--check</code>); or run it on the hub above and it prints
+  what the server needs, since it can't reach it. Nothing changes on the hub above: the server keeps dialing it through the same peer entry (an
+  <code>oper_scope</code> or <code>oper_deny</code> on that entry now also covers the opers of the new hub's leaves). The new hub restarts once to switch modes. If its
+  links use TLS, <code>[links] tls = true</code> applies to its leaves' links as well and the listener reuses its client <code>[tls]</code> certificate, so that must be
+  enabled. Its first leaf is then added with <code>tools/linkmgmt.py add</code> on the new hub (the leaf dials it, never the hub above too: the network is a tree).</p>
 <p>The services link is left alone (it lives in <code>services/services.toml</code>), and the template's commented examples are never touched.
   Removing a link doesn't turn <code>tls</code> off, since other links may rely on it.</p>
 <p>Encrypt and pin: set <code>[links] tls = true</code> on both servers (the listening one needs <code>[tls]</code> enabled; its certificate is reused) and put
