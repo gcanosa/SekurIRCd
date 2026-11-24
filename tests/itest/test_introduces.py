@@ -85,10 +85,11 @@ def test_leaf_true_closes_a_link_that_announces_any_server():
         out = hub.output()
         assert "says nothing may link behind it (leaf = true)" in out, out[-1500:]
         o = Client(hub.port, "obs"); o.send("OPER boss bosspw"); o.expect(r" 381 ")
-        # it redials (autoconnect) and is closed again at each burst, with a growing backoff: on a slow machine one LINKS can
-        # land in the moment between its link-up and its burst, so look a few times for it gone
-        gone = any("la.sekurnet.org" not in " ".join(o.say("LINKS", 0.5)).replace("hub.sekurnet.org", "") for _ in range(6))
-        assert gone, "the leaf that announced a server is not linked"
+        # la itself may be linked at any moment (it redials, and is clean while its own leaf is reconnecting to it); what may
+        # never show here is a server behind it
+        for _ in range(4):
+            links = [l for l in o.say("LINKS", 0.5) if " 364 " in l]  # not the server notices, which name it
+            assert not any("ok.sekurnet.org" in l for l in links), "no server behind a leaf = true peer is ever entered"
     finally:
         stop(S)
 

@@ -17,6 +17,7 @@ die() { printf ' \033[31mx\033[0m %s\n' "$*" >&2; for c in ircd svc stats; do ec
 trap '"$engine" rm -f "$name-ircd" "$name-svc" "$name-stats" >/dev/null 2>&1 || true; rm -rf "$data"' EXIT
 
 answers=(
+  ''                              # this machine runs: 1 (the ircd and services together)
   irc.smoke.test SmokeNet ''      # server name, network, server id
   127.0.0.1 "$port" ''            # bind, plaintext port, IPv6 (n)
   ''                              # leaf (n)
@@ -29,7 +30,8 @@ answers=(
   '' '' smokepw smokepw '' ''     # operator: add (y), name, password twice, hosts, another (n)
   '' ''                           # oper auto-join, debug channel
   '' ''                           # admin email, log level
-  '' "$link" '' '' '' '' '' ''    # services (y), link port, name, other links, NickServ, enforce, admins, founder rank
+  '' "$link" '' '' '' '' ''       # services (y), link port, name, other links, NickServ, enforce, admins
+  '' '' ''                        # account expiry days, channel expiry days, founder rank
   y "$panel" '' '' '' '' smokepw smokepw   # stats panel (y), port, bind, hostname, public viewer, admin name, password twice
   '' ''                           # write the files (y), make a self-signed certificate (y)
 )
