@@ -15,7 +15,7 @@ def test_no_implicit_names_and_pre_away():
         p.send("AWAY :out for lunch")
         p.send("NICK pa")
         p.send("USER pa 0 * :x")
-        p.expect(r" 001 ")
+        p.expect(r" 306 pa ")
         w = s.client("viewer")
         assert any(" 301 viewer pa :out for lunch" in l for l in w.say("WHOIS pa")), "away set before registration"
 

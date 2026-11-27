@@ -268,3 +268,12 @@ def test_leaf_restart_keeps_its_detached_users_on_the_network():
         assert any(" 311 aoleafw aoleaf " in l for l in got), "a still sees the detached user after b restarted: %r" % got[-3:]
     finally:
         n.stop()
+
+
+def test_resume_while_away_says_306():
+    with Server(cfg=ACC) as s:
+        a, _ = setup(s, "aoaway", "aoawayacct", False)
+        a.say("AWAY :gone fishing", 0.3)
+        a.close()
+        c = sasl_connect(s, "aoback", "aoawayacct", "password1")
+        assert any(" 306 aoaway " in l for l in c.drain(1.0)), "the new connection learns it is still away"

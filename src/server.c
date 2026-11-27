@@ -1070,6 +1070,9 @@ void server_send_welcome(server_t *srv, client_t *cl) {
     char modestr[32];
     client_mode_string(cl, modestr, sizeof modestr);
     client_reply(cl, N_UMODEIS, NULL, 0, modestr);
+
+    /* away before the client could be told: draft/pre-away, or a resumed always-on session that had set it */
+    if (cl->is_away) client_reply(cl, N_NOWAWAY, NULL, 0, "You have been marked as being away");
 }
 
 /* --- K/G-lines --------------------------------------------------------------- */

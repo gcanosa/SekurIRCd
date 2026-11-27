@@ -1,5 +1,12 @@
 [
   {
+    "tag": "Unreleased",
+    "date": "",
+    "changes": [
+      "/AWAY: a client that is already away when it connects now gets 306 (RPL_NOWAWAY) after the welcome. This covers AWAY sent before registration (draft/pre-away) and a new connection resuming an always-on session where you had set yourself away; before, the user stayed away without the client being told."
+    ]
+  },
+  {
     "tag": "v1.3.6",
     "date": "2026-11-24",
     "changes": [
