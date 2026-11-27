@@ -2184,7 +2184,7 @@ void netsync_unshun(server_t *srv, const char *mask) {
     flood(srv, NULL, line);
 }
 
-/* A network announcement (services' SVCGLOBAL, from the stats panel's planned maintenance) to every user connected here,
+/* A network announcement (/GNOTICE, or services' SVCGLOBAL from the stats panel's planned maintenance) to every user connected here,
  * as a server notice. Service bots and always-on sessions with no connection are skipped. */
 static void global_notice_local(server_t *srv, const char *text) {
     client_t *u, *tmp;
@@ -2202,6 +2202,7 @@ void netsync_global_notice(server_t *srv, const char *text) {
 
 /* :<sid> GNOTICE :<text> -- every server tells its own users and passes it on. Older servers ignore the verb. */
 static void handle_gnotice(server_t *srv, link_conn_t *lc, irc_message_t *msg) {
+    if (limited_link(srv, lc)) { scope_deny(srv, lc, NULL, "GNOTICE"); return; }
     netserver_t *from = src_server(srv, lc, msg->prefix);
     if (!from || msg->nparams < 1) return;
     const char *text = msg->params[msg->nparams - 1];

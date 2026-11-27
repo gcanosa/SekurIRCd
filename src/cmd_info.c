@@ -196,6 +196,7 @@ static const help_entry_t HELP_TABLE[] = {
     {"SILENCE", {"SILENCE [(+|-)mask ...]", "Manage your ignore list for private messages; no argument lists it."}},
     {"USERHOST", {"USERHOST <nick> [nick...]", "Show host/away/oper info for up to 5 nicks."}},
     {"GLOBOPS", {"GLOBOPS :<text>", "IRC operators only: message every online operator."}},
+    {"GNOTICE", {"GNOTICE :<text>", "IRC operators only: an announcement to every user on every server, as a server notice."}},
     {"CHGIDENT", {"CHGIDENT <nick> <ident>", "IRC operators only: change a user's ident."}},
     {"SANICK", {"SANICK <nick> <newnick>", "IRC operators only: force a nick change."}},
     {"SHUN", {"SHUN [<mask> [duration] [reason]]", "IRC operators only: silently drop a connected user's messages (no disconnect), on every linked server. Needs UNSHUN to lift."}},

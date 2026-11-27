@@ -309,7 +309,7 @@ oper_scope = "local"                  # "global" (default) | "local"
 oper_deny  = ["override", "auspex"]   # taken off that leaf's opers, on top of their own privileges</pre>
 <p><code>oper_scope = "local"</code>: that leaf's opers keep their own server (KILL, SAJOIN, CHGHOST, K/Z/E-lines, DIE, REHASH, STATS and the rest, as their
   <code>privileges</code> allow) but can't reach another one: no KILL, SAJOIN/SAPART/SANICK/CHGHOST/CHGIDENT of a user on another server, no GLINE or SHUN (the
-  network-wide bans; a K-line stays on their server), no SQUIT of a server that isn't linked to theirs, no REHASH or STATS of another server, no SAMODE on a
+  network-wide bans; a K-line stays on their server), no SQUIT of a server that isn't linked to theirs, no REHASH or STATS of another server, no GNOTICE, no SAMODE on a
   channel with users on other servers. Their server says so when they try; if an older or modified leaf sends it anyway the hub drops it, tells the oper,
   and posts a notice to its own opers. WHOIS, VERSION and the like, and WALLOPS/GLOBOPS, still work. A limited leaf's own spam filters still shun locally, but those SHUNs don't spread to the rest of the network.</p>
 <p><code>oper_deny</code> takes the same names as an <code>[[operators]]</code> <code>privileges</code> list: <code>kill</code>, <code>kline</code>,

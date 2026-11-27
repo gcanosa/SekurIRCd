@@ -317,6 +317,20 @@ void cmd_globops(server_t *srv, client_t *cl, irc_message_t *msg) {
     netsync_wallops(srv, cl, "GLOBOPS", text);
 }
 
+/* GNOTICE: an announcement to every user on the network, as a server notice (WALLOPS only reaches +w, GLOBOPS opers). */
+void cmd_gnotice(server_t *srv, client_t *cl, irc_message_t *msg) {
+    if (netsync_scope_refuse(srv, cl, "GNOTICE")) return;
+    /* one parameter only: unquoted words would be cut at max_params, or to the first word, without the oper knowing */
+    if (msg->nparams != 1 || !msg->params[0][0]) { notice_self(srv, cl, "Usage: GNOTICE :<text> (the colon before the text is needed)"); return; }
+    char text[420];
+    snprintf(text, sizeof text, "[Announcement] %s", msg->params[0]);
+    netsync_global_notice(srv, text);
+    char snote[600];
+    snprintf(snote, sizeof snote, "%s sent a global notice: %s", cl->nick, msg->params[0]);
+    log_info("oper", "%s", snote);
+    server_notify_opers(srv, snote);
+}
+
 /* LOCOPS: like GLOBOPS but only operators on THIS server (a linked network keeps it local). */
 void cmd_locops(server_t *srv, client_t *cl, irc_message_t *msg) {
     const char *text = msg->params[msg->nparams - 1];

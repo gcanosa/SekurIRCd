@@ -3,6 +3,7 @@
     "tag": "Unreleased",
     "date": "",
     "changes": [
+      "/GNOTICE :<text> (IRC operators with the wallops privilege): an announcement to every user on every server, each getting \"[Announcement] text\" as a server notice. Detached always-on sessions and services are skipped. The colon is needed, so a text is never cut short. A leaf the hub limits to its own server (oper_scope = local) can't use it. Servers on 1.3.6 pass it on and deliver it; older ones ignore it.",
       "/AWAY: a client that is already away when it connects now gets 306 (RPL_NOWAWAY) after the welcome. This covers AWAY sent before registration (draft/pre-away) and a new connection resuming an always-on session where you had set yourself away; before, the user stayed away without the client being told."
     ]
   },
